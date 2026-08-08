@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+cd "$repository_root"
+
+if [ -n "${PROPEVOLVE_PYTHON:-}" ]; then
+    python_executable=$PROPEVOLVE_PYTHON
+elif [ -x "$repository_root/.venv/bin/python" ]; then
+    python_executable=$repository_root/.venv/bin/python
+elif command -v python3 >/dev/null 2>&1; then
+    python_executable=$(command -v python3)
+else
+    echo "[pre-commit] Python is unavailable; refusing commit." >&2
+    exit 1
+fi
+
+echo "[pre-commit] Running the complete PropEvolve unit-test suite..."
+if ! PYTHONPATH="$repository_root/src${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python_executable" -m pytest; then
+    echo "[pre-commit] Unit tests failed; commit blocked." >&2
+    exit 1
+fi

@@ -113,7 +113,13 @@ Install PropEvolve and its pinned FFM package integration:
 
 ```bash
 python -m pip install -e '.[dev,ffm]'
+git config core.hooksPath .githooks
 ```
+
+The tracked pre-commit hook runs the complete unit-test suite and blocks the
+commit if any test fails. It uses `.venv/bin/python` when available; set
+`PROPEVOLVE_PYTHON` to an explicit interpreter when the environment lives
+elsewhere.
 
 Validate the frozen experiment contract:
 
