@@ -14,6 +14,27 @@ from .decision import Action
 from .replay import Transition
 
 
+def resolve_device(device: str) -> torch.device:
+    """Resolve the declared accelerator without silently changing explicit requests."""
+    if device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError(
+            "MPS training was requested but this PyTorch runtime cannot use MPS"
+        )
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA training was requested but this PyTorch runtime cannot use CUDA"
+        )
+    if device not in {"cpu", "mps", "cuda"}:
+        raise ValueError("device must be auto, cuda, mps, or cpu")
+    return torch.device(device)
+
+
 class RecurrentC51Network(nn.Module):
     """Compact market/account encoder with recurrent C51 action values."""
 
@@ -71,7 +92,7 @@ class RecurrentC51Agent:
             raise ValueError("distributional support is invalid")
         torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
-        self.device = torch.device(device)
+        self.device = resolve_device(device)
         self.observation_dim = int(observation_dim)
         self.hidden_dim = int(hidden_dim)
         self.atoms = int(atoms)
@@ -241,4 +262,3 @@ class RecurrentC51Agent:
         agent.optimizer.load_state_dict(payload["optimizer"])
         agent._updates = int(payload["updates"])
         return agent, dict(payload["manifest"])
-

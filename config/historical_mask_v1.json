@@ -12,7 +12,7 @@
     "chunk_windows": 256,
     "batch_series": 512,
     "fast_group_attention": true,
-    "device": "mps"
+    "device": "auto"
   },
   "challenge": {
     "profit_target": 6000.0,
@@ -41,7 +41,7 @@
     "atoms": 51,
     "gamma": 0.997,
     "learning_rate": 0.0001,
-    "device": "cpu"
+    "device": "mps"
   },
   "training": {
     "episodes": 50,

@@ -54,6 +54,12 @@ The policy uses one state-dependent discrete action set:
 - positioned: hold, add, reduce, or close;
 - unsafe or nonsensical actions are masked outside the model.
 
+The promoted training recipe selects accelerators in the order CUDA, Apple
+Metal (`mps`), then CPU. Replay storage and environment simulation remain on
+CPU; batched network updates, recurrent inference, target-network updates, and
+checkpoint resume are MPS-compatible. An explicitly requested unavailable
+accelerator fails immediately; only `auto` may fall back to the next device.
+
 ## Market population
 
 Historical training uses nine independent 3-minute markets:

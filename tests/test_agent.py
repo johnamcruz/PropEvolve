@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 import torch
 
-from propevolve.agent import RecurrentC51Agent, RecurrentC51Network
+from propevolve.agent import RecurrentC51Agent, RecurrentC51Network, resolve_device
 from propevolve.decision import Action
 from propevolve.replay import Transition
 
@@ -15,6 +18,18 @@ def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
     assert logits.shape == (3, 5, 9, 21)
     assert hidden.shape == (1, 3, 16)
     torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 9))
+
+
+def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert resolve_device("auto").type == "cuda"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert resolve_device("auto").type == "mps"
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    assert resolve_device("auto").type == "cpu"
 
 
 def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
@@ -57,3 +72,49 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert loss > 0
     assert not torch.equal(before, agent.online.output.weight.detach())
 
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="MPS is unavailable on this test host",
+)
+def test_mps_training_update_action_selection_and_checkpoint_resume(
+    tmp_path: Path,
+) -> None:
+    agent = RecurrentC51Agent(
+        observation_dim=8,
+        hidden_dim=16,
+        atoms=21,
+        device="mps",
+        seed=17,
+        target_sync_updates=1,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.full(8, index / 10, np.float32),
+            action=Action.WAIT,
+            reward=0.2 if index < 3 else 1.0,
+            next_observation=np.full(8, (index + 1) / 10, np.float32),
+            terminated=index == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        )
+        for index in range(4)
+    )
+
+    loss = agent.train_batch((sequence, sequence))
+    selected, hidden, values = agent.select_action(
+        np.zeros(8, np.float32),
+        hidden=None,
+        valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+    )
+    checkpoint = agent.save(tmp_path / "agent.pt", manifest={"device": "mps"})
+    restored, manifest = RecurrentC51Agent.load(checkpoint, device="mps")
+    resumed_loss = restored.train_batch((sequence, sequence))
+
+    assert np.isfinite(loss)
+    assert np.isfinite(resumed_loss)
+    assert selected in (Action.WAIT, Action.ENTER_LONG_1)
+    assert hidden.device.type == "mps"
+    assert np.isfinite(values[[int(Action.WAIT), int(Action.ENTER_LONG_1)]]).all()
+    assert restored.device.type == "mps"
+    assert manifest == {"device": "mps"}
