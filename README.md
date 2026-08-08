@@ -85,11 +85,12 @@ before replacing the champion.
 
 ## FFM integration
 
-PropEvolve imports `futures-foundation-model[foundation]` as a package and uses
-its Chronos2 embedding implementation. FFM source is not copied into this
-repository. OHLCV and the promoted Mask checkpoint are local symbolic links;
-generated embedding caches and run artifacts remain on the SSD and are ignored
-by Git.
+PropEvolve imports
+[`futures-foundation-model[foundation]`](https://github.com/johnamcruz/Futures-Foundation-Model)
+as a package and uses its Chronos2 embedding implementation. FFM source is not
+copied into this repository. OHLCV and the promoted Mask checkpoint are local
+symbolic links; generated embedding caches and run artifacts remain in
+configured local storage and are ignored by Git.
 
 Current promoted checkpoint identity:
 
