@@ -103,7 +103,7 @@ Create or refresh the local links without copying assets:
 ```bash
 propevolve setup-assets \
   --market-data "/path/to/ohlcv/data" \
-  --checkpoint "/Volumes/CRUZ SSD/Futures-Foundation-Model/checkpoints/chronos2_mask_full"
+  --checkpoint "/path/to/chronos2_mask_full"
 ```
 
 ## Running the historical POC
