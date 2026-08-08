@@ -76,7 +76,7 @@ class TradeLedger(Protocol):
 
 
 class PropFirmLedger:
-    """Port of algoTraderAI's cumulative combine balance and fee semantics."""
+    """Cumulative prop-challenge balance and round-trip fee ledger."""
 
     ROUND_TRIP_FEES = {
         "NQ": 3.78,

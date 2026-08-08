@@ -5,8 +5,8 @@ adapts, and trades within prop-firm constraints**.
 
 The first model learns the complete trading decision directly from causal,
 frozen FFM/Chronos2 market-context embeddings plus normalized account and
-execution state. It does not inherit algoTraderAI's PPO policy, Mantis signals,
-or handcrafted trend indicators.
+execution state. The policy is native to PropEvolve and does not depend on
+external trading policies, signal models, or handcrafted trend indicators.
 
 ## Objective
 
@@ -102,7 +102,7 @@ Create or refresh the local links without copying assets:
 
 ```bash
 propevolve setup-assets \
-  --market-data "/Volumes/CRUZ SSD/algoTraderAI/data" \
+  --market-data "/path/to/ohlcv/data" \
   --checkpoint "/Volumes/CRUZ SSD/Futures-Foundation-Model/checkpoints/chronos2_mask_full"
 ```
 
