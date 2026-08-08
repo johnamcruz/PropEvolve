@@ -71,8 +71,12 @@ are training-only source markets: they broaden market-pattern experience but
 cannot be selected by the live execution allowlist. ES, GC, RTY, and YM require
 their own isolated promotion evidence before live use.
 
-Each episode contains one market's causal embedding stream. The live agent does
-not require all nine feeds simultaneously.
+Each episode contains one market's causal embedding stream, but training draws
+episodes from all nine markets into the same shared policy and replay memory.
+Experience learned on any training market can therefore update the one agent.
+The markets are not presented as nine simultaneous feeds because live inference
+observes and trades one market at a time; this preserves train-to-live input
+parity while still teaching cross-market generalization.
 
 ## Learning and memory
 
