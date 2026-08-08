@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import hashlib
-import json
+from dataclasses import dataclass
 from pathlib import Path
 import time
 from typing import TYPE_CHECKING
@@ -29,14 +27,6 @@ class TrainingResult:
     timeouts: int
     mean_reward: float
     mean_loss: float
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def load_markets(
@@ -183,29 +173,3 @@ def evaluate_agent(
         mean_reward=float(np.mean(rewards)),
         mean_loss=float("nan"),
     )
-
-
-def write_run_report(
-    path: str | Path,
-    *,
-    config_path: str | Path,
-    assets: AssetContract,
-    training: TrainingResult,
-    validation: TrainingResult,
-) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    config_path = Path(config_path).resolve(strict=True)
-    payload = {
-        "schema": "propevolve_historical_run_v1",
-        "decision": "PROCEED" if validation.passes > validation.blows else "REVISE",
-        "config": str(config_path),
-        "config_sha256": _sha256(config_path),
-        "checkpoint_sha256": assets.checkpoint_sha256,
-        "training": asdict(training),
-        "validation": asdict(validation),
-    }
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    temporary.replace(path)
-    return path

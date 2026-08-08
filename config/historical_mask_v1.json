@@ -54,5 +54,35 @@
     "recurrent_horizon": 64,
     "seed": 314159
   },
+  "evolution": {
+    "hypothesis": "A recurrent distributional value agent can improve prop-challenge outcomes using frozen causal market embeddings and account state.",
+    "parent_candidate_ids": [],
+    "allowed_revision_paths": [
+      "agent.hidden_dim",
+      "agent.atoms",
+      "agent.gamma",
+      "agent.learning_rate",
+      "training.episodes",
+      "training.replay_capacity_episodes",
+      "training.sequence_length",
+      "training.warmup_episodes",
+      "training.updates_per_episode",
+      "training.batch_sequences",
+      "training.recurrent_horizon"
+    ],
+    "frozen_paths": [
+      "assets",
+      "tickers",
+      "deployment_tickers",
+      "training_only_tickers",
+      "timeframe_minutes",
+      "cache_root",
+      "cache",
+      "challenge",
+      "point_values",
+      "round_trip_fees",
+      "temporal"
+    ]
+  },
   "output": "runs/historical_mask_v1"
 }

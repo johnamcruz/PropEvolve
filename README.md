@@ -134,8 +134,35 @@ propevolve train --config config/historical_mask_v1.json
 ```
 
 The recipe trains on 2021–2024, uses 2025 for development validation, and
-leaves data from 2026 onward sealed. Running the commands is intentionally
-deferred while the separate Expansion campaign owns the machine.
+leaves data from 2026 onward sealed.
+
+## Offline self-improvement
+
+Every completed training run becomes a content-addressed challenger bundle
+under the configured output directory. A bundle contains immutable model
+weights, its frozen contract, complete recipe, parent lineage, and hypothesis.
+Running the trainer again creates another candidate; it never overwrites the
+previous model.
+
+PropEvolve's offline evolution layer provides six research interfaces:
+
+1. An immutable candidate archive and reversible champion registry.
+2. A bounded set of diverse elites selected by declared metrics such as pass
+   rate, blow rate, expectancy, temporal stability, and side balance.
+3. Executable multi-metric evaluation, with economic evidence—not model
+   critique—as the source of truth.
+4. A staged evaluator cascade that stops weak candidates before expensive
+   walk-forward, prop-gauntlet, sealed, or shadow evaluation.
+5. Authenticated reasoning packets containing the champion, selected prior
+   candidates, exact evidence, failure taxonomy, and frozen contract.
+6. Allowlisted JSON revisions that may tune declared model or training fields
+   but cannot change data lineage, temporal splits, costs, prop rules, sealed
+   periods, or deployment markets.
+
+The future ML Training Loop integration will consume these interfaces to
+diagnose evidence and propose the next bounded challenger. It will operate only
+between runs: deployed champion weights remain frozen, and activation or
+rollback always records an append-only receipt.
 
 ## Expansion, Pivot, and Trend teachers
 
@@ -169,7 +196,12 @@ pytest
 Tests cover asset identity and symbolic linking, causal cache timing, frozen FFM
 delegation, observation normalization, action masking, challenge economics,
 balanced replay, shadow-memory authentication, configuration, orchestration,
-and the recurrent distributional agent.
+the recurrent distributional agent, immutable model lineage, evaluator
+cascades, diverse candidate selection, reasoning-packet authentication, and
+frozen-contract recipe revision.
 
 The research synthesis behind the design is in
 [`docs/research/stanford_cs329a_self_improving_rl_agent.md`](docs/research/stanford_cs329a_self_improving_rl_agent.md).
+The AlphaEvolve mapping and its trading-specific safety limits are documented
+in
+[`docs/research/alphaevolve_concepts_for_propevolve.md`](docs/research/alphaevolve_concepts_for_propevolve.md).

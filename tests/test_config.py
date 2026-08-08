@@ -30,6 +30,11 @@ def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) ->
         },
         "agent": {},
         "training": {},
+        "evolution": {
+            "hypothesis": "baseline",
+            "allowed_revision_paths": ["agent.hidden_dim"],
+            "frozen_paths": ["temporal", "challenge"],
+        },
         "output": "runs/test"
     }
     path = tmp_path / "experiment.json"
@@ -51,3 +56,14 @@ def test_config_rejects_training_only_market_in_deployment(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="training-only"):
         load_experiment_config(path)
 
+
+def test_config_rejects_revision_allowlist_that_overlaps_frozen_contract(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["evolution"]["allowed_revision_paths"].append("temporal.train_start")
+    path = tmp_path / "invalid-evolution.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="overlaps"):
+        load_experiment_config(path)

@@ -41,9 +41,27 @@ def load_experiment_config(path: str | Path) -> dict:
         and ordered[3] <= ordered[4]
     ):
         raise ValueError("temporal train, validation, and sealed periods overlap")
+    evolution = payload.get("evolution") or {}
+    if not str(evolution.get("hypothesis", "")).strip():
+        raise ValueError("evolution hypothesis is required")
+    allowed = tuple(str(value) for value in evolution.get("allowed_revision_paths", ()))
+    frozen = tuple(str(value) for value in evolution.get("frozen_paths", ()))
+    if not allowed or not frozen:
+        raise ValueError("evolution revision and frozen paths must be declared")
+    if any(
+        path == locked or path.startswith(locked + ".")
+        for path in allowed
+        for locked in frozen
+    ):
+        raise ValueError("evolution allowlist overlaps the frozen contract")
+    evolution["allowed_revision_paths"] = allowed
+    evolution["frozen_paths"] = frozen
+    evolution["parent_candidate_ids"] = tuple(
+        str(value) for value in evolution.get("parent_candidate_ids", ())
+    )
+    payload["evolution"] = evolution
     payload["tickers"] = tickers
     payload["deployment_tickers"] = deployment
     payload["training_only_tickers"] = training_only
     payload["_path"] = str(path.resolve())
     return payload
-
