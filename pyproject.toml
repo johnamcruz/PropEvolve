@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = [
+  "ml-training-loop @ git+https://github.com/johnamcruz/ML-training-loop.git@9150279a179598484ff284b116ef990e6c206a37",
   "numpy>=1.26",
   "pandas>=2.1",
   "torch>=2.4",
@@ -18,7 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 ffm = [
-  "futures-foundation-model[foundation] @ git+https://github.com/johnamcruz/Futures-Foundation-Model.git@dcaf674",
+  "futures-foundation-model[foundation] @ git+https://github.com/johnamcruz/Futures-Foundation-Model.git@fbb96c3",
 ]
 
 [project.scripts]
@@ -26,6 +27,9 @@ propevolve = "propevolve.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/propevolve"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

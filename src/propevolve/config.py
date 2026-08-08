@@ -60,8 +60,40 @@ def load_experiment_config(path: str | Path) -> dict:
         str(value) for value in evolution.get("parent_candidate_ids", ())
     )
     payload["evolution"] = evolution
+    campaign = payload.get("campaign") or {}
+    if not str(campaign.get("state_root", "")).strip():
+        raise ValueError("campaign state_root is required")
+    max_revisions = campaign.get("max_revisions_per_stage")
+    if isinstance(max_revisions, bool) or not isinstance(max_revisions, int):
+        raise ValueError("campaign max revisions must be an integer")
+    if max_revisions < 1:
+        raise ValueError("campaign max revisions must be positive")
+    reasoning = campaign.get("reasoning") or {}
+    if reasoning.get("provider") not in {"codex", "manual"}:
+        raise ValueError("campaign reasoning provider must be codex or manual")
+    requirements = campaign.get("selection_requirements") or ()
+    if not isinstance(requirements, list) or not requirements:
+        raise ValueError("campaign selection requirements must be nonempty")
+    for requirement in requirements:
+        if (
+            not isinstance(requirement, dict)
+            or requirement.get("operator") not in {">", ">=", "<", "<=", "=="}
+            or not str(requirement.get("metric", "")).strip()
+            or isinstance(requirement.get("value"), bool)
+            or not isinstance(requirement.get("value"), (int, float))
+        ):
+            raise ValueError("campaign selection requirement is invalid")
+    niches = campaign.get("niches") or ()
+    if not isinstance(niches, list) or not niches:
+        raise ValueError("campaign niches must be nonempty")
+    payload["campaign"] = campaign
     payload["tickers"] = tickers
     payload["deployment_tickers"] = deployment
     payload["training_only_tickers"] = training_only
     payload["_path"] = str(path.resolve())
+    payload["_root"] = str(
+        path.parent.parent.resolve()
+        if path.parent.name == "config"
+        else path.parent.resolve()
+    )
     return payload

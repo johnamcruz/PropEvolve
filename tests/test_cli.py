@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
+from ml_training_loop import Phase, RunState
+from ml_training_loop.stores import JsonRunStore
+import propevolve.orchestration
 from propevolve.cli import main
 
 
@@ -29,3 +33,50 @@ def test_setup_assets_command_creates_links_without_copying(tmp_path: Path) -> N
 def test_validate_config_command_accepts_promoted_recipe() -> None:
     assert main(["validate-config", "--config", "config/historical_mask_v1.json"]) == 0
 
+
+def test_evolve_status_reads_durable_state_without_running_training(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["campaign"]["state_root"] = "runs/status-test/ml-loop-state"
+    config_path = tmp_path / "experiment.json"
+    config_path.write_text(json.dumps(payload))
+    store = JsonRunStore(tmp_path / "runs/status-test/ml-loop-state")
+    store.save(RunState("status-run", "plan", Phase.NEEDS_REASONING))
+
+    code = main([
+        "evolve-status",
+        "--config", str(config_path),
+        "--run-id", "status-run",
+    ])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["phase"] == "NEEDS_REASONING"
+
+
+def test_evolve_command_dispatches_the_shared_training_loop(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+
+    def fake_campaign(config_path, *, run_id):
+        calls.append((config_path, run_id))
+        return RunState(run_id, "plan", Phase.COMPLETE)
+
+    monkeypatch.setattr(
+        propevolve.orchestration,
+        "run_evolution_campaign",
+        fake_campaign,
+    )
+
+    code = main([
+        "evolve",
+        "--config", "config/historical_mask_v1.json",
+        "--run-id", "fake-e2e",
+    ])
+
+    assert code == 0
+    assert calls == [("config/historical_mask_v1.json", "fake-e2e")]
+    assert json.loads(capsys.readouterr().out)["phase"] == "COMPLETE"

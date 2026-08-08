@@ -159,10 +159,27 @@ PropEvolve's offline evolution layer provides six research interfaces:
    but cannot change data lineage, temporal splits, costs, prop rules, sealed
    periods, or deployment markets.
 
-The future ML Training Loop integration will consume these interfaces to
-diagnose evidence and propose the next bounded challenger. It will operate only
-between runs: deployed champion weights remain frozen, and activation or
-rollback always records an append-only receipt.
+The shared ML Training Loop consumes these interfaces to diagnose evidence and
+propose the next bounded challenger. It operates only between runs: deployed
+champion weights remain frozen, and activation or rollback always records an
+append-only receipt. Start or interruption-safely resume a campaign with:
+
+```bash
+propevolve evolve --config config/historical_mask_v1.json --run-id mask-v1
+```
+
+Inspect durable state without launching work with:
+
+```bash
+propevolve evolve-status --config config/historical_mask_v1.json --run-id mask-v1
+```
+
+Reasoning remains the campaign controller. The shared loop's optional
+`SurrogateAdvisor` may later provide uncertainty-aware diagnostics and bounded
+numerical proposals through Optuna or another Bayesian backend, but it cannot
+select a proposal, mutate the plan, execute training, or waive a gate. No
+surrogate is enabled by default. This boundary follows
+[*Agentic Bayesian Optimization through Surrogate-Augmented Autoresearch*](https://arxiv.org/abs/2608.00316).
 
 ## Expansion, Pivot, and Trend teachers
 

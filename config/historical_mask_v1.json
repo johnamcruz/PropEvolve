@@ -84,5 +84,27 @@
       "temporal"
     ]
   },
+  "campaign": {
+    "state_root": "runs/historical_mask_v1/ml-loop-state",
+    "max_revisions_per_stage": 6,
+    "reasoning": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "timeout_seconds": 1800
+    },
+    "selection_requirements": [
+      {
+        "metric": "selection.pass_minus_blow",
+        "operator": ">",
+        "value": 0.0
+      }
+    ],
+    "niches": [
+      {"name": "highest_pass", "metric": "selection.pass_rate", "maximize": true},
+      {"name": "lowest_blow", "metric": "selection.blow_rate", "maximize": false},
+      {"name": "best_reward", "metric": "selection.mean_reward", "maximize": true}
+    ]
+  },
   "output": "runs/historical_mask_v1"
 }

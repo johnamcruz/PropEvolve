@@ -35,6 +35,17 @@ def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) ->
             "allowed_revision_paths": ["agent.hidden_dim"],
             "frozen_paths": ["temporal", "challenge"],
         },
+        "campaign": {
+            "state_root": "runs/test/ml-loop-state",
+            "max_revisions_per_stage": 2,
+            "reasoning": {"provider": "manual"},
+            "selection_requirements": [
+                {"metric": "selection.pass_minus_blow", "operator": ">", "value": 0}
+            ],
+            "niches": [
+                {"name": "pass", "metric": "selection.pass_rate", "maximize": True}
+            ],
+        },
         "output": "runs/test"
     }
     path = tmp_path / "experiment.json"

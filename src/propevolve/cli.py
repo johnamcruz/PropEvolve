@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
-import math
 from pathlib import Path
-import tempfile
 from typing import Sequence
 
 from .assets import AssetContract, link_local_assets
@@ -28,6 +27,14 @@ def _parser() -> argparse.ArgumentParser:
     cache.add_argument("--ticker", action="append")
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
+    evolve = subparsers.add_parser(
+        "evolve", help="run or resume reasoning-guided offline evolution"
+    )
+    evolve.add_argument("--config", required=True)
+    evolve.add_argument("--run-id", required=True)
+    status = subparsers.add_parser("evolve-status", help="show durable campaign state")
+    status.add_argument("--config", required=True)
+    status.add_argument("--run-id", required=True)
     return parser
 
 
@@ -99,159 +106,47 @@ def _file_sha256(path: Path) -> str:
 
 
 def _train(config: dict) -> int:
-    from .agent import RecurrentC51Agent
-    from .environment import ChallengeSpec, HistoricalChallengeEnv
-    from .evolution import CandidateArchive
-    from .replay import BalancedSequenceReplay
-    from .training import (
-        evaluate_agent,
-        load_markets,
-        train_agent,
-    )
+    from .training import HistoricalCandidateRunner
 
-    root = Path(config["_path"]).parent.parent
-    assets = AssetContract.load(_resolve(root, config["assets"]))
-    temporal = config["temporal"]
-    cache_root = _resolve(root, config["cache_root"])
-    train_markets = load_markets(
-        asset_contract=assets,
-        cache_root=cache_root,
-        tickers=config["tickers"],
-        timeframe_minutes=int(config["timeframe_minutes"]),
-        start=temporal["train_start"],
-        end=temporal["train_end"],
-    )
-    validation_markets = load_markets(
-        asset_contract=assets,
-        cache_root=cache_root,
-        tickers=config["deployment_tickers"],
-        timeframe_minutes=int(config["timeframe_minutes"]),
-        start=temporal["validation_start"],
-        end=temporal["validation_end"],
-    )
-    challenge = ChallengeSpec(**config["challenge"])
-    seed = int(config["training"]["seed"])
-    train_environment = HistoricalChallengeEnv(
-        train_markets,
-        tick_values=config["point_values"],
-        round_trip_fees=config["round_trip_fees"],
-        spec=challenge,
-        seed=seed,
-    )
-    validation_environment = HistoricalChallengeEnv(
-        validation_markets,
-        tick_values={key: config["point_values"][key] for key in validation_markets},
-        round_trip_fees={key: config["round_trip_fees"][key] for key in validation_markets},
-        spec=challenge,
-        seed=seed + 1,
-    )
-    observation_dim = next(iter(train_markets.values())).embeddings.shape[1] + 12
-    agent_config = dict(config["agent"])
-    agent = RecurrentC51Agent(observation_dim, seed=seed, **agent_config)
-    training_config = config["training"]
-    replay = BalancedSequenceReplay(
-        capacity_episodes=int(training_config["replay_capacity_episodes"]),
-        sequence_length=int(training_config["sequence_length"]),
-        seed=seed,
-    )
-    training = train_agent(
-        agent,
-        train_environment,
-        episodes=int(training_config["episodes"]),
-        replay=replay,
-        warmup_episodes=int(training_config["warmup_episodes"]),
-        updates_per_episode=int(training_config["updates_per_episode"]),
-        batch_sequences=int(training_config["batch_sequences"]),
-        recurrent_horizon=int(training_config["recurrent_horizon"]),
-    )
-    validation = evaluate_agent(
-        agent,
-        validation_environment,
-        episodes=int(training_config["validation_episodes"]),
-        recurrent_horizon=int(training_config["recurrent_horizon"]),
-    )
-    output = _resolve(root, config["output"])
-    output.mkdir(parents=True, exist_ok=True)
-    config_bytes = Path(config["_path"]).read_bytes()
-    frozen_contract = {
-        "checkpoint_sha256": assets.checkpoint_sha256,
-        "experiment_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
-        "training_tickers": list(config["tickers"]),
-        "deployment_tickers": list(config["deployment_tickers"]),
-        "training_only_tickers": list(config["training_only_tickers"]),
-        "temporal": dict(temporal),
-        "challenge": dict(config["challenge"]),
-        "point_values": dict(config["point_values"]),
-        "round_trip_fees": dict(config["round_trip_fees"]),
-        "sealed_start": temporal["sealed_start"],
-    }
-    archive = CandidateArchive(output / "archive")
-    evolution = config["evolution"]
-    recipe = {
-        key: value
-        for key, value in config.items()
-        if not key.startswith("_")
-    }
-    with tempfile.TemporaryDirectory(prefix=".trained-", dir=output) as temporary:
-        temporary_model = Path(temporary) / "model.pt"
-        agent.save(temporary_model, manifest=frozen_contract)
-        candidate = archive.register_candidate(
-            temporary_model,
-            contract=frozen_contract,
-            recipe=recipe,
-            parent_candidate_ids=evolution["parent_candidate_ids"],
-            hypothesis=evolution["hypothesis"],
-        )
-    validation_pass_rate = validation.passes / validation.episodes
-    validation_blow_rate = validation.blows / validation.episodes
-    decision = "PASS" if validation.passes > validation.blows else "REVISE"
-    evaluation = archive.record_evaluation(
-        candidate.candidate_id,
-        evaluator_contract={
-            "schema": "propevolve_initial_historical_evaluator_v1",
-            "selection_period": [
-                temporal["validation_start"], temporal["validation_end"]
-            ],
-            "sealed_start": temporal["sealed_start"],
-            "decision_rule": "validation passes must exceed validation blows",
-        },
-        metrics={
-            "training_pass_rate": training.passes / training.episodes,
-            "training_blow_rate": training.blows / training.episodes,
-            "training_mean_reward": training.mean_reward,
-            "validation_pass_rate": validation_pass_rate,
-            "validation_blow_rate": validation_blow_rate,
-            "validation_mean_reward": validation.mean_reward,
-        },
-        stages=(
-            {
-                "name": "training",
-                "status": "COMPLETE",
-                "result": {
-                    **training.__dict__,
-                    "mean_loss": training.mean_loss
-                    if math.isfinite(training.mean_loss)
-                    else None,
-                },
-            },
-            {
-                "name": "validation",
-                "status": decision,
-                "result": {
-                    **validation.__dict__,
-                    "mean_loss": validation.mean_loss
-                    if math.isfinite(validation.mean_loss)
-                    else None,
-                },
-            },
-        ),
-        status=decision,
+    candidate, evaluation = HistoricalCandidateRunner().run(
+        config,
+        parent_candidate_ids=tuple(config["evolution"]["parent_candidate_ids"]),
+        hypothesis=str(config["evolution"]["hypothesis"]),
     )
     print(
         f"[train] COMPLETE candidate={candidate.candidate_id} "
-        f"evaluation={evaluation.evaluation_id} decision={decision}",
+        f"evaluation={evaluation.evaluation_id} decision={evaluation.status}",
         flush=True,
     )
+    return 0
+
+
+def _state_payload(state) -> dict:
+    payload = asdict(state)
+    payload["phase"] = state.phase.value
+    if state.last_gate is not None:
+        payload["last_gate"]["decision"] = state.last_gate.decision.value
+    return payload
+
+
+def _evolve(config_path: str, run_id: str) -> int:
+    from .orchestration import run_evolution_campaign
+
+    state = run_evolution_campaign(config_path, run_id=run_id)
+    print(json.dumps(_state_payload(state), indent=2, sort_keys=True, default=str))
+    return 0 if state.phase.value == "COMPLETE" else 2
+
+
+def _evolve_status(config: dict, run_id: str) -> int:
+    from ml_training_loop.stores import JsonRunStore
+
+    root = Path(config["_root"])
+    state_root = root / str(config["campaign"]["state_root"])
+    state = JsonRunStore(state_root).load(run_id)
+    if state is None:
+        print(json.dumps({"run_id": run_id, "status": "not_found"}))
+        return 1
+    print(json.dumps(_state_payload(state), indent=2, sort_keys=True, default=str))
     return 0
 
 
@@ -270,6 +165,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _build_caches(config)
     if args.command == "train":
         return _train(config)
+    if args.command == "evolve":
+        return _evolve(args.config, args.run_id)
+    if args.command == "evolve-status":
+        return _evolve_status(config, args.run_id)
     raise RuntimeError(f"unhandled command: {args.command}")
 
 
