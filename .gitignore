@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Recreated local links and generated PropEvolve artifacts.
+.DS_Store
+config/local-assets.json
+data/ohlcv
+checkpoints/chronos2_mask_full
+cache/
+runs/
+models/

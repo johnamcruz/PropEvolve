@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "propevolve"
+version = "0.1.0"
+description = "A self-improving recurrent RL trading agent driven by frozen FFM embeddings."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "torch>=2.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+ffm = [
+  "futures-foundation-model[foundation] @ git+https://github.com/johnamcruz/Futures-Foundation-Model.git@dcaf674",
+]
+
+[project.scripts]
+propevolve = "propevolve.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/propevolve"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

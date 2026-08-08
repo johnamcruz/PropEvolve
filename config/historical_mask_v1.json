@@ -1,0 +1,58 @@
+{
+  "schema": "propevolve_historical_training_v1",
+  "assets": "config/local-assets.json",
+  "tickers": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"],
+  "deployment_tickers": ["NQ"],
+  "training_only_tickers": ["CL", "SI", "ZB", "ZN"],
+  "timeframe_minutes": 3,
+  "cache_root": "cache/chronos2_mask_full_3min",
+  "cache": {
+    "context_length": 256,
+    "stride": 1,
+    "chunk_windows": 256,
+    "batch_series": 512,
+    "fast_group_attention": true,
+    "device": "mps"
+  },
+  "challenge": {
+    "profit_target": 6000.0,
+    "max_loss": 3000.0,
+    "episode_days": 30,
+    "bars_per_day": 480,
+    "max_position_size": 2
+  },
+  "point_values": {
+    "NQ": 20.0, "ES": 50.0, "GC": 100.0, "RTY": 50.0, "YM": 5.0,
+    "CL": 1000.0, "SI": 5000.0, "ZB": 1000.0, "ZN": 1000.0
+  },
+  "round_trip_fees": {
+    "NQ": 3.78, "ES": 3.78, "GC": 4.32, "RTY": 3.78, "YM": 3.78,
+    "CL": 4.02, "SI": 4.32, "ZB": 2.76, "ZN": 2.58
+  },
+  "temporal": {
+    "train_start": "2021-01-01",
+    "train_end": "2025-01-01",
+    "validation_start": "2025-01-01",
+    "validation_end": "2026-01-01",
+    "sealed_start": "2026-01-01"
+  },
+  "agent": {
+    "hidden_dim": 128,
+    "atoms": 51,
+    "gamma": 0.997,
+    "learning_rate": 0.0001,
+    "device": "cpu"
+  },
+  "training": {
+    "episodes": 50,
+    "validation_episodes": 25,
+    "replay_capacity_episodes": 500,
+    "sequence_length": 32,
+    "warmup_episodes": 8,
+    "updates_per_episode": 8,
+    "batch_sequences": 16,
+    "recurrent_horizon": 64,
+    "seed": 314159
+  },
+  "output": "runs/historical_mask_v1"
+}

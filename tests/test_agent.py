@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+from propevolve.agent import RecurrentC51Agent, RecurrentC51Network
+from propevolve.decision import Action
+from propevolve.replay import Transition
+
+
+def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
+    network = RecurrentC51Network(observation_dim=12, action_count=9, atoms=21, hidden_dim=16)
+    logits, hidden = network(torch.zeros(3, 5, 12))
+
+    assert logits.shape == (3, 5, 9, 21)
+    assert hidden.shape == (1, 3, 16)
+    torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 9))
+
+
+def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
+    agent = RecurrentC51Agent(observation_dim=4, hidden_dim=8, atoms=11, seed=3)
+    with torch.no_grad():
+        for parameter in agent.online.parameters():
+            parameter.zero_()
+        # Give ENTER_LONG_2 the largest unmasked value; it must still lose to WAIT.
+        agent.online.output.bias.view(len(Action), agent.atoms)[Action.ENTER_LONG_2, -1] = 100
+
+    selected, _, _ = agent.select_action(
+        np.zeros(4, np.float32),
+        hidden=None,
+        valid_actions=(Action.WAIT,),
+        epsilon=0.0,
+    )
+
+    assert selected == Action.WAIT
+
+
+def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> None:
+    agent = RecurrentC51Agent(observation_dim=2, hidden_dim=8, atoms=11, seed=5)
+    sequence = tuple(
+        Transition(
+            observation=np.array([i, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.1 if i < 3 else 1.0,
+            next_observation=np.array([i + 1, 0], np.float32),
+            terminated=i == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        )
+        for i in range(4)
+    )
+    before = agent.online.output.weight.detach().clone()
+
+    loss = agent.train_batch((sequence, sequence))
+
+    assert np.isfinite(loss)
+    assert loss > 0
+    assert not torch.equal(before, agent.online.output.weight.detach())
+
