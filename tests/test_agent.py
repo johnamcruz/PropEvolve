@@ -50,6 +50,31 @@ def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
     assert selected == Action.WAIT
 
 
+def test_agent_scores_long_and_short_hypotheses_in_the_same_decision() -> None:
+    agent = RecurrentC51Agent(observation_dim=4, hidden_dim=8, atoms=11, seed=13)
+    with torch.no_grad():
+        for parameter in agent.online.parameters():
+            parameter.zero_()
+        distributions = agent.online.output.bias.view(len(Action), agent.atoms)
+        distributions[Action.ENTER_LONG_1, -1] = 20.0
+        distributions[Action.ENTER_SHORT_1, 0] = 20.0
+
+    selected, _, action_values = agent.select_action(
+        np.zeros(4, np.float32),
+        hidden=None,
+        valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+        epsilon=0.0,
+    )
+
+    assert np.isfinite(action_values[[
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    ]]).all()
+    assert action_values[Action.ENTER_LONG_1] > action_values[Action.WAIT]
+    assert action_values[Action.WAIT] > action_values[Action.ENTER_SHORT_1]
+    assert selected == Action.ENTER_LONG_1
+
+
 def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> None:
     agent = RecurrentC51Agent(observation_dim=2, hidden_dim=8, atoms=11, seed=5)
     sequence = tuple(

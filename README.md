@@ -37,7 +37,11 @@ causal 3-minute OHLCV windows
                    recurrent distributional
                      Double-DQN challenger
                                │
-                    exact valid-action scoring
+              simultaneous action-return distributions
+                    ┌──────────┴──────────┐
+               Long hypotheses      Short hypotheses
+                    └──────────┬──────────┘
+                    Wait / Hold / Exit values
                                │
                   deterministic prop-risk mask
                                │
@@ -53,6 +57,21 @@ The policy uses one state-dependent discrete action set:
 - flat: wait or enter long/short at an allowed size;
 - positioned: hold, add, reduce, or close;
 - unsafe or nonsensical actions are masked outside the model.
+
+FFM supplies shared market-state and expansion-opportunity context; it is not
+required to classify direction. At every flat-state decision, the recurrent
+C51 policy scores the complete return distribution for both Long sizes and
+both Short sizes in the same causal forward pass, alongside Wait. These are
+independent action-value hypotheses learned from one shared recurrent state,
+so the stronger risk-adjusted side can win while the external prop-risk mask
+remains authoritative.
+
+The first matched baseline uses only frozen FFM embeddings as market context.
+If that baseline cannot learn reliable entry timing, a later declared ablation
+may append causal out-of-fold Expansion Launch/Persistence scores. Those scores
+would be training and inference context, never a hard entry rule; PropEvolve
+would still learn direction, timing, sizing, and abstention from challenge
+economics. No specialist augmentation may inspect the sealed 2026 period.
 
 The promoted training recipe selects accelerators in the order CUDA, Apple
 Metal (`mps`), then CPU. Replay storage and environment simulation remain on
