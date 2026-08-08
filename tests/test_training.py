@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 
 from propevolve.decision import Action
@@ -39,6 +41,27 @@ class Environment:
         return np.array([self.index], np.float32), 0.25, terminated, False, info
 
 
+class MultiMarketEnvironment(Environment):
+    def __init__(self) -> None:
+        super().__init__()
+        self.episode_tickers = []
+        self.ticker = ""
+
+    def reset(self, *, options=None):
+        self.index = 0
+        self.ticker = options["ticker"]
+        self.episode_tickers.append(self.ticker)
+        return np.array([0.0], np.float32), {
+            "ticker": self.ticker,
+            "valid_actions": (Action.WAIT,),
+        }
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = super().step(action)
+        info["ticker"] = self.ticker
+        return observation, reward, terminated, truncated, info
+
+
 def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     agent = Agent()
     replay = BalancedSequenceReplay(capacity_episodes=10, sequence_length=2, seed=1)
@@ -67,3 +90,26 @@ def test_evaluation_never_updates_agent() -> None:
     assert result.passes == 2
     assert agent.updates == 0
 
+
+def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
+    tickers = ("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN")
+    environment = MultiMarketEnvironment()
+    agent = Agent()
+    replay = BalancedSequenceReplay(capacity_episodes=30, sequence_length=2, seed=7)
+
+    result = train_agent(
+        agent,
+        environment,
+        episodes=18,
+        replay=replay,
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        episode_tickers=tickers,
+        ticker_seed=7,
+    )
+
+    assert Counter(environment.episode_tickers) == Counter({ticker: 2 for ticker in tickers})
+    assert result.episodes == 18
+    assert agent.updates == 18

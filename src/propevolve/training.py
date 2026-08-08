@@ -109,6 +109,8 @@ class HistoricalCandidateRunner:
             updates_per_episode=int(training_config["updates_per_episode"]),
             batch_sequences=int(training_config["batch_sequences"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
+            episode_tickers=tuple(config["tickers"]),
+            ticker_seed=seed,
         )
         validation = evaluate_agent(
             agent,
@@ -228,13 +230,25 @@ def train_agent(
     recurrent_horizon: int = 64,
     epsilon_start: float = 0.25,
     epsilon_end: float = 0.02,
+    episode_tickers: tuple[str, ...] | None = None,
+    ticker_seed: int = 0,
 ) -> TrainingResult:
     if episodes < 1:
         raise ValueError("episodes must be positive")
+    ticker_schedule = _balanced_ticker_schedule(
+        episode_tickers,
+        episodes=episodes,
+        seed=ticker_seed,
+    )
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards, losses = [], []
     for episode_index in range(episodes):
-        observation, reset_info = environment.reset()
+        if ticker_schedule is None:
+            observation, reset_info = environment.reset()
+        else:
+            observation, reset_info = environment.reset(
+                options={"ticker": ticker_schedule[episode_index]}
+            )
         valid = tuple(reset_info["valid_actions"])
         hidden = None
         transitions = []
@@ -298,6 +312,25 @@ def train_agent(
         mean_reward=float(np.mean(rewards)),
         mean_loss=float(np.mean(losses)) if losses else float("nan"),
     )
+
+
+def _balanced_ticker_schedule(
+    tickers: tuple[str, ...] | None,
+    *,
+    episodes: int,
+    seed: int,
+) -> tuple[str, ...] | None:
+    if tickers is None:
+        return None
+    if not tickers or len(set(tickers)) != len(tickers):
+        raise ValueError("episode tickers must be nonempty and unique")
+    random = np.random.default_rng(seed)
+    schedule = []
+    while len(schedule) < episodes:
+        cycle = list(tickers)
+        random.shuffle(cycle)
+        schedule.extend(cycle)
+    return tuple(schedule[:episodes])
 
 
 def evaluate_agent(
