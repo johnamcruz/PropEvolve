@@ -13,6 +13,7 @@ import pandas as pd
 
 
 OHLCV = ("open", "high", "low", "close", "volume")
+CACHE_SCHEMA = "propevolve_chronos2_embedding_cache_v2"
 
 
 class WindowEncoder(Protocol):
@@ -40,12 +41,20 @@ class EmbeddingCache:
     def load(cls, root: str | Path) -> "EmbeddingCache":
         root = Path(root)
         manifest = json.loads((root / "manifest.json").read_text())
+        if manifest.get("schema") != CACHE_SCHEMA:
+            raise ValueError("unsupported embedding cache schema")
         embeddings = np.load(root / "embeddings.npy", mmap_mode="r")
         timestamps = np.load(root / "timestamps.npy", mmap_mode="r")
         if embeddings.ndim != 2 or timestamps.shape != (len(embeddings),):
             raise ValueError("embedding cache arrays violate their shape contract")
         if int(manifest.get("rows", -1)) != len(embeddings):
             raise ValueError("embedding cache manifest row count drift")
+        research_end = manifest.get("research_end_exclusive")
+        if not research_end or manifest.get("sealed_holdout_touched") is not False:
+            raise ValueError("embedding cache lacks an authenticated sealed boundary")
+        boundary = np.datetime64(pd.Timestamp(research_end).tz_convert("UTC").tz_localize(None))
+        if len(timestamps) and not (timestamps < boundary).all():
+            raise ValueError("embedding cache crosses its sealed boundary")
         return cls(root.resolve(), embeddings, timestamps, manifest)
 
 
@@ -66,6 +75,15 @@ def load_market_series(
         raise ValueError("embedding cache ticker does not match requested market")
     if cache.manifest.get("source_sha256") != _sha256(source):
         raise ValueError("embedding cache source identity drift")
+    research_end = np.datetime64(
+        pd.Timestamp(cache.manifest["research_end_exclusive"])
+        .tz_convert("UTC")
+        .tz_localize(None)
+    )
+    if end is not None and np.datetime64(end) > research_end:
+        raise ValueError("requested market slice crosses the sealed boundary")
+    if start is not None and np.datetime64(start) >= research_end:
+        raise ValueError("requested market slice begins in the sealed holdout")
     timeframe = int(cache.manifest["timeframe_minutes"])
     frame = pd.read_csv(source, usecols=["datetime", "open", "high", "low", "close"])
     opens = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
@@ -104,12 +122,13 @@ def build_embedding_cache(
     ticker: str,
     encoder: WindowEncoder,
     checkpoint_sha256: str,
+    research_end_exclusive: str,
     context_length: int = 256,
     stride: int = 1,
     chunk_windows: int = 256,
     timeframe_minutes: int = 3,
 ) -> Path:
-    """Encode every causal stride window and write a manifest-last cache."""
+    """Encode causal pre-holdout windows and write a manifest-last cache."""
     if min(context_length, stride, chunk_windows, timeframe_minutes) < 1:
         raise ValueError("cache dimensions must be positive")
     source = Path(source).resolve(strict=True)
@@ -120,6 +139,15 @@ def build_embedding_cache(
         raise ValueError(f"invalid source timestamps: {source}")
     if frame["datetime"].duplicated().any() or not frame["datetime"].is_monotonic_increasing:
         raise ValueError(f"source timestamps must be unique and ordered: {source}")
+    research_end = pd.Timestamp(research_end_exclusive)
+    if research_end.tzinfo is None:
+        research_end = research_end.tz_localize("UTC")
+    else:
+        research_end = research_end.tz_convert("UTC")
+    close_availability = frame["datetime"] + pd.Timedelta(minutes=timeframe_minutes)
+    frame = frame.loc[close_availability < research_end].reset_index(drop=True)
+    if frame.empty:
+        raise ValueError("source has no rows strictly before the sealed boundary")
     values = frame.loc[:, OHLCV].to_numpy(np.float32)
     if not np.isfinite(values).all():
         raise ValueError(f"source OHLCV must be finite: {source}")
@@ -181,7 +209,7 @@ def build_embedding_cache(
     temp_embeddings.replace(destination / "embeddings.npy")
     np.save(destination / "timestamps.npy", close_times)
     manifest = {
-        "schema": "propevolve_chronos2_embedding_cache_v1",
+        "schema": CACHE_SCHEMA,
         "ticker": str(ticker),
         "timeframe_minutes": timeframe_minutes,
         "context_length": context_length,
@@ -195,6 +223,8 @@ def build_embedding_cache(
         "decision_timing": "embedding includes bar close at timestamp",
         "first_decision_time": str(close_times[0]),
         "last_decision_time": str(close_times[-1]),
+        "research_end_exclusive": research_end.isoformat(),
+        "sealed_holdout_touched": False,
     }
     temporary_manifest = destination / ".manifest.tmp.json"
     temporary_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

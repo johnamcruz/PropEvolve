@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections import Counter
 
 import numpy as np
+import pytest
 
 from propevolve.decision import Action
+from propevolve.environment import MarketSeries
 from propevolve.replay import BalancedSequenceReplay
-from propevolve.training import evaluate_agent, train_agent
+from propevolve.training import assert_temporal_role, evaluate_agent, train_agent
 
 
 class Agent:
@@ -113,3 +115,28 @@ def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
     assert Counter(environment.episode_tickers) == Counter({ticker: 2 for ticker in tickers})
     assert result.episodes == 18
     assert agent.updates == 18
+
+
+def test_temporal_preflight_rejects_any_sealed_holdout_timestamp() -> None:
+    timestamps = np.array([
+        "2025-12-31T23:57:00", "2026-01-01T00:00:00"
+    ], dtype="datetime64[ns]")
+    close = np.array([100.0, 101.0], np.float32)
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        embeddings=np.zeros((2, 4), np.float32),
+    )
+
+    with pytest.raises(ValueError, match="temporal contract"):
+        assert_temporal_role(
+            {"NQ": market},
+            role="selection",
+            start="2025-01-01",
+            end="2026-01-01",
+            sealed_start="2026-01-01",
+        )

@@ -58,6 +58,7 @@ def _build_caches(config: dict) -> int:
         fast_group_attention=bool(cache_config.get("fast_group_attention", False)),
     )
     cache_root = _resolve(root, config["cache_root"])
+    research_end = str(config["temporal"]["sealed_start"])
     requested = tuple(config.get("_requested_tickers") or config["tickers"])
     unknown = set(requested) - set(config["tickers"])
     if unknown:
@@ -76,6 +77,9 @@ def _build_caches(config: dict) -> int:
                 and manifest.get("context_length") == int(cache_config["context_length"])
                 and manifest.get("stride") == int(cache_config["stride"])
                 and manifest.get("source_sha256") == _file_sha256(source)
+                and manifest.get("research_end_exclusive")
+                == _utc_isoformat(research_end)
+                and manifest.get("sealed_holdout_touched") is False
                 and len(cached.embeddings) == int(manifest["rows"])
             ):
                 print(f"[cache] HIT {ticker} {destination}", flush=True)
@@ -88,6 +92,7 @@ def _build_caches(config: dict) -> int:
             ticker=ticker,
             encoder=encoder,
             checkpoint_sha256=assets.checkpoint_sha256,
+            research_end_exclusive=research_end,
             context_length=int(cache_config["context_length"]),
             stride=int(cache_config["stride"]),
             chunk_windows=int(cache_config["chunk_windows"]),
@@ -95,6 +100,15 @@ def _build_caches(config: dict) -> int:
         )
         print(f"[cache] COMPLETE {ticker} {destination}", flush=True)
     return 0
+
+
+def _utc_isoformat(value: str) -> str:
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _file_sha256(path: Path) -> str:

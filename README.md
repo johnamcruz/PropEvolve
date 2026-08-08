@@ -150,8 +150,18 @@ Then train the historical challenger and evaluate naturally on NQ 2025:
 propevolve train --config config/historical_mask_v1.json
 ```
 
-The recipe trains on 2021–2024, uses 2025 for development validation, and
-leaves data from 2026 onward sealed.
+The development recipe trains on 2021–2024 and uses 2025 for selection. After
+the complete recipe is frozen, a separate final-fit stage may retrain on
+2021–2025. Data from 2026 onward is a one-time sealed evaluation set and must
+never enter cache generation, replay, training, validation, reasoning packets,
+candidate selection, or recipe revision.
+
+Embedding caches physically censor bars by close-time availability before
+Chronos encoding. Their authenticated manifest records
+`research_end_exclusive = 2026-01-01T00:00:00+00:00` and
+`sealed_holdout_touched = false`; legacy or boundary-crossing caches fail
+closed. The promoted Mask checkpoint is also backed by the FFM 36-stream
+preflight whose aligned data ends before that same holdout boundary.
 
 ## Offline self-improvement
 
@@ -227,7 +237,8 @@ turnover evidence, with NQ evaluated independently.
 pytest
 ```
 
-Tests cover asset identity and symbolic linking, causal cache timing, frozen FFM
+Tests cover asset identity and symbolic linking, causal cache timing, physical
+sealed-row censoring, temporal-role boundaries, frozen FFM
 delegation, observation normalization, action masking, challenge economics,
 balanced replay, shadow-memory authentication, configuration, orchestration,
 the recurrent distributional agent, immutable model lineage, evaluator

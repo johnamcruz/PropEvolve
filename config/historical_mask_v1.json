@@ -5,7 +5,7 @@
   "deployment_tickers": ["NQ"],
   "training_only_tickers": ["CL", "SI", "ZB", "ZN"],
   "timeframe_minutes": 3,
-  "cache_root": "cache/chronos2_mask_full_3min",
+  "cache_root": "cache/chronos2_mask_full_3min_pre2026_v2",
   "cache": {
     "context_length": 256,
     "stride": 1,

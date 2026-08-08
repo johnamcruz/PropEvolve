@@ -70,6 +70,20 @@ class HistoricalCandidateRunner:
             start=temporal["validation_start"],
             end=temporal["validation_end"],
         )
+        assert_temporal_role(
+            train_markets,
+            role="training",
+            start=temporal["train_start"],
+            end=temporal["train_end"],
+            sealed_start=temporal["sealed_start"],
+        )
+        assert_temporal_role(
+            validation_markets,
+            role="selection",
+            start=temporal["validation_start"],
+            end=temporal["validation_end"],
+            sealed_start=temporal["sealed_start"],
+        )
         challenge = ChallengeSpec(**config["challenge"])
         seed = int(config["training"]["seed"])
         train_environment = HistoricalChallengeEnv(
@@ -123,6 +137,12 @@ class HistoricalCandidateRunner:
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
             "checkpoint_sha256": assets.checkpoint_sha256,
+            "embedding_cache_manifest_sha256": {
+                ticker: hashlib.sha256(
+                    (cache_root / ticker / "manifest.json").read_bytes()
+                ).hexdigest()
+                for ticker in sorted(set(config["tickers"]))
+            },
             "experiment_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
             "training_tickers": list(config["tickers"]),
             "deployment_tickers": list(config["deployment_tickers"]),
@@ -132,6 +152,7 @@ class HistoricalCandidateRunner:
             "point_values": dict(config["point_values"]),
             "round_trip_fees": dict(config["round_trip_fees"]),
             "sealed_start": temporal["sealed_start"],
+            "sealed_holdout_touched": False,
         }
         archive = CandidateArchive(output / "archive")
         recipe = {
@@ -176,6 +197,7 @@ class HistoricalCandidateRunner:
                     temporal["validation_start"], temporal["validation_end"]
                 ],
                 "sealed_start": temporal["sealed_start"],
+                "sealed_holdout_touched": False,
                 "decision_rule": "selection pass rate must exceed blow rate",
             },
             (
@@ -216,6 +238,30 @@ def load_markets(
             end=end,
         )
     return markets
+
+
+def assert_temporal_role(
+    markets: dict[str, MarketSeries],
+    *,
+    role: str,
+    start: str,
+    end: str,
+    sealed_start: str,
+) -> None:
+    """Fail closed unless every causal decision belongs to its declared period."""
+    lower = np.datetime64(start)
+    upper = np.datetime64(end)
+    sealed = np.datetime64(sealed_start)
+    if upper > sealed:
+        raise ValueError(f"{role} period crosses the sealed holdout")
+    for ticker, market in markets.items():
+        timestamps = np.asarray(market.timestamps)
+        if len(timestamps) < 2:
+            raise ValueError(f"{role} market {ticker} is empty")
+        if (timestamps < lower).any() or (timestamps >= upper).any():
+            raise ValueError(f"{role} market {ticker} violates its temporal contract")
+        if (timestamps >= sealed).any():
+            raise ValueError(f"{role} market {ticker} touches the sealed holdout")
 
 
 def train_agent(
