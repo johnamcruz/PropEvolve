@@ -26,6 +26,10 @@ class ChallengeSpec:
     terminal_timeout_reward: float
     terminal_pass_speed_reward_per_day: float
     reward_scale: float
+    per_trade_risk_dollars: float | None = None
+    ratchet_activation_r: float | None = None
+    ratchet_giveback_r: float | None = None
+    daily_profit_lock_dollars: float | None = None
 
     def __post_init__(self) -> None:
         if min(
@@ -41,6 +45,25 @@ class ChallengeSpec:
             raise ValueError("PropEvolve v1 supports exactly one contract")
         if self.terminal_pass_reward <= 0 or self.terminal_blow_reward >= 0:
             raise ValueError("terminal pass and blow rewards must have opposite signs")
+        ratchet = (
+            self.per_trade_risk_dollars,
+            self.ratchet_activation_r,
+            self.ratchet_giveback_r,
+        )
+        if any(value is not None for value in ratchet):
+            if any(value is None for value in ratchet):
+                raise ValueError("trade risk and ratchet settings must be declared together")
+            if (
+                float(self.per_trade_risk_dollars) <= 0
+                or float(self.ratchet_giveback_r) <= 0
+                or float(self.ratchet_activation_r) <= float(self.ratchet_giveback_r)
+            ):
+                raise ValueError("trade risk and ratchet settings are invalid")
+        if (
+            self.daily_profit_lock_dollars is not None
+            and self.daily_profit_lock_dollars <= 0
+        ):
+            raise ValueError("daily profit lock must be positive")
 
     @property
     def episode_bars(self) -> int:
@@ -160,6 +183,10 @@ class _Position:
     side: PositionSide
     size: int
     average_entry: float
+    initial_risk_points: float | None = None
+    protective_stop: float | None = None
+    peak_favorable_r: float = 0.0
+    ratchet_active: bool = False
 
 
 class HistoricalChallengeEnv:
@@ -189,6 +216,11 @@ class HistoricalChallengeEnv:
         missing_fees = set(markets) - set(self.round_trip_fees)
         if missing_fees:
             raise ValueError(f"missing round-trip fees for {sorted(missing_fees)}")
+        if self.spec.per_trade_risk_dollars is not None and any(
+            fee >= self.spec.per_trade_risk_dollars
+            for fee in self.round_trip_fees.values()
+        ):
+            raise ValueError("round-trip fee must be smaller than per-trade risk")
         self._session_keys = {
             ticker: _cme_session_keys(market.timestamps)
             for ticker, market in self.markets.items()
@@ -266,6 +298,13 @@ class HistoricalChallengeEnv:
         }
 
     def valid_actions(self) -> tuple[Action, ...]:
+        if (
+            self._position is None
+            and self._account is not None
+            and self.spec.daily_profit_lock_dollars is not None
+            and self._account.session_pnl >= self.spec.daily_profit_lock_dollars
+        ):
+            return (Action.WAIT,)
         return self._masker.valid_actions(self._account_state())
 
     def step(self, action: Action | int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -288,6 +327,8 @@ class HistoricalChallengeEnv:
             info["session_boundary"] = True
         self._apply_action(action, fill, info)
 
+        self._apply_protective_stop(next_index, info)
+
         worst_price = self._adverse_price(next_index)
         worst_equity = self._equity(worst_price)
         info["worst_equity_pnl"] = worst_equity
@@ -304,6 +345,8 @@ class HistoricalChallengeEnv:
             elif self._index >= self._end:
                 self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "timeout"
+        if outcome is None and self._position is not None:
+            self._update_ratchet(next_index, info)
 
         equity = self._equity(float(self._market.close[self._index]))
         self._peak_equity = max(self._peak_equity, equity)
@@ -331,6 +374,10 @@ class HistoricalChallengeEnv:
             "mll_floor_pnl": self._account.mll_floor_pnl,
             "mll_headroom": self._account.mll_headroom(equity),
             "passmark_locked": self._account.passmark_locked,
+            "daily_profit_locked": bool(
+                self.spec.daily_profit_lock_dollars is not None
+                and self._account.session_pnl >= self.spec.daily_profit_lock_dollars
+            ),
             "timestamp": str(self._market.timestamps[self._index]),
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
@@ -347,7 +394,25 @@ class HistoricalChallengeEnv:
             }
             if action in entries:
                 side, size = entries[action]
-                self._position = _Position(side, size, fill)
+                initial_risk_points = None
+                protective_stop = None
+                if self.spec.per_trade_risk_dollars is not None:
+                    fee = self.round_trip_fees[self._ticker] * size
+                    initial_risk_points = (
+                        self.spec.per_trade_risk_dollars - fee
+                    ) / (self.tick_values[self._ticker] * size)
+                    protective_stop = (
+                        fill - initial_risk_points
+                        if side == PositionSide.LONG
+                        else fill + initial_risk_points
+                    )
+                self._position = _Position(
+                    side,
+                    size,
+                    fill,
+                    initial_risk_points=initial_risk_points,
+                    protective_stop=protective_stop,
+                )
                 self._primary_side = "long" if side == PositionSide.LONG else "short"
                 info.update({"fill_price": fill, "fill_side": self._primary_side, "fill_size": size})
             return
@@ -359,6 +424,67 @@ class HistoricalChallengeEnv:
                 "fill_side": "close",
                 "fill_size": closing_size,
             })
+
+    def _apply_protective_stop(self, index: int, info: dict) -> None:
+        position = self._position
+        if position is None or position.protective_stop is None:
+            return
+        assert self._market is not None
+        stop = position.protective_stop
+        opening = float(self._market.open[index])
+        if position.side == PositionSide.LONG:
+            if opening <= stop:
+                fill = opening
+            elif float(self._market.low[index]) <= stop:
+                fill = stop
+            else:
+                return
+        else:
+            if opening >= stop:
+                fill = opening
+            elif float(self._market.high[index]) >= stop:
+                fill = stop
+            else:
+                return
+        info["exit_reason"] = (
+            "ratchet_stop" if position.ratchet_active else "initial_stop"
+        )
+        info["protective_stop_price"] = stop
+        self._liquidate(fill, info)
+
+    def _update_ratchet(self, index: int, info: dict) -> None:
+        position = self._position
+        if position is None or position.initial_risk_points is None:
+            return
+        assert self._market is not None
+        favorable = (
+            float(self._market.high[index]) - position.average_entry
+            if position.side == PositionSide.LONG
+            else position.average_entry - float(self._market.low[index])
+        )
+        position.peak_favorable_r = max(
+            position.peak_favorable_r,
+            favorable / position.initial_risk_points,
+        )
+        activation = float(self.spec.ratchet_activation_r)
+        giveback = float(self.spec.ratchet_giveback_r)
+        if position.peak_favorable_r >= activation:
+            protected_r = position.peak_favorable_r - giveback
+            candidate = (
+                position.average_entry + protected_r * position.initial_risk_points
+                if position.side == PositionSide.LONG
+                else position.average_entry - protected_r * position.initial_risk_points
+            )
+            if position.side == PositionSide.LONG:
+                position.protective_stop = max(position.protective_stop, candidate)
+            else:
+                position.protective_stop = min(position.protective_stop, candidate)
+            position.ratchet_active = True
+        info.update({
+            "peak_favorable_r": position.peak_favorable_r,
+            "ratchet_active": position.ratchet_active,
+            "protective_stop_price": position.protective_stop,
+        })
 
     def _close_size(self, price: float, size: int) -> float:
         if self._position is None or self._account is None:
@@ -384,9 +510,12 @@ class HistoricalChallengeEnv:
             "trade_count": trades,
             "win_count": len(winners),
             "win_rate": len(winners) / trades if trades else 0.0,
-            # One account-R is the challenge's complete maximum-loss allowance.
+            # Ratchet recipes use true per-trade R; legacy recipes retain the
+            # challenge-level denominator used by their historical receipts.
             "avg_win_r": (
-                float(np.mean(winners)) / self.spec.max_loss if winners else 0.0
+                float(np.mean(winners))
+                / (self.spec.per_trade_risk_dollars or self.spec.max_loss)
+                if winners else 0.0
             ),
         }
 

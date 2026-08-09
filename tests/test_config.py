@@ -8,6 +8,17 @@ import pytest
 from propevolve.config import load_experiment_config
 
 
+def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
+    config = load_experiment_config("config/historical_mask_ratchet_v1.json")
+
+    assert config["challenge"]["per_trade_risk_dollars"] == 200.0
+    assert config["challenge"]["ratchet_activation_r"] == 2.0
+    assert config["challenge"]["ratchet_giveback_r"] == 0.5
+    assert config["challenge"]["daily_profit_lock_dollars"] == 3_000.0
+    assert "challenge" in config["evolution"]["frozen_paths"]
+    assert config["training"]["minimum_environment_steps"] == 5_000_000
+
+
 def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) -> None:
     payload = json.loads(Path("config/historical_mask_v1.json").read_text())
     payload["tickers"] = ["NQ", "CL"]
@@ -54,4 +65,33 @@ def test_config_rejects_revision_allowlist_that_overlaps_frozen_contract(
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="overlaps"):
+        load_experiment_config(path)
+
+
+def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["challenge"].update({
+        "per_trade_risk_dollars": 200.0,
+        "ratchet_activation_r": 2.0,
+        "ratchet_giveback_r": 0.5,
+        "daily_profit_lock_dollars": 3_000.0,
+    })
+    path = tmp_path / "ratchet.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["challenge"]["per_trade_risk_dollars"] == 200.0
+    assert config["challenge"]["ratchet_activation_r"] == 2.0
+    assert config["challenge"]["ratchet_giveback_r"] == 0.5
+    assert config["challenge"]["daily_profit_lock_dollars"] == 3_000.0
+
+
+def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["challenge"]["per_trade_risk_dollars"] = 200.0
+    path = tmp_path / "partial-ratchet.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="declared together"):
         load_experiment_config(path)

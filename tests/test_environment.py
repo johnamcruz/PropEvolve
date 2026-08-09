@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from propevolve.decision import Action
-from propevolve.environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
+from propevolve.environment import (
+    ChallengeSpec,
+    HistoricalChallengeEnv,
+    MarketSeries,
+    PropChallengeAccount,
+)
 
 
 def _spec(**overrides) -> ChallengeSpec:
@@ -35,6 +41,50 @@ def _market(*, low_at_one: float = 100.5) -> MarketSeries:
         low=np.array([99, low_at_one, 101, 102, 103, 104, 105, 106], np.float32),
         close=np.array([100, 102, 103, 104, 105, 106, 107, 108], np.float32),
         embeddings=np.stack((values, values + 10), axis=1),
+    )
+
+
+def test_combine_accumulates_pnl_across_trades_and_sessions_until_pass() -> None:
+    account = PropChallengeAccount(
+        max_loss=3_000.0,
+        profit_target=6_000.0,
+        trailing_mll_lock=True,
+    )
+
+    account.realize(2_000.0)
+    account.close_session()
+    assert account.cumulative_pnl == 2_000.0
+    assert account.outcome() is None
+
+    account.realize(2_000.0)
+    account.close_session()
+    assert account.cumulative_pnl == 4_000.0
+    assert account.outcome() is None
+
+    account.realize(2_000.0)
+    assert account.cumulative_pnl == 6_000.0
+    assert account.outcome() == "pass"
+
+
+def test_daily_profit_lock_blocks_new_entries_until_next_session() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(daily_profit_lock_dollars=3_000.0),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    assert env._account is not None
+    env._account.realize(3_000.0)
+
+    assert env.valid_actions() == (Action.WAIT,)
+
+    env._account.close_session()
+    assert env.valid_actions() == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
     )
 
 
@@ -131,3 +181,108 @@ def test_timeout_occurs_after_exact_cme_trading_session_count() -> None:
 
     assert info["outcome"] == "timeout"
     assert info["trading_days_elapsed"] == 2
+
+
+def test_mechanical_stop_limits_trade_to_one_r_including_fees() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(4) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.full(4, 100.0, np.float32),
+        high=np.full(4, 101.0, np.float32),
+        low=np.array([99.0, 90.0, 99.0, 99.0], np.float32),
+        close=np.full(4, 100.0, np.float32),
+        embeddings=np.zeros((4, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 4.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, info = env.step(Action.ENTER_LONG_1)
+
+    assert not terminated
+    assert info["exit_reason"] == "initial_stop"
+    assert info["realized_pnl"] == pytest.approx(-200.0)
+    assert info["trade_count"] == 1
+
+
+def test_ratchet_activates_at_two_r_on_the_following_bar() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 116.0, 116.0, 116.0], np.float32),
+        high=np.array([101.0, 120.0, 117.0, 117.0, 117.0], np.float32),
+        # The activation bar trades below the future +1.5R stop. It must not
+        # use that newly observed high to exit retroactively on the same bar.
+        low=np.array([99.0, 95.0, 114.0, 115.0, 115.0], np.float32),
+        close=np.array([100.0, 110.0, 116.0, 116.0, 116.0], np.float32),
+        embeddings=np.zeros((5, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, activation = env.step(Action.ENTER_LONG_1)
+    assert not terminated
+    assert activation["ratchet_active"] is True
+    assert activation["protective_stop_price"] == 115.0
+    assert activation["trade_count"] == 0
+
+    _, _, terminated, _, stopped = env.step(Action.HOLD)
+    assert not terminated
+    assert stopped["exit_reason"] == "ratchet_stop"
+    assert stopped["realized_pnl"] == 300.0
+    assert stopped["avg_win_r"] == 1.5
+
+
+def test_short_ratchet_uses_an_independent_downside_path() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 84.0, 84.0, 84.0], np.float32),
+        high=np.array([101.0, 105.0, 86.0, 85.0, 85.0], np.float32),
+        low=np.array([99.0, 80.0, 83.0, 83.0, 83.0], np.float32),
+        close=np.array([100.0, 90.0, 84.0, 84.0, 84.0], np.float32),
+        embeddings=np.zeros((5, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, _, _, activation = env.step(Action.ENTER_SHORT_1)
+    assert activation["ratchet_active"] is True
+    assert activation["protective_stop_price"] == 85.0
+
+    _, _, _, _, stopped = env.step(Action.HOLD)
+    assert stopped["exit_reason"] == "ratchet_stop"
+    assert stopped["realized_pnl"] == 300.0
+    assert stopped["avg_win_r"] == 1.5

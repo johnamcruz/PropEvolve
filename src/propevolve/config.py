@@ -98,6 +98,28 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("the initial PropEvolve recipe supports one contract")
     if not isinstance(challenge["trailing_mll_lock"], bool):
         raise ValueError("challenge trailing_mll_lock must be boolean")
+    ratchet_fields = (
+        "per_trade_risk_dollars",
+        "ratchet_activation_r",
+        "ratchet_giveback_r",
+    )
+    present_ratchet_fields = tuple(
+        field for field in ratchet_fields if field in challenge
+    )
+    if present_ratchet_fields and len(present_ratchet_fields) != len(ratchet_fields):
+        raise ValueError("trade risk and ratchet fields must be declared together")
+    if present_ratchet_fields and (
+        float(challenge["per_trade_risk_dollars"]) <= 0
+        or float(challenge["ratchet_giveback_r"]) <= 0
+        or float(challenge["ratchet_activation_r"])
+        <= float(challenge["ratchet_giveback_r"])
+    ):
+        raise ValueError("trade risk and ratchet fields are invalid")
+    if (
+        "daily_profit_lock_dollars" in challenge
+        and float(challenge["daily_profit_lock_dollars"]) <= 0
+    ):
+        raise ValueError("challenge daily profit lock must be positive")
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
         raise ValueError("cache format must be native or ffm_frozen_representation_v2")
