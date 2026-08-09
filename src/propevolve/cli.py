@@ -20,6 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--workspace", default=".")
     setup.add_argument("--market-data", required=True)
     setup.add_argument("--checkpoint", required=True)
+    setup.add_argument("--embedding-cache")
     validate = subparsers.add_parser("validate-config", help="validate experiment JSON")
     validate.add_argument("--config", required=True)
     cache = subparsers.add_parser("build-cache", help="build frozen Chronos2 caches")
@@ -44,19 +45,29 @@ def _resolve(root: Path, value: str) -> Path:
 
 
 def _build_caches(config: dict) -> int:
-    from .cache import build_embedding_cache
-    from .encoder import FrozenChronos2Encoder
+    from .cache import (
+        EmbeddingCache,
+        build_embedding_cache,
+        import_ffm_representation_cache,
+    )
 
     root = Path(config["_path"]).parent.parent
     assets = AssetContract.load(_resolve(root, config["assets"]))
     assets.verify()
     cache_config = config["cache"]
-    encoder = FrozenChronos2Encoder(
-        assets.checkpoint,
-        device=cache_config["device"],
-        batch_series=int(cache_config["batch_series"]),
-        fast_group_attention=bool(cache_config["fast_group_attention"]),
-    )
+    cache_format = str(cache_config["format"])
+    encoder = None
+    if cache_format == "native":
+        from .encoder import FrozenChronos2Encoder
+
+        encoder = FrozenChronos2Encoder(
+            assets.checkpoint,
+            device=cache_config["device"],
+            batch_series=int(cache_config["batch_series"]),
+            fast_group_attention=bool(cache_config["fast_group_attention"]),
+        )
+    elif assets.embedding_cache is None:
+        raise ValueError("FFM cache import requires assets.embedding_cache")
     cache_root = _resolve(root, config["cache_root"])
     research_end = str(config["temporal"]["sealed_start"])
     requested = tuple(config.get("_requested_tickers") or config["tickers"])
@@ -65,40 +76,60 @@ def _build_caches(config: dict) -> int:
         raise ValueError(f"requested cache tickers are outside the contract: {sorted(unknown)}")
     for ticker in requested:
         destination = cache_root / ticker
+        source = Path(assets.market_data) / (
+            f"{ticker}_{config['timeframe_minutes']}min.csv"
+        )
         manifest_path = destination / "manifest.json"
         if manifest_path.is_file():
             manifest = json.loads(manifest_path.read_text())
-            source = Path(assets.market_data) / (
-                f"{ticker}_{config['timeframe_minutes']}min.csv")
-            from .cache import EmbeddingCache
             cached = EmbeddingCache.load(destination)
-            if (
-                manifest.get("checkpoint_sha256") == assets.checkpoint_sha256
-                and manifest.get("context_length") == int(cache_config["context_length"])
+            common_match = (
+                manifest.get("context_length") == int(cache_config["context_length"])
                 and manifest.get("stride") == int(cache_config["stride"])
                 and manifest.get("source_sha256") == _file_sha256(source)
                 and manifest.get("research_end_exclusive")
                 == _utc_isoformat(research_end)
                 and manifest.get("sealed_holdout_touched") is False
                 and len(cached.embeddings) == int(manifest["rows"])
-            ):
+            )
+            identity_match = (
+                manifest.get("encoder_identity_sha256")
+                == cache_config["encoder_identity_sha256"]
+                if cache_format == "ffm_frozen_representation_v2"
+                else manifest.get("checkpoint_sha256") == assets.checkpoint_sha256
+            )
+            if common_match and identity_match:
                 print(f"[cache] HIT {ticker} {destination}", flush=True)
                 continue
             raise ValueError(f"existing cache identity conflicts for {ticker}")
-        build_embedding_cache(
-            source=Path(assets.market_data)
-            / f"{ticker}_{config['timeframe_minutes']}min.csv",
-            destination=destination,
-            ticker=ticker,
-            encoder=encoder,
-            checkpoint_sha256=assets.checkpoint_sha256,
-            research_end_exclusive=research_end,
-            context_length=int(cache_config["context_length"]),
-            stride=int(cache_config["stride"]),
-            chunk_windows=int(cache_config["chunk_windows"]),
-            timeframe_minutes=int(config["timeframe_minutes"]),
-        )
-        print(f"[cache] COMPLETE {ticker} {destination}", flush=True)
+        if cache_format == "ffm_frozen_representation_v2":
+            import_ffm_representation_cache(
+                source=source,
+                source_cache_root=assets.embedding_cache,
+                destination=destination,
+                ticker=ticker,
+                timeframe_minutes=int(config["timeframe_minutes"]),
+                context_length=int(cache_config["context_length"]),
+                stride=int(cache_config["stride"]),
+                research_end_exclusive=research_end,
+                encoder_identity_sha256=str(cache_config["encoder_identity_sha256"]),
+            )
+            print(f"[cache] IMPORTED {ticker} {destination}", flush=True)
+        else:
+            assert encoder is not None
+            build_embedding_cache(
+                source=source,
+                destination=destination,
+                ticker=ticker,
+                encoder=encoder,
+                checkpoint_sha256=assets.checkpoint_sha256,
+                research_end_exclusive=research_end,
+                context_length=int(cache_config["context_length"]),
+                stride=int(cache_config["stride"]),
+                chunk_windows=int(cache_config["chunk_windows"]),
+                timeframe_minutes=int(config["timeframe_minutes"]),
+            )
+            print(f"[cache] COMPLETE {ticker} {destination}", flush=True)
     return 0
 
 
@@ -167,7 +198,12 @@ def _evolve_status(config: dict, run_id: str) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "setup-assets":
-        contract = link_local_assets(args.workspace, args.market_data, args.checkpoint)
+        contract = link_local_assets(
+            args.workspace,
+            args.market_data,
+            args.checkpoint,
+            args.embedding_cache,
+        )
         print(json.dumps(contract.__dict__, indent=2, sort_keys=True))
         return 0
     config = load_experiment_config(args.config)

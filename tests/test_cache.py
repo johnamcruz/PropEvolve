@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from propevolve.cache import EmbeddingCache, build_embedding_cache, load_market_series
+from propevolve.cache import (
+    EmbeddingCache,
+    build_embedding_cache,
+    import_ffm_representation_cache,
+    load_market_series,
+)
 
 
 class MeanEncoder:
@@ -125,3 +130,91 @@ def test_cache_rejects_manifest_without_authenticated_sealed_boundary(
 
     with pytest.raises(ValueError, match="unsupported embedding cache schema"):
         EmbeddingCache.load(root)
+
+
+def test_imports_authenticated_ffm_cache_without_copying_embeddings(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "NQ_3min.csv"
+    times = pd.date_range("2024-01-01", periods=6, freq="3min", tz="UTC")
+    close = np.arange(100, 106, dtype=float)
+    pd.DataFrame({
+        "datetime": times,
+        "open": close - 0.25,
+        "high": close + 0.50,
+        "low": close - 0.50,
+        "close": close,
+        "volume": np.arange(10, 16, dtype=float),
+    }).to_csv(source, index=False)
+
+    external = tmp_path / "ffm-cache"
+    external.mkdir()
+    stem = "NQ_3min_frozen_representation_deadbeefdeadbeef"
+    embeddings_path = external / f"{stem}.embeddings.npy"
+    embeddings = np.arange(12, dtype=np.float16).reshape(3, 4)
+    np.save(embeddings_path, embeddings)
+    identity = "a" * 64
+    index_path = external / f"{stem}.npz"
+    np.savez(
+        index_path,
+        identity_sha256=np.asarray(identity),
+        bar_idx=np.asarray([2, 3, 4], dtype=np.int64),
+        timestamp_ns=times[2:5].to_numpy(dtype="datetime64[ns]").astype(np.int64),
+    )
+    source_sha = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+    embeddings_sha = __import__("hashlib").sha256(
+        embeddings_path.read_bytes()
+    ).hexdigest()
+    manifest_path = external / f"{stem}.manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema": "pivot-frozen-representation-bar-cache-v2",
+        "ticker": "NQ",
+        "timeframe": "3min",
+        "rows": 3,
+        "feature_width": 4,
+        "stride": 1,
+        "bars_sha256": source_sha,
+        "identity_sha256": identity,
+        "encoder_identity_sha256": "b" * 64,
+        "embedding_file": embeddings_path.name,
+        "embedding_dtype": "float16",
+        "embeddings_sha256": embeddings_sha,
+        "cache_sha256": __import__("hashlib").sha256(
+            index_path.read_bytes()
+        ).hexdigest(),
+        "decision_availability": "endpoint_bar_close",
+        "source_bar_timestamp_semantics": "bar_open",
+        "boundary_policy": "endpoint_bar_close_strictly_before_research_end",
+        "research_end_exclusive": "2026-01-01T00:00:00.000000000Z",
+        "encoder": {
+            "checkpoint": {"stage": "mask", "sha256": "d" * 64},
+            "input": {"context_length": 3},
+        },
+    }))
+
+    destination = import_ffm_representation_cache(
+        source=source,
+        source_cache_root=external,
+        destination=tmp_path / "cache/NQ",
+        ticker="NQ",
+        timeframe_minutes=3,
+        context_length=3,
+        stride=1,
+        research_end_exclusive="2026-01-01",
+        encoder_identity_sha256="b" * 64,
+    )
+    cache = EmbeddingCache.load(destination)
+
+    assert (destination / "embeddings.npy").is_symlink()
+    assert (destination / "embeddings.npy").resolve() == embeddings_path.resolve()
+    assert cache.embeddings.dtype == np.float16
+    np.testing.assert_array_equal(cache.embeddings, embeddings)
+    np.testing.assert_array_equal(
+        cache.timestamps,
+        (times[2:5] + pd.Timedelta(minutes=3)).to_numpy(dtype="datetime64[ns]"),
+    )
+    assert cache.manifest["imported_ffm_cache_identity_sha256"] == identity
+    assert cache.manifest["sealed_holdout_touched"] is False
+    market = load_market_series(source, destination, ticker="NQ")
+    assert isinstance(market.embeddings, np.memmap)
+    assert market.embeddings.dtype == np.float16

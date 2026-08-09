@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Protocol
 
 import numpy as np
@@ -111,8 +113,171 @@ def load_market_series(
         high=frame["high"].to_numpy(np.float32)[indices],
         low=frame["low"].to_numpy(np.float32)[indices],
         close=frame["close"].to_numpy(np.float32)[indices],
-        embeddings=np.asarray(cache.embeddings[cache_rows], dtype=np.float32),
+        embeddings=_contiguous_embedding_view(cache.embeddings, cache_rows),
     )
+
+
+def _contiguous_embedding_view(
+    embeddings: np.ndarray,
+    rows: np.ndarray,
+) -> np.ndarray:
+    """Preserve the memory map for chronological slices instead of copying it."""
+    if len(rows) < 1:
+        raise ValueError("embedding slice cannot be empty")
+    if len(rows) > 1 and not np.all(np.diff(rows) == 1):
+        raise ValueError("embedding selection must be one chronological range")
+    return embeddings[int(rows[0]):int(rows[-1]) + 1]
+
+
+def import_ffm_representation_cache(
+    *,
+    source: str | Path,
+    source_cache_root: str | Path,
+    destination: str | Path,
+    ticker: str,
+    timeframe_minutes: int,
+    context_length: int,
+    stride: int,
+    research_end_exclusive: str,
+    encoder_identity_sha256: str,
+) -> Path:
+    """Import one authenticated FFM cache using a zero-copy embedding symlink."""
+    source = Path(source).resolve(strict=True)
+    source_cache_root = Path(source_cache_root).resolve(strict=True)
+    destination = Path(destination)
+    if destination.exists():
+        raise ValueError(f"refusing to replace existing cache: {destination}")
+    timeframe = f"{int(timeframe_minutes)}min"
+    manifests = tuple(source_cache_root.glob(f"{ticker}_{timeframe}_*.manifest.json"))
+    if len(manifests) != 1:
+        raise ValueError(
+            f"expected exactly one FFM cache manifest for {ticker}@{timeframe}, "
+            f"found {len(manifests)}"
+        )
+    source_manifest_path = manifests[0]
+    source_manifest = json.loads(source_manifest_path.read_text())
+    expected = {
+        "schema": "pivot-frozen-representation-bar-cache-v2",
+        "ticker": ticker,
+        "timeframe": timeframe,
+        "stride": int(stride),
+        "encoder_identity_sha256": encoder_identity_sha256,
+        "decision_availability": "endpoint_bar_close",
+        "source_bar_timestamp_semantics": "bar_open",
+        "boundary_policy": "endpoint_bar_close_strictly_before_research_end",
+    }
+    drift = {
+        key: (source_manifest.get(key), value)
+        for key, value in expected.items()
+        if source_manifest.get(key) != value
+    }
+    if drift:
+        raise ValueError(f"FFM cache contract drift for {ticker}: {drift}")
+    if source_manifest.get("encoder", {}).get("checkpoint", {}).get("stage") != "mask":
+        raise ValueError("FFM cache is not from the Mask checkpoint")
+    if (
+        int(source_manifest.get("encoder", {}).get("input", {}).get("context_length", -1))
+        != int(context_length)
+    ):
+        raise ValueError("FFM cache context length drift")
+    if source_manifest.get("bars_sha256") != _sha256(source):
+        raise ValueError("FFM cache source identity drift")
+
+    research_end = pd.Timestamp(research_end_exclusive)
+    research_end = (
+        research_end.tz_localize("UTC")
+        if research_end.tzinfo is None
+        else research_end.tz_convert("UTC")
+    )
+    manifest_end = pd.Timestamp(source_manifest.get("research_end_exclusive"))
+    manifest_end = (
+        manifest_end.tz_localize("UTC")
+        if manifest_end.tzinfo is None
+        else manifest_end.tz_convert("UTC")
+    )
+    if manifest_end != research_end:
+        raise ValueError("FFM cache sealed boundary drift")
+
+    stem = source_manifest_path.name.removesuffix(".manifest.json")
+    index_path = source_cache_root / f"{stem}.npz"
+    embeddings_path = source_cache_root / str(source_manifest.get("embedding_file", ""))
+    if not index_path.is_file() or not embeddings_path.is_file():
+        raise ValueError("FFM cache artifact set is incomplete")
+    if _sha256(index_path) != source_manifest.get("cache_sha256"):
+        raise ValueError("FFM cache row-map identity drift")
+    if _sha256(embeddings_path) != source_manifest.get("embeddings_sha256"):
+        raise ValueError("FFM cache embedding identity drift")
+
+    with np.load(index_path, allow_pickle=False) as artifact:
+        if set(artifact.files) != {"identity_sha256", "bar_idx", "timestamp_ns"}:
+            raise ValueError("FFM cache row-map schema drift")
+        identity = str(artifact["identity_sha256"].item())
+        bar_indices = np.asarray(artifact["bar_idx"], dtype=np.int64)
+        open_timestamp_ns = np.asarray(artifact["timestamp_ns"], dtype=np.int64)
+    if identity != source_manifest.get("identity_sha256"):
+        raise ValueError("FFM cache manifest and row-map identities disagree")
+    rows = int(source_manifest.get("rows", -1))
+    if bar_indices.shape != (rows,) or open_timestamp_ns.shape != (rows,):
+        raise ValueError("FFM cache row-map shape drift")
+    if rows < 2 or (np.diff(bar_indices) <= 0).any() or (np.diff(open_timestamp_ns) <= 0).any():
+        raise ValueError("FFM cache row map must be nonempty, unique, and ordered")
+
+    embeddings = np.load(embeddings_path, mmap_mode="r")
+    expected_shape = (rows, int(source_manifest.get("feature_width", -1)))
+    if embeddings.shape != expected_shape or embeddings.dtype != np.float16:
+        raise ValueError("FFM cache embedding shape or dtype drift")
+    del embeddings
+
+    source_times = pd.read_csv(source, usecols=["datetime"])["datetime"]
+    source_times = pd.to_datetime(source_times, utc=True, errors="coerce")
+    if source_times.isna().any() or int(bar_indices[-1]) >= len(source_times):
+        raise ValueError("FFM cache row map exceeds its source timeline")
+    selected_open_ns = source_times.iloc[bar_indices].to_numpy(
+        dtype="datetime64[ns]"
+    ).astype(np.int64)
+    if not np.array_equal(selected_open_ns, open_timestamp_ns):
+        raise ValueError("FFM cache row map does not match source timestamps")
+    decision_ns = open_timestamp_ns + int(pd.Timedelta(minutes=timeframe_minutes).value)
+    decision_times = decision_ns.astype("datetime64[ns]")
+    boundary = np.datetime64(research_end.tz_localize(None))
+    if not (decision_times < boundary).all():
+        raise ValueError("FFM cache crosses the sealed boundary")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{destination.name}.", dir=destination.parent
+    ) as temporary_name:
+        temporary = Path(temporary_name)
+        os.symlink(embeddings_path, temporary / "embeddings.npy")
+        np.save(temporary / "timestamps.npy", decision_times)
+        manifest = {
+            "schema": CACHE_SCHEMA,
+            "ticker": ticker,
+            "timeframe_minutes": int(timeframe_minutes),
+            "context_length": int(context_length),
+            "stride": int(stride),
+            "rows": rows,
+            "embedding_dim": expected_shape[1],
+            "source": str(source),
+            "source_sha256": source_manifest["bars_sha256"],
+            "checkpoint": "imported authenticated FFM Mask cache",
+            "checkpoint_sha256": source_manifest["encoder"]["checkpoint"]["sha256"],
+            "encoder_identity_sha256": encoder_identity_sha256,
+            "decision_timing": "embedding includes completed bar at decision close",
+            "first_decision_time": str(decision_times[0]),
+            "last_decision_time": str(decision_times[-1]),
+            "research_end_exclusive": research_end.isoformat(),
+            "sealed_holdout_touched": False,
+            "imported_ffm_cache_identity_sha256": identity,
+            "imported_ffm_cache_manifest": str(source_manifest_path),
+            "imported_ffm_embeddings_sha256": source_manifest["embeddings_sha256"],
+            "embedding_storage": "external_npy_float16_memmap_symlink_v1",
+        }
+        (temporary / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+        temporary.rename(destination)
+    return destination
 
 
 def build_embedding_cache(

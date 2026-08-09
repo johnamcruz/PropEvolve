@@ -7,6 +7,8 @@
   "timeframe_minutes": 3,
   "cache_root": "cache/chronos2_mask_full_3min_pre2026_v2",
   "cache": {
+    "format": "ffm_frozen_representation_v2",
+    "encoder_identity_sha256": "1b8b7f001b0b4e501aa47ca90a3c2fd31d0b41dbd1d896e98ce084f6ed325710",
     "context_length": 256,
     "stride": 1,
     "chunk_windows": 256,

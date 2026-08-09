@@ -134,9 +134,9 @@ before replacing the champion.
 PropEvolve imports
 [`futures-foundation-model[foundation]`](https://github.com/johnamcruz/Futures-Foundation-Model)
 as a package and uses its Chronos2 embedding implementation. FFM source is not
-copied into this repository. OHLCV and the promoted Mask checkpoint are local
-symbolic links; generated embedding caches and run artifacts remain in
-configured local storage and are ignored by Git.
+copied into this repository. OHLCV, the promoted Mask checkpoint, and an
+optional authenticated FFM embedding cache remain external; PropEvolve uses
+local symbolic links and stores only its own manifests and run artifacts.
 
 Current promoted checkpoint identity:
 
@@ -150,7 +150,8 @@ Create or refresh the local links without copying assets:
 ```bash
 propevolve setup-assets \
   --market-data "/path/to/ohlcv/data" \
-  --checkpoint "/path/to/chronos2_mask_full"
+  --checkpoint "/path/to/chronos2_mask_full" \
+  --embedding-cache "/path/to/ffm/representation_cache"
 ```
 
 ## Running the historical POC
@@ -173,7 +174,8 @@ Validate the frozen experiment contract:
 propevolve validate-config --config config/historical_mask_v1.json
 ```
 
-Build the nine frozen embedding caches:
+Import the declared authenticated cache without copying its embedding arrays,
+or build the nine frozen embeddings when the recipe selects native mode:
 
 ```bash
 propevolve build-cache --config config/historical_mask_v1.json

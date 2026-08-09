@@ -8,6 +8,8 @@ from pathlib import Path
 
 REQUIRED_RECIPE_FIELDS = {
     "cache": {
+        "format",
+        "encoder_identity_sha256",
         "context_length",
         "stride",
         "chunk_windows",
@@ -95,6 +97,11 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("the initial PropEvolve recipe supports one contract")
     if not isinstance(challenge["trailing_mll_lock"], bool):
         raise ValueError("challenge trailing_mll_lock must be boolean")
+    cache = payload["cache"]
+    if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
+        raise ValueError("cache format must be native or ffm_frozen_representation_v2")
+    if not str(cache["encoder_identity_sha256"]).strip():
+        raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
