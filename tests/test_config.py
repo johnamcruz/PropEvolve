@@ -17,7 +17,7 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     assert "challenge.profit_target" in config["evolution"]["frozen_paths"]
     assert "challenge.per_trade_risk_dollars" not in config["evolution"]["frozen_paths"]
     assert config["evolution"]["revision_bounds"] == {
-        "challenge.per_trade_risk_dollars": {"minimum": 100.0, "maximum": 300.0},
+        "challenge.per_trade_risk_dollars": {"minimum": 100.0, "maximum": 500.0},
         "challenge.ratchet_activation_r": {"minimum": 1.5, "maximum": 3.0},
         "challenge.ratchet_giveback_r": {"minimum": 0.25, "maximum": 1.0},
     }
