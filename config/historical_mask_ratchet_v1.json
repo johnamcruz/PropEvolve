@@ -63,7 +63,7 @@
   "training": {
     "episodes": 10000,
     "minimum_environment_steps": 5000000,
-    "validation_episodes": 25,
+    "validation_episodes": 200,
     "replay_capacity_episodes": 500,
     "sequence_length": 32,
     "warmup_episodes": 8,
@@ -123,8 +123,13 @@
     },
     "selection_requirements": [
       {
-        "metric": "selection.pass_minus_blow",
-        "operator": ">",
+        "metric": "selection.pass_rate",
+        "operator": ">=",
+        "value": 0.5
+      },
+      {
+        "metric": "selection.blow_rate",
+        "operator": "==",
         "value": 0.0
       }
     ],

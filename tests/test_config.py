@@ -16,6 +16,11 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
     assert "challenge" in config["evolution"]["frozen_paths"]
     assert config["training"]["minimum_environment_steps"] == 5_000_000
+    assert config["training"]["validation_episodes"] == 200
+    assert config["campaign"]["selection_requirements"] == [
+        {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+        {"metric": "selection.blow_rate", "operator": "==", "value": 0.0},
+    ]
 
 
 def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) -> None:
