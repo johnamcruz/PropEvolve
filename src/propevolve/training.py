@@ -123,6 +123,8 @@ class HistoricalCandidateRunner:
             updates_per_episode=int(training_config["updates_per_episode"]),
             batch_sequences=int(training_config["batch_sequences"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
+            epsilon_start=float(training_config["epsilon_start"]),
+            epsilon_end=float(training_config["epsilon_end"]),
             episode_tickers=tuple(config["tickers"]),
             ticker_seed=seed,
         )
@@ -270,14 +272,14 @@ def train_agent(
     *,
     episodes: int,
     replay: BalancedSequenceReplay,
-    warmup_episodes: int = 8,
-    updates_per_episode: int = 8,
-    batch_sequences: int = 16,
-    recurrent_horizon: int = 64,
-    epsilon_start: float = 0.25,
-    epsilon_end: float = 0.02,
-    episode_tickers: tuple[str, ...] | None = None,
-    ticker_seed: int = 0,
+    warmup_episodes: int,
+    updates_per_episode: int,
+    batch_sequences: int,
+    recurrent_horizon: int,
+    epsilon_start: float,
+    epsilon_end: float,
+    episode_tickers: tuple[str, ...] | None,
+    ticker_seed: int,
 ) -> TrainingResult:
     if episodes < 1:
         raise ValueError("episodes must be positive")
@@ -384,7 +386,7 @@ def evaluate_agent(
     environment: HistoricalChallengeEnv,
     *,
     episodes: int,
-    recurrent_horizon: int = 64,
+    recurrent_horizon: int,
 ) -> TrainingResult:
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []

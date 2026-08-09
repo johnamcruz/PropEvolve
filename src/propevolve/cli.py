@@ -55,7 +55,7 @@ def _build_caches(config: dict) -> int:
         assets.checkpoint,
         device=cache_config["device"],
         batch_series=int(cache_config["batch_series"]),
-        fast_group_attention=bool(cache_config.get("fast_group_attention", False)),
+        fast_group_attention=bool(cache_config["fast_group_attention"]),
     )
     cache_root = _resolve(root, config["cache_root"])
     research_end = str(config["temporal"]["sealed_start"])

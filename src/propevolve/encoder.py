@@ -34,9 +34,9 @@ class FrozenChronos2Encoder:
         self,
         checkpoint: str | Path,
         *,
-        device: str = "mps",
-        batch_series: int = 512,
-        fast_group_attention: bool = False,
+        device: str,
+        batch_series: int,
+        fast_group_attention: bool,
         package_embedder: EmbeddingChunks | None = None,
     ) -> None:
         self.checkpoint = Path(checkpoint).resolve(strict=True)

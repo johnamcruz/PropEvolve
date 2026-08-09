@@ -77,6 +77,10 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
         updates_per_episode=1,
         batch_sequences=1,
         recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=1,
     )
 
     assert result.passes == 2
@@ -108,6 +112,8 @@ def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
         updates_per_episode=1,
         batch_sequences=1,
         recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
         episode_tickers=tickers,
         ticker_seed=7,
     )

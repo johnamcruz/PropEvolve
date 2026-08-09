@@ -123,10 +123,10 @@ def build_embedding_cache(
     encoder: WindowEncoder,
     checkpoint_sha256: str,
     research_end_exclusive: str,
-    context_length: int = 256,
-    stride: int = 1,
-    chunk_windows: int = 256,
-    timeframe_minutes: int = 3,
+    context_length: int,
+    stride: int,
+    chunk_windows: int,
+    timeframe_minutes: int,
 ) -> Path:
     """Encode causal pre-holdout windows and write a manifest-last cache."""
     if min(context_length, stride, chunk_windows, timeframe_minutes) < 1:

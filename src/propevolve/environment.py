@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -13,14 +14,18 @@ from .observation import AccountState, ObservationAssembler
 
 @dataclass(frozen=True)
 class ChallengeSpec:
-    profit_target: float = 6_000.0
-    max_loss: float = 3_000.0
-    episode_days: int = 30
-    bars_per_day: int = 130
-    max_position_size: int = 2
-    terminal_pass_reward: float = 1.0
-    terminal_blow_reward: float = -1.0
-    terminal_timeout_reward: float = -0.10
+    profit_target: float
+    max_loss: float
+    episode_days: int
+    bars_per_day: int
+    max_position_size: int
+    minimum_mll_headroom: float
+    trailing_mll_lock: bool
+    terminal_pass_reward: float
+    terminal_blow_reward: float
+    terminal_timeout_reward: float
+    terminal_pass_speed_reward_per_day: float
+    reward_scale: float
 
     def __post_init__(self) -> None:
         if min(
@@ -29,8 +34,13 @@ class ChallengeSpec:
             self.episode_days,
             self.bars_per_day,
             self.max_position_size,
+            self.reward_scale,
         ) <= 0:
             raise ValueError("challenge economics and durations must be positive")
+        if self.max_position_size != 1:
+            raise ValueError("PropEvolve v1 supports exactly one contract")
+        if self.terminal_pass_reward <= 0 or self.terminal_blow_reward >= 0:
+            raise ValueError("terminal pass and blow rewards must have opposite signs")
 
     @property
     def episode_bars(self) -> int:
@@ -67,39 +77,82 @@ class MarketSeries:
             raise ValueError("market OHLC relationships are invalid")
         if not np.all(self.timestamps[1:] > self.timestamps[:-1]):
             raise ValueError("market timestamps must be strictly increasing")
+        if np.isnat(self.timestamps).any():
+            raise ValueError("market timestamps must be finite")
 
 
-class TradeLedger(Protocol):
-    cumulative_pnl: float
-
-    def close_trade(self, ticker: str, gross_pnl: float, size: int) -> float: ...
+_CENTRAL = ZoneInfo("America/Chicago")
 
 
-class PropFirmLedger:
-    """Cumulative prop-challenge balance and round-trip fee ledger."""
+def _cme_session_keys(timestamps: np.ndarray) -> np.ndarray:
+    """Precompute DST-aware CME session keys; the session rolls at 5 PM CT."""
+    nanoseconds = np.asarray(timestamps).astype("datetime64[ns]").astype(np.int64)
+    keys = np.empty(len(nanoseconds), dtype=np.int32)
+    for index, value in enumerate(nanoseconds):
+        local = datetime.fromtimestamp(value / 1_000_000_000, timezone.utc).astimezone(
+            _CENTRAL
+        )
+        session_day = local.date() if local.hour >= 17 else local.date() - timedelta(days=1)
+        keys[index] = session_day.toordinal()
+    return keys
 
-    ROUND_TRIP_FEES = {
-        "NQ": 3.78,
-        "ES": 3.78,
-        "GC": 4.32,
-        "RTY": 3.78,
-        "YM": 3.78,
-        "CL": 4.02,
-        "SI": 4.32,
-        "ZB": 2.76,
-        "ZN": 2.58,
-    }
 
-    def __init__(self, round_trip_fees: dict[str, float] | None = None) -> None:
-        self.cumulative_pnl = 0.0
-        self.round_trip_fees = dict(round_trip_fees or self.ROUND_TRIP_FEES)
+class PropChallengeAccount:
+    """Cumulative challenge balance with EOD trailing and passmark-lock MLL."""
 
-    def close_trade(self, ticker: str, gross_pnl: float, size: int) -> float:
-        if ticker not in self.round_trip_fees:
-            raise ValueError(f"missing round-trip fee for {ticker}")
-        net = float(gross_pnl) - self.round_trip_fees[ticker] * int(size)
-        self.cumulative_pnl += net
-        return net
+    def __init__(
+        self,
+        *,
+        max_loss: float,
+        profit_target: float,
+        trailing_mll_lock: bool,
+    ) -> None:
+        if max_loss <= 0 or profit_target <= 0:
+            raise ValueError("challenge economics must be positive")
+        self.max_loss = float(max_loss)
+        self.profit_target = float(profit_target)
+        self.trailing_mll_lock = bool(trailing_mll_lock)
+        self.realized_pnl = 0.0
+        self.session_pnl = 0.0
+        self.mll_floor_pnl = -self.max_loss
+        self.passmark_locked = False
+
+    @property
+    def cumulative_pnl(self) -> float:
+        return self.realized_pnl
+
+    def realize(self, net_pnl: float) -> float:
+        value = float(net_pnl)
+        self.realized_pnl += value
+        self.session_pnl += value
+        if (
+            self.trailing_mll_lock
+            and not self.passmark_locked
+            and self.realized_pnl >= self.max_loss
+        ):
+            self.passmark_locked = True
+            self.mll_floor_pnl = 0.0
+        return value
+
+    def close_session(self) -> None:
+        if self.trailing_mll_lock and not self.passmark_locked:
+            self.mll_floor_pnl = min(
+                max(self.mll_floor_pnl, self.realized_pnl - self.max_loss),
+                0.0,
+            )
+        self.session_pnl = 0.0
+
+    def mll_headroom(self, equity_pnl: float | None = None) -> float:
+        equity = self.realized_pnl if equity_pnl is None else float(equity_pnl)
+        return max(0.0, equity - self.mll_floor_pnl)
+
+    def outcome(self, equity_pnl: float | None = None) -> str | None:
+        equity = self.realized_pnl if equity_pnl is None else float(equity_pnl)
+        if equity <= self.mll_floor_pnl:
+            return "blow"
+        if equity >= self.profit_target:
+            return "pass"
+        return None
 
 
 @dataclass
@@ -117,10 +170,9 @@ class HistoricalChallengeEnv:
         markets: dict[str, MarketSeries],
         *,
         tick_values: dict[str, float],
-        spec: ChallengeSpec | None = None,
-        ledger_factory: Callable[[], TradeLedger] | None = None,
-        round_trip_fees: dict[str, float] | None = None,
-        seed: int = 0,
+        spec: ChallengeSpec,
+        round_trip_fees: dict[str, float],
+        seed: int,
     ) -> None:
         if not markets:
             raise ValueError("at least one market is required")
@@ -132,16 +184,15 @@ class HistoricalChallengeEnv:
             raise ValueError(f"missing tick values for {sorted(missing)}")
         self.markets = dict(markets)
         self.tick_values = {key: float(value) for key, value in tick_values.items()}
-        self.spec = spec or ChallengeSpec()
-        self.round_trip_fees = dict(round_trip_fees or PropFirmLedger.ROUND_TRIP_FEES)
+        self.spec = spec
+        self.round_trip_fees = dict(round_trip_fees)
         missing_fees = set(markets) - set(self.round_trip_fees)
-        if missing_fees and ledger_factory is None:
+        if missing_fees:
             raise ValueError(f"missing round-trip fees for {sorted(missing_fees)}")
-        self._ledger_factory = (
-            ledger_factory
-            if ledger_factory is not None
-            else lambda: PropFirmLedger(self.round_trip_fees)
-        )
+        self._session_keys = {
+            ticker: _cme_session_keys(market.timestamps)
+            for ticker, market in self.markets.items()
+        }
         self._rng = np.random.default_rng(seed)
         self._assembler = ObservationAssembler(
             next(iter(embedding_dims)),
@@ -151,13 +202,14 @@ class HistoricalChallengeEnv:
         self._masker = ActionMasker(
             max_position_size=self.spec.max_position_size,
             max_loss=self.spec.max_loss,
+            minimum_mll_headroom=self.spec.minimum_mll_headroom,
         )
         self._market: MarketSeries | None = None
         self._ticker = ""
         self._index = 0
         self._start = 0
         self._end = 0
-        self._ledger: TradeLedger | None = None
+        self._account: PropChallengeAccount | None = None
         self._position: _Position | None = None
         self._peak_equity = 0.0
         self._terminated = True
@@ -178,7 +230,11 @@ class HistoricalChallengeEnv:
         self._index = start
         self._start = start
         self._end = start + desired
-        self._ledger = self._ledger_factory()
+        self._account = PropChallengeAccount(
+            max_loss=self.spec.max_loss,
+            profit_target=self.spec.profit_target,
+            trailing_mll_lock=self.spec.trailing_mll_lock,
+        )
         self._position = None
         self._peak_equity = 0.0
         self._terminated = False
@@ -194,7 +250,7 @@ class HistoricalChallengeEnv:
         return self._masker.valid_actions(self._account_state())
 
     def step(self, action: Action | int) -> tuple[np.ndarray, float, bool, bool, dict]:
-        if self._terminated or self._market is None or self._ledger is None:
+        if self._terminated or self._market is None or self._account is None:
             raise RuntimeError("reset the challenge before stepping")
         action = Action(int(action))
         if action not in self.valid_actions():
@@ -202,7 +258,14 @@ class HistoricalChallengeEnv:
         previous_equity = self._equity(self._market.close[self._index])
         next_index = self._index + 1
         fill = float(self._market.open[next_index])
-        info: dict = {"decision_index": self._index, "fill_index": next_index}
+        info: dict = {
+            "decision_index": self._index,
+            "fill_index": next_index,
+            "fees_paid": 0.0,
+        }
+        if self._session_keys[self._ticker][next_index] != self._session_keys[self._ticker][self._index]:
+            self._account.close_session()
+            info["session_boundary"] = True
         self._apply_action(action, fill, info)
 
         worst_price = self._adverse_price(next_index)
@@ -210,33 +273,42 @@ class HistoricalChallengeEnv:
         info["worst_equity_pnl"] = worst_equity
         self._index = next_index
         outcome = None
-        if worst_equity <= -self.spec.max_loss:
-            self._liquidate(worst_price)
+        if self._account.outcome(worst_equity) == "blow":
+            self._liquidate(worst_price, info)
             outcome = "blow"
         else:
             current_equity = self._equity(float(self._market.close[self._index]))
-            if current_equity >= self.spec.profit_target:
-                self._liquidate(float(self._market.close[self._index]))
+            if self._account.outcome(current_equity) == "pass":
+                self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "pass"
             elif self._index >= self._end:
-                self._liquidate(float(self._market.close[self._index]))
+                self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "timeout"
 
         equity = self._equity(float(self._market.close[self._index]))
         self._peak_equity = max(self._peak_equity, equity)
         reward = (equity - previous_equity) / self.spec.max_loss
         if outcome == "pass":
-            reward += self.spec.terminal_pass_reward
+            elapsed_days = (self._index - self._start) / self.spec.bars_per_day
+            days_saved = max(0.0, self.spec.episode_days - elapsed_days)
+            reward += (
+                self.spec.terminal_pass_reward
+                + self.spec.terminal_pass_speed_reward_per_day * days_saved
+            ) / self.spec.reward_scale
         elif outcome == "blow":
-            reward += self.spec.terminal_blow_reward
+            reward += self.spec.terminal_blow_reward / self.spec.reward_scale
         elif outcome == "timeout":
-            reward += self.spec.terminal_timeout_reward
+            reward += self.spec.terminal_timeout_reward / self.spec.reward_scale
         self._terminated = outcome is not None
         info.update({
             "outcome": outcome,
             "equity_pnl": equity,
             "ticker": self._ticker,
             "primary_side": self._primary_side,
+            "realized_pnl": self._account.realized_pnl,
+            "mll_floor_pnl": self._account.mll_floor_pnl,
+            "mll_headroom": self._account.mll_headroom(equity),
+            "passmark_locked": self._account.passmark_locked,
             "timestamp": str(self._market.timestamps[self._index]),
             "valid_actions": () if self._terminated else self.valid_actions(),
         })
@@ -247,9 +319,7 @@ class HistoricalChallengeEnv:
         if position is None:
             entries = {
                 Action.ENTER_LONG_1: (PositionSide.LONG, 1),
-                Action.ENTER_LONG_2: (PositionSide.LONG, 2),
                 Action.ENTER_SHORT_1: (PositionSide.SHORT, 1),
-                Action.ENTER_SHORT_2: (PositionSide.SHORT, 2),
             }
             if action in entries:
                 side, size = entries[action]
@@ -258,33 +328,30 @@ class HistoricalChallengeEnv:
                 info.update({"fill_price": fill, "fill_side": self._primary_side, "fill_size": size})
             return
         if action == Action.CLOSE:
-            self._liquidate(fill)
-            info.update({"fill_price": fill, "fill_side": "close", "fill_size": position.size})
-        elif action == Action.REDUCE_1:
-            self._close_size(fill, 1)
-            info.update({"fill_price": fill, "fill_side": "reduce", "fill_size": 1})
-        elif action == Action.ADD_1:
-            new_size = position.size + 1
-            position.average_entry = (
-                position.average_entry * position.size + fill
-            ) / new_size
-            position.size = new_size
-            info.update({"fill_price": fill, "fill_side": "add", "fill_size": 1})
+            closing_size = position.size
+            self._liquidate(fill, info)
+            info.update({
+                "fill_price": fill,
+                "fill_side": "close",
+                "fill_size": closing_size,
+            })
 
-    def _close_size(self, price: float, size: int) -> None:
-        if self._position is None or self._ledger is None:
-            return
+    def _close_size(self, price: float, size: int) -> float:
+        if self._position is None or self._account is None:
+            return 0.0
         size = min(size, self._position.size)
         points = (price - self._position.average_entry) * int(self._position.side)
         gross = points * self.tick_values[self._ticker] * size
-        self._ledger.close_trade(self._ticker, gross, size)
+        fee = self.round_trip_fees[self._ticker] * size
+        self._account.realize(gross - fee)
         self._position.size -= size
         if self._position.size == 0:
             self._position = None
+        return fee
 
-    def _liquidate(self, price: float) -> None:
+    def _liquidate(self, price: float, info: dict) -> None:
         if self._position is not None:
-            self._close_size(price, self._position.size)
+            info["fees_paid"] += self._close_size(price, self._position.size)
 
     def _adverse_price(self, index: int) -> float:
         assert self._market is not None
@@ -297,7 +364,7 @@ class HistoricalChallengeEnv:
         )
 
     def _equity(self, price: float) -> float:
-        realized = 0.0 if self._ledger is None else float(self._ledger.cumulative_pnl)
+        realized = 0.0 if self._account is None else self._account.realized_pnl
         if self._position is None:
             return realized
         points = (price - self._position.average_entry) * int(self._position.side)
@@ -310,7 +377,7 @@ class HistoricalChallengeEnv:
 
     def _account_state(self) -> AccountState:
         assert self._market is not None
-        realized = 0.0 if self._ledger is None else float(self._ledger.cumulative_pnl)
+        realized = 0.0 if self._account is None else self._account.realized_pnl
         equity = self._equity(float(self._market.close[self._index]))
         side = PositionSide.FLAT if self._position is None else self._position.side
         size = 0 if self._position is None else self._position.size
@@ -329,6 +396,11 @@ class HistoricalChallengeEnv:
             challenge_remaining=bars_left / max(1, self.spec.episode_bars),
             point_value=self.tick_values[self._ticker],
             round_trip_fee=self.round_trip_fees.get(self._ticker, 0.0),
+            mll_headroom=(
+                self.spec.max_loss + equity
+                if self._account is None
+                else self._account.mll_headroom(equity)
+            ),
         )
 
     def _observation(self) -> np.ndarray:

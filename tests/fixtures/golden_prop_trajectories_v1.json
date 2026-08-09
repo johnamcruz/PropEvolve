@@ -1,0 +1,202 @@
+{
+  "schema": "propevolve_golden_prop_trajectories_v1",
+  "reference_revision": "7048522f6ed93849d19ef77726d7c1dc94788aeb",
+  "account_trajectories": [
+    {
+      "name": "eod_trailing_floor_ratchets_and_never_retreats",
+      "max_loss": 3000.0,
+      "profit_target": 6000.0,
+      "events": [
+        {"kind": "realize", "net_pnl": 1500.0},
+        {"kind": "session_close"},
+        {"kind": "realize", "net_pnl": -1200.0},
+        {"kind": "session_close"}
+      ],
+      "expected": {
+        "realized_pnl": 300.0,
+        "mll_floor_pnl": -1500.0,
+        "mll_headroom": 1800.0,
+        "passmark_locked": false,
+        "outcome": null
+      }
+    },
+    {
+      "name": "passmark_touch_locks_floor_and_giveback_blows",
+      "max_loss": 3000.0,
+      "profit_target": 6000.0,
+      "events": [
+        {"kind": "realize", "net_pnl": 3000.0},
+        {"kind": "realize", "net_pnl": -3000.0}
+      ],
+      "expected": {
+        "realized_pnl": 0.0,
+        "mll_floor_pnl": 0.0,
+        "mll_headroom": 0.0,
+        "passmark_locked": true,
+        "outcome": "blow"
+      }
+    },
+    {
+      "name": "profit_target_passes",
+      "max_loss": 3000.0,
+      "profit_target": 6000.0,
+      "events": [
+        {"kind": "realize", "net_pnl": 6000.0}
+      ],
+      "expected": {
+        "realized_pnl": 6000.0,
+        "mll_floor_pnl": 0.0,
+        "mll_headroom": 6000.0,
+        "passmark_locked": true,
+        "outcome": "pass"
+      }
+    }
+  ],
+  "execution_trajectories": [
+    {
+      "name": "next_open_fill_and_round_trip_fee",
+      "profit_target": 35.0,
+      "max_loss": 3000.0,
+      "point_value": 20.0,
+      "round_trip_fee": 3.84,
+      "timestamps": [
+        "2025-06-02T14:30:00Z",
+        "2025-06-02T14:33:00Z",
+        "2025-06-02T14:36:00Z",
+        "2025-06-02T14:39:00Z"
+      ],
+      "open": [100.0, 101.0, 103.0, 103.0],
+      "high": [101.0, 102.0, 104.0, 104.0],
+      "low": [99.0, 100.5, 102.0, 102.0],
+      "close": [100.0, 101.5, 103.0, 103.0],
+      "actions": ["ENTER_LONG_1", "CLOSE"],
+      "expected_steps": [
+        {
+          "fill_index": 1,
+          "fill_price": 101.0,
+          "fees_paid": 0.0,
+          "equity_pnl": 6.16,
+          "reward": 0.0020533333333333332,
+          "outcome": null,
+          "terminated": false
+        },
+        {
+          "fill_index": 2,
+          "fill_price": 103.0,
+          "fees_paid": 3.84,
+          "equity_pnl": 36.16,
+          "reward": 0.26666666666666666,
+          "outcome": "pass",
+          "terminated": true
+        }
+      ]
+    },
+    {
+      "name": "intrabar_mll_blow_precedes_close_recovery",
+      "profit_target": 6000.0,
+      "max_loss": 300.0,
+      "point_value": 20.0,
+      "round_trip_fee": 3.84,
+      "timestamps": [
+        "2025-06-02T14:30:00Z",
+        "2025-06-02T14:33:00Z",
+        "2025-06-02T14:36:00Z"
+      ],
+      "open": [100.0, 100.0, 100.0],
+      "high": [101.0, 102.0, 101.0],
+      "low": [99.0, 84.0, 99.0],
+      "close": [100.0, 101.0, 100.0],
+      "actions": ["ENTER_LONG_1"],
+      "expected_steps": [
+        {
+          "fill_index": 1,
+          "fill_price": 100.0,
+          "fees_paid": 3.84,
+          "worst_equity_pnl": -323.84,
+          "equity_pnl": -323.84,
+          "reward": -2.5794666666666666,
+          "outcome": "blow",
+          "terminated": true
+        }
+      ]
+    },
+    {
+      "name": "cme_session_boundary_ratchets_realized_mll",
+      "profit_target": 6000.0,
+      "max_loss": 3000.0,
+      "point_value": 100.0,
+      "round_trip_fee": 0.0,
+      "timestamps": [
+        "2025-06-02T21:51:00Z",
+        "2025-06-02T21:54:00Z",
+        "2025-06-02T21:57:00Z",
+        "2025-06-02T22:00:00Z",
+        "2025-06-02T22:03:00Z",
+        "2025-06-02T22:06:00Z"
+      ],
+      "open": [100.0, 100.0, 115.0, 115.0, 115.0, 115.0],
+      "high": [101.0, 101.0, 116.0, 116.0, 116.0, 116.0],
+      "low": [99.0, 99.0, 114.0, 114.0, 114.0, 114.0],
+      "close": [100.0, 100.0, 115.0, 115.0, 115.0, 115.0],
+      "actions": ["ENTER_LONG_1", "CLOSE", "WAIT"],
+      "expected_steps": [
+        {
+          "fill_index": 1,
+          "fill_price": 100.0,
+          "fees_paid": 0.0,
+          "equity_pnl": 0.0,
+          "mll_floor_pnl": -3000.0,
+          "reward": 0.0,
+          "outcome": null,
+          "terminated": false
+        },
+        {
+          "fill_index": 2,
+          "fill_price": 115.0,
+          "fees_paid": 0.0,
+          "equity_pnl": 1500.0,
+          "mll_floor_pnl": -3000.0,
+          "reward": 0.5,
+          "outcome": null,
+          "terminated": false
+        },
+        {
+          "fill_index": 3,
+          "fees_paid": 0.0,
+          "equity_pnl": 1500.0,
+          "mll_floor_pnl": -1500.0,
+          "mll_headroom": 3000.0,
+          "reward": 0.0,
+          "outcome": null,
+          "terminated": false
+        }
+      ]
+    },
+    {
+      "name": "episode_window_times_out_and_liquidates",
+      "profit_target": 6000.0,
+      "max_loss": 3000.0,
+      "point_value": 20.0,
+      "round_trip_fee": 3.84,
+      "timestamps": [
+        "2025-06-02T14:30:00Z",
+        "2025-06-02T14:33:00Z"
+      ],
+      "open": [100.0, 100.0],
+      "high": [101.0, 101.0],
+      "low": [99.0, 99.0],
+      "close": [100.0, 100.0],
+      "actions": ["WAIT"],
+      "expected_steps": [
+        {
+          "fill_index": 1,
+          "fees_paid": 0.0,
+          "equity_pnl": 0.0,
+          "reward": -0.002,
+          "outcome": "timeout",
+          "terminated": true
+        }
+      ]
+    }
+  ]
+}

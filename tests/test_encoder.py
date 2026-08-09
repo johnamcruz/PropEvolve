@@ -27,6 +27,7 @@ def test_encoder_delegates_to_installed_ffm_package_interface(tmp_path: Path) ->
         checkpoint=checkpoint,
         device="cpu",
         batch_series=10,
+        fast_group_attention=False,
         package_embedder=package_embedder,
     )
     windows = np.arange(2 * 5 * 4, dtype=np.float32).reshape(2, 5, 4)
@@ -53,6 +54,9 @@ def test_encoder_rejects_wrong_channel_order_or_nonfinite_data(tmp_path: Path) -
     )
     encoder = FrozenChronos2Encoder(
         checkpoint=checkpoint,
+        device="cpu",
+        batch_series=10,
+        fast_group_attention=False,
         package_embedder=lambda chunks, **kwargs: chunks,
     )
 
@@ -80,7 +84,11 @@ def test_encoder_streams_multiple_chunks_through_one_ffm_load(tmp_path: Path) ->
             yield chunk.mean(axis=(1, 2))[:, None]
 
     encoder = FrozenChronos2Encoder(
-        checkpoint=checkpoint, package_embedder=package_embedder
+        checkpoint=checkpoint,
+        device="cpu",
+        batch_series=10,
+        fast_group_attention=False,
+        package_embedder=package_embedder,
     )
     chunks = (
         np.ones((2, 5, 4), np.float32),

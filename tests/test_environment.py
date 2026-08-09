@@ -6,13 +6,23 @@ from propevolve.decision import Action
 from propevolve.environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
 
 
-class Ledger:
-    def __init__(self) -> None:
-        self.cumulative_pnl = 0.0
-
-    def close_trade(self, ticker: str, gross_pnl: float, size: int) -> float:
-        self.cumulative_pnl += gross_pnl
-        return gross_pnl
+def _spec(**overrides) -> ChallengeSpec:
+    settings = {
+        "profit_target": 6_000.0,
+        "max_loss": 3_000.0,
+        "episode_days": 1,
+        "bars_per_day": 6,
+        "max_position_size": 1,
+        "minimum_mll_headroom": 250.0,
+        "trailing_mll_lock": True,
+        "terminal_pass_reward": 250.0,
+        "terminal_blow_reward": -1_500.0,
+        "terminal_timeout_reward": -2.0,
+        "terminal_pass_speed_reward_per_day": 20.0,
+        "reward_scale": 1_000.0,
+    }
+    settings.update(overrides)
+    return ChallengeSpec(**settings)
 
 
 def _market(*, low_at_one: float = 100.5) -> MarketSeries:
@@ -31,10 +41,9 @@ def _market(*, low_at_one: float = 100.5) -> MarketSeries:
 def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
     env = HistoricalChallengeEnv(
         {"NQ": _market()},
-        ledger_factory=Ledger,
         round_trip_fees={"NQ": 0.0},
         tick_values={"NQ": 20.0},
-        spec=ChallengeSpec(profit_target=15, max_loss=3_000, episode_days=1, bars_per_day=6),
+        spec=_spec(profit_target=15),
         seed=1,
     )
     observation, info = env.reset(options={"ticker": "NQ", "start": 0})
@@ -46,16 +55,15 @@ def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
     assert info["outcome"] == "pass"
     assert info["fill_price"] == 101.0
     assert info["equity_pnl"] == 20.0
-    assert reward > 1.0
+    assert reward > 0.25
 
 
 def test_intrabar_adverse_excursion_enforces_mll_before_close_recovery() -> None:
     env = HistoricalChallengeEnv(
         {"NQ": _market(low_at_one=80.0)},
-        ledger_factory=Ledger,
         round_trip_fees={"NQ": 0.0},
         tick_values={"NQ": 20.0},
-        spec=ChallengeSpec(profit_target=6_000, max_loss=300, episode_days=1, bars_per_day=6),
+        spec=_spec(max_loss=300),
         seed=1,
     )
     env.reset(options={"ticker": "NQ", "start": 0})
@@ -72,7 +80,7 @@ def test_round_trip_fee_is_included_before_declaring_a_pass() -> None:
         {"NQ": _market()},
         tick_values={"NQ": 20.0},
         round_trip_fees={"NQ": 10.0},
-        spec=ChallengeSpec(profit_target=15, max_loss=3_000, episode_days=1, bars_per_day=6),
+        spec=_spec(profit_target=15),
         seed=1,
     )
     env.reset(options={"ticker": "NQ", "start": 0})

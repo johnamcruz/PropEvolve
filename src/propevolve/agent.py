@@ -78,35 +78,45 @@ class RecurrentC51Agent:
         self,
         observation_dim: int,
         *,
-        hidden_dim: int = 128,
-        atoms: int = 51,
-        value_min: float = -1.5,
-        value_max: float = 1.5,
-        gamma: float = 0.997,
-        learning_rate: float = 1e-4,
-        target_sync_updates: int = 250,
-        device: str = "cpu",
-        seed: int = 0,
+        hidden_dim: int,
+        atoms: int,
+        value_min: float,
+        value_max: float,
+        gamma: float,
+        learning_rate: float,
+        weight_decay: float,
+        gradient_clip: float,
+        target_sync_updates: int,
+        device: str,
+        seed: int,
     ) -> None:
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
+        if learning_rate <= 0 or weight_decay < 0 or gradient_clip <= 0:
+            raise ValueError("optimizer settings are invalid")
+        if target_sync_updates < 1:
+            raise ValueError("target_sync_updates must be positive")
         torch.manual_seed(seed)
+        self.seed = int(seed)
         self._rng = np.random.default_rng(seed)
         self.device = resolve_device(device)
         self.observation_dim = int(observation_dim)
         self.hidden_dim = int(hidden_dim)
         self.atoms = int(atoms)
         self.gamma = float(gamma)
+        self.learning_rate = float(learning_rate)
         self.value_min = float(value_min)
         self.value_max = float(value_max)
         self.target_sync_updates = int(target_sync_updates)
+        self.weight_decay = float(weight_decay)
+        self.gradient_clip = float(gradient_clip)
         self.support = torch.linspace(value_min, value_max, atoms, device=self.device)
         self.online = RecurrentC51Network(
             observation_dim, len(Action), atoms, hidden_dim
         ).to(self.device)
         self.target = copy.deepcopy(self.online).to(self.device).eval()
         self.optimizer = torch.optim.AdamW(
-            self.online.parameters(), lr=learning_rate, weight_decay=1e-5
+            self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
         self._updates = 0
 
@@ -116,7 +126,7 @@ class RecurrentC51Agent:
         *,
         hidden: torch.Tensor | None,
         valid_actions: tuple[Action, ...],
-        epsilon: float = 0.0,
+        epsilon: float,
     ) -> tuple[Action, torch.Tensor, np.ndarray]:
         if not valid_actions:
             raise ValueError("at least one action must be valid")
@@ -199,7 +209,7 @@ class RecurrentC51Agent:
         loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=10.0)
+        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=self.gradient_clip)
         self.optimizer.step()
         self._updates += 1
         if self._updates % self.target_sync_updates == 0:
@@ -245,13 +255,17 @@ class RecurrentC51Agent:
                 "value_min": self.value_min,
                 "value_max": self.value_max,
                 "gamma": self.gamma,
+                "learning_rate": self.learning_rate,
+                "weight_decay": self.weight_decay,
+                "gradient_clip": self.gradient_clip,
                 "target_sync_updates": self.target_sync_updates,
+                "seed": self.seed,
             },
         }, path)
         return path
 
     @classmethod
-    def load(cls, path: str | Path, *, device: str = "cpu") -> tuple["RecurrentC51Agent", dict]:
+    def load(cls, path: str | Path, *, device: str) -> tuple["RecurrentC51Agent", dict]:
         payload = torch.load(Path(path), map_location=device, weights_only=False)
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")

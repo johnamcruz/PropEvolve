@@ -6,11 +6,75 @@ import json
 from pathlib import Path
 
 
+REQUIRED_RECIPE_FIELDS = {
+    "cache": {
+        "context_length",
+        "stride",
+        "chunk_windows",
+        "batch_series",
+        "fast_group_attention",
+        "device",
+    },
+    "challenge": {
+        "profit_target",
+        "max_loss",
+        "episode_days",
+        "bars_per_day",
+        "max_position_size",
+        "minimum_mll_headroom",
+        "trailing_mll_lock",
+        "terminal_pass_reward",
+        "terminal_blow_reward",
+        "terminal_timeout_reward",
+        "terminal_pass_speed_reward_per_day",
+        "reward_scale",
+    },
+    "agent": {
+        "hidden_dim",
+        "atoms",
+        "value_min",
+        "value_max",
+        "gamma",
+        "learning_rate",
+        "weight_decay",
+        "gradient_clip",
+        "target_sync_updates",
+        "device",
+    },
+    "training": {
+        "episodes",
+        "validation_episodes",
+        "replay_capacity_episodes",
+        "sequence_length",
+        "warmup_episodes",
+        "updates_per_episode",
+        "batch_sequences",
+        "recurrent_horizon",
+        "epsilon_start",
+        "epsilon_end",
+        "seed",
+    },
+}
+
+
+def _require_recipe_fields(payload: dict) -> None:
+    for section, required in REQUIRED_RECIPE_FIELDS.items():
+        values = payload.get(section)
+        if not isinstance(values, dict):
+            raise ValueError(f"{section} recipe section is required")
+        missing = sorted(required - set(values))
+        if missing:
+            raise ValueError(f"{section} recipe is missing fields {missing}")
+
+
 def load_experiment_config(path: str | Path) -> dict:
     path = Path(path)
     payload = json.loads(path.read_text())
     if payload.get("schema") != "propevolve_historical_training_v1":
         raise ValueError("unsupported PropEvolve experiment schema")
+    _require_recipe_fields(payload)
+    if "timeframe_minutes" not in payload:
+        raise ValueError("timeframe_minutes recipe field is required")
     tickers = tuple(str(value) for value in payload.get("tickers", ()))
     deployment = tuple(str(value) for value in payload.get("deployment_tickers", ()))
     training_only = tuple(str(value) for value in payload.get("training_only_tickers", ()))
@@ -26,6 +90,17 @@ def load_experiment_config(path: str | Path) -> dict:
         values = payload.get(field) or {}
         if set(values) != set(tickers) or any(float(value) <= 0 for value in values.values()):
             raise ValueError(f"{field} must positively cover the exact ticker population")
+    challenge = payload["challenge"]
+    if challenge["max_position_size"] != 1:
+        raise ValueError("the initial PropEvolve recipe supports one contract")
+    if not isinstance(challenge["trailing_mll_lock"], bool):
+        raise ValueError("challenge trailing_mll_lock must be boolean")
+    agent = payload["agent"]
+    if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
+        raise ValueError("agent device must be auto, cuda, mps, or cpu")
+    training = payload["training"]
+    if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
+        raise ValueError("training epsilon schedule is invalid")
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),

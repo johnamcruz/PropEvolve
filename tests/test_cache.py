@@ -39,6 +39,7 @@ def test_cache_uses_only_windows_ending_at_each_decision_timestamp(tmp_path: Pat
         context_length=3,
         stride=1,
         chunk_windows=2,
+        timeframe_minutes=3,
         research_end_exclusive="2026-01-01",
     )
     cache = EmbeddingCache.load(path)

@@ -44,7 +44,7 @@ class BalancedSequenceReplay:
         capacity_episodes: int,
         sequence_length: int,
         *,
-        seed: int = 0,
+        seed: int,
     ) -> None:
         if capacity_episodes < 1 or sequence_length < 1:
             raise ValueError("replay capacity and sequence length must be positive")
@@ -87,4 +87,3 @@ class BalancedSequenceReplay:
             start = self._random.randint(0, last_start)
             sequences.append(episode.transitions[start:start + self.sequence_length])
         return tuple(sequences)
-

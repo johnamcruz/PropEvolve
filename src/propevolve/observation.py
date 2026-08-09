@@ -16,12 +16,13 @@ class AccountState:
     peak_equity_pnl: float = 0.0
     position_side: PositionSide = PositionSide.FLAT
     position_size: int = 0
-    max_position_size: int = 2
+    max_position_size: int = 1
     unrealized_pnl: float = 0.0
     session_remaining: float = 1.0
     challenge_remaining: float = 1.0
     point_value: float = 0.0
     round_trip_fee: float = 0.0
+    mll_headroom: float | None = None
 
 
 class ObservationAssembler:
@@ -33,8 +34,8 @@ class ObservationAssembler:
         self,
         embedding_dim: int,
         *,
-        max_loss: float = 3_000.0,
-        profit_target: float = 6_000.0,
+        max_loss: float,
+        profit_target: float,
     ) -> None:
         if embedding_dim < 1 or max_loss <= 0 or profit_target <= 0:
             raise ValueError("observation dimensions and economics must be positive")
@@ -59,7 +60,11 @@ class ObservationAssembler:
                 account.realized_pnl / self.profit_target,
                 account.equity_pnl / self.profit_target,
                 account.peak_equity_pnl / self.profit_target,
-                (account.equity_pnl + self.max_loss) / self.max_loss,
+                (
+                    account.mll_headroom
+                    if account.mll_headroom is not None
+                    else account.equity_pnl + self.max_loss
+                ) / self.max_loss,
                 (account.peak_equity_pnl - account.equity_pnl) / self.max_loss,
                 float(account.position_side),
                 account.position_size / maximum_size,

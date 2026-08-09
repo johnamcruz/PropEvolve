@@ -11,13 +11,31 @@ from propevolve.decision import Action
 from propevolve.replay import Transition
 
 
+def _agent(observation_dim: int, **overrides) -> RecurrentC51Agent:
+    settings = {
+        "hidden_dim": 8,
+        "atoms": 11,
+        "value_min": -3.0,
+        "value_max": 3.0,
+        "gamma": 0.997,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-5,
+        "gradient_clip": 10.0,
+        "target_sync_updates": 250,
+        "device": "cpu",
+        "seed": 0,
+    }
+    settings.update(overrides)
+    return RecurrentC51Agent(observation_dim, **settings)
+
+
 def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
-    network = RecurrentC51Network(observation_dim=12, action_count=9, atoms=21, hidden_dim=16)
+    network = RecurrentC51Network(observation_dim=12, action_count=5, atoms=21, hidden_dim=16)
     logits, hidden = network(torch.zeros(3, 5, 12))
 
-    assert logits.shape == (3, 5, 9, 21)
+    assert logits.shape == (3, 5, 5, 21)
     assert hidden.shape == (1, 3, 16)
-    torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 9))
+    torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 5))
 
 
 def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
@@ -33,12 +51,12 @@ def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
 
 
 def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
-    agent = RecurrentC51Agent(observation_dim=4, hidden_dim=8, atoms=11, seed=3)
+    agent = _agent(4, seed=3)
     with torch.no_grad():
         for parameter in agent.online.parameters():
             parameter.zero_()
-        # Give ENTER_LONG_2 the largest unmasked value; it must still lose to WAIT.
-        agent.online.output.bias.view(len(Action), agent.atoms)[Action.ENTER_LONG_2, -1] = 100
+        # Give ENTER_LONG_1 the largest unmasked value; it must still lose to WAIT.
+        agent.online.output.bias.view(len(Action), agent.atoms)[Action.ENTER_LONG_1, -1] = 100
 
     selected, _, _ = agent.select_action(
         np.zeros(4, np.float32),
@@ -51,7 +69,7 @@ def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
 
 
 def test_agent_scores_long_and_short_hypotheses_in_the_same_decision() -> None:
-    agent = RecurrentC51Agent(observation_dim=4, hidden_dim=8, atoms=11, seed=13)
+    agent = _agent(4, seed=13)
     with torch.no_grad():
         for parameter in agent.online.parameters():
             parameter.zero_()
@@ -76,7 +94,7 @@ def test_agent_scores_long_and_short_hypotheses_in_the_same_decision() -> None:
 
 
 def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> None:
-    agent = RecurrentC51Agent(observation_dim=2, hidden_dim=8, atoms=11, seed=5)
+    agent = _agent(2, seed=5)
     sequence = tuple(
         Transition(
             observation=np.array([i, 0], np.float32),
@@ -105,8 +123,8 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
 def test_mps_training_update_action_selection_and_checkpoint_resume(
     tmp_path: Path,
 ) -> None:
-    agent = RecurrentC51Agent(
-        observation_dim=8,
+    agent = _agent(
+        8,
         hidden_dim=16,
         atoms=21,
         device="mps",
@@ -131,6 +149,7 @@ def test_mps_training_update_action_selection_and_checkpoint_resume(
         np.zeros(8, np.float32),
         hidden=None,
         valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        epsilon=0.0,
     )
     checkpoint = agent.save(tmp_path / "agent.pt", manifest={"device": "mps"})
     restored, manifest = RecurrentC51Agent.load(checkpoint, device="mps")

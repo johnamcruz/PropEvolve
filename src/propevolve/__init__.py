@@ -11,6 +11,7 @@ from .evolution import (
     RevisionPolicy,
 )
 from .observation import AccountState, ObservationAssembler
+from .environment import PropChallengeAccount
 
 __all__ = [
     "AccountState",
@@ -24,5 +25,6 @@ __all__ = [
     "Niche",
     "ObservationAssembler",
     "PositionSide",
+    "PropChallengeAccount",
     "RevisionPolicy",
 ]

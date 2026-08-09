@@ -19,14 +19,21 @@
     "max_loss": 3000.0,
     "episode_days": 30,
     "bars_per_day": 480,
-    "max_position_size": 2
+    "max_position_size": 1,
+    "minimum_mll_headroom": 250.0,
+    "trailing_mll_lock": true,
+    "terminal_pass_reward": 250.0,
+    "terminal_blow_reward": -1500.0,
+    "terminal_timeout_reward": -2.0,
+    "terminal_pass_speed_reward_per_day": 20.0,
+    "reward_scale": 1000.0
   },
   "point_values": {
     "NQ": 20.0, "ES": 50.0, "GC": 100.0, "RTY": 50.0, "YM": 5.0,
     "CL": 1000.0, "SI": 5000.0, "ZB": 1000.0, "ZN": 1000.0
   },
   "round_trip_fees": {
-    "NQ": 3.78, "ES": 3.78, "GC": 4.32, "RTY": 3.78, "YM": 3.78,
+    "NQ": 3.84, "ES": 3.84, "GC": 4.30, "RTY": 3.84, "YM": 3.84,
     "CL": 4.02, "SI": 4.32, "ZB": 2.76, "ZN": 2.58
   },
   "temporal": {
@@ -39,8 +46,13 @@
   "agent": {
     "hidden_dim": 128,
     "atoms": 51,
+    "value_min": -3.0,
+    "value_max": 3.0,
     "gamma": 0.997,
     "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
+    "gradient_clip": 10.0,
+    "target_sync_updates": 250,
     "device": "mps"
   },
   "training": {
@@ -52,6 +64,8 @@
     "updates_per_episode": 8,
     "batch_sequences": 16,
     "recurrent_horizon": 64,
+    "epsilon_start": 0.25,
+    "epsilon_end": 0.02,
     "seed": 314159
   },
   "evolution": {
@@ -60,15 +74,22 @@
     "allowed_revision_paths": [
       "agent.hidden_dim",
       "agent.atoms",
+      "agent.value_min",
+      "agent.value_max",
       "agent.gamma",
       "agent.learning_rate",
+      "agent.weight_decay",
+      "agent.gradient_clip",
+      "agent.target_sync_updates",
       "training.episodes",
       "training.replay_capacity_episodes",
       "training.sequence_length",
       "training.warmup_episodes",
       "training.updates_per_episode",
       "training.batch_sequences",
-      "training.recurrent_horizon"
+      "training.recurrent_horizon",
+      "training.epsilon_start",
+      "training.epsilon_end"
     ],
     "frozen_paths": [
       "assets",

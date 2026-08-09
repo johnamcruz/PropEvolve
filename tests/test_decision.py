@@ -21,6 +21,7 @@ def test_observation_is_frozen_embedding_plus_normalized_account_state() -> None
         challenge_remaining=0.50,
         point_value=20.0,
         round_trip_fee=3.78,
+        mll_headroom=4_200,
     )
 
     value = assembler.assemble(np.array([1, 2, 3, 4], np.float32), account)
@@ -36,22 +37,24 @@ def test_observation_is_frozen_embedding_plus_normalized_account_state() -> None
 
 
 def test_observation_rejects_nonfinite_embeddings() -> None:
-    assembler = ObservationAssembler(embedding_dim=2)
+    assembler = ObservationAssembler(
+        embedding_dim=2, max_loss=3_000, profit_target=6_000
+    )
     account = AccountState()
     with pytest.raises(ValueError, match="finite"):
         assembler.assemble(np.array([1.0, np.nan], np.float32), account)
 
 
 def test_risk_mask_exposes_only_state_valid_actions() -> None:
-    masker = ActionMasker(max_position_size=3, minimum_mll_headroom=250)
+    masker = ActionMasker(
+        max_position_size=1, max_loss=3_000, minimum_mll_headroom=250
+    )
 
     flat = AccountState(equity_pnl=0, position_side=PositionSide.FLAT)
     assert masker.valid_actions(flat) == (
         Action.WAIT,
         Action.ENTER_LONG_1,
-        Action.ENTER_LONG_2,
         Action.ENTER_SHORT_1,
-        Action.ENTER_SHORT_2,
     )
 
     long = AccountState(
@@ -60,4 +63,4 @@ def test_risk_mask_exposes_only_state_valid_actions() -> None:
         position_size=2,
         max_position_size=3,
     )
-    assert masker.valid_actions(long) == (Action.HOLD, Action.REDUCE_1, Action.CLOSE)
+    assert masker.valid_actions(long) == (Action.HOLD, Action.CLOSE)

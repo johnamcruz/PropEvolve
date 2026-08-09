@@ -17,6 +17,9 @@ One 30-day Monte Carlo episode represents one prop challenge attempt:
 - goal: maximize pass probability without blowing the account;
 - execution: decisions observed at a completed bar are filled at the next bar
   open, with intrabar MLL enforcement and round-trip costs.
+- risk accounting: the MLL floor trails realized balance only at the 5:00 p.m.
+  Central session boundary and locks permanently at starting balance once the
+  account reaches the passmark.
 
 The same normalized state works whether the account is expressed as `$0 →
 $6k` with a `-$3k` floor or as a `$3k` cushion targeting `$9k` with a `$0`
@@ -54,17 +57,24 @@ causal 3-minute OHLCV windows
 
 The policy uses one state-dependent discrete action set:
 
-- flat: wait or enter long/short at an allowed size;
-- positioned: hold, add, reduce, or close;
+- flat: wait or enter one contract long/short;
+- positioned: hold or close the one-contract position;
 - unsafe or nonsensical actions are masked outside the model.
 
 FFM supplies shared market-state and expansion-opportunity context; it is not
 required to classify direction. At every flat-state decision, the recurrent
-C51 policy scores the complete return distribution for both Long sizes and
-both Short sizes in the same causal forward pass, alongside Wait. These are
+C51 policy scores the complete return distribution for Long and Short in the
+same causal forward pass, alongside Wait. These are
 independent action-value hypotheses learned from one shared recurrent state,
 so the stronger risk-adjusted side can win while the external prop-risk mask
 remains authoritative.
+
+The first version deliberately excludes pyramiding, add/reduce actions,
+conviction sizing, inherited signal gates, and PPO-specific behavior. The
+algorithm-independent challenge contract retains cumulative balance, next-open
+fills, fees, intrabar blow precedence, EOD trailing MLL, passmark locking,
+pass/blow/timeout priority, and faster-pass reward. Terminal reward ratios are
+preserved under a constant scale suitable for distributional value learning.
 
 The first matched baseline uses only frozen FFM embeddings as market context.
 If that baseline cannot learn reliable entry timing, a later declared ablation
@@ -78,6 +88,12 @@ Metal (`mps`), then CPU. Replay storage and environment simulation remain on
 CPU; batched network updates, recurrent inference, target-network updates, and
 checkpoint resume are MPS-compatible. An explicitly requested unavailable
 accelerator fails immediately; only `auto` may fall back to the next device.
+
+The experiment JSON is the complete serialized recipe. Cache dimensions,
+challenge economics, risk and reward behavior, action size, C51 support,
+optimizer, target synchronization, replay, exploration, temporal splits, and
+device must all be declared there. The loader fails closed when a required
+field is absent; Python constructors do not silently supply training defaults.
 
 ## Market population
 
@@ -259,6 +275,8 @@ pytest
 Tests cover asset identity and symbolic linking, causal cache timing, physical
 sealed-row censoring, temporal-role boundaries, frozen FFM
 delegation, observation normalization, action masking, challenge economics,
+golden-trajectory parity for fills, fees, MLL behavior, pass/blow/timeout, and
+episode termination,
 balanced replay, shadow-memory authentication, configuration, orchestration,
 the recurrent distributional agent, immutable model lineage, evaluator
 cascades, diverse candidate selection, reasoning-packet authentication, and
