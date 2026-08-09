@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class TrainingResult:
     episodes: int
+    environment_steps: int
     passes: int
     blows: int
     timeouts: int
@@ -118,6 +119,9 @@ class HistoricalCandidateRunner:
             agent,
             train_environment,
             episodes=int(training_config["episodes"]),
+            minimum_environment_steps=int(
+                training_config["minimum_environment_steps"]
+            ),
             replay=replay,
             warmup_episodes=int(training_config["warmup_episodes"]),
             updates_per_episode=int(training_config["updates_per_episode"]),
@@ -176,6 +180,7 @@ class HistoricalCandidateRunner:
                 "pass_rate": training.passes / training.episodes,
                 "blow_rate": training.blows / training.episodes,
                 "mean_reward": training.mean_reward,
+                "environment_steps": float(training.environment_steps),
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
@@ -189,6 +194,7 @@ class HistoricalCandidateRunner:
                 "blow_rate": blow_rate,
                 "pass_minus_blow": pass_rate - blow_rate,
                 "mean_reward": validation.mean_reward,
+                "environment_steps": float(validation.environment_steps),
             }
 
         cascade = EvaluatorCascade(
@@ -271,6 +277,7 @@ def train_agent(
     environment: HistoricalChallengeEnv,
     *,
     episodes: int,
+    minimum_environment_steps: int,
     replay: BalancedSequenceReplay,
     warmup_episodes: int,
     updates_per_episode: int,
@@ -281,8 +288,8 @@ def train_agent(
     episode_tickers: tuple[str, ...] | None,
     ticker_seed: int,
 ) -> TrainingResult:
-    if episodes < 1:
-        raise ValueError("episodes must be positive")
+    if episodes < 1 or minimum_environment_steps < 1:
+        raise ValueError("episode ceiling and minimum environment steps must be positive")
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -290,6 +297,8 @@ def train_agent(
     )
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards, losses = [], []
+    environment_steps = 0
+    completed_episodes = 0
     for episode_index in range(episodes):
         if ticker_schedule is None:
             observation, reset_info = environment.reset()
@@ -301,9 +310,11 @@ def train_agent(
         hidden = None
         transitions = []
         total_reward = 0.0
-        epsilon = epsilon_start + (epsilon_end - epsilon_start) * (
-            episode_index / max(1, episodes - 1)
-        )
+        # Decay exploration against actual market interaction, not the
+        # emergency episode ceiling. Early pass/blow episodes vary greatly in
+        # length, so episode-index decay would not represent equal experience.
+        step_progress = min(1.0, environment_steps / minimum_environment_steps)
+        epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
         terminal_info = reset_info
         step_index = 0
         while True:
@@ -330,11 +341,13 @@ def train_agent(
             observation, valid = next_observation, next_valid
             terminal_info = info
             step_index += 1
+            environment_steps += 1
             if terminated:
                 break
         outcome = str(terminal_info["outcome"])
         outcomes[outcome] += 1
         rewards.append(total_reward)
+        completed_episodes += 1
         if len(transitions) >= replay.sequence_length:
             replay.add(Episode(
                 episode_id=f"historical-{episode_index}-{time.time_ns()}",
@@ -349,11 +362,22 @@ def train_agent(
                 losses.append(agent.train_batch(replay.sample(batch_sequences)))
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "
-            f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)}",
+            f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)} "
+            f"trades={int(terminal_info.get('trade_count', 0))} "
+            f"WR={float(terminal_info.get('win_rate', 0.0)):.1%} "
+            f"winR={float(terminal_info.get('avg_win_r', 0.0)):+.3f}R "
+            f"steps={environment_steps:,}/{minimum_environment_steps:,}",
             flush=True,
         )
+        if environment_steps >= minimum_environment_steps:
+            break
+    if environment_steps < minimum_environment_steps:
+        raise RuntimeError(
+            "episode safety ceiling reached before the minimum environment-step budget"
+        )
     return TrainingResult(
-        episodes=episodes,
+        episodes=completed_episodes,
+        environment_steps=environment_steps,
         passes=outcomes["pass"],
         blows=outcomes["blow"],
         timeouts=outcomes["timeout"],
@@ -390,6 +414,7 @@ def evaluate_agent(
 ) -> TrainingResult:
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []
+    environment_steps = 0
     for _ in range(episodes):
         observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
@@ -406,12 +431,14 @@ def evaluate_agent(
             valid = tuple(info["valid_actions"])
             total += reward
             step_index += 1
+            environment_steps += 1
             if terminated:
                 break
         outcomes[str(info["outcome"])] += 1
         rewards.append(total)
     return TrainingResult(
         episodes=episodes,
+        environment_steps=environment_steps,
         passes=outcomes["pass"],
         blows=outcomes["blow"],
         timeouts=outcomes["timeout"],

@@ -12,6 +12,7 @@ from propevolve.environment import (
     HistoricalChallengeEnv,
     MarketSeries,
     PropChallengeAccount,
+    _cme_session_keys,
 )
 
 
@@ -65,6 +66,7 @@ def test_golden_execution_trajectory(trajectory: dict) -> None:
         close=np.asarray(trajectory["close"], dtype=np.float32),
         embeddings=np.zeros((length, 2), dtype=np.float32),
     )
+    episode_days = len(np.unique(_cme_session_keys(market.timestamps)))
     env = HistoricalChallengeEnv(
         {"NQ": market},
         tick_values={"NQ": trajectory["point_value"]},
@@ -72,7 +74,7 @@ def test_golden_execution_trajectory(trajectory: dict) -> None:
         spec=ChallengeSpec(
             profit_target=trajectory["profit_target"],
             max_loss=trajectory["max_loss"],
-            episode_days=1,
+            episode_days=episode_days,
             bars_per_day=length - 1,
             max_position_size=1,
             minimum_mll_headroom=0.0,

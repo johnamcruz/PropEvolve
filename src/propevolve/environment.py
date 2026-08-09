@@ -214,22 +214,39 @@ class HistoricalChallengeEnv:
         self._peak_equity = 0.0
         self._terminated = True
         self._primary_side = "flat"
+        self._closed_trade_pnls: list[float] = []
+        self._trading_days_elapsed = 0
 
     def reset(self, *, options: dict | None = None) -> tuple[np.ndarray, dict]:
         options = options or {}
         ticker = str(options.get("ticker") or self._rng.choice(tuple(self.markets)))
         market = self.markets[ticker]
-        maximum_start = len(market.close) - 2
-        desired = min(self.spec.episode_bars, len(market.close) - 1)
-        maximum_start = len(market.close) - desired - 1
+        session_keys = self._session_keys[ticker]
+        unique_sessions = np.unique(session_keys)
+        if len(unique_sessions) < self.spec.episode_days:
+            raise ValueError(
+                f"market {ticker} cannot fit {self.spec.episode_days} trading days"
+            )
+        last_start_session = unique_sessions[-self.spec.episode_days]
+        maximum_start = min(
+            len(market.close) - 2,
+            int(np.searchsorted(session_keys, last_start_session, side="right") - 1),
+        )
         start = int(options.get("start", self._rng.integers(0, max(1, maximum_start + 1))))
         if start < 0 or start > maximum_start:
             raise ValueError("episode start cannot fit the challenge window")
+        start_session_index = int(np.searchsorted(unique_sessions, session_keys[start]))
+        final_session = unique_sessions[
+            start_session_index + self.spec.episode_days - 1
+        ]
+        end = int(np.searchsorted(session_keys, final_session, side="right") - 1)
+        if end <= start:
+            raise ValueError("episode start does not leave a causal decision step")
         self._market = market
         self._ticker = ticker
         self._index = start
         self._start = start
-        self._end = start + desired
+        self._end = end
         self._account = PropChallengeAccount(
             max_loss=self.spec.max_loss,
             profit_target=self.spec.profit_target,
@@ -239,6 +256,8 @@ class HistoricalChallengeEnv:
         self._peak_equity = 0.0
         self._terminated = False
         self._primary_side = "flat"
+        self._closed_trade_pnls = []
+        self._trading_days_elapsed = 1
         return self._observation(), {
             "ticker": ticker,
             "start": start,
@@ -265,6 +284,7 @@ class HistoricalChallengeEnv:
         }
         if self._session_keys[self._ticker][next_index] != self._session_keys[self._ticker][self._index]:
             self._account.close_session()
+            self._trading_days_elapsed += 1
             info["session_boundary"] = True
         self._apply_action(action, fill, info)
 
@@ -289,6 +309,8 @@ class HistoricalChallengeEnv:
         self._peak_equity = max(self._peak_equity, equity)
         reward = (equity - previous_equity) / self.spec.max_loss
         if outcome == "pass":
+            # Match the proven environment's continuous faster-pass shaping;
+            # session keys govern the hard 30-day termination contract.
             elapsed_days = (self._index - self._start) / self.spec.bars_per_day
             days_saved = max(0.0, self.spec.episode_days - elapsed_days)
             reward += (
@@ -310,7 +332,9 @@ class HistoricalChallengeEnv:
             "mll_headroom": self._account.mll_headroom(equity),
             "passmark_locked": self._account.passmark_locked,
             "timestamp": str(self._market.timestamps[self._index]),
+            "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
+            **self._trade_statistics(),
         })
         return self._observation(), float(reward), self._terminated, False, info
 
@@ -343,11 +367,28 @@ class HistoricalChallengeEnv:
         points = (price - self._position.average_entry) * int(self._position.side)
         gross = points * self.tick_values[self._ticker] * size
         fee = self.round_trip_fees[self._ticker] * size
-        self._account.realize(gross - fee)
+        net_pnl = gross - fee
+        closes_trade = size == self._position.size
+        self._account.realize(net_pnl)
         self._position.size -= size
         if self._position.size == 0:
             self._position = None
+        if closes_trade:
+            self._closed_trade_pnls.append(float(net_pnl))
         return fee
+
+    def _trade_statistics(self) -> dict[str, float | int]:
+        trades = len(self._closed_trade_pnls)
+        winners = [value for value in self._closed_trade_pnls if value > 0.0]
+        return {
+            "trade_count": trades,
+            "win_count": len(winners),
+            "win_rate": len(winners) / trades if trades else 0.0,
+            # One account-R is the challenge's complete maximum-loss allowance.
+            "avg_win_r": (
+                float(np.mean(winners)) / self.spec.max_loss if winners else 0.0
+            ),
+        }
 
     def _liquidate(self, price: float, info: dict) -> None:
         if self._position is not None:
@@ -382,7 +423,9 @@ class HistoricalChallengeEnv:
         side = PositionSide.FLAT if self._position is None else self._position.side
         size = 0 if self._position is None else self._position.size
         elapsed = self._index - self._start
-        bars_left = max(0, self._end - self._index)
+        days_left = max(
+            0, self.spec.episode_days - self._trading_days_elapsed + 1
+        )
         return AccountState(
             realized_pnl=realized,
             equity_pnl=equity,
@@ -393,7 +436,7 @@ class HistoricalChallengeEnv:
             unrealized_pnl=equity - realized,
             session_remaining=(self.spec.bars_per_day - (elapsed % self.spec.bars_per_day))
             / self.spec.bars_per_day,
-            challenge_remaining=bars_left / max(1, self.spec.episode_bars),
+            challenge_remaining=days_left / max(1, self.spec.episode_days),
             point_value=self.tick_values[self._ticker],
             round_trip_fee=self.round_trip_fees.get(self._ticker, 0.0),
             mll_headroom=(

@@ -256,7 +256,8 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "device": "cpu",
         },
         "training": {
-            "episodes": 1,
+            "episodes": 2,
+            "minimum_environment_steps": 2,
             "validation_episodes": 1,
             "replay_capacity_episodes": 2,
             "sequence_length": 1,
@@ -296,6 +297,7 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
         agent,
         Environment(),
         episodes=2,
+        minimum_environment_steps=8,
         replay=replay,
         warmup_episodes=1,
         updates_per_episode=1,
@@ -308,6 +310,7 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     )
 
     assert result.passes == 2
+    assert result.environment_steps == 8
     assert result.blows == result.timeouts == 0
     assert len(replay) == 2
     assert agent.updates == 2
@@ -331,6 +334,7 @@ def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
         agent,
         environment,
         episodes=18,
+        minimum_environment_steps=72,
         replay=replay,
         warmup_episodes=1,
         updates_per_episode=1,

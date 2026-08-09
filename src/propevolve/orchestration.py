@@ -60,6 +60,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _config_value(config: Mapping, path: str) -> object:
+    value: object = config
+    for part in path.split("."):
+        if not isinstance(value, Mapping) or part not in value:
+            raise ValueError(f"frozen recipe path does not exist: {path}")
+        value = value[part]
+    return value
+
+
 def _public_config(config: Mapping) -> dict:
     return {
         key: value
@@ -238,7 +247,8 @@ class _ArchiveReasoningAdapter:
                     **request.receipt.outputs,
                     "reasoning_packet": {
                         "path": str(packet.path),
-                        "sha256": packet.packet_sha256,
+                        "identity_sha256": packet.packet_sha256,
+                        "file_sha256": _sha256(packet.path),
                         "elite_candidate_ids": elites,
                     },
                 },
@@ -273,12 +283,24 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "economic boundary, then $ml-design-experiment to propose one smallest "
         "causal revision and $ml-train-select-model to check training validity. "
         "Read the authenticated PropEvolve reasoning packet at "
-        f"{packet.get('path')} with SHA-256 {packet.get('sha256')}. The packet "
+        f"{packet.get('path')}. Its serialized file SHA-256 is "
+        f"{packet.get('file_sha256')}; its embedded content identity is "
+        f"{packet.get('identity_sha256')}. These authenticate different "
+        "representations and must not be compared to each other. The packet "
         "contains the current parent, diverse metric elites, prior evaluation "
-        "evidence, failure taxonomy, and frozen contract. The authenticated "
+        "evidence, failure taxonomy, and materialized candidate contract. Its "
+        "frozen_contract_sha256 covers concrete checkpoint, cache, split, cost, "
+        "and market identities. The stage frozen_recipe_sha256 separately covers "
+        "the immutable JSON recipe fields; these hashes are also not expected to "
+        "be equal. Verify each hash only against the representation it names. "
+        "The authenticated "
         "experiment ledger supplied with this request contains every completed "
         "attempt in the current campaign, including its effective revision, "
         "training and selection metrics, artifact identities, and parent lineage. "
+        "Propose only a novel recipe not already present in that ledger. If no "
+        "scientifically defensible allowlisted revision remains, fail closed with "
+        "a genuine exhausted-hypothesis blocker instead of repeating a recipe or "
+        "performing an arbitrary numerical permutation. "
         "If optional surrogate advice is present, treat it only as uncertainty-aware "
         "diagnostics and proposals; reasoning remains responsible for accepting, "
         "refining, or rejecting it. Return REVISE with one complete "
@@ -325,11 +347,11 @@ def _plan(config: Mapping) -> TrainingPlan:
             config={
                 "schema": "propevolve_evolution_stage_v1",
                 "selection_requirements": list(campaign["selection_requirements"]),
-                "frozen_contract_sha256": hashlib.sha256(
+                "frozen_recipe_sha256": hashlib.sha256(
                     json.dumps(
                         {
-                            key: config[key]
-                            for key in config["evolution"]["frozen_paths"]
+                            path: _config_value(config, path)
+                            for path in config["evolution"]["frozen_paths"]
                         },
                         sort_keys=True,
                         separators=(",", ":"),

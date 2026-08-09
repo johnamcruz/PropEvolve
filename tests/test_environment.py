@@ -55,6 +55,9 @@ def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
     assert info["outcome"] == "pass"
     assert info["fill_price"] == 101.0
     assert info["equity_pnl"] == 20.0
+    assert info["trade_count"] == 1
+    assert info["win_rate"] == 1.0
+    assert info["avg_win_r"] == 20.0 / 3_000.0
     assert reward > 0.25
 
 
@@ -89,3 +92,42 @@ def test_round_trip_fee_is_included_before_declaring_a_pass() -> None:
 
     assert not terminated
     assert info["equity_pnl"] == 10.0
+
+
+def test_timeout_occurs_after_exact_cme_trading_session_count() -> None:
+    timestamps = np.asarray(
+        [
+            "2024-01-02T23:00", "2024-01-03T12:00",
+            "2024-01-03T23:00", "2024-01-04T12:00",
+            "2024-01-04T23:00", "2024-01-05T12:00",
+        ],
+        dtype="datetime64[m]",
+    )
+    prices = np.full(len(timestamps), 100.0, dtype=np.float32)
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=prices,
+        high=prices,
+        low=prices,
+        close=prices,
+        embeddings=np.zeros((len(timestamps), 2), dtype=np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        # Deliberately wrong bar estimate: episode duration must be based on
+        # exchange sessions rather than episode_days * bars_per_day.
+        spec=_spec(episode_days=2, bars_per_day=99),
+        seed=1,
+    )
+    _, reset_info = env.reset(options={"ticker": "NQ", "start": 0})
+
+    assert reset_info["end"] == 3
+    for expected_terminated in (False, False, True):
+        _, _, terminated, _, info = env.step(Action.WAIT)
+        assert terminated is expected_terminated
+
+    assert info["outcome"] == "timeout"
+    assert info["trading_days_elapsed"] == 2

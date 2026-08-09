@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -60,8 +61,14 @@ class ImproveHiddenDimension:
         self.packet_paths: list[Path] = []
 
     def revise(self, request):
-        packet = Path(request.receipt.outputs["reasoning_packet"]["path"])
+        reference = request.receipt.outputs["reasoning_packet"]
+        packet = Path(reference["path"])
         assert packet.is_file()
+        payload = json.loads(packet.read_text())
+        assert reference["identity_sha256"] == payload["packet_sha256"]
+        assert reference["file_sha256"] == hashlib.sha256(packet.read_bytes()).hexdigest()
+        assert "frozen_recipe_sha256" in request.stage.config
+        assert "frozen_contract_sha256" not in request.stage.config
         self.packet_paths.append(packet)
         return ReasoningOutcome(
             Decision.REVISE,

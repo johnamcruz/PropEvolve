@@ -58,12 +58,13 @@
     "device": "mps"
   },
   "training": {
-    "episodes": 50,
+    "episodes": 10000,
+    "minimum_environment_steps": 5000000,
     "validation_episodes": 25,
     "replay_capacity_episodes": 500,
     "sequence_length": 32,
     "warmup_episodes": 8,
-    "updates_per_episode": 8,
+    "updates_per_episode": 32,
     "batch_sequences": 16,
     "recurrent_horizon": 64,
     "epsilon_start": 0.25,
@@ -104,12 +105,13 @@
       "challenge",
       "point_values",
       "round_trip_fees",
-      "temporal"
+      "temporal",
+      "training.minimum_environment_steps"
     ]
   },
   "campaign": {
     "state_root": "runs/historical_mask_v1/ml-loop-state",
-    "max_revisions_per_stage": 6,
+    "max_revisions_per_stage": 24,
     "reasoning": {
       "provider": "codex",
       "model": "gpt-5.6-sol",

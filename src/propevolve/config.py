@@ -45,6 +45,7 @@ REQUIRED_RECIPE_FIELDS = {
     },
     "training": {
         "episodes",
+        "minimum_environment_steps",
         "validation_episodes",
         "replay_capacity_episodes",
         "sequence_length",
@@ -148,8 +149,8 @@ def load_experiment_config(path: str | Path) -> dict:
     max_revisions = campaign.get("max_revisions_per_stage")
     if isinstance(max_revisions, bool) or not isinstance(max_revisions, int):
         raise ValueError("campaign max revisions must be an integer")
-    if max_revisions < 1:
-        raise ValueError("campaign max revisions must be positive")
+    if max_revisions < 0:
+        raise ValueError("campaign max revisions must be nonnegative")
     reasoning = campaign.get("reasoning") or {}
     if reasoning.get("provider") not in {"codex", "manual"}:
         raise ValueError("campaign reasoning provider must be codex or manual")
