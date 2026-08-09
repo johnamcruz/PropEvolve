@@ -15,7 +15,7 @@ import numpy as np
 from .assets import AssetContract
 from .cache import load_market_series
 from .decision import Action
-from .environment import HistoricalChallengeEnv, MarketSeries
+from .environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
