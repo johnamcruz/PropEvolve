@@ -14,12 +14,22 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     assert config["challenge"]["per_trade_risk_dollars"] == 200.0
     assert config["challenge"]["ratchet_activation_r"] == 2.0
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
-    assert "challenge" in config["evolution"]["frozen_paths"]
+    assert "challenge.profit_target" in config["evolution"]["frozen_paths"]
+    assert "challenge.per_trade_risk_dollars" not in config["evolution"]["frozen_paths"]
+    assert config["evolution"]["revision_bounds"] == {
+        "challenge.per_trade_risk_dollars": {"minimum": 100.0, "maximum": 300.0},
+        "challenge.ratchet_activation_r": {"minimum": 1.5, "maximum": 3.0},
+        "challenge.ratchet_giveback_r": {"minimum": 0.25, "maximum": 1.0},
+    }
     assert config["training"]["minimum_environment_steps"] == 5_000_000
     assert config["training"]["validation_episodes"] == 200
     assert config["campaign"]["selection_requirements"] == [
         {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
         {"metric": "selection.blow_rate", "operator": "==", "value": 0.0},
+    ]
+    assert config["campaign"]["diagnostic_targets"] == [
+        {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+        {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0},
     ]
 
 

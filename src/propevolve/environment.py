@@ -489,6 +489,7 @@ class HistoricalChallengeEnv:
     def _trade_statistics(self) -> dict[str, float | int]:
         trades = len(self._closed_trade_pnls)
         winners = [value for value in self._closed_trade_pnls if value > 0.0]
+        risk_denominator = self.spec.per_trade_risk_dollars or self.spec.max_loss
         return {
             "trade_count": trades,
             "win_count": len(winners),
@@ -497,9 +498,10 @@ class HistoricalChallengeEnv:
             # challenge-level denominator used by their historical receipts.
             "avg_win_r": (
                 float(np.mean(winners))
-                / (self.spec.per_trade_risk_dollars or self.spec.max_loss)
+                / risk_denominator
                 if winners else 0.0
             ),
+            "winning_r_sum": float(np.sum(winners)) / risk_denominator,
         }
 
     def _liquidate(self, price: float, info: dict) -> None:

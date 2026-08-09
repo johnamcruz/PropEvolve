@@ -35,8 +35,36 @@ class TrainingResult:
     passes: int
     blows: int
     timeouts: int
+    trade_count: int
+    win_count: int
+    winning_r_sum: float
+    worst_pnl: float
+    mean_terminal_pnl: float
     mean_reward: float
     mean_loss: float
+
+    @property
+    def trade_win_rate(self) -> float:
+        return self.win_count / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def average_win_r(self) -> float:
+        return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+
+def prop_safety_objective(
+    result: TrainingResult,
+    *,
+    max_loss: float,
+    profit_target: float,
+) -> float:
+    """Rank zero-blow candidates by pass rate, then cushion and progress."""
+    if result.blows:
+        overage = max(0.0, -result.worst_pnl - max_loss) / max_loss
+        return -1.0 - result.blows / result.episodes - overage
+    margin = max(0.0, min(1.0, (max_loss + result.worst_pnl) / max_loss))
+    progress = max(0.0, result.mean_terminal_pnl / profit_target)
+    return result.passes / result.episodes + 0.05 * margin + 0.02 * progress
 
 
 class HistoricalCandidateRunner:
@@ -181,6 +209,15 @@ class HistoricalCandidateRunner:
                 "blow_rate": training.blows / training.episodes,
                 "mean_reward": training.mean_reward,
                 "environment_steps": float(training.environment_steps),
+                "trade_win_rate": training.trade_win_rate,
+                "average_win_r": training.average_win_r,
+                "worst_pnl": training.worst_pnl,
+                "mean_terminal_pnl": training.mean_terminal_pnl,
+                "safety_objective": prop_safety_objective(
+                    training,
+                    max_loss=challenge.max_loss,
+                    profit_target=challenge.profit_target,
+                ),
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
@@ -195,6 +232,15 @@ class HistoricalCandidateRunner:
                 "pass_minus_blow": pass_rate - blow_rate,
                 "mean_reward": validation.mean_reward,
                 "environment_steps": float(validation.environment_steps),
+                "trade_win_rate": validation.trade_win_rate,
+                "average_win_r": validation.average_win_r,
+                "worst_pnl": validation.worst_pnl,
+                "mean_terminal_pnl": validation.mean_terminal_pnl,
+                "safety_objective": prop_safety_objective(
+                    validation,
+                    max_loss=challenge.max_loss,
+                    profit_target=challenge.profit_target,
+                ),
             }
 
         cascade = EvaluatorCascade(
@@ -297,6 +343,9 @@ def train_agent(
     )
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards, losses = [], []
+    terminal_pnls = []
+    trade_count = win_count = 0
+    winning_r_sum = 0.0
     environment_steps = 0
     completed_episodes = 0
     for episode_index in range(episodes):
@@ -347,6 +396,10 @@ def train_agent(
         outcome = str(terminal_info["outcome"])
         outcomes[outcome] += 1
         rewards.append(total_reward)
+        terminal_pnls.append(float(terminal_info.get("equity_pnl", 0.0)))
+        trade_count += int(terminal_info.get("trade_count", 0))
+        win_count += int(terminal_info.get("win_count", 0))
+        winning_r_sum += float(terminal_info.get("winning_r_sum", 0.0))
         completed_episodes += 1
         if len(transitions) >= replay.sequence_length:
             replay.add(Episode(
@@ -381,6 +434,11 @@ def train_agent(
         passes=outcomes["pass"],
         blows=outcomes["blow"],
         timeouts=outcomes["timeout"],
+        trade_count=trade_count,
+        win_count=win_count,
+        winning_r_sum=winning_r_sum,
+        worst_pnl=float(np.min(terminal_pnls)),
+        mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_reward=float(np.mean(rewards)),
         mean_loss=float(np.mean(losses)) if losses else float("nan"),
     )
@@ -414,6 +472,9 @@ def evaluate_agent(
 ) -> TrainingResult:
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []
+    terminal_pnls = []
+    trade_count = win_count = 0
+    winning_r_sum = 0.0
     environment_steps = 0
     for _ in range(episodes):
         observation, info = environment.reset()
@@ -436,12 +497,21 @@ def evaluate_agent(
                 break
         outcomes[str(info["outcome"])] += 1
         rewards.append(total)
+        terminal_pnls.append(float(info.get("equity_pnl", 0.0)))
+        trade_count += int(info.get("trade_count", 0))
+        win_count += int(info.get("win_count", 0))
+        winning_r_sum += float(info.get("winning_r_sum", 0.0))
     return TrainingResult(
         episodes=episodes,
         environment_steps=environment_steps,
         passes=outcomes["pass"],
         blows=outcomes["blow"],
         timeouts=outcomes["timeout"],
+        trade_count=trade_count,
+        win_count=win_count,
+        winning_r_sum=winning_r_sum,
+        worst_pnl=float(np.min(terminal_pnls)),
+        mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_reward=float(np.mean(rewards)),
         mean_loss=float("nan"),
     )

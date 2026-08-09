@@ -16,8 +16,10 @@ from propevolve.environment import ChallengeSpec, MarketSeries
 from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import (
     HistoricalCandidateRunner,
+    TrainingResult,
     assert_temporal_role,
     evaluate_agent,
+    prop_safety_objective,
     train_agent,
 )
 
@@ -50,6 +52,10 @@ class Environment:
             "outcome": "pass" if terminated else None,
             "ticker": "NQ",
             "primary_side": "flat",
+            "trade_count": 2 if terminated else 0,
+            "win_count": 1 if terminated else 0,
+            "winning_r_sum": 2.5 if terminated else 0.0,
+            "equity_pnl": 6_000.0 if terminated else 0.0,
         }
         return np.array([self.index], np.float32), 0.25, terminated, False, info
 
@@ -315,6 +321,33 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     assert len(replay) == 2
     assert agent.updates == 2
     assert result.mean_loss == 0.5
+    assert result.trade_win_rate == 0.5
+    assert result.average_win_r == 2.5
+
+
+def test_prop_safety_objective_hard_ranks_any_blow_below_zero_blow() -> None:
+    common = dict(
+        episodes=100,
+        environment_steps=1000,
+        passes=50,
+        timeouts=50,
+        trade_count=100,
+        win_count=40,
+        winning_r_sum=80.0,
+        worst_pnl=-2_000.0,
+        mean_terminal_pnl=2_000.0,
+        mean_reward=0.0,
+        mean_loss=1.0,
+    )
+    safe = TrainingResult(blows=0, **common)
+    unsafe = TrainingResult(blows=1, **{**common, "passes": 99, "timeouts": 0})
+
+    assert prop_safety_objective(
+        unsafe, max_loss=3_000.0, profit_target=6_000.0
+    ) < -1.0
+    assert prop_safety_objective(
+        safe, max_loss=3_000.0, profit_target=6_000.0
+    ) >= 0.0
 
 
 def test_evaluation_never_updates_agent() -> None:

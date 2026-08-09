@@ -425,17 +425,31 @@ class RevisionReceipt:
 class RevisionPolicy:
     allowed_paths: tuple[str, ...]
     frozen_paths: tuple[str, ...]
+    numeric_bounds: tuple[tuple[str, float, float], ...] = ()
 
     def apply(self, base: Mapping, changes: Mapping[str, object]) -> RevisionReceipt:
         if not changes:
             raise ValueError("a recipe revision requires at least one change")
         revised = deepcopy(dict(base))
         diff = {}
+        bounds = {
+            path: (minimum, maximum)
+            for path, minimum, maximum in self.numeric_bounds
+        }
         for path, value in changes.items():
             if path not in self.allowed_paths:
                 raise ValueError(f"revision path is not allowlisted: {path}")
             if any(path == frozen or path.startswith(frozen + ".") for frozen in self.frozen_paths):
                 raise ValueError(f"revision path is frozen: {path}")
+            if path in bounds:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"bounded revision must be numeric: {path}")
+                minimum, maximum = bounds[path]
+                if not minimum <= float(value) <= maximum:
+                    raise ValueError(
+                        f"revision path {path} is outside declared bounds "
+                        f"[{minimum}, {maximum}]"
+                    )
             parts = path.split(".")
             cursor = revised
             for part in parts[:-1]:

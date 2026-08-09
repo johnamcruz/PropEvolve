@@ -230,6 +230,7 @@ def test_ratchet_activates_at_two_r_on_the_following_bar() -> None:
     assert stopped["exit_reason"] == "ratchet_stop"
     assert stopped["realized_pnl"] == 300.0
     assert stopped["avg_win_r"] == 1.5
+    assert stopped["winning_r_sum"] == 1.5
 
 
 def test_short_ratchet_uses_an_independent_downside_path() -> None:

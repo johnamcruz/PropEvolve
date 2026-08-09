@@ -182,6 +182,30 @@ def test_campaign_blocks_reasoning_that_changes_frozen_temporal_contract(
     assert len(runner.archive.list_candidates()) == 1
 
 
+def test_campaign_blocks_reasoning_outside_declared_numeric_bounds(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["evolution"]["revision_bounds"] = {
+        "agent.hidden_dim": {"minimum": 64, "maximum": 192}
+    }
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="bounded-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.BLOCKED
+    assert "outside declared bounds" in state.message
+    assert len(runner.archive.list_candidates()) == 1
+
+
 def test_surrogate_advice_is_optional_and_reasoning_remains_controller(
     tmp_path: Path,
 ) -> None:

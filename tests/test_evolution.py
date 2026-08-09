@@ -173,6 +173,21 @@ def test_revision_policy_changes_only_allowlisted_json_fields() -> None:
         policy.apply(base, {"challenge.max_loss": 4000})
 
 
+def test_revision_policy_enforces_numeric_bounds() -> None:
+    base = {"challenge": {"per_trade_risk_dollars": 200.0}}
+    policy = RevisionPolicy(
+        allowed_paths=("challenge.per_trade_risk_dollars",),
+        frozen_paths=(),
+        numeric_bounds=(("challenge.per_trade_risk_dollars", 100.0, 300.0),),
+    )
+
+    assert policy.apply(
+        base, {"challenge.per_trade_risk_dollars": 250.0}
+    ).config["challenge"]["per_trade_risk_dollars"] == 250.0
+    with pytest.raises(ValueError, match="outside declared bounds"):
+        policy.apply(base, {"challenge.per_trade_risk_dollars": 350.0})
+
+
 def test_registry_can_promote_then_roll_back_without_deleting_models(
     tmp_path: Path,
 ) -> None:

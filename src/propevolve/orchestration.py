@@ -77,6 +77,18 @@ def _public_config(config: Mapping) -> dict:
     }
 
 
+def _revision_policy(config: Mapping) -> RevisionPolicy:
+    bounds = config["evolution"].get("revision_bounds", {})
+    return RevisionPolicy(
+        tuple(config["evolution"]["allowed_revision_paths"]),
+        tuple(config["evolution"]["frozen_paths"]),
+        tuple(
+            (str(path), float(values["minimum"]), float(values["maximum"]))
+            for path, values in sorted(bounds.items())
+        ),
+    )
+
+
 class _CandidateStageAdapter:
     def __init__(
         self,
@@ -301,6 +313,9 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "scientifically defensible allowlisted revision remains, fail closed with "
         "a genuine exhausted-hypothesis blocker instead of repeating a recipe or "
         "performing an arbitrary numerical permutation. "
+        "Any numeric override must remain within the revision_bounds declared "
+        "in the stage contract. Diagnostic targets guide diagnosis but are not "
+        "promotion gates. "
         "If optional surrogate advice is present, treat it only as uncertainty-aware "
         "diagnostics and proposals; reasoning remains responsible for accepting, "
         "refining, or rejecting it. Return REVISE with one complete "
@@ -314,10 +329,7 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
 
 
 def _build_codex_provider(config: Mapping, state_root: Path) -> ReasoningAdapter:
-    policy = RevisionPolicy(
-        tuple(config["evolution"]["allowed_revision_paths"]),
-        tuple(config["evolution"]["frozen_paths"]),
-    )
+    policy = _revision_policy(config)
     base = _public_config(config)
 
     def validate(revision: Revision) -> None:
@@ -347,6 +359,10 @@ def _plan(config: Mapping) -> TrainingPlan:
             config={
                 "schema": "propevolve_evolution_stage_v1",
                 "selection_requirements": list(campaign["selection_requirements"]),
+                "diagnostic_targets": list(campaign.get("diagnostic_targets", ())),
+                "revision_bounds": dict(
+                    config["evolution"].get("revision_bounds", {})
+                ),
                 "frozen_recipe_sha256": hashlib.sha256(
                     json.dumps(
                         {
@@ -400,10 +416,7 @@ def run_evolution_campaign(
         from .training import HistoricalCandidateRunner
 
         candidate_runner = HistoricalCandidateRunner()
-    policy = RevisionPolicy(
-        tuple(config["evolution"]["allowed_revision_paths"]),
-        tuple(config["evolution"]["frozen_paths"]),
-    )
+    policy = _revision_policy(config)
     if reasoning is _DEFAULT_REASONING:
         provider = (
             _build_codex_provider(config, state_root)

@@ -154,6 +154,25 @@ def load_experiment_config(path: str | Path) -> dict:
         for locked in frozen
     ):
         raise ValueError("evolution allowlist overlaps the frozen contract")
+    revision_bounds = evolution.get("revision_bounds") or {}
+    if not isinstance(revision_bounds, dict):
+        raise ValueError("evolution revision bounds must be an object")
+    for revision_path, bounds in revision_bounds.items():
+        if revision_path not in allowed:
+            raise ValueError(
+                f"revision bound path is not allowlisted: {revision_path}"
+            )
+        if not isinstance(bounds, dict) or set(bounds) != {"minimum", "maximum"}:
+            raise ValueError(f"revision bounds are invalid for {revision_path}")
+        minimum, maximum = bounds["minimum"], bounds["maximum"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, (int, float))
+            or not isinstance(maximum, (int, float))
+            or float(minimum) > float(maximum)
+        ):
+            raise ValueError(f"revision bounds are invalid for {revision_path}")
     evolution["allowed_revision_paths"] = allowed
     evolution["frozen_paths"] = frozen
     evolution["parent_candidate_ids"] = tuple(
@@ -183,6 +202,18 @@ def load_experiment_config(path: str | Path) -> dict:
             or not isinstance(requirement.get("value"), (int, float))
         ):
             raise ValueError("campaign selection requirement is invalid")
+    diagnostics = campaign.get("diagnostic_targets", [])
+    if not isinstance(diagnostics, list):
+        raise ValueError("campaign diagnostic targets must be an array")
+    for target in diagnostics:
+        if (
+            not isinstance(target, dict)
+            or target.get("operator") not in {">", ">=", "<", "<=", "=="}
+            or not str(target.get("metric", "")).strip()
+            or isinstance(target.get("value"), bool)
+            or not isinstance(target.get("value"), (int, float))
+        ):
+            raise ValueError("campaign diagnostic target is invalid")
     niches = campaign.get("niches") or ()
     if not isinstance(niches, list) or not niches:
         raise ValueError("campaign niches must be nonempty")

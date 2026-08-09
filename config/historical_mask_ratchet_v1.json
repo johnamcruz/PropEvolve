@@ -87,6 +87,9 @@
       "agent.weight_decay",
       "agent.gradient_clip",
       "agent.target_sync_updates",
+      "challenge.per_trade_risk_dollars",
+      "challenge.ratchet_activation_r",
+      "challenge.ratchet_giveback_r",
       "training.episodes",
       "training.replay_capacity_episodes",
       "training.sequence_length",
@@ -105,12 +108,28 @@
       "timeframe_minutes",
       "cache_root",
       "cache",
-      "challenge",
+      "challenge.profit_target",
+      "challenge.max_loss",
+      "challenge.episode_days",
+      "challenge.bars_per_day",
+      "challenge.max_position_size",
+      "challenge.minimum_mll_headroom",
+      "challenge.trailing_mll_lock",
+      "challenge.terminal_pass_reward",
+      "challenge.terminal_blow_reward",
+      "challenge.terminal_timeout_reward",
+      "challenge.terminal_pass_speed_reward_per_day",
+      "challenge.reward_scale",
       "point_values",
       "round_trip_fees",
       "temporal",
       "training.minimum_environment_steps"
-    ]
+    ],
+    "revision_bounds": {
+      "challenge.per_trade_risk_dollars": {"minimum": 100.0, "maximum": 300.0},
+      "challenge.ratchet_activation_r": {"minimum": 1.5, "maximum": 3.0},
+      "challenge.ratchet_giveback_r": {"minimum": 0.25, "maximum": 1.0}
+    }
   },
   "campaign": {
     "state_root": "runs/historical_mask_ratchet_v1/ml-loop-state",
@@ -133,9 +152,14 @@
         "value": 0.0
       }
     ],
+    "diagnostic_targets": [
+      {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+      {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+    ],
     "niches": [
       {"name": "highest_pass", "metric": "selection.pass_rate", "maximize": true},
       {"name": "lowest_blow", "metric": "selection.blow_rate", "maximize": false},
+      {"name": "best_safety", "metric": "selection.safety_objective", "maximize": true},
       {"name": "best_reward", "metric": "selection.mean_reward", "maximize": true}
     ]
   },
