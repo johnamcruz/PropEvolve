@@ -41,14 +41,20 @@ class FakeCandidateRunner:
             parent_candidate_ids=parent_candidate_ids,
             hypothesis=hypothesis,
         )
-        delta = 0.20 if hidden_dim == 256 else -0.10
+        safety_shaping = float(
+            config["challenge"].get("mll_proximity_penalty_coefficient", 0.0)
+        )
+        safe_revision = safety_shaping > 0.0001
+        delta = 0.20 if hidden_dim == 256 or safe_revision else -0.10
         evaluation = self.archive.record_evaluation(
             candidate.candidate_id,
             evaluator_contract={"name": "fake-economic-v1"},
             metrics={
                 "selection.pass_minus_blow": delta,
                 "selection.pass_rate": 0.60 if delta > 0 else 0.20,
-                "selection.blow_rate": 0.10 if delta > 0 else 0.30,
+                "selection.blow_rate": (
+                    0.0 if safe_revision else 0.10 if delta > 0 else 0.30
+                ),
             },
             stages=({"name": "selection", "status": "PASS" if delta > 0 else "FAIL"},),
             status="PASS" if delta > 0 else "FAIL",
@@ -90,6 +96,22 @@ class IllegalTemporalRevision:
                 stage=request.stage.name,
                 rationale="move the holdout",
                 config_override={"temporal.validation_start": "2024-01-01"},
+            ),
+        )
+
+
+class IncreaseSafetyShaping:
+    def revise(self, request):
+        return ReasoningOutcome(
+            Decision.REVISE,
+            "increase local MLL-cliff learning signal after nonzero blow rate",
+            Revision(
+                stage=request.stage.name,
+                rationale="increase bounded MLL-proximity shaping",
+                config_override={
+                    "challenge.mll_proximity_penalty_coefficient": 0.0002,
+                    "training.terminal_sequence_fraction": 0.5,
+                },
             ),
         )
 
@@ -180,6 +202,37 @@ def test_campaign_blocks_reasoning_that_changes_frozen_temporal_contract(
     assert state.phase is Phase.BLOCKED
     assert "not allowlisted" in state.message
     assert len(runner.archive.list_candidates()) == 1
+
+
+def test_campaign_reasoning_can_revise_bounded_reward_and_replay_fields(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(
+        Path("config/historical_mask_safety_replay_v1.json").read_text()
+    )
+    payload["output"] = "runs/reward-revision-test"
+    payload["campaign"]["state_root"] = (
+        "runs/reward-revision-test/ml-loop-state"
+    )
+    config_path = tmp_path / "reward-config.json"
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/reward-revision-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="reward-revision-test",
+        candidate_runner=runner,
+        reasoning=IncreaseSafetyShaping(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert len(runner.configs) == 2
+    assert (
+        runner.configs[-1]["challenge"]["mll_proximity_penalty_coefficient"]
+        == 0.0002
+    )
+    assert runner.configs[-1]["training"]["terminal_sequence_fraction"] == 0.5
 
 
 def test_campaign_blocks_reasoning_outside_declared_numeric_bounds(

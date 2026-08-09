@@ -29,6 +29,10 @@ class ChallengeSpec:
     per_trade_risk_dollars: float | None = None
     ratchet_activation_r: float | None = None
     ratchet_giveback_r: float | None = None
+    mll_proximity_penalty_coefficient: float = 0.0
+    lead_giveback_penalty_coefficient: float = 0.0
+    large_win_threshold_r: float = 2.0
+    large_win_bonus_coefficient: float = 0.0
 
     def __post_init__(self) -> None:
         if min(
@@ -44,6 +48,13 @@ class ChallengeSpec:
             raise ValueError("PropEvolve v1 supports exactly one contract")
         if self.terminal_pass_reward <= 0 or self.terminal_blow_reward >= 0:
             raise ValueError("terminal pass and blow rewards must have opposite signs")
+        if min(
+            self.mll_proximity_penalty_coefficient,
+            self.lead_giveback_penalty_coefficient,
+            self.large_win_threshold_r,
+            self.large_win_bonus_coefficient,
+        ) < 0:
+            raise ValueError("reward-shaping settings must be nonnegative")
         ratchet = (
             self.per_trade_risk_dollars,
             self.ratchet_activation_r,
@@ -58,6 +69,8 @@ class ChallengeSpec:
                 or float(self.ratchet_activation_r) <= float(self.ratchet_giveback_r)
             ):
                 raise ValueError("trade risk and ratchet settings are invalid")
+        if self.large_win_bonus_coefficient > 0 and self.per_trade_risk_dollars is None:
+            raise ValueError("large-win reward requires declared per-trade risk")
 
     @property
     def episode_bars(self) -> int:
@@ -301,6 +314,7 @@ class HistoricalChallengeEnv:
         if action not in self.valid_actions():
             raise ValueError(f"action {action.name} is invalid in the current state")
         previous_equity = self._equity(self._market.close[self._index])
+        closed_trade_count = len(self._closed_trade_pnls)
         next_index = self._index + 1
         fill = float(self._market.open[next_index])
         info: dict = {
@@ -336,13 +350,20 @@ class HistoricalChallengeEnv:
             self._update_ratchet(next_index, info)
 
         equity = self._equity(float(self._market.close[self._index]))
-        self._peak_equity = max(self._peak_equity, equity)
         reward = (equity - previous_equity) / self.spec.max_loss
+        shaping_reward, shaping_info = self._reward_shaping(
+            equity,
+            closed_trade_count=closed_trade_count,
+        )
+        reward += shaping_reward
+        self._peak_equity = max(self._peak_equity, equity)
         if outcome == "pass":
             # Match the proven environment's continuous faster-pass shaping;
             # session keys govern the hard 30-day termination contract.
-            elapsed_days = (self._index - self._start) / self.spec.bars_per_day
-            days_saved = max(0.0, self.spec.episode_days - elapsed_days)
+            days_saved = max(
+                0.0,
+                self.spec.episode_days - self._trading_days_elapsed,
+            )
             reward += (
                 self.spec.terminal_pass_reward
                 + self.spec.terminal_pass_speed_reward_per_day * days_saved
@@ -364,9 +385,59 @@ class HistoricalChallengeEnv:
             "timestamp": str(self._market.timestamps[self._index]),
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
+            **shaping_info,
             **self._trade_statistics(),
         })
         return self._observation(), float(reward), self._terminated, False, info
+
+    def _reward_shaping(
+        self,
+        equity: float,
+        *,
+        closed_trade_count: int,
+    ) -> tuple[float, dict[str, float]]:
+        proximity_penalty = 0.0
+        lead_giveback_penalty = 0.0
+        if self._position is not None and self._account is not None:
+            cushion_fraction = min(
+                1.0,
+                self._account.mll_headroom(equity) / self.spec.max_loss,
+            )
+            proximity_penalty = (
+                self.spec.mll_proximity_penalty_coefficient
+                * (1.0 - cushion_fraction) ** 2
+            )
+            progress = min(
+                1.0,
+                max(0.0, self._account.realized_pnl / self.spec.profit_target),
+            )
+            drawdown_fraction = max(0.0, self._peak_equity - equity) / self.spec.max_loss
+            lead_giveback_penalty = (
+                self.spec.lead_giveback_penalty_coefficient
+                * progress**2
+                * drawdown_fraction
+            )
+
+        realized_win_r = 0.0
+        large_win_bonus = 0.0
+        if len(self._closed_trade_pnls) > closed_trade_count:
+            closed_pnl = self._closed_trade_pnls[-1]
+            risk = self.spec.per_trade_risk_dollars or self.spec.max_loss
+            realized_win_r = max(0.0, closed_pnl / risk)
+            large_win_bonus = self.spec.large_win_bonus_coefficient * max(
+                0.0,
+                realized_win_r - self.spec.large_win_threshold_r,
+            )
+
+        return (
+            large_win_bonus - proximity_penalty - lead_giveback_penalty,
+            {
+                "mll_proximity_penalty": proximity_penalty,
+                "lead_giveback_penalty": lead_giveback_penalty,
+                "realized_win_r": realized_win_r,
+                "large_win_bonus": large_win_bonus,
+            },
+        )
 
     def _apply_action(self, action: Action, fill: float, info: dict) -> None:
         position = self._position

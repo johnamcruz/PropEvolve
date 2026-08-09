@@ -1,0 +1,281 @@
+{
+  "schema": "propevolve_historical_training_v1",
+  "assets": "config/local-assets.json",
+  "tickers": [
+    "NQ",
+    "ES",
+    "GC",
+    "RTY",
+    "YM",
+    "CL",
+    "SI",
+    "ZB",
+    "ZN"
+  ],
+  "deployment_tickers": [
+    "NQ"
+  ],
+  "training_only_tickers": [
+    "CL",
+    "SI",
+    "ZB",
+    "ZN"
+  ],
+  "timeframe_minutes": 3,
+  "cache_root": "cache/chronos2_mask_full_3min_pre2026_v2",
+  "cache": {
+    "format": "ffm_frozen_representation_v2",
+    "encoder_identity_sha256": "1b8b7f001b0b4e501aa47ca90a3c2fd31d0b41dbd1d896e98ce084f6ed325710",
+    "context_length": 256,
+    "stride": 1,
+    "chunk_windows": 256,
+    "batch_series": 512,
+    "fast_group_attention": true,
+    "device": "auto"
+  },
+  "challenge": {
+    "profit_target": 6000,
+    "max_loss": 3000,
+    "episode_days": 30,
+    "bars_per_day": 480,
+    "max_position_size": 1,
+    "minimum_mll_headroom": 250,
+    "trailing_mll_lock": true,
+    "terminal_pass_reward": 250,
+    "terminal_blow_reward": -1500,
+    "terminal_timeout_reward": -2,
+    "terminal_pass_speed_reward_per_day": 20,
+    "reward_scale": 1000,
+    "per_trade_risk_dollars": 200,
+    "ratchet_activation_r": 2,
+    "ratchet_giveback_r": 0.5,
+    "mll_proximity_penalty_coefficient": 0.0001,
+    "lead_giveback_penalty_coefficient": 0,
+    "large_win_threshold_r": 2,
+    "large_win_bonus_coefficient": 0
+  },
+  "point_values": {
+    "NQ": 20,
+    "ES": 50,
+    "GC": 100,
+    "RTY": 50,
+    "YM": 5,
+    "CL": 1000,
+    "SI": 5000,
+    "ZB": 1000,
+    "ZN": 1000
+  },
+  "round_trip_fees": {
+    "NQ": 3.84,
+    "ES": 3.84,
+    "GC": 4.3,
+    "RTY": 3.84,
+    "YM": 3.84,
+    "CL": 4.02,
+    "SI": 4.32,
+    "ZB": 2.76,
+    "ZN": 2.58
+  },
+  "temporal": {
+    "train_start": "2021-01-01",
+    "train_end": "2025-01-01",
+    "validation_start": "2025-01-01",
+    "validation_end": "2026-01-01",
+    "sealed_start": "2026-01-01"
+  },
+  "agent": {
+    "hidden_dim": 128,
+    "atoms": 51,
+    "value_min": -3,
+    "value_max": 3,
+    "gamma": 0.997,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
+    "gradient_clip": 10,
+    "target_sync_updates": 250,
+    "device": "mps"
+  },
+  "training": {
+    "episodes": 10000,
+    "minimum_environment_steps": 5000000,
+    "validation_episodes": 200,
+    "replay_capacity_episodes": 500,
+    "sequence_length": 32,
+    "warmup_episodes": 8,
+    "updates_per_episode": 32,
+    "batch_sequences": 16,
+    "recurrent_horizon": 64,
+    "epsilon_start": 0.25,
+    "epsilon_end": 0.02,
+    "seed": 314159,
+    "terminal_sequence_fraction": 0.5
+  },
+  "evolution": {
+    "hypothesis": "Session-correct pass rewards, terminal-aware recurrent replay, and bounded safety shaping can reduce greedy-policy blow rate without suppressing challenge completion.",
+    "parent_candidate_ids": [],
+    "allowed_revision_paths": [
+      "agent.hidden_dim",
+      "agent.atoms",
+      "agent.value_min",
+      "agent.value_max",
+      "agent.gamma",
+      "agent.learning_rate",
+      "agent.weight_decay",
+      "agent.gradient_clip",
+      "agent.target_sync_updates",
+      "challenge.per_trade_risk_dollars",
+      "challenge.ratchet_activation_r",
+      "challenge.ratchet_giveback_r",
+      "training.episodes",
+      "training.replay_capacity_episodes",
+      "training.sequence_length",
+      "training.warmup_episodes",
+      "training.updates_per_episode",
+      "training.batch_sequences",
+      "training.recurrent_horizon",
+      "training.epsilon_start",
+      "training.epsilon_end",
+      "challenge.minimum_mll_headroom",
+      "challenge.terminal_pass_reward",
+      "challenge.terminal_blow_reward",
+      "challenge.terminal_timeout_reward",
+      "challenge.terminal_pass_speed_reward_per_day",
+      "challenge.mll_proximity_penalty_coefficient",
+      "challenge.lead_giveback_penalty_coefficient",
+      "challenge.large_win_threshold_r",
+      "challenge.large_win_bonus_coefficient",
+      "training.terminal_sequence_fraction"
+    ],
+    "frozen_paths": [
+      "assets",
+      "tickers",
+      "deployment_tickers",
+      "training_only_tickers",
+      "timeframe_minutes",
+      "cache_root",
+      "cache",
+      "challenge.profit_target",
+      "challenge.max_loss",
+      "challenge.episode_days",
+      "challenge.bars_per_day",
+      "challenge.max_position_size",
+      "challenge.trailing_mll_lock",
+      "challenge.reward_scale",
+      "point_values",
+      "round_trip_fees",
+      "temporal",
+      "training.minimum_environment_steps"
+    ],
+    "revision_bounds": {
+      "challenge.per_trade_risk_dollars": {
+        "minimum": 100,
+        "maximum": 500
+      },
+      "challenge.ratchet_activation_r": {
+        "minimum": 1.5,
+        "maximum": 3
+      },
+      "challenge.ratchet_giveback_r": {
+        "minimum": 0.25,
+        "maximum": 1
+      },
+      "challenge.minimum_mll_headroom": {
+        "minimum": 250,
+        "maximum": 1500
+      },
+      "challenge.terminal_pass_reward": {
+        "minimum": 100,
+        "maximum": 500
+      },
+      "challenge.terminal_blow_reward": {
+        "minimum": -2500,
+        "maximum": -1000
+      },
+      "challenge.terminal_timeout_reward": {
+        "minimum": -20,
+        "maximum": 0
+      },
+      "challenge.terminal_pass_speed_reward_per_day": {
+        "minimum": 0,
+        "maximum": 50
+      },
+      "challenge.mll_proximity_penalty_coefficient": {
+        "minimum": 0,
+        "maximum": 0.01
+      },
+      "challenge.lead_giveback_penalty_coefficient": {
+        "minimum": 0,
+        "maximum": 0.01
+      },
+      "challenge.large_win_threshold_r": {
+        "minimum": 1,
+        "maximum": 3
+      },
+      "challenge.large_win_bonus_coefficient": {
+        "minimum": 0,
+        "maximum": 0.5
+      },
+      "training.terminal_sequence_fraction": {
+        "minimum": 0.25,
+        "maximum": 1
+      }
+    }
+  },
+  "campaign": {
+    "state_root": "runs/historical_mask_safety_replay_v1/ml-loop-state",
+    "max_revisions_per_stage": 24,
+    "reasoning": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "timeout_seconds": 1800
+    },
+    "selection_requirements": [
+      {
+        "metric": "selection.pass_rate",
+        "operator": ">=",
+        "value": 0.5
+      },
+      {
+        "metric": "selection.blow_rate",
+        "operator": "==",
+        "value": 0
+      }
+    ],
+    "diagnostic_targets": [
+      {
+        "metric": "selection.trade_win_rate",
+        "operator": ">=",
+        "value": 0.4
+      },
+      {
+        "metric": "selection.average_win_r",
+        "operator": ">=",
+        "value": 2
+      }
+    ],
+    "niches": [
+      {
+        "name": "highest_pass",
+        "metric": "selection.pass_rate",
+        "maximize": true
+      },
+      {
+        "name": "lowest_blow",
+        "metric": "selection.blow_rate",
+        "maximize": false
+      },
+      {
+        "name": "best_safety",
+        "metric": "selection.safety_objective",
+        "maximize": true
+      },
+      {
+        "name": "best_reward",
+        "metric": "selection.mean_reward",
+        "maximize": true
+      }
+    ]
+  },
+  "output": "runs/historical_mask_safety_replay_v1"
+}

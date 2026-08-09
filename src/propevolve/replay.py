@@ -44,12 +44,16 @@ class BalancedSequenceReplay:
         capacity_episodes: int,
         sequence_length: int,
         *,
+        terminal_sequence_fraction: float = 0.0,
         seed: int,
     ) -> None:
         if capacity_episodes < 1 or sequence_length < 1:
             raise ValueError("replay capacity and sequence length must be positive")
+        if not 0.0 <= terminal_sequence_fraction <= 1.0:
+            raise ValueError("terminal sequence fraction must be between zero and one")
         self.capacity = int(capacity_episodes)
         self.sequence_length = int(sequence_length)
+        self.terminal_sequence_fraction = float(terminal_sequence_fraction)
         self._episodes: OrderedDict[str, Episode] = OrderedDict()
         self._random = random.Random(seed)
 
@@ -82,8 +86,13 @@ class BalancedSequenceReplay:
 
     def sample(self, count: int) -> tuple[tuple[Transition, ...], ...]:
         sequences = []
-        for episode in self.sample_episodes(count):
+        terminal_count = round(count * self.terminal_sequence_fraction)
+        for index, episode in enumerate(self.sample_episodes(count)):
             last_start = len(episode.transitions) - self.sequence_length
-            start = self._random.randint(0, last_start)
+            start = (
+                last_start
+                if index < terminal_count
+                else self._random.randint(0, last_start)
+            )
             sequences.append(episode.transitions[start:start + self.sequence_length])
         return tuple(sequences)

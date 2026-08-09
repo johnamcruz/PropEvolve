@@ -53,3 +53,21 @@ def test_replay_balances_outcome_buckets_before_reusing_them() -> None:
 
     assert {episode.outcome for episode in sampled} == {"pass", "blow"}
 
+
+def test_replay_anchors_declared_fraction_of_sequences_at_terminal_outcomes() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=20,
+        sequence_length=3,
+        terminal_sequence_fraction=1.0,
+        seed=13,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    replay.add(_episode("ES", "blow", "short", 100))
+
+    batch = replay.sample(2)
+
+    assert all(sequence[-1].terminated for sequence in batch)
+    assert {
+        tuple(int(item.observation[0]) for item in sequence)
+        for sequence in batch
+    } == {(3, 4, 5), (103, 104, 105)}

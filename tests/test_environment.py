@@ -265,3 +265,137 @@ def test_short_ratchet_uses_an_independent_downside_path() -> None:
     assert stopped["exit_reason"] == "ratchet_stop"
     assert stopped["realized_pnl"] == 300.0
     assert stopped["avg_win_r"] == 1.5
+
+
+def test_pass_speed_reward_uses_completed_cme_sessions_not_row_count() -> None:
+    timestamps = np.asarray(
+        [
+            "2024-01-02T23:00", "2024-01-03T12:00",
+            "2024-01-03T23:00", "2024-01-04T12:00",
+        ],
+        dtype="datetime64[m]",
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 101.0, 102.0, 103.0], np.float32),
+        high=np.array([100.0, 103.0, 104.0, 105.0], np.float32),
+        low=np.array([100.0, 101.0, 102.0, 103.0], np.float32),
+        close=np.array([100.0, 102.0, 103.0, 104.0], np.float32),
+        embeddings=np.zeros((4, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(episode_days=2, bars_per_day=99, profit_target=15.0),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, reward, terminated, _, info = env.step(Action.ENTER_LONG_1)
+
+    assert terminated
+    assert info["outcome"] == "pass"
+    assert info["trading_days_elapsed"] == 1
+    assert reward == pytest.approx(20.0 / 3_000.0 + (250.0 + 20.0) / 1_000.0)
+
+
+def test_reward_shaping_penalizes_mll_proximity_only_while_exposed() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 90.0, 90.0, 90.0], np.float32),
+        high=np.array([100.0, 100.0, 90.0, 90.0, 90.0], np.float32),
+        low=np.array([100.0, 90.0, 90.0, 90.0, 90.0], np.float32),
+        close=np.array([100.0, 90.0, 90.0, 90.0, 90.0], np.float32),
+        embeddings=np.zeros((5, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            max_loss=300.0,
+            mll_proximity_penalty_coefficient=0.09,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+
+    _, reward, terminated, _, info = env.step(Action.HOLD)
+
+    assert not terminated
+    assert info["mll_proximity_penalty"] == pytest.approx(0.04)
+    assert reward == pytest.approx(-0.04)
+
+
+def test_reward_shaping_rewards_only_realized_wins_above_threshold_r() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 120.0, 120.0, 120.0], np.float32),
+        high=np.array([100.0, 120.0, 120.0, 120.0, 120.0], np.float32),
+        low=np.array([100.0, 100.0, 120.0, 120.0, 120.0], np.float32),
+        close=np.array([100.0, 120.0, 120.0, 120.0, 120.0], np.float32),
+        embeddings=np.zeros((5, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=3.0,
+            ratchet_giveback_r=0.5,
+            large_win_threshold_r=1.5,
+            large_win_bonus_coefficient=0.1,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+
+    _, reward, _, _, info = env.step(Action.CLOSE)
+
+    assert info["realized_win_r"] == pytest.approx(2.0)
+    assert info["large_win_bonus"] == pytest.approx(0.05)
+    assert reward == pytest.approx(0.05)
+
+
+def test_reward_shaping_penalizes_giveback_more_near_the_pass_target() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(6) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 110.0, 110.0, 100.0, 100.0], np.float32),
+        high=np.array([100.0, 110.0, 110.0, 110.0, 100.0, 100.0], np.float32),
+        low=np.array([100.0, 100.0, 110.0, 100.0, 100.0, 100.0], np.float32),
+        close=np.array([100.0, 110.0, 110.0, 100.0, 100.0, 100.0], np.float32),
+        embeddings=np.zeros((6, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            profit_target=1_000.0,
+            max_loss=300.0,
+            lead_giveback_penalty_coefficient=0.3,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+    env.step(Action.CLOSE)
+
+    _, _, _, _, info = env.step(Action.ENTER_LONG_1)
+
+    # $200 realized progress is 20% of target; the new position gives back
+    # $200 from peak equity, or two-thirds of MLL.
+    assert info["lead_giveback_penalty"] == pytest.approx(
+        0.3 * 0.2**2 * (200.0 / 300.0)
+    )

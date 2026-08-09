@@ -94,10 +94,26 @@ def load_experiment_config(path: str | Path) -> dict:
         if set(values) != set(tickers) or any(float(value) <= 0 for value in values.values()):
             raise ValueError(f"{field} must positively cover the exact ticker population")
     challenge = payload["challenge"]
+    # Schema-v1 receipts predate configurable reward shaping. Normalize their
+    # behavior explicitly while new recipes serialize every setting in JSON.
+    challenge.setdefault("mll_proximity_penalty_coefficient", 0.0)
+    challenge.setdefault("lead_giveback_penalty_coefficient", 0.0)
+    challenge.setdefault("large_win_threshold_r", 2.0)
+    challenge.setdefault("large_win_bonus_coefficient", 0.0)
     if challenge["max_position_size"] != 1:
         raise ValueError("the initial PropEvolve recipe supports one contract")
     if not isinstance(challenge["trailing_mll_lock"], bool):
         raise ValueError("challenge trailing_mll_lock must be boolean")
+    if any(
+        float(challenge[field]) < 0
+        for field in (
+            "mll_proximity_penalty_coefficient",
+            "lead_giveback_penalty_coefficient",
+            "large_win_threshold_r",
+            "large_win_bonus_coefficient",
+        )
+    ):
+        raise ValueError("challenge reward-shaping settings must be nonnegative")
     ratchet_fields = (
         "per_trade_risk_dollars",
         "ratchet_activation_r",
@@ -124,8 +140,11 @@ def load_experiment_config(path: str | Path) -> dict:
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     training = payload["training"]
+    training.setdefault("terminal_sequence_fraction", 0.0)
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
+    if not 0 <= float(training["terminal_sequence_fraction"]) <= 1:
+        raise ValueError("training terminal sequence fraction must be between zero and one")
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),

@@ -141,6 +141,9 @@ class HistoricalCandidateRunner:
         replay = BalancedSequenceReplay(
             capacity_episodes=int(training_config["replay_capacity_episodes"]),
             sequence_length=int(training_config["sequence_length"]),
+            terminal_sequence_fraction=float(
+                training_config["terminal_sequence_fraction"]
+            ),
             seed=seed,
         )
         training = train_agent(

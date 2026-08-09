@@ -85,7 +85,7 @@
           "fill_price": 103.0,
           "fees_paid": 3.84,
           "equity_pnl": 36.16,
-          "reward": 0.26666666666666666,
+          "reward": 0.26,
           "outcome": "pass",
           "terminated": true
         }

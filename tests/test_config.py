@@ -16,10 +16,10 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
     assert "challenge.profit_target" in config["evolution"]["frozen_paths"]
     assert "challenge.per_trade_risk_dollars" not in config["evolution"]["frozen_paths"]
-    assert config["evolution"]["revision_bounds"] == {
-        "challenge.per_trade_risk_dollars": {"minimum": 100.0, "maximum": 500.0},
-        "challenge.ratchet_activation_r": {"minimum": 1.5, "maximum": 3.0},
-        "challenge.ratchet_giveback_r": {"minimum": 0.25, "maximum": 1.0},
+    assert config["training"]["terminal_sequence_fraction"] == 0.0
+    assert config["evolution"]["revision_bounds"]["challenge.per_trade_risk_dollars"] == {
+        "minimum": 100.0,
+        "maximum": 500.0,
     }
     assert config["training"]["minimum_environment_steps"] == 5_000_000
     assert config["training"]["validation_episodes"] == 200
@@ -31,6 +31,33 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
         {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
         {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0},
     ]
+
+
+def test_safety_replay_recipe_exposes_only_bounded_training_reward_revisions() -> None:
+    config = load_experiment_config("config/historical_mask_safety_replay_v1.json")
+
+    assert config["training"]["terminal_sequence_fraction"] == 0.5
+    assert config["challenge"]["mll_proximity_penalty_coefficient"] == 0.0001
+    for path in (
+        "challenge.mll_proximity_penalty_coefficient",
+        "challenge.lead_giveback_penalty_coefficient",
+        "challenge.large_win_bonus_coefficient",
+        "challenge.terminal_pass_reward",
+        "challenge.terminal_blow_reward",
+        "training.terminal_sequence_fraction",
+    ):
+        assert path in config["evolution"]["allowed_revision_paths"]
+        assert path in config["evolution"]["revision_bounds"]
+        assert path not in config["evolution"]["frozen_paths"]
+    for path in (
+        "challenge.profit_target",
+        "challenge.max_loss",
+        "temporal",
+        "point_values",
+        "round_trip_fees",
+        "training.minimum_environment_steps",
+    ):
+        assert path in config["evolution"]["frozen_paths"]
 
 
 def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) -> None:
