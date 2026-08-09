@@ -250,8 +250,23 @@ surrogate is enabled by default. This boundary follows
 The first matched baseline uses only frozen embeddings and account state. If
 that context is insufficient, causal OOF Expansion, Pivot, or Trend predictions
 may be used as **temporary training teachers**. Teacher outputs never enter the
-student's deployed observation, their influence decays during training, and the
-final teacher-free student must earn temporal OOS economic lift.
+student's deployed observation, their influence is bounded by the experiment
+recipe, and the final teacher-free student must earn temporal OOS economic lift.
+
+The portable starter bundle lives in `models/teachers/`. The teacher recipe
+authenticates its artifacts and automatically builds the ignored dense cache
+when it is absent. Its current Pivot OOF coverage is NQ only, so NQ receives
+Pivot and Expansion soft targets while the other eight markets continue to
+train the shared policy from ordinary RL experience. Missing teacher rows are
+masked rather than treated as negative examples.
+
+```bash
+propevolve run --config config/historical_mask_ratchet_teachers_v1.json
+```
+
+The auxiliary teacher head is discarded when the student checkpoint is saved;
+deployment still consumes only frozen FFM embeddings and account state. The
+experiment does not require paths into a contributor's FFM Strategies checkout.
 
 Permanent detector inputs are considered only if teacher-free distillation
 fails and a matched ablation proves that the additional live dependency raises

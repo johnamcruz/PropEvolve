@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import math
 from pathlib import Path
@@ -23,6 +23,11 @@ from .evolution import (
     EvaluatorCascade,
 )
 from .replay import BalancedSequenceReplay, Episode, Transition
+from .teachers import (
+    TeacherSignalCache,
+    build_directional_oof_teacher_cache,
+    load_teacher_bundle,
+)
 
 if TYPE_CHECKING:
     from .agent import RecurrentC51Agent
@@ -83,6 +88,16 @@ class HistoricalCandidateRunner:
         assets = AssetContract.load(_resolve(root, config["assets"]))
         temporal = config["temporal"]
         cache_root = _resolve(root, config["cache_root"])
+        teacher_config = config.get("teachers") or {}
+        teachers_enabled = bool(teacher_config.get("enabled", False))
+        teacher_channels = tuple(str(value) for value in teacher_config.get("channels", ()))
+        if teachers_enabled:
+            _ensure_teacher_caches(
+                root=root,
+                embedding_cache_root=cache_root,
+                teacher_config=teacher_config,
+                sealed_start=temporal["sealed_start"],
+            )
         train_markets = load_markets(
             asset_contract=assets,
             cache_root=cache_root,
@@ -90,6 +105,14 @@ class HistoricalCandidateRunner:
             timeframe_minutes=int(config["timeframe_minutes"]),
             start=temporal["train_start"],
             end=temporal["train_end"],
+            teacher_cache_root=(
+                _resolve(root, teacher_config["cache_root"])
+                if teachers_enabled else None
+            ),
+            teacher_channels=teacher_channels,
+            required_teacher_tickers=tuple(
+                str(value) for value in teacher_config.get("required_tickers", ())
+            ),
         )
         validation_markets = load_markets(
             asset_contract=assets,
@@ -135,6 +158,13 @@ class HistoricalCandidateRunner:
         agent = RecurrentC51Agent(
             observation_dim,
             seed=seed,
+            temporary_teacher_weights=(
+                tuple(
+                    float(teacher_config["loss_weights"][channel])
+                    for channel in teacher_channels
+                )
+                if teachers_enabled else None
+            ),
             **dict(config["agent"]),
         )
         training_config = config["training"]
@@ -187,6 +217,25 @@ class HistoricalCandidateRunner:
             "round_trip_fees": dict(config["round_trip_fees"]),
             "sealed_start": temporal["sealed_start"],
             "sealed_holdout_touched": False,
+            "temporary_teachers": (
+                {
+                    "enabled": True,
+                    "channels": list(teacher_channels),
+                    "cache_manifest_sha256": {
+                        ticker: hashlib.sha256(
+                            (
+                                _resolve(root, teacher_config["cache_root"])
+                                / ticker
+                                / "manifest.json"
+                            ).read_bytes()
+                        ).hexdigest()
+                        for ticker in teacher_config.get("required_tickers", ())
+                    },
+                    "teacher_inputs_at_inference": False,
+                    "temporary_heads_saved": False,
+                }
+                if teachers_enabled else {"enabled": False}
+            ),
         }
         archive = CandidateArchive(output / "archive")
         recipe = {
@@ -271,6 +320,40 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _ensure_teacher_caches(
+    *,
+    root: Path,
+    embedding_cache_root: Path,
+    teacher_config: dict,
+    sealed_start: str,
+) -> None:
+    bundle = load_teacher_bundle(_resolve(root, teacher_config["bundle"]))
+    cache_root = _resolve(root, teacher_config["cache_root"])
+    required = tuple(str(value) for value in teacher_config["required_tickers"])
+    if required != ("NQ",):
+        raise ValueError(
+            "the bundled paired Pivot OOF source currently supports exactly NQ"
+        )
+    destination = cache_root / "NQ"
+    if destination.is_dir():
+        TeacherSignalCache.load(
+            destination,
+            ticker="NQ",
+            channels=teacher_config["channels"],
+        )
+        return
+    bundle_root = Path(bundle["_root"])
+    build_directional_oof_teacher_cache(
+        embedding_cache_root=embedding_cache_root / "NQ",
+        pivot_oof=bundle_root / bundle["pivot"]["oof_scores"],
+        expansion_oof=bundle_root / bundle["expansion"]["oof_scores"],
+        destination=destination,
+        ticker="NQ",
+        channels=teacher_config["channels"],
+        research_end_exclusive=sealed_start,
+    )
+
+
 def load_markets(
     *,
     asset_contract: AssetContract,
@@ -279,18 +362,53 @@ def load_markets(
     timeframe_minutes: int,
     start: str | None,
     end: str | None,
+    teacher_cache_root: str | Path | None = None,
+    teacher_channels: tuple[str, ...] = (),
+    required_teacher_tickers: tuple[str, ...] = (),
 ) -> dict[str, MarketSeries]:
     asset_contract.verify()
     root = Path(cache_root)
     markets = {}
     for ticker in tickers:
-        markets[ticker] = load_market_series(
+        market = load_market_series(
             Path(asset_contract.market_data) / f"{ticker}_{timeframe_minutes}min.csv",
             root / ticker,
             ticker=ticker,
             start=start,
             end=end,
         )
+        if teacher_cache_root is not None:
+            if ticker in required_teacher_tickers:
+                teacher_path = Path(teacher_cache_root) / ticker
+                if not teacher_path.is_dir():
+                    raise ValueError(
+                        f"required temporary teacher cache is missing for {ticker}"
+                    )
+                teacher = TeacherSignalCache.load(
+                    teacher_path,
+                    ticker=ticker,
+                    channels=teacher_channels,
+                )
+                teacher_times = np.asarray(teacher.timestamps)
+                rows = np.searchsorted(teacher_times, market.timestamps)
+                if (
+                    (rows >= len(teacher_times)).any()
+                    or not np.array_equal(teacher_times[rows], market.timestamps)
+                ):
+                    raise ValueError(
+                        f"temporary teacher timestamps do not exactly align for {ticker}"
+                    )
+                targets = np.asarray(teacher.probabilities[rows], dtype=np.float32)
+                mask = np.asarray(teacher.availability[rows], dtype=np.bool_)
+            else:
+                targets = np.zeros((len(market.timestamps), len(teacher_channels)), np.float32)
+                mask = np.zeros_like(targets, dtype=np.bool_)
+            market = replace(
+                market,
+                teacher_targets=targets,
+                teacher_mask=mask,
+            )
+        markets[ticker] = market
     return markets
 
 
@@ -356,6 +474,8 @@ def train_agent(
                 options={"ticker": ticker_schedule[episode_index]}
             )
         valid = tuple(reset_info["valid_actions"])
+        teacher_targets = reset_info.get("teacher_targets")
+        teacher_mask = reset_info.get("teacher_mask")
         hidden = None
         transitions = []
         total_reward = 0.0
@@ -385,9 +505,21 @@ def train_agent(
                 terminated=terminated,
                 valid_actions=valid,
                 next_valid_actions=next_valid,
+                teacher_targets=(
+                    None
+                    if teacher_targets is None
+                    else np.asarray(teacher_targets, dtype=np.float32)
+                ),
+                teacher_mask=(
+                    None
+                    if teacher_mask is None
+                    else np.asarray(teacher_mask, dtype=np.bool_)
+                ),
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid
+            teacher_targets = info.get("teacher_targets")
+            teacher_mask = info.get("teacher_mask")
             terminal_info = info
             step_index += 1
             environment_steps += 1

@@ -224,4 +224,6 @@ data/ohlcv
 checkpoints/chronos2_mask_full
 cache/
 runs/
-models/
+models/*
+!models/teachers/
+!models/teachers/**

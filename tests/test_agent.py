@@ -116,6 +116,79 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert not torch.equal(before, agent.online.output.weight.detach())
 
 
+def test_temporary_teacher_loss_updates_shared_encoder_but_is_not_saved(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        2,
+        seed=9,
+        temporary_teacher_weights=(0.25, 0.25, 0.5, 0.5),
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([index, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([index + 1, 0], np.float32),
+            terminated=index == 3,
+            valid_actions=(Action.WAIT,),
+            next_valid_actions=(Action.WAIT,),
+            teacher_targets=np.asarray([1.0, 0.0, 1.0, 0.0], np.float32),
+            teacher_mask=np.ones(4, dtype=np.bool_),
+        )
+        for index in range(4)
+    )
+    before = agent.online.input[1].weight.detach().clone()
+
+    loss = agent.train_batch((sequence, sequence))
+    checkpoint = agent.save(tmp_path / "student.pt", manifest={"teachers": "discarded"})
+    restored, manifest = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert np.isfinite(loss)
+    assert not torch.equal(before, agent.online.input[1].weight.detach())
+    assert agent.temporary_teacher_head is not None
+    assert restored.temporary_teacher_head is None
+    assert not any("teacher" in key for key in restored.online.state_dict())
+    assert manifest == {"teachers": "discarded"}
+
+
+def test_teacher_enabled_agent_rejects_replay_without_teacher_targets() -> None:
+    agent = _agent(2, temporary_teacher_weights=(1.0,))
+    transition = Transition(
+        observation=np.zeros(2, np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.zeros(2, np.float32),
+        terminated=True,
+        valid_actions=(Action.WAIT,),
+        next_valid_actions=(Action.WAIT,),
+    )
+
+    with pytest.raises(ValueError, match="teacher-enabled replay"):
+        agent.train_batch(((transition,),))
+
+
+def test_teacher_loss_weight_controls_auxiliary_supervision_strength() -> None:
+    transition = Transition(
+        observation=np.asarray([0.25, -0.5], np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.asarray([0.5, -0.25], np.float32),
+        terminated=True,
+        valid_actions=(Action.WAIT,),
+        next_valid_actions=(Action.WAIT,),
+        teacher_targets=np.asarray([1.0], np.float32),
+        teacher_mask=np.asarray([True], np.bool_),
+    )
+    weak = _agent(2, seed=19, temporary_teacher_weights=(0.1,))
+    strong = _agent(2, seed=19, temporary_teacher_weights=(1.0,))
+
+    weak_loss = weak.train_batch(((transition,),))
+    strong_loss = strong.train_batch(((transition,),))
+
+    assert strong_loss > weak_loss
+
+
 @pytest.mark.skipif(
     not torch.backends.mps.is_available(),
     reason="MPS is unavailable on this test host",

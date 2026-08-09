@@ -63,12 +63,20 @@ class RecurrentC51Network(nn.Module):
         observations: torch.Tensor,
         hidden: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        encoded = self.input(observations)
-        recurrent, hidden = self.recurrent(encoded, hidden)
+        recurrent, hidden = self.encode(observations, hidden)
         logits = self.output(recurrent).view(
             *recurrent.shape[:2], self.action_count, self.atoms
         )
         return logits, hidden
+
+    def encode(
+        self,
+        observations: torch.Tensor,
+        hidden: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        encoded = self.input(observations)
+        recurrent, hidden = self.recurrent(encoded, hidden)
+        return recurrent, hidden
 
 
 class RecurrentC51Agent:
@@ -89,6 +97,7 @@ class RecurrentC51Agent:
         target_sync_updates: int,
         device: str,
         seed: int,
+        temporary_teacher_weights: Sequence[float] | None = None,
     ) -> None:
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
@@ -115,8 +124,25 @@ class RecurrentC51Agent:
             observation_dim, len(Action), atoms, hidden_dim
         ).to(self.device)
         self.target = copy.deepcopy(self.online).to(self.device).eval()
+        teacher_weights = tuple(
+            float(value) for value in (temporary_teacher_weights or ())
+        )
+        if any(value < 0 for value in teacher_weights) or (
+            teacher_weights and not any(value > 0 for value in teacher_weights)
+        ):
+            raise ValueError("temporary teacher weights must be nonnegative and nonzero")
+        self._temporary_teacher_weights = torch.as_tensor(
+            teacher_weights, dtype=torch.float32, device=self.device
+        )
+        self.temporary_teacher_head = (
+            nn.Linear(hidden_dim, len(teacher_weights)).to(self.device)
+            if teacher_weights else None
+        )
+        parameters = list(self.online.parameters())
+        if self.temporary_teacher_head is not None:
+            parameters.extend(self.temporary_teacher_head.parameters())
         self.optimizer = torch.optim.AdamW(
-            self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
+            parameters, lr=self.learning_rate, weight_decay=self.weight_decay
         )
         self._updates = 0
 
@@ -188,7 +214,10 @@ class RecurrentC51Agent:
             device=self.device,
         )
 
-        logits, _ = self.online(observations)
+        features, _ = self.online.encode(observations)
+        logits = self.online.output(features).view(
+            *features.shape[:2], len(Action), self.atoms
+        )
         chosen_logits = logits.gather(
             2,
             actions[..., None, None].expand(-1, -1, 1, self.atoms),
@@ -207,9 +236,52 @@ class RecurrentC51Agent:
                 target_distribution, rewards, terminated
             )
         loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
+        if self.temporary_teacher_head is not None:
+            if any(
+                item.teacher_targets is None or item.teacher_mask is None
+                for sequence in sequences
+                for item in sequence
+            ):
+                raise ValueError("teacher-enabled replay requires teacher targets and masks")
+            teacher_targets = torch.as_tensor(
+                np.stack([
+                    [item.teacher_targets for item in sequence]
+                    for sequence in sequences
+                ]),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            teacher_mask = torch.as_tensor(
+                np.stack([
+                    [item.teacher_mask for item in sequence]
+                    for sequence in sequences
+                ]),
+                dtype=torch.bool,
+                device=self.device,
+            )
+            expected = (*features.shape[:2], len(self._temporary_teacher_weights))
+            if teacher_targets.shape != expected or teacher_mask.shape != expected:
+                raise ValueError("teacher-enabled replay channel shape drifted")
+            weighted_mask = (
+                teacher_mask.float() * self._temporary_teacher_weights.view(1, 1, -1)
+            )
+            denominator = teacher_mask.sum()
+            if denominator.item() > 0:
+                teacher_logits = self.temporary_teacher_head(features)
+                teacher_loss = nn.functional.binary_cross_entropy_with_logits(
+                    teacher_logits, teacher_targets, reduction="none"
+                )
+                loss = loss + (teacher_loss * weighted_mask).sum() / denominator
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=self.gradient_clip)
+        nn.utils.clip_grad_norm_(
+            (
+                parameter
+                for group in self.optimizer.param_groups
+                for parameter in group["params"]
+            ),
+            max_norm=self.gradient_clip,
+        )
         self.optimizer.step()
         self._updates += 1
         if self._updates % self.target_sync_updates == 0:
@@ -245,7 +317,13 @@ class RecurrentC51Agent:
             "manifest": dict(manifest),
             "online": self.online.state_dict(),
             "target": self.target.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+            # Temporary teacher parameters and their optimizer slots are
+            # intentionally absent from the deployable student checkpoint.
+            "optimizer": (
+                None
+                if self.temporary_teacher_head is not None
+                else self.optimizer.state_dict()
+            ),
             "updates": self._updates,
             "support": self.support.cpu(),
             "config": {
@@ -273,6 +351,7 @@ class RecurrentC51Agent:
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])
-        agent.optimizer.load_state_dict(payload["optimizer"])
+        if payload.get("optimizer") is not None:
+            agent.optimizer.load_state_dict(payload["optimizer"])
         agent._updates = int(payload["updates"])
         return agent, dict(payload["manifest"])

@@ -1,0 +1,23 @@
+{
+  "schema": "propevolve_temporary_teacher_bundle_v1",
+  "inference_dependency": false,
+  "temporary_heads_saved": false,
+  "pivot": {
+    "scope": "NQ paired 3min/developing-15min Pivot durability teacher",
+    "checkpoint": "pivot/pivot.pt",
+    "checkpoint_sha256": "02e5dcadbcae6089330ffe7ecf416a614b91c2a70b56c9dc91f8cbe21d5cfd3b",
+    "oof_scores": "pivot/oof_scores.npz",
+    "oof_scores_sha256": "8bbe0861c60828651bb2939cd9e6cdba92c36214b538f161b2fe391a3c9f955c",
+    "oof_policy": "strict_temporal_oof"
+  },
+  "expansion": {
+    "scope": "nine-market 3min factorized Expansion teacher",
+    "checkpoint": "expansion/expansion.pt",
+    "checkpoint_sha256": "4c7eae37ce92b11c9bcc29ce5e3e07e4b24afc481d2026d39d6a552f11c89208",
+    "oof_scores": "expansion/oof_scores.npz",
+    "oof_scores_sha256": "166198ef955bd5dedf3047213d540889e626b7414cd7fbd9a63fae2ef9ab78ce",
+    "calibration": "expansion/calibration.json",
+    "calibration_sha256": "d7e021991861011d80c196fb806786db7fb9b521681d3d93f15d865918c83e5a",
+    "oof_policy": "strict_temporal_oof"
+  }
+}

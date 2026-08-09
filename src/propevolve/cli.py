@@ -26,6 +26,14 @@ def _parser() -> argparse.ArgumentParser:
     cache = subparsers.add_parser("build-cache", help="build frozen Chronos2 caches")
     cache.add_argument("--config", required=True)
     cache.add_argument("--ticker", action="append")
+    teachers = subparsers.add_parser(
+        "build-teacher-cache",
+        help="densify matched temporal OOF Pivot and Expansion teachers",
+    )
+    teachers.add_argument("--config", required=True)
+    teachers.add_argument("--ticker", required=True)
+    teachers.add_argument("--pivot-oof", required=True)
+    teachers.add_argument("--expansion-oof", required=True)
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
     evolve = subparsers.add_parser(
@@ -166,6 +174,30 @@ def _train(config: dict) -> int:
     return 0
 
 
+def _build_teacher_cache(config: dict, args) -> int:
+    from .teachers import build_directional_oof_teacher_cache
+
+    teacher_config = config.get("teachers") or {}
+    if not teacher_config.get("enabled"):
+        raise ValueError("experiment config does not enable temporary teachers")
+    ticker = str(args.ticker)
+    if ticker not in config["tickers"]:
+        raise ValueError("teacher ticker is outside the experiment population")
+    root = Path(config["_root"])
+    destination = _resolve(root, teacher_config["cache_root"]) / ticker
+    result = build_directional_oof_teacher_cache(
+        embedding_cache_root=_resolve(root, config["cache_root"]) / ticker,
+        pivot_oof=args.pivot_oof,
+        expansion_oof=args.expansion_oof,
+        destination=destination,
+        ticker=ticker,
+        channels=teacher_config["channels"],
+        research_end_exclusive=config["temporal"]["sealed_start"],
+    )
+    print(f"[teachers] COMPLETE {ticker} {result}", flush=True)
+    return 0
+
+
 def _state_payload(state) -> dict:
     payload = asdict(state)
     payload["phase"] = state.phase.value
@@ -213,6 +245,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build-cache":
         config["_requested_tickers"] = tuple(args.ticker or ())
         return _build_caches(config)
+    if args.command == "build-teacher-cache":
+        return _build_teacher_cache(config, args)
     if args.command == "train":
         return _train(config)
     if args.command == "evolve":
