@@ -226,4 +226,6 @@ cache/
 runs/
 models/*
 !models/teachers/
-!models/teachers/**
+!models/teachers/manifest.json
+!models/teachers/expansion/
+!models/teachers/expansion/expansion.pt

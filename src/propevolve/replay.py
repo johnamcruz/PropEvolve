@@ -20,8 +20,6 @@ class Transition:
     terminated: bool
     valid_actions: tuple[Action, ...]
     next_valid_actions: tuple[Action, ...]
-    teacher_targets: np.ndarray | None = None
-    teacher_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

@@ -33,19 +33,6 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     ]
 
 
-def test_teacher_experiment_is_portable_and_keeps_teachers_out_of_inference() -> None:
-    config = load_experiment_config(
-        "config/historical_mask_ratchet_teachers_v1.json"
-    )
-
-    assert config["teachers"]["bundle"] == "models/teachers/manifest.json"
-    assert config["teachers"]["required_tickers"] == ("NQ",)
-    assert config["teachers"]["inference_dependency"] is False
-    assert "teachers.loss_weights.expansion_long_probability" in (
-        config["evolution"]["allowed_revision_paths"]
-    )
-
-
 def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) -> None:
     payload = json.loads(Path("config/historical_mask_v1.json").read_text())
     payload["tickers"] = ["NQ", "CL"]
@@ -119,71 +106,4 @@ def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="declared together"):
-        load_experiment_config(path)
-
-
-def test_config_accepts_training_only_oof_teachers(tmp_path: Path) -> None:
-    payload = json.loads(Path("config/historical_mask_ratchet_v1.json").read_text())
-    payload["teachers"] = {
-        "schema": "temporary_oof_distillation_v1",
-        "enabled": True,
-        "source_policy": "strict_temporal_oof",
-        "inference_dependency": False,
-        "cache_root": "cache/teachers",
-        "bundle": "models/teachers/manifest.json",
-        "channels": ["pivot_long", "pivot_short", "expansion_long", "expansion_short"],
-        "loss_weights": {
-            "pivot_long": 0.25,
-            "pivot_short": 0.25,
-            "expansion_long": 0.5,
-            "expansion_short": 0.5,
-        },
-        "required_tickers": ["NQ"],
-    }
-    path = tmp_path / "teachers.json"
-    path.write_text(json.dumps(payload))
-
-    config = load_experiment_config(path)
-
-    assert config["teachers"]["required_tickers"] == ("NQ",)
-    assert config["teachers"]["inference_dependency"] is False
-
-
-def test_config_rejects_duplicate_teacher_coverage(tmp_path: Path) -> None:
-    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
-    payload["teachers"] = {
-        "schema": "temporary_oof_distillation_v1",
-        "enabled": True,
-        "source_policy": "strict_temporal_oof",
-        "inference_dependency": False,
-        "cache_root": "cache/teachers",
-        "bundle": "models/teachers/manifest.json",
-        "channels": ["pivot_long_probability"],
-        "loss_weights": {"pivot_long_probability": 0.25},
-        "required_tickers": ["NQ", "NQ"],
-    }
-    path = tmp_path / "duplicate-teachers.json"
-    path.write_text(json.dumps(payload))
-
-    with pytest.raises(ValueError, match="coverage are invalid"):
-        load_experiment_config(path)
-
-
-def test_config_rejects_teacher_inference_dependency(tmp_path: Path) -> None:
-    payload = json.loads(Path("config/historical_mask_ratchet_v1.json").read_text())
-    payload["teachers"] = {
-        "schema": "temporary_oof_distillation_v1",
-        "enabled": True,
-        "source_policy": "strict_temporal_oof",
-        "inference_dependency": True,
-        "cache_root": "cache/teachers",
-        "bundle": "models/teachers/manifest.json",
-        "channels": ["pivot"],
-        "loss_weights": {"pivot": 1.0},
-        "required_tickers": ["NQ"],
-    }
-    path = tmp_path / "invalid-teachers.json"
-    path.write_text(json.dumps(payload))
-
-    with pytest.raises(ValueError, match="teacher contract"):
         load_experiment_config(path)

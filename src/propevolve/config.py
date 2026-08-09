@@ -126,43 +126,6 @@ def load_experiment_config(path: str | Path) -> dict:
     training = payload["training"]
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
-    teachers = payload.get("teachers")
-    if teachers is not None:
-        if (
-            not isinstance(teachers, dict)
-            or teachers.get("schema") != "temporary_oof_distillation_v1"
-            or teachers.get("enabled") is not True
-            or teachers.get("source_policy") != "strict_temporal_oof"
-            or teachers.get("inference_dependency") is not False
-            or not str(teachers.get("cache_root", "")).strip()
-            or not str(teachers.get("bundle", "")).strip()
-        ):
-            raise ValueError("temporary teacher contract is invalid")
-        channels = tuple(str(value) for value in teachers.get("channels", ()))
-        weights = teachers.get("loss_weights") or {}
-        required_tickers = tuple(
-            str(value) for value in teachers.get("required_tickers", ())
-        )
-        if (
-            not channels
-            or len(set(channels)) != len(channels)
-            or not isinstance(weights, dict)
-            or set(weights) != set(channels)
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or float(value) < 0
-                for value in weights.values()
-            )
-            or not any(float(value) > 0 for value in weights.values())
-            or not required_tickers
-            or len(set(required_tickers)) != len(required_tickers)
-            or not set(required_tickers) <= set(tickers)
-        ):
-            raise ValueError("temporary teacher channels, weights, or coverage are invalid")
-        teachers["channels"] = channels
-        teachers["required_tickers"] = required_tickers
-        payload["teachers"] = teachers
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),

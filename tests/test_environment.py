@@ -265,36 +265,3 @@ def test_short_ratchet_uses_an_independent_downside_path() -> None:
     assert stopped["exit_reason"] == "ratchet_stop"
     assert stopped["realized_pnl"] == 300.0
     assert stopped["avg_win_r"] == 1.5
-
-
-def test_environment_exposes_teacher_supervision_without_observation_dependency() -> None:
-    market = _market()
-    teacher_targets = np.tile(
-        np.asarray([0.8, 0.2, 0.7, 0.3], np.float32),
-        (len(market.close), 1),
-    )
-    teacher_mask = np.ones_like(teacher_targets, dtype=np.bool_)
-    market = MarketSeries(
-        ticker=market.ticker,
-        timestamps=market.timestamps,
-        open=market.open,
-        high=market.high,
-        low=market.low,
-        close=market.close,
-        embeddings=market.embeddings,
-        teacher_targets=teacher_targets,
-        teacher_mask=teacher_mask,
-    )
-    environment = HistoricalChallengeEnv(
-        {"NQ": market},
-        tick_values={"NQ": 20.0},
-        round_trip_fees={"NQ": 3.84},
-        spec=_spec(),
-        seed=1,
-    )
-
-    observation, info = environment.reset(options={"ticker": "NQ", "start": 0})
-
-    assert observation.shape == (market.embeddings.shape[1] + 12,)
-    np.testing.assert_array_equal(info["teacher_targets"], teacher_targets[0])
-    np.testing.assert_array_equal(info["teacher_mask"], teacher_mask[0])

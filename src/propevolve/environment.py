@@ -73,8 +73,6 @@ class MarketSeries:
     low: np.ndarray
     close: np.ndarray
     embeddings: np.ndarray
-    teacher_targets: np.ndarray | None = None
-    teacher_mask: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         lengths = {
@@ -88,20 +86,6 @@ class MarketSeries:
             raise ValueError("market prices and embeddings must be finite matrices")
         if not np.isfinite(self.embeddings).all():
             raise ValueError("market prices and embeddings must be finite matrices")
-        if (self.teacher_targets is None) != (self.teacher_mask is None):
-            raise ValueError("teacher targets and mask must be declared together")
-        if self.teacher_targets is not None:
-            targets = np.asarray(self.teacher_targets)
-            mask = np.asarray(self.teacher_mask)
-            if (
-                targets.ndim != 2
-                or targets.shape[0] != len(self.timestamps)
-                or mask.shape != targets.shape
-                or mask.dtype != np.bool_
-                or not np.isfinite(targets).all()
-                or np.any((targets < 0.0) | (targets > 1.0))
-            ):
-                raise ValueError("market teacher arrays violate their contract")
         if (
             (self.high < np.maximum(self.open, self.close)).any()
             or (self.low > np.minimum(self.open, self.close)).any()
@@ -300,14 +284,12 @@ class HistoricalChallengeEnv:
         self._primary_side = "flat"
         self._closed_trade_pnls = []
         self._trading_days_elapsed = 1
-        info = {
+        return self._observation(), {
             "ticker": ticker,
             "start": start,
             "end": self._end,
             "valid_actions": self.valid_actions(),
         }
-        info.update(self._teacher_info())
-        return self._observation(), info
 
     def valid_actions(self) -> tuple[Action, ...]:
         return self._masker.valid_actions(self._account_state())
@@ -384,7 +366,6 @@ class HistoricalChallengeEnv:
             "valid_actions": () if self._terminated else self.valid_actions(),
             **self._trade_statistics(),
         })
-        info.update(self._teacher_info())
         return self._observation(), float(reward), self._terminated, False, info
 
     def _apply_action(self, action: Action, fill: float, info: dict) -> None:
@@ -584,16 +565,3 @@ class HistoricalChallengeEnv:
         return self._assembler.assemble(
             self._market.embeddings[self._index], self._account_state()
         )
-
-    def _teacher_info(self) -> dict[str, np.ndarray]:
-        assert self._market is not None
-        if self._market.teacher_targets is None:
-            return {}
-        return {
-            "teacher_targets": np.asarray(
-                self._market.teacher_targets[self._index], dtype=np.float32
-            ),
-            "teacher_mask": np.asarray(
-                self._market.teacher_mask[self._index], dtype=np.bool_
-            ),
-        }
