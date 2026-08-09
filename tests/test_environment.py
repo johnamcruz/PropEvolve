@@ -66,28 +66,6 @@ def test_combine_accumulates_pnl_across_trades_and_sessions_until_pass() -> None
     assert account.outcome() == "pass"
 
 
-def test_daily_profit_lock_blocks_new_entries_until_next_session() -> None:
-    env = HistoricalChallengeEnv(
-        {"NQ": _market()},
-        round_trip_fees={"NQ": 0.0},
-        tick_values={"NQ": 20.0},
-        spec=_spec(daily_profit_lock_dollars=3_000.0),
-        seed=1,
-    )
-    env.reset(options={"ticker": "NQ", "start": 0})
-    assert env._account is not None
-    env._account.realize(3_000.0)
-
-    assert env.valid_actions() == (Action.WAIT,)
-
-    env._account.close_session()
-    assert env.valid_actions() == (
-        Action.WAIT,
-        Action.ENTER_LONG_1,
-        Action.ENTER_SHORT_1,
-    )
-
-
 def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
     env = HistoricalChallengeEnv(
         {"NQ": _market()},

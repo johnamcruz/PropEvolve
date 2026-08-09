@@ -14,7 +14,6 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
     assert config["challenge"]["per_trade_risk_dollars"] == 200.0
     assert config["challenge"]["ratchet_activation_r"] == 2.0
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
-    assert config["challenge"]["daily_profit_lock_dollars"] == 3_000.0
     assert "challenge" in config["evolution"]["frozen_paths"]
     assert config["training"]["minimum_environment_steps"] == 5_000_000
 
@@ -74,7 +73,6 @@ def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path)
         "per_trade_risk_dollars": 200.0,
         "ratchet_activation_r": 2.0,
         "ratchet_giveback_r": 0.5,
-        "daily_profit_lock_dollars": 3_000.0,
     })
     path = tmp_path / "ratchet.json"
     path.write_text(json.dumps(payload))
@@ -84,7 +82,6 @@ def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path)
     assert config["challenge"]["per_trade_risk_dollars"] == 200.0
     assert config["challenge"]["ratchet_activation_r"] == 2.0
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
-    assert config["challenge"]["daily_profit_lock_dollars"] == 3_000.0
 
 
 def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:

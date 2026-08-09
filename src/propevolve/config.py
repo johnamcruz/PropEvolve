@@ -115,11 +115,6 @@ def load_experiment_config(path: str | Path) -> dict:
         <= float(challenge["ratchet_giveback_r"])
     ):
         raise ValueError("trade risk and ratchet fields are invalid")
-    if (
-        "daily_profit_lock_dollars" in challenge
-        and float(challenge["daily_profit_lock_dollars"]) <= 0
-    ):
-        raise ValueError("challenge daily profit lock must be positive")
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
         raise ValueError("cache format must be native or ffm_frozen_representation_v2")

@@ -31,8 +31,7 @@
     "reward_scale": 1000.0,
     "per_trade_risk_dollars": 200.0,
     "ratchet_activation_r": 2.0,
-    "ratchet_giveback_r": 0.5,
-    "daily_profit_lock_dollars": 3000.0
+    "ratchet_giveback_r": 0.5
   },
   "point_values": {
     "NQ": 20.0, "ES": 50.0, "GC": 100.0, "RTY": 50.0, "YM": 5.0,

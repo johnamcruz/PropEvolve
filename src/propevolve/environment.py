@@ -29,7 +29,6 @@ class ChallengeSpec:
     per_trade_risk_dollars: float | None = None
     ratchet_activation_r: float | None = None
     ratchet_giveback_r: float | None = None
-    daily_profit_lock_dollars: float | None = None
 
     def __post_init__(self) -> None:
         if min(
@@ -59,11 +58,6 @@ class ChallengeSpec:
                 or float(self.ratchet_activation_r) <= float(self.ratchet_giveback_r)
             ):
                 raise ValueError("trade risk and ratchet settings are invalid")
-        if (
-            self.daily_profit_lock_dollars is not None
-            and self.daily_profit_lock_dollars <= 0
-        ):
-            raise ValueError("daily profit lock must be positive")
 
     @property
     def episode_bars(self) -> int:
@@ -298,13 +292,6 @@ class HistoricalChallengeEnv:
         }
 
     def valid_actions(self) -> tuple[Action, ...]:
-        if (
-            self._position is None
-            and self._account is not None
-            and self.spec.daily_profit_lock_dollars is not None
-            and self._account.session_pnl >= self.spec.daily_profit_lock_dollars
-        ):
-            return (Action.WAIT,)
         return self._masker.valid_actions(self._account_state())
 
     def step(self, action: Action | int) -> tuple[np.ndarray, float, bool, bool, dict]:
@@ -374,10 +361,6 @@ class HistoricalChallengeEnv:
             "mll_floor_pnl": self._account.mll_floor_pnl,
             "mll_headroom": self._account.mll_headroom(equity),
             "passmark_locked": self._account.passmark_locked,
-            "daily_profit_locked": bool(
-                self.spec.daily_profit_lock_dollars is not None
-                and self._account.session_pnl >= self.spec.daily_profit_lock_dollars
-            ),
             "timestamp": str(self._market.timestamps[self._index]),
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
