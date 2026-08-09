@@ -36,6 +36,7 @@ def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:
 def test_safety_replay_recipe_exposes_only_bounded_training_reward_revisions() -> None:
     config = load_experiment_config("config/historical_mask_safety_replay_v1.json")
 
+    assert config["campaign"]["reasoning"]["proposer"] == "standard"
     assert config["training"]["terminal_sequence_fraction"] == 0.5
     assert config["challenge"]["mll_proximity_penalty_coefficient"] == 0.0001
     for path in (
@@ -58,6 +59,30 @@ def test_safety_replay_recipe_exposes_only_bounded_training_reward_revisions() -
         "training.minimum_environment_steps",
     ):
         assert path in config["evolution"]["frozen_paths"]
+
+
+def test_config_accepts_optional_gepa_reflective_reasoning_proposer(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["campaign"]["reasoning"]["proposer"] = "gepa_reflective"
+    path = tmp_path / "gepa-reflective.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["campaign"]["reasoning"]["provider"] == "codex"
+    assert config["campaign"]["reasoning"]["proposer"] == "gepa_reflective"
+
+
+def test_config_rejects_unknown_reasoning_proposer(tmp_path: Path) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["campaign"]["reasoning"]["proposer"] = "unbounded_search"
+    path = tmp_path / "invalid-proposer.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="reasoning proposer"):
+        load_experiment_config(path)
 
 
 def test_config_locks_training_only_markets_out_of_deployment(tmp_path: Path) -> None:

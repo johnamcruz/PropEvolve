@@ -35,6 +35,7 @@ from ml_training_loop.stores import JsonRunStore
 
 from .config import load_experiment_config
 from .evolution import CandidateArchive, Niche, RevisionPolicy
+from .reasoning import GepaReflectiveReasoningAdapter
 
 
 _STAGE_ADAPTER = "propevolve-candidate"
@@ -290,7 +291,7 @@ class _ArchiveReasoningAdapter:
 
 def _reasoning_prompt(request: ReasoningRequest) -> str:
     packet = request.receipt.outputs.get("reasoning_packet", {})
-    return (
+    prompt = (
         "Use $ml-diagnose-experiment to identify the first failed learning or "
         "economic boundary, then $ml-design-experiment to propose one smallest "
         "causal revision and $ml-train-select-model to check training validity. "
@@ -333,6 +334,21 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "markets. Choose STOP when the scientific path is falsified and BLOCKED "
         "only for integrity, causality, lineage, or executable-contract faults."
     )
+    reflection = request.receipt.outputs.get("gepa_reflection")
+    if reflection:
+        prompt += (
+            " This checkpoint uses the optional GEPA-style reflective proposer. "
+            "Read its authenticated actionable-side-information packet at "
+            f"{reflection.get('path')}. Verify its file SHA-256 "
+            f"{reflection.get('file_sha256')} and embedded content identity "
+            f"{reflection.get('identity_sha256')} against the representation each "
+            "name identifies. Compare the current parent evidence with exactly one "
+            "causally motivated child revision. Explain internally why the proposed "
+            "mutation addresses the first failed boundary and is not a repeated "
+            "recipe. The existing evaluator—not the reflection model—determines "
+            "acceptance. Never trade a nonzero blow rate for aggregate improvement."
+        )
+    return prompt
 
 
 def _build_codex_provider(config: Mapping, state_root: Path) -> ReasoningAdapter:
@@ -432,6 +448,14 @@ def run_evolution_campaign(
         )
     else:
         provider = reasoning
+    if (
+        provider is not None
+        and config["campaign"]["reasoning"]["proposer"] == "gepa_reflective"
+    ):
+        provider = GepaReflectiveReasoningAdapter(
+            provider=provider,
+            packet_root=state_root / "gepa-reflections",
+        )
     archive_reasoning = (
         None
         if provider is None

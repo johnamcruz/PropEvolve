@@ -245,6 +245,28 @@ select a proposal, mutate the plan, execute training, or waive a gate. No
 surrogate is enabled by default. This boundary follows
 [*Agentic Bayesian Optimization through Surrogate-Augmented Autoresearch*](https://arxiv.org/abs/2608.00316).
 
+The reasoning proposer is also selectable without changing the reasoning
+provider. Existing recipes default to `standard`. Set the following only for an
+opt-in GEPA-style reflective checkpoint:
+
+```json
+{
+  "campaign": {
+    "reasoning": {
+      "provider": "codex",
+      "proposer": "gepa_reflective"
+    }
+  }
+}
+```
+
+The reflective proposer adds a content-addressed Actionable Side Information
+packet containing the matched parent, diverse candidate evidence, exact gate
+failure, prior revisions, and experiment ledger. Codex still proposes exactly
+one allowlisted JSON revision, while the existing evaluator and hard zero-blow
+gate remain authoritative. It does not add GEPA as a runtime dependency or
+permit reasoning to mutate the frozen research contract.
+
 ## Expansion, Pivot, and Trend teachers
 
 The first matched baseline uses only frozen embeddings and account state. If

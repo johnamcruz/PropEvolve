@@ -209,6 +209,13 @@ def load_experiment_config(path: str | Path) -> dict:
     reasoning = campaign.get("reasoning") or {}
     if reasoning.get("provider") not in {"codex", "manual"}:
         raise ValueError("campaign reasoning provider must be codex or manual")
+    proposer = reasoning.get("proposer", "standard")
+    if proposer not in {"standard", "gepa_reflective"}:
+        raise ValueError(
+            "campaign reasoning proposer must be standard or gepa_reflective"
+        )
+    reasoning["proposer"] = proposer
+    campaign["reasoning"] = reasoning
     requirements = campaign.get("selection_requirements") or ()
     if not isinstance(requirements, list) or not requirements:
         raise ValueError("campaign selection requirements must be nonempty")

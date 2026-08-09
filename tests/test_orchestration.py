@@ -87,6 +87,29 @@ class ImproveHiddenDimension:
         )
 
 
+class InspectGepaReflection(ImproveHiddenDimension):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reflections: list[dict] = []
+
+    def revise(self, request):
+        reference = request.receipt.outputs["gepa_reflection"]
+        path = Path(reference["path"])
+        payload = json.loads(path.read_text())
+        assert payload["schema"] == "propevolve_gepa_reflection_v1"
+        assert payload["identity_sha256"] == reference["identity_sha256"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == reference["file_sha256"]
+        assert payload["actionable_side_information"]["gate"]["decision"] == "REVISE"
+        assert payload["actionable_side_information"]["gate"]["evidence"]["failures"]
+        assert payload["parent_reasoning_packet"]["identity_sha256"]
+        assert payload["experiment_ledger"]["identity"]
+        assert payload["reflection_contract"]["hard_feasibility_gate"] == (
+            "selection.blow_rate == 0"
+        )
+        self.reflections.append(payload)
+        return super().revise(request)
+
+
 class IllegalTemporalRevision:
     def revise(self, request):
         return ReasoningOutcome(
@@ -183,6 +206,48 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     parent = next(item for item in candidates if item.model_path.read_bytes() == b"128")
     assert child.manifest["parent_candidate_ids"] == [parent.candidate_id]
     assert reasoning.packet_paths
+
+
+def test_optional_gepa_proposer_adds_authenticated_actionable_side_information(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["campaign"]["reasoning"]["proposer"] = "gepa_reflective"
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+    reasoning = InspectGepaReflection()
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="gepa-reflection-test",
+        candidate_runner=runner,
+        reasoning=reasoning,
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert len(reasoning.reflections) == 1
+
+
+def test_standard_proposer_does_not_add_gepa_reflection(tmp_path: Path) -> None:
+    config_path = _config(tmp_path)
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    class InspectStandard(ImproveHiddenDimension):
+        def revise(self, request):
+            assert "gepa_reflection" not in request.receipt.outputs
+            return super().revise(request)
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="standard-reflection-test",
+        candidate_runner=runner,
+        reasoning=InspectStandard(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
 
 
 def test_campaign_blocks_reasoning_that_changes_frozen_temporal_contract(
