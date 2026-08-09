@@ -26,6 +26,12 @@ def _parser() -> argparse.ArgumentParser:
     cache = subparsers.add_parser("build-cache", help="build frozen Chronos2 caches")
     cache.add_argument("--config", required=True)
     cache.add_argument("--ticker", action="append")
+    expansion_teacher = subparsers.add_parser(
+        "build-expansion-teacher-cache",
+        help="score verified Expansion teachers over existing Mask caches",
+    )
+    expansion_teacher.add_argument("--config", required=True)
+    expansion_teacher.add_argument("--ticker", action="append")
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
     evolve = subparsers.add_parser(
@@ -133,6 +139,19 @@ def _build_caches(config: dict) -> int:
     return 0
 
 
+def _build_expansion_teacher_caches(
+    config_path: str,
+    requested_tickers: Sequence[str],
+) -> int:
+    from .expansion_teacher import build_expansion_teacher_caches
+
+    build_expansion_teacher_caches(
+        config_path,
+        requested_tickers=tuple(requested_tickers),
+    )
+    return 0
+
+
 def _utc_isoformat(value: str) -> str:
     from datetime import datetime, timezone
 
@@ -206,6 +225,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(contract.__dict__, indent=2, sort_keys=True))
         return 0
+    if args.command == "build-expansion-teacher-cache":
+        return _build_expansion_teacher_caches(
+            args.config,
+            tuple(args.ticker or ()),
+        )
     config = load_experiment_config(args.config)
     if args.command == "validate-config":
         print(f"VALID {config['_path']}")

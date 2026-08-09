@@ -38,6 +38,17 @@
       "ZB": "2bb0418bc5ef1f6d100fafea3230a04b88a2023627c172064bc513ff4954f186",
       "ZN": "439533532c35097c1e3be023883a5d834e01189fd9439b2d7a7dbaf73349c3f2"
     },
+    "embeddings_sha256s": {
+      "CL": "02014d28b79dafa28606f111ebb6f79b3c2c9787b5a82e77a50b61ffde57d78b",
+      "ES": "0146fa1eb74da064a3e5e689a84375ee8e795285db6ae7cc48564d8c67de27f1",
+      "GC": "01efcb6325d373af38057bb75a2669a1b2583c3796561d8870a245445fc7a85c",
+      "NQ": "35e025c51631327f96a26838ed76d85448d7defde64c4d54b89b5ae19de723bc",
+      "RTY": "a9dca8bcce7aae20cbfaa2b57c437ed45b7dea9e058096699f87927b1861e08d",
+      "SI": "6b2d0d9d0556831026c9ef15e9ba55ccbdf12284ff84d3b3e801c8d44c217e5a",
+      "YM": "c8e41d34eb2c31462691e13daaa6ddf36128adccd781abef3f97d97b6af0c0b0",
+      "ZB": "3b0dc08e027f6fcdf2ba8906491e1151a31d9e420f46ac9a5464ed3c9ea0df3a",
+      "ZN": "b5972553a5c3ee4fdc5f0f5dd7c492b5fdb9a091bf0022d9e3fe2772a1702266"
+    },
     "training_roles": {
       "train_rows": 2106875,
       "natural_validation_rows": 1060232,

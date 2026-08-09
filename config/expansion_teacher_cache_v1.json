@@ -1,0 +1,15 @@
+{
+  "schema": "expansion_teacher_cache_build_v1",
+  "teacher_manifest": "models/teachers/manifest.json",
+  "embedding_cache_root": "cache/chronos2_mask_full_3min_pre2026_v2",
+  "output_root": "cache/expansion_teacher_9market_3min_pre2025_v1",
+  "tickers": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"],
+  "training_start_inclusive": "2021-01-01",
+  "training_end_exclusive": "2025-01-01",
+  "sealed_start": "2026-01-01",
+  "device": "mps",
+  "batch_size": 1024,
+  "fallback_batch_sizes": [512, 256],
+  "synchronization_batches": 8,
+  "progress_batches": 256
+}

@@ -260,6 +260,19 @@ be regenerated from that checkpoint for all nine markets before a teacher
 experiment is enabled; unrelated or merely timestamp-compatible score buses
 are rejected.
 
+After the matched baseline completes, generate the training-only Expansion
+teacher caches with the existing Mask embeddings:
+
+```bash
+propevolve build-expansion-teacher-cache \
+  --config config/expansion_teacher_cache_v1.json
+```
+
+The builder loads the model once on MPS, scores one ticker at a time, starts at
+batch size 1024 with bounded memory fallbacks, writes each ticker atomically,
+and treats authenticated completed tickers as resumable cache hits. It
+physically excludes 2025 selection and the sealed 2026 period.
+
 Permanent detector inputs are considered only if teacher-free distillation
 fails and a matched ablation proves that the additional live dependency raises
 pass rate or expectancy while reducing blow risk.

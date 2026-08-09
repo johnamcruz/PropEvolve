@@ -6,6 +6,7 @@ import json
 from ml_training_loop import Phase, RunState
 from ml_training_loop.stores import JsonRunStore
 import propevolve.orchestration
+import propevolve.expansion_teacher
 from propevolve.cli import main
 
 
@@ -80,3 +81,31 @@ def test_evolve_command_dispatches_the_shared_training_loop(
     assert code == 0
     assert calls == [("config/historical_mask_v1.json", "fake-e2e")]
     assert json.loads(capsys.readouterr().out)["phase"] == "COMPLETE"
+
+
+def test_expansion_teacher_cache_command_dispatches_requested_tickers(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def fake_builder(config_path, *, requested_tickers):
+        calls.append((config_path, requested_tickers))
+        return ()
+
+    monkeypatch.setattr(
+        propevolve.expansion_teacher,
+        "build_expansion_teacher_caches",
+        fake_builder,
+    )
+
+    code = main([
+        "build-expansion-teacher-cache",
+        "--config", "config/expansion_teacher_cache_v1.json",
+        "--ticker", "NQ",
+        "--ticker", "ES",
+    ])
+
+    assert code == 0
+    assert calls == [
+        ("config/expansion_teacher_cache_v1.json", ("NQ", "ES"))
+    ]
