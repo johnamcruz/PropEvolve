@@ -140,6 +140,20 @@ def test_curriculum_recipe_teaches_four_priorities_by_warm_started_stage() -> No
     assert "training.safety_sequence_fraction" in stages[0]["revision_paths"]
 
 
+def test_expansion_entry_search_recipe_is_training_only_and_matched() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_entry_search_curriculum_v7.json"
+    )
+
+    assert config["teacher"]["entry_search_loss_weight"] == 0.3
+    assert config["training"]["entry_opportunity_sequence_fraction"] == 0.25
+    assert "teacher" in config["evolution"]["frozen_paths"]
+    assert "training.entry_opportunity_sequence_fraction" in config["evolution"][
+        "frozen_paths"
+    ]
+    assert config["output"].endswith("historical_mask_expansion_entry_search_curriculum_v7")
+
+
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(
     tmp_path: Path,
 ) -> None:

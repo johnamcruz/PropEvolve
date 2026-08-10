@@ -146,6 +146,7 @@ def load_experiment_config(path: str | Path) -> dict:
     training = payload["training"]
     training.setdefault("terminal_sequence_fraction", 0.0)
     training.setdefault("safety_sequence_fraction", 0.0)
+    training.setdefault("entry_opportunity_sequence_fraction", 0.0)
     training.setdefault("management_epsilon_start", training["epsilon_start"])
     training.setdefault("management_epsilon_end", training["epsilon_end"])
     if (
@@ -166,8 +167,12 @@ def load_experiment_config(path: str | Path) -> dict:
     if (
         not 0 <= float(training["terminal_sequence_fraction"]) <= 1
         or not 0 <= float(training["safety_sequence_fraction"]) <= 1
+        or not 0 <= float(training["entry_opportunity_sequence_fraction"]) <= 1
         or float(training["terminal_sequence_fraction"])
         + float(training["safety_sequence_fraction"]) > 1
+        or float(training["terminal_sequence_fraction"])
+        + float(training["safety_sequence_fraction"])
+        + float(training["entry_opportunity_sequence_fraction"]) > 1
     ):
         raise ValueError("training replay sequence fractions are invalid")
     if (
@@ -179,12 +184,18 @@ def load_experiment_config(path: str | Path) -> dict:
     if teacher is not None:
         from .expansion_teacher import CHANNELS
 
+        teacher.setdefault("entry_search_loss_weight", 0.0)
+
         if (
             not isinstance(teacher, dict)
-            or set(teacher) != {"kind", "cache_root", "channels", "loss_weight"}
+            or set(teacher) != {
+                "kind", "cache_root", "channels", "loss_weight",
+                "entry_search_loss_weight",
+            }
             or teacher.get("kind") != "expansion"
             or tuple(teacher.get("channels", ())) != CHANNELS
             or float(teacher.get("loss_weight", 0.0)) <= 0
+            or float(teacher.get("entry_search_loss_weight", 0.0)) < 0
             or not str(teacher.get("cache_root", "")).strip()
         ):
             raise ValueError("training-only Expansion teacher contract is invalid")

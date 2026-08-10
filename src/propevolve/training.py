@@ -388,6 +388,9 @@ class HistoricalCandidateRunner:
             agent_settings.update(
                 teacher_channels=len(teacher_config["channels"]),
                 teacher_loss_weight=float(teacher_config["loss_weight"]),
+                teacher_entry_search_loss_weight=float(
+                    teacher_config["entry_search_loss_weight"]
+                ),
             )
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
@@ -450,6 +453,9 @@ class HistoricalCandidateRunner:
             ),
             safety_sequence_fraction=float(
                 training_config.get("safety_sequence_fraction", 0.0)
+            ),
+            entry_opportunity_sequence_fraction=float(
+                training_config.get("entry_opportunity_sequence_fraction", 0.0)
             ),
             seed=seed,
         )
@@ -1097,6 +1103,12 @@ def train_agent(
                 if teacher_lookup is not None
                 else None
             )
+            entry_opportunity_priority = 0.0
+            if teacher_target is not None:
+                entry_opportunity_priority = max(
+                    float(teacher_target[0]) * float(teacher_target[1]),
+                    float(teacher_target[2]) * float(teacher_target[3]),
+                )
             if teacher_target is not None and action in {
                 Action.ENTER_LONG_1, Action.ENTER_SHORT_1
             }:
@@ -1117,6 +1129,7 @@ def train_agent(
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
                 ),
+                entry_opportunity_priority=entry_opportunity_priority,
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid
@@ -1147,6 +1160,7 @@ def train_agent(
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
+        episode_entry_search_losses = []
         if len(replay) >= warmup_episodes:
             for _ in range(updates_per_episode):
                 episode_losses.append(agent.train_batch(replay.sample(batch_sequences)))
@@ -1156,6 +1170,10 @@ def train_agent(
                 if "teacher_loss" in train_metrics:
                     episode_teacher_losses.append(
                         float(train_metrics["teacher_loss"])
+                    )
+                if "entry_search_loss" in train_metrics:
+                    episode_entry_search_losses.append(
+                        float(train_metrics["entry_search_loss"])
                     )
         progress = TrainingProgress(
             completed_episodes=episode_index + 1,
@@ -1308,6 +1326,10 @@ def train_agent(
                 "mean_teacher_loss": (
                     float(np.mean(episode_teacher_losses))
                     if episode_teacher_losses else None
+                ),
+                "mean_entry_search_loss": (
+                    float(np.mean(episode_entry_search_losses))
+                    if episode_entry_search_losses else None
                 ),
                 "cumulative_passes": progress.passes,
                 "cumulative_blows": progress.blows,

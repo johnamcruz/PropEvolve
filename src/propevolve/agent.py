@@ -106,6 +106,7 @@ class RecurrentC51Agent:
         seed: int,
         teacher_channels: int = 0,
         teacher_loss_weight: float = 0.0,
+        teacher_entry_search_loss_weight: float = 0.0,
     ) -> None:
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
@@ -113,7 +114,11 @@ class RecurrentC51Agent:
             raise ValueError("optimizer settings are invalid")
         if target_sync_updates < 1:
             raise ValueError("target_sync_updates must be positive")
-        if teacher_channels < 0 or teacher_loss_weight < 0:
+        if (
+            teacher_channels < 0
+            or teacher_loss_weight < 0
+            or teacher_entry_search_loss_weight < 0
+        ):
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
             raise ValueError("teacher channels and loss weight must be enabled together")
@@ -133,6 +138,9 @@ class RecurrentC51Agent:
         self.gradient_clip = float(gradient_clip)
         self.teacher_channels = int(teacher_channels)
         self.teacher_loss_weight = float(teacher_loss_weight)
+        self.teacher_entry_search_loss_weight = float(
+            teacher_entry_search_loss_weight
+        )
         self.last_train_metrics: dict[str, float] = {}
         self.support = torch.linspace(value_min, value_max, atoms, device=self.device)
         self.online = RecurrentC51Network(
@@ -237,6 +245,7 @@ class RecurrentC51Agent:
         rl_loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
         loss = rl_loss
         teacher_loss_value = 0.0
+        entry_search_loss_value = 0.0
         if self.teacher_channels:
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
@@ -265,6 +274,54 @@ class RecurrentC51Agent:
                 )
                 teacher_loss_value = float(teacher_loss.detach().cpu())
                 loss = loss + self.teacher_loss_weight * teacher_loss
+                if self.teacher_entry_search_loss_weight:
+                    valid_masks = torch.as_tensor(
+                        [[
+                            [action in item.valid_actions for action in Action]
+                            for item in sequence
+                        ] for sequence in sequences],
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                    entry_rows = (
+                        teacher_rows
+                        & valid_masks[..., int(Action.WAIT)]
+                        & valid_masks[..., int(Action.ENTER_LONG_1)]
+                        & valid_masks[..., int(Action.ENTER_SHORT_1)]
+                    )
+                    if entry_rows.any():
+                        q_values = (logits.softmax(-1) * self.support).sum(-1)
+                        long_target = (
+                            teacher_targets_tensor[..., 0]
+                            * teacher_targets_tensor[..., 1]
+                        ).clamp(0.0, 1.0)
+                        short_target = (
+                            teacher_targets_tensor[..., 2]
+                            * teacher_targets_tensor[..., 3]
+                        ).clamp(0.0, 1.0)
+                        long_advantage = (
+                            q_values[..., int(Action.ENTER_LONG_1)]
+                            - q_values[..., int(Action.WAIT)]
+                        )
+                        short_advantage = (
+                            q_values[..., int(Action.ENTER_SHORT_1)]
+                            - q_values[..., int(Action.WAIT)]
+                        )
+                        entry_search_loss = 0.5 * (
+                            nn.functional.binary_cross_entropy_with_logits(
+                                long_advantage[entry_rows], long_target[entry_rows]
+                            )
+                            + nn.functional.binary_cross_entropy_with_logits(
+                                short_advantage[entry_rows], short_target[entry_rows]
+                            )
+                        )
+                        entry_search_loss_value = float(
+                            entry_search_loss.detach().cpu()
+                        )
+                        loss = loss + (
+                            self.teacher_entry_search_loss_weight
+                            * entry_search_loss
+                        )
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=self.gradient_clip)
@@ -276,6 +333,7 @@ class RecurrentC51Agent:
         self.last_train_metrics = {
             "rl_loss": float(rl_loss.detach().cpu()),
             "teacher_loss": teacher_loss_value,
+            "entry_search_loss": entry_search_loss_value,
             "total_loss": total_loss,
         }
         return total_loss
@@ -302,6 +360,7 @@ class RecurrentC51Agent:
         self.target = target
         self.teacher_channels = 0
         self.teacher_loss_weight = 0.0
+        self.teacher_entry_search_loss_weight = 0.0
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
@@ -353,6 +412,9 @@ class RecurrentC51Agent:
                 "seed": self.seed,
                 "teacher_channels": self.teacher_channels,
                 "teacher_loss_weight": self.teacher_loss_weight,
+                "teacher_entry_search_loss_weight": (
+                    self.teacher_entry_search_loss_weight
+                ),
             },
         }, path)
         return path

@@ -22,6 +22,7 @@ class Transition:
     next_valid_actions: tuple[Action, ...]
     teacher_target: np.ndarray | None = None
     safety_priority: float = 0.0
+    entry_opportunity_priority: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class _StoredEpisode:
     next_valid_masks: np.ndarray
     teacher_targets: np.ndarray | None
     safety_priorities: np.ndarray
+    entry_opportunity_priorities: np.ndarray
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -70,6 +72,12 @@ class _StoredEpisode:
             for item in transitions
         ):
             raise ValueError("replay safety priority is invalid")
+        if any(
+            not np.isfinite(item.entry_opportunity_priority)
+            or item.entry_opportunity_priority < 0
+            for item in transitions
+        ):
+            raise ValueError("replay entry opportunity priority is invalid")
         for current, following in zip(transitions, transitions[1:]):
             if not np.array_equal(current.next_observation, following.observation):
                 raise ValueError("replay episode observations are not contiguous")
@@ -116,6 +124,9 @@ class _StoredEpisode:
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
             ),
+            entry_opportunity_priorities=np.asarray(
+                [item.entry_opportunity_priority for item in transitions], np.float32
+            ),
         )
 
     def sequence(self, start: int, length: int) -> tuple[Transition, ...]:
@@ -142,6 +153,9 @@ class _StoredEpisode:
                     else self.teacher_targets[index]
                 ),
                 safety_priority=float(self.safety_priorities[index]),
+                entry_opportunity_priority=float(
+                    self.entry_opportunity_priorities[index]
+                ),
             )
             for index in range(start, stop)
         )
@@ -158,6 +172,7 @@ class BalancedSequenceReplay:
         capacity_transitions: int | None = None,
         terminal_sequence_fraction: float = 0.0,
         safety_sequence_fraction: float = 0.0,
+        entry_opportunity_sequence_fraction: float = 0.0,
         seed: int,
     ) -> None:
         if capacity_episodes < 1 or sequence_length < 1:
@@ -166,7 +181,9 @@ class BalancedSequenceReplay:
             raise ValueError("terminal sequence fraction must be between zero and one")
         if (
             not 0.0 <= safety_sequence_fraction <= 1.0
-            or terminal_sequence_fraction + safety_sequence_fraction > 1.0
+            or not 0.0 <= entry_opportunity_sequence_fraction <= 1.0
+            or terminal_sequence_fraction + safety_sequence_fraction
+            + entry_opportunity_sequence_fraction > 1.0
         ):
             raise ValueError("replay sequence fractions are invalid")
         self.capacity = int(capacity_episodes)
@@ -178,6 +195,9 @@ class BalancedSequenceReplay:
         self.sequence_length = int(sequence_length)
         self.terminal_sequence_fraction = float(terminal_sequence_fraction)
         self.safety_sequence_fraction = float(safety_sequence_fraction)
+        self.entry_opportunity_sequence_fraction = float(
+            entry_opportunity_sequence_fraction
+        )
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -240,12 +260,16 @@ class BalancedSequenceReplay:
         sequences = []
         terminal_count = round(count * self.terminal_sequence_fraction)
         safety_count = round(count * self.safety_sequence_fraction)
+        entry_count = round(count * self.entry_opportunity_sequence_fraction)
         for index, episode in enumerate(self.sample_episodes(count)):
             last_start = episode.transition_count - self.sequence_length
             if index < terminal_count:
                 start = last_start
             elif index < terminal_count + safety_count:
                 critical = int(np.argmax(episode.safety_priorities))
+                start = max(0, min(last_start, critical - self.sequence_length + 1))
+            elif index < terminal_count + safety_count + entry_count:
+                critical = int(np.argmax(episode.entry_opportunity_priorities))
                 start = max(0, min(last_start, critical - self.sequence_length + 1))
             else:
                 start = self._random.randint(0, last_start)

@@ -105,6 +105,36 @@ def test_replay_anchors_declared_fraction_at_highest_mll_risk() -> None:
     assert sequence[-1].safety_priority == pytest.approx(0.9)
 
 
+def test_replay_anchors_declared_fraction_at_expansion_entry_opportunity() -> None:
+    episode = _episode("NQ", "timeout", "long", 0)
+    entry_priorities = (0.0, 0.1, 0.2, 0.95, 0.1, 0.0)
+    prioritized = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{**item.__dict__, "entry_opportunity_priority": priority})
+            for item, priority in zip(
+                episode.transitions, entry_priorities, strict=True
+            )
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=3,
+        entry_opportunity_sequence_fraction=1.0,
+        seed=31,
+    )
+    replay.add(prioritized)
+
+    sequence = replay.sample(1)[0]
+
+    assert tuple(int(item.observation[0]) for item in sequence) == (1, 2, 3)
+    assert sequence[-1].entry_opportunity_priority == pytest.approx(0.95)
+
+
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,
