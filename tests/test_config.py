@@ -171,3 +171,25 @@ def test_expansion_teacher_recipe_is_training_only_and_frozen() -> None:
     assert config["temporal"]["train_end"] == "2025-01-01"
     assert config["temporal"]["sealed_start"] == "2026-01-01"
     assert "teacher" in config["evolution"]["frozen_paths"]
+
+
+def test_large_win_expansion_challenger_is_bounded_and_distinct() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_large_win_v1.json"
+    )
+
+    assert config["challenge"]["large_win_threshold_r"] == 2.0
+    assert config["challenge"]["large_win_bonus_coefficient"] == 0.1
+    assert config["training"]["minimum_environment_steps"] == 2_000_000
+    assert config["output"] == "runs/historical_mask_expansion_teacher_large_win_v1"
+    assert (
+        config["campaign"]["state_root"]
+        == "runs/historical_mask_expansion_teacher_large_win_v1/ml-loop-state"
+    )
+    assert config["temporal"] == {
+        "train_start": "2021-01-01",
+        "train_end": "2025-01-01",
+        "validation_start": "2025-01-01",
+        "validation_end": "2026-01-01",
+        "sealed_start": "2026-01-01",
+    }
