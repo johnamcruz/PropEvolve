@@ -39,6 +39,15 @@ class OutcomeStatistics:
     winning_r_sum: float
     terminal_pnl_sum: float
     reward_sum: float
+    mfe_sum: float = 0.0
+    mae_sum: float = 0.0
+    retention_eligible_count: int = 0
+    retention_capture_sum: float = 0.0
+    retention_gap_sum: float = 0.0
+    retention_round_trip_count: int = 0
+    two_r_eligible_count: int = 0
+    two_r_capture_sum: float = 0.0
+    two_r_round_trip_count: int = 0
 
     @property
     def mean_trade_count(self) -> float:
@@ -60,6 +69,35 @@ class OutcomeStatistics:
     def mean_reward(self) -> float:
         return self.reward_sum / self.episodes if self.episodes else 0.0
 
+    @property
+    def average_mfe_r(self) -> float:
+        return self.mfe_sum / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def average_mae_r(self) -> float:
+        return self.mae_sum / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def mfe_capture_ratio(self) -> float:
+        return (
+            self.retention_capture_sum / self.retention_eligible_count
+            if self.retention_eligible_count else 0.0
+        )
+
+    @property
+    def gave_it_all_back_rate(self) -> float:
+        return (
+            self.retention_round_trip_count / self.retention_eligible_count
+            if self.retention_eligible_count else 0.0
+        )
+
+    @property
+    def two_r_mfe_capture_ratio(self) -> float:
+        return (
+            self.two_r_capture_sum / self.two_r_eligible_count
+            if self.two_r_eligible_count else 0.0
+        )
+
 
 @dataclass(frozen=True)
 class TrainingResult:
@@ -76,6 +114,15 @@ class TrainingResult:
     mean_reward: float
     mean_loss: float
     outcome_statistics: tuple[OutcomeStatistics, ...] = ()
+    mfe_sum: float = 0.0
+    mae_sum: float = 0.0
+    retention_eligible_count: int = 0
+    retention_capture_sum: float = 0.0
+    retention_gap_sum: float = 0.0
+    retention_round_trip_count: int = 0
+    two_r_eligible_count: int = 0
+    two_r_capture_sum: float = 0.0
+    two_r_round_trip_count: int = 0
 
     @property
     def trade_win_rate(self) -> float:
@@ -84,6 +131,49 @@ class TrainingResult:
     @property
     def average_win_r(self) -> float:
         return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+    @property
+    def average_mfe_r(self) -> float:
+        return self.mfe_sum / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def average_mae_r(self) -> float:
+        return self.mae_sum / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def mfe_capture_ratio(self) -> float:
+        return (
+            self.retention_capture_sum / self.retention_eligible_count
+            if self.retention_eligible_count else 0.0
+        )
+
+    @property
+    def mfe_realized_gap_r(self) -> float:
+        return (
+            self.retention_gap_sum / self.retention_eligible_count
+            if self.retention_eligible_count else 0.0
+        )
+
+    @property
+    def gave_it_all_back_rate(self) -> float:
+        return (
+            self.retention_round_trip_count / self.retention_eligible_count
+            if self.retention_eligible_count else 0.0
+        )
+
+    @property
+    def two_r_mfe_capture_ratio(self) -> float:
+        return (
+            self.two_r_capture_sum / self.two_r_eligible_count
+            if self.two_r_eligible_count else 0.0
+        )
+
+    @property
+    def two_r_gave_it_all_back_rate(self) -> float:
+        return (
+            self.two_r_round_trip_count / self.two_r_eligible_count
+            if self.two_r_eligible_count else 0.0
+        )
 
     def outcome(self, name: str) -> OutcomeStatistics:
         for statistics in self.outcome_statistics:
@@ -102,6 +192,11 @@ def _outcome_metric_values(result: TrainingResult) -> dict[str, float]:
             f"{prefix}_average_win_r": statistics.average_win_r,
             f"{prefix}_mean_terminal_pnl": statistics.mean_terminal_pnl,
             f"{prefix}_mean_reward": statistics.mean_reward,
+            f"{prefix}_average_mfe_r": statistics.average_mfe_r,
+            f"{prefix}_average_mae_r": statistics.average_mae_r,
+            f"{prefix}_mfe_capture_ratio": statistics.mfe_capture_ratio,
+            f"{prefix}_gave_it_all_back_rate": statistics.gave_it_all_back_rate,
+            f"{prefix}_two_r_mfe_capture_ratio": statistics.two_r_mfe_capture_ratio,
         })
     return metrics
 
@@ -125,6 +220,15 @@ class TrainingProgress:
     reward_count: int = 0
     loss_sum: float = 0.0
     loss_count: int = 0
+    mfe_sum: float = 0.0
+    mae_sum: float = 0.0
+    retention_eligible_count: int = 0
+    retention_capture_sum: float = 0.0
+    retention_gap_sum: float = 0.0
+    retention_round_trip_count: int = 0
+    two_r_eligible_count: int = 0
+    two_r_capture_sum: float = 0.0
+    two_r_round_trip_count: int = 0
 
     def result(self) -> TrainingResult:
         if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
@@ -146,6 +250,15 @@ class TrainingProgress:
                 if self.loss_count
                 else float("nan")
             ),
+            mfe_sum=self.mfe_sum,
+            mae_sum=self.mae_sum,
+            retention_eligible_count=self.retention_eligible_count,
+            retention_capture_sum=self.retention_capture_sum,
+            retention_gap_sum=self.retention_gap_sum,
+            retention_round_trip_count=self.retention_round_trip_count,
+            two_r_eligible_count=self.two_r_eligible_count,
+            two_r_capture_sum=self.two_r_capture_sum,
+            two_r_round_trip_count=self.two_r_round_trip_count,
         )
 
 
@@ -407,6 +520,15 @@ class HistoricalCandidateRunner:
                     max_loss=challenge.max_loss,
                     profit_target=challenge.profit_target,
                 ),
+                "average_mfe_r": training.average_mfe_r,
+                "average_mae_r": training.average_mae_r,
+                "mfe_capture_ratio": training.mfe_capture_ratio,
+                "mfe_realized_gap_r": training.mfe_realized_gap_r,
+                "gave_it_all_back_rate": training.gave_it_all_back_rate,
+                "two_r_mfe_capture_ratio": training.two_r_mfe_capture_ratio,
+                "two_r_gave_it_all_back_rate": (
+                    training.two_r_gave_it_all_back_rate
+                ),
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
@@ -429,6 +551,15 @@ class HistoricalCandidateRunner:
                     validation,
                     max_loss=challenge.max_loss,
                     profit_target=challenge.profit_target,
+                ),
+                "average_mfe_r": validation.average_mfe_r,
+                "average_mae_r": validation.average_mae_r,
+                "mfe_capture_ratio": validation.mfe_capture_ratio,
+                "mfe_realized_gap_r": validation.mfe_realized_gap_r,
+                "gave_it_all_back_rate": validation.gave_it_all_back_rate,
+                "two_r_mfe_capture_ratio": validation.two_r_mfe_capture_ratio,
+                "two_r_gave_it_all_back_rate": (
+                    validation.two_r_gave_it_all_back_rate
                 ),
             }
             metrics.update(_outcome_metric_values(validation))
@@ -570,6 +701,33 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "average_loss_r": weighted("avg_loss_r", loss_weights),
         "expectancy_r": weighted("expectancy_r", trade_weights),
         "average_mfe_r": weighted("avg_mfe_r", trade_weights),
+        "average_mae_r": weighted("avg_mae_r", trade_weights),
+        "retention_eligible_count": int(sum(
+            float(row.get("retention_eligible_count", 0)) for row in rows
+        )),
+        "mfe_capture_ratio": weighted(
+            "mfe_capture_ratio",
+            [float(row.get("retention_eligible_count", 0)) for row in rows],
+        ),
+        "mfe_realized_gap_r": weighted(
+            "mfe_realized_gap_r",
+            [float(row.get("retention_eligible_count", 0)) for row in rows],
+        ),
+        "gave_it_all_back_rate": weighted(
+            "gave_it_all_back_rate",
+            [float(row.get("retention_eligible_count", 0)) for row in rows],
+        ),
+        "two_r_eligible_count": int(sum(
+            float(row.get("two_r_eligible_count", 0)) for row in rows
+        )),
+        "two_r_mfe_capture_ratio": weighted(
+            "two_r_mfe_capture_ratio",
+            [float(row.get("two_r_eligible_count", 0)) for row in rows],
+        ),
+        "two_r_gave_it_all_back_rate": weighted(
+            "two_r_gave_it_all_back_rate",
+            [float(row.get("two_r_eligible_count", 0)) for row in rows],
+        ),
         "ratchet_activation_rate": activated / trades if trades else 0.0,
         "activated_average_realized_r": weighted(
             "activated_avg_realized_r", activation_weights
@@ -640,6 +798,12 @@ def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
         ])
         for ticker in sorted({str(row.get("ticker")) for row in rows})
     }
+    by_outcome = {
+        outcome: _diagnostic_aggregate([
+            row for row in rows if str(row.get("outcome")) == outcome
+        ])
+        for outcome in sorted({str(row.get("outcome")) for row in rows})
+    }
     payload = {
         "schema": "propevolve_training_diagnostic_summary_v1",
         "source": source.name,
@@ -647,6 +811,7 @@ def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
         "overall": _diagnostic_aggregate(rows),
         "recent_20": _diagnostic_aggregate(rows[-20:]),
         "by_ticker": by_ticker,
+        "by_outcome": by_outcome,
     }
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -888,6 +1053,53 @@ def train_agent(
             reward_count=progress.reward_count + 1,
             loss_sum=progress.loss_sum + sum(episode_losses),
             loss_count=progress.loss_count + len(episode_losses),
+            mfe_sum=(
+                progress.mfe_sum
+                + float(terminal_info.get("avg_mfe_r", 0.0))
+                * int(terminal_info.get("trade_count", 0))
+            ),
+            mae_sum=(
+                progress.mae_sum
+                + float(terminal_info.get("avg_mae_r", 0.0))
+                * int(terminal_info.get("trade_count", 0))
+            ),
+            retention_eligible_count=(
+                progress.retention_eligible_count
+                + int(terminal_info.get("retention_eligible_count", 0))
+            ),
+            retention_capture_sum=(
+                progress.retention_capture_sum
+                + float(terminal_info.get("mfe_capture_ratio", 0.0))
+                * int(terminal_info.get("retention_eligible_count", 0))
+            ),
+            retention_gap_sum=(
+                progress.retention_gap_sum
+                + float(terminal_info.get("mfe_realized_gap_r", 0.0))
+                * int(terminal_info.get("retention_eligible_count", 0))
+            ),
+            retention_round_trip_count=(
+                progress.retention_round_trip_count
+                + round(
+                    float(terminal_info.get("gave_it_all_back_rate", 0.0))
+                    * int(terminal_info.get("retention_eligible_count", 0))
+                )
+            ),
+            two_r_eligible_count=(
+                progress.two_r_eligible_count
+                + int(terminal_info.get("two_r_eligible_count", 0))
+            ),
+            two_r_capture_sum=(
+                progress.two_r_capture_sum
+                + float(terminal_info.get("two_r_mfe_capture_ratio", 0.0))
+                * int(terminal_info.get("two_r_eligible_count", 0))
+            ),
+            two_r_round_trip_count=(
+                progress.two_r_round_trip_count
+                + round(
+                    float(terminal_info.get("two_r_gave_it_all_back_rate", 0.0))
+                    * int(terminal_info.get("two_r_eligible_count", 0))
+                )
+            ),
         )
         cumulative_average_balance = (
             progress.terminal_pnl_sum / progress.terminal_pnl_count
@@ -906,6 +1118,28 @@ def train_agent(
                 "avg_loss_r": float(terminal_info.get("avg_loss_r", 0.0)),
                 "expectancy_r": float(terminal_info.get("expectancy_r", 0.0)),
                 "avg_mfe_r": float(terminal_info.get("avg_mfe_r", 0.0)),
+                "avg_mae_r": float(terminal_info.get("avg_mae_r", 0.0)),
+                "retention_eligible_count": int(
+                    terminal_info.get("retention_eligible_count", 0)
+                ),
+                "mfe_capture_ratio": float(
+                    terminal_info.get("mfe_capture_ratio", 0.0)
+                ),
+                "mfe_realized_gap_r": float(
+                    terminal_info.get("mfe_realized_gap_r", 0.0)
+                ),
+                "gave_it_all_back_rate": float(
+                    terminal_info.get("gave_it_all_back_rate", 0.0)
+                ),
+                "two_r_eligible_count": int(
+                    terminal_info.get("two_r_eligible_count", 0)
+                ),
+                "two_r_mfe_capture_ratio": float(
+                    terminal_info.get("two_r_mfe_capture_ratio", 0.0)
+                ),
+                "two_r_gave_it_all_back_rate": float(
+                    terminal_info.get("two_r_gave_it_all_back_rate", 0.0)
+                ),
                 "ratchet_activation_rate": float(
                     terminal_info.get("ratchet_activation_rate", 0.0)
                 ),
@@ -1030,6 +1264,11 @@ def evaluate_agent(
     terminal_pnls = []
     trade_count = win_count = 0
     winning_r_sum = 0.0
+    mfe_sum = mae_sum = 0.0
+    retention_eligible_count = retention_round_trip_count = 0
+    retention_capture_sum = retention_gap_sum = 0.0
+    two_r_eligible_count = two_r_round_trip_count = 0
+    two_r_capture_sum = 0.0
     environment_steps = 0
     by_outcome = {
         outcome: {
@@ -1039,6 +1278,15 @@ def evaluate_agent(
             "winning_r_sum": 0.0,
             "terminal_pnl_sum": 0.0,
             "reward_sum": 0.0,
+            "mfe_sum": 0.0,
+            "mae_sum": 0.0,
+            "retention_eligible_count": 0,
+            "retention_capture_sum": 0.0,
+            "retention_gap_sum": 0.0,
+            "retention_round_trip_count": 0,
+            "two_r_eligible_count": 0,
+            "two_r_capture_sum": 0.0,
+            "two_r_round_trip_count": 0,
         }
         for outcome in outcomes
     }
@@ -1068,10 +1316,40 @@ def evaluate_agent(
         episode_trades = int(info.get("trade_count", 0))
         episode_wins = int(info.get("win_count", 0))
         episode_winning_r = float(info.get("winning_r_sum", 0.0))
+        episode_mfe_sum = float(info.get("avg_mfe_r", 0.0)) * episode_trades
+        episode_mae_sum = float(info.get("avg_mae_r", 0.0)) * episode_trades
+        episode_retention_count = int(info.get("retention_eligible_count", 0))
+        episode_retention_capture = (
+            float(info.get("mfe_capture_ratio", 0.0)) * episode_retention_count
+        )
+        episode_retention_gap = (
+            float(info.get("mfe_realized_gap_r", 0.0)) * episode_retention_count
+        )
+        episode_round_trips = round(
+            float(info.get("gave_it_all_back_rate", 0.0))
+            * episode_retention_count
+        )
+        episode_two_r_count = int(info.get("two_r_eligible_count", 0))
+        episode_two_r_capture = (
+            float(info.get("two_r_mfe_capture_ratio", 0.0)) * episode_two_r_count
+        )
+        episode_two_r_round_trips = round(
+            float(info.get("two_r_gave_it_all_back_rate", 0.0))
+            * episode_two_r_count
+        )
         terminal_pnls.append(terminal_pnl)
         trade_count += episode_trades
         win_count += episode_wins
         winning_r_sum += episode_winning_r
+        mfe_sum += episode_mfe_sum
+        mae_sum += episode_mae_sum
+        retention_eligible_count += episode_retention_count
+        retention_capture_sum += episode_retention_capture
+        retention_gap_sum += episode_retention_gap
+        retention_round_trip_count += episode_round_trips
+        two_r_eligible_count += episode_two_r_count
+        two_r_capture_sum += episode_two_r_capture
+        two_r_round_trip_count += episode_two_r_round_trips
         outcome_values = by_outcome[outcome]
         outcome_values["episodes"] += 1
         outcome_values["trade_count"] += episode_trades
@@ -1079,6 +1357,15 @@ def evaluate_agent(
         outcome_values["winning_r_sum"] += episode_winning_r
         outcome_values["terminal_pnl_sum"] += terminal_pnl
         outcome_values["reward_sum"] += total
+        outcome_values["mfe_sum"] += episode_mfe_sum
+        outcome_values["mae_sum"] += episode_mae_sum
+        outcome_values["retention_eligible_count"] += episode_retention_count
+        outcome_values["retention_capture_sum"] += episode_retention_capture
+        outcome_values["retention_gap_sum"] += episode_retention_gap
+        outcome_values["retention_round_trip_count"] += episode_round_trips
+        outcome_values["two_r_eligible_count"] += episode_two_r_count
+        outcome_values["two_r_capture_sum"] += episode_two_r_capture
+        outcome_values["two_r_round_trip_count"] += episode_two_r_round_trips
         episode_win_rate = (
             episode_wins / episode_trades if episode_trades else 0.0
         )
@@ -1114,6 +1401,15 @@ def evaluate_agent(
             for outcome, values in by_outcome.items()
             if values["episodes"]
         ),
+        mfe_sum=mfe_sum,
+        mae_sum=mae_sum,
+        retention_eligible_count=retention_eligible_count,
+        retention_capture_sum=retention_capture_sum,
+        retention_gap_sum=retention_gap_sum,
+        retention_round_trip_count=retention_round_trip_count,
+        two_r_eligible_count=two_r_eligible_count,
+        two_r_capture_sum=two_r_capture_sum,
+        two_r_round_trip_count=two_r_round_trip_count,
     )
     print(
         f"[validation] COMPLETE episodes={episodes} "

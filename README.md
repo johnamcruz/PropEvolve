@@ -310,6 +310,19 @@ Training loss is not promotion evidence. A candidate must ultimately report
 per-market and chronological pass, blow, timeout, expectancy, drawdown, and
 turnover evidence, with NQ evaluated independently.
 
+Closed-trade diagnostics also report MAE, MFE, MFE-to-realized-R gap, profit
+capture, and the fraction of trades that reached at least 1R or 2R before
+round-tripping to scratch or loss. These are split by PASS, TIMEOUT, BLOW, and
+ticker and are included in the authenticated reasoning packet. They diagnose
+whether entry selection or winner retention failed; they are not direct reward
+targets because optimizing capture alone can select a short-horizon scalper.
+
+Campaign stages may declare `parent_improvement_requirements`. With those
+enabled, a zero-blow challenger can advance only when both pass rate and the
+declared retained-winner metric strictly improve over its authenticated parent.
+Reasoning chooses the mechanism family first; bounded numerical search is then
+restricted to that family's JSON fields.
+
 ## Tests
 
 ```bash

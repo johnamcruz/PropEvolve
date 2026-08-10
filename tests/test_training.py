@@ -306,6 +306,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     ).hexdigest()
     assert summary["overall"]["episodes"] == len(diagnostics)
     assert summary["by_ticker"]["NQ"]["episodes"] == len(diagnostics)
+    assert summary["by_outcome"]["timeout"]["episodes"] == len(diagnostics)
     assert evaluation.candidate_id == candidate.candidate_id
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
     assert set(evaluation.metrics) >= {
@@ -317,6 +318,11 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "selection.timeout_trade_win_rate",
         "selection.timeout_average_win_r",
         "selection.timeout_mean_terminal_pnl",
+        "selection.average_mfe_r",
+        "selection.average_mae_r",
+        "selection.mfe_capture_ratio",
+        "selection.gave_it_all_back_rate",
+        "selection.two_r_mfe_capture_ratio",
     }
 
 
@@ -355,6 +361,9 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["episode"] == 2
     assert diagnostics[-1]["outcome"] == "pass"
     assert diagnostics[-1]["expectancy_r"] == 0.0
+    assert diagnostics[-1]["avg_mae_r"] == 0.0
+    assert diagnostics[-1]["mfe_capture_ratio"] == 0.0
+    assert diagnostics[-1]["gave_it_all_back_rate"] == 0.0
     assert diagnostics[-1]["entry_epsilon"] == pytest.approx(0.135)
     assert diagnostics[-1]["management_epsilon"] == pytest.approx(0.135)
     assert diagnostics[-1]["updates"] == 1

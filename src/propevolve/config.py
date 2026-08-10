@@ -282,7 +282,10 @@ def load_experiment_config(path: str | Path) -> dict:
         required_stage_fields = {
             "name", "minimum_environment_steps", "selection_requirements"
         }
-        optional_stage_fields = {"seed", "seeds", "max_parallel", "allow_revisions"}
+        optional_stage_fields = {
+            "seed", "seeds", "max_parallel", "allow_revisions",
+            "parent_improvement_requirements",
+        }
         if (
             not isinstance(stage, dict)
             or not required_stage_fields <= set(stage)
@@ -340,6 +343,22 @@ def load_experiment_config(path: str | Path) -> dict:
                 or not isinstance(requirement.get("value"), (int, float))
             ):
                 raise ValueError("campaign budget stage requirement is invalid")
+        parent_requirements = stage.get("parent_improvement_requirements", [])
+        if not isinstance(parent_requirements, list):
+            raise ValueError("campaign parent-improvement requirements must be an array")
+        for requirement in parent_requirements:
+            if (
+                not isinstance(requirement, dict)
+                or set(requirement) != {"metric", "direction", "minimum_delta"}
+                or requirement.get("direction") not in {"maximize", "minimize"}
+                or not str(requirement.get("metric", "")).strip()
+                or isinstance(requirement.get("minimum_delta"), bool)
+                or not isinstance(requirement.get("minimum_delta"), (int, float))
+                or float(requirement["minimum_delta"]) < 0
+            ):
+                raise ValueError(
+                    "campaign parent-improvement requirement is invalid"
+                )
         names.append(name)
         budgets.append(budget)
     if len(set(names)) != len(names) or budgets != sorted(budgets):

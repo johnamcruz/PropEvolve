@@ -67,6 +67,9 @@ class FakeCandidateRunner:
                 "selection.blow_rate": (
                     0.0 if safe_revision else 0.10 if delta > 0 else 0.30
                 ),
+                "selection.two_r_mfe_capture_ratio": (
+                    0.55 if delta > 0 else 0.20
+                ),
             },
             stages=({"name": "selection", "status": "PASS" if delta > 0 else "FAIL"},),
             status="PASS" if delta > 0 else "FAIL",
@@ -443,6 +446,45 @@ def test_campaign_reasoning_can_revise_bounded_reward_and_replay_fields(
         == 0.0002
     )
     assert runner.configs[-1]["training"]["terminal_sequence_fraction"] == 0.5
+
+
+def test_campaign_promotes_only_parent_improvements_with_zero_blow(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["campaign"]["budget_stages"] = [{
+        "name": "historical_candidate",
+        "minimum_environment_steps": payload["training"][
+            "minimum_environment_steps"
+        ],
+        "selection_requirements": payload["campaign"]["selection_requirements"],
+        "parent_improvement_requirements": [
+        {
+            "metric": "selection.pass_rate",
+            "direction": "maximize",
+            "minimum_delta": 0.0,
+        },
+        {
+            "metric": "selection.two_r_mfe_capture_ratio",
+            "direction": "maximize",
+            "minimum_delta": 0.0,
+        },
+        ],
+    }]
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="retention-promotion-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert len(runner.configs) == 2
 
 
 def test_campaign_blocks_reasoning_outside_declared_numeric_bounds(

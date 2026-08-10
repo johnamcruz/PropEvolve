@@ -304,8 +304,83 @@ def test_voluntary_close_reports_entry_quality_and_winner_retention() -> None:
     assert closed["voluntary_close_count"] == 1
     assert closed["ratchet_stop_count"] == 0
     assert closed["avg_mfe_r"] == pytest.approx(0.8)
+    assert closed["avg_mae_r"] == pytest.approx(0.1)
     assert closed["avg_hold_bars"] == 1.0
     assert closed["expectancy_r"] == pytest.approx(0.5)
+
+
+def test_trade_retention_reports_profit_capture_and_round_trips() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(8) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 105.0, 105.0, 105.0, 105.0, 105.0, 105.0], np.float32),
+        high=np.array([100.0, 120.0, 106.0, 106.0, 106.0, 106.0, 106.0, 106.0], np.float32),
+        low=np.array([100.0, 95.0, 104.0, 104.0, 104.0, 104.0, 104.0, 104.0], np.float32),
+        close=np.array([100.0, 105.0, 105.0, 105.0, 105.0, 105.0, 105.0, 105.0], np.float32),
+        embeddings=np.zeros((8, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=3.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+    _, _, _, _, closed = env.step(Action.CLOSE)
+
+    # The trade touched +2R, experienced 0.5R MAE, and banked only +0.5R.
+    assert closed["retention_eligible_count"] == 1
+    assert closed["avg_mfe_r"] == pytest.approx(2.0)
+    assert closed["avg_mae_r"] == pytest.approx(0.5)
+    assert closed["mfe_capture_ratio"] == pytest.approx(0.25)
+    assert closed["mfe_realized_gap_r"] == pytest.approx(1.5)
+    assert closed["gave_it_all_back_rate"] == 0.0
+    assert closed["two_r_eligible_count"] == 1
+    assert closed["two_r_mfe_capture_ratio"] == pytest.approx(0.25)
+
+
+def test_trade_retention_flags_a_real_winner_round_trip() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(8) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 95.0, 95.0, 95.0, 95.0, 95.0, 95.0], np.float32),
+        high=np.array([100.0, 120.0, 96.0, 96.0, 96.0, 96.0, 96.0, 96.0], np.float32),
+        low=np.array([100.0, 95.0, 94.0, 94.0, 94.0, 94.0, 94.0, 94.0], np.float32),
+        close=np.array([100.0, 105.0, 95.0, 95.0, 95.0, 95.0, 95.0, 95.0], np.float32),
+        embeddings=np.zeros((8, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=3.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+    _, _, _, _, closed = env.step(Action.CLOSE)
+
+    assert closed["mfe_capture_ratio"] == pytest.approx(-0.25)
+    assert closed["gave_it_all_back_rate"] == 1.0
+    assert closed["two_r_gave_it_all_back_rate"] == 1.0
 
 
 def test_closed_entry_reports_counterfactual_multi_horizon_expansion() -> None:

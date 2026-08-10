@@ -213,6 +213,7 @@ class _ClosedTrade:
     pnl: float
     realized_r: float
     peak_favorable_r: float
+    peak_adverse_r: float
     ratchet_activated: bool
     exit_reason: str
     hold_bars: int
@@ -615,6 +616,12 @@ class HistoricalChallengeEnv:
         risk_denominator = self.spec.per_trade_risk_dollars or self.spec.max_loss
         realized_rs = [trade.realized_r for trade in self._closed_trades]
         losing_rs = [value for value in realized_rs if value < 0.0]
+        retention_trades = [
+            trade for trade in self._closed_trades if trade.peak_favorable_r >= 1.0
+        ]
+        two_r_trades = [
+            trade for trade in self._closed_trades if trade.peak_favorable_r >= 2.0
+        ]
         activated = [trade for trade in self._closed_trades if trade.ratchet_activated]
         exit_counts = {
             reason: sum(trade.exit_reason == reason for trade in self._closed_trades)
@@ -641,6 +648,43 @@ class HistoricalChallengeEnv:
             "avg_mfe_r": (
                 float(np.mean([trade.peak_favorable_r for trade in self._closed_trades]))
                 if self._closed_trades else 0.0
+            ),
+            "avg_mae_r": (
+                float(np.mean([trade.peak_adverse_r for trade in self._closed_trades]))
+                if self._closed_trades else 0.0
+            ),
+            "retention_eligible_count": len(retention_trades),
+            "mfe_capture_ratio": (
+                float(np.mean([
+                    trade.realized_r / trade.peak_favorable_r
+                    for trade in retention_trades
+                ]))
+                if retention_trades else 0.0
+            ),
+            "mfe_realized_gap_r": (
+                float(np.mean([
+                    trade.peak_favorable_r - trade.realized_r
+                    for trade in retention_trades
+                ]))
+                if retention_trades else 0.0
+            ),
+            "gave_it_all_back_rate": (
+                sum(trade.realized_r <= 0.0 for trade in retention_trades)
+                / len(retention_trades)
+                if retention_trades else 0.0
+            ),
+            "two_r_eligible_count": len(two_r_trades),
+            "two_r_mfe_capture_ratio": (
+                float(np.mean([
+                    trade.realized_r / trade.peak_favorable_r
+                    for trade in two_r_trades
+                ]))
+                if two_r_trades else 0.0
+            ),
+            "two_r_gave_it_all_back_rate": (
+                sum(trade.realized_r <= 0.0 for trade in two_r_trades)
+                / len(two_r_trades)
+                if two_r_trades else 0.0
             ),
             "ratchet_activation_rate": len(activated) / trades if trades else 0.0,
             "activated_avg_realized_r": (
@@ -687,18 +731,71 @@ class HistoricalChallengeEnv:
         if self._position is not None:
             position = self._position
             exit_index = int(info.get("fill_index", self._index))
+            exit_reason = str(info.get("exit_reason", "unknown"))
+            peak_favorable_r, peak_adverse_r = self._closed_trade_excursions(
+                position,
+                exit_index=exit_index,
+                exit_price=price,
+                exit_reason=exit_reason,
+            )
             info["fees_paid"] += self._close_size(price, self._position.size)
             pnl = self._closed_trade_pnls[-1]
             risk = self.spec.per_trade_risk_dollars or self.spec.max_loss
             self._closed_trades.append(_ClosedTrade(
                 pnl=pnl,
                 realized_r=pnl / risk,
-                peak_favorable_r=position.peak_favorable_r,
+                peak_favorable_r=peak_favorable_r,
+                peak_adverse_r=peak_adverse_r,
                 ratchet_activated=position.ratchet_active,
-                exit_reason=str(info.get("exit_reason", "unknown")),
+                exit_reason=exit_reason,
                 hold_bars=max(0, exit_index - position.entry_index),
                 shadow_outcomes=self._shadow_entry_outcomes(position),
             ))
+
+    def _closed_trade_excursions(
+        self,
+        position: _Position,
+        *,
+        exit_index: int,
+        exit_price: float,
+        exit_reason: str,
+    ) -> tuple[float, float]:
+        """Return causal MFE/MAE actually available before the recorded exit.
+
+        A close/pass/timeout at bar close observes that complete bar. Stops,
+        blows, and next-open voluntary closes conservatively observe only prior
+        completed bars plus their executable exit price.
+        """
+        if position.initial_risk_points is None:
+            return 0.0, 0.0
+        assert self._market is not None
+        include_exit_bar = exit_reason in {"challenge_pass", "episode_timeout"}
+        stop = min(
+            len(self._market.close),
+            exit_index + int(include_exit_bar),
+        )
+        highs = self._market.high[position.entry_index:stop]
+        lows = self._market.low[position.entry_index:stop]
+        entry = position.average_entry
+        favorable_prices = [float(exit_price)]
+        adverse_prices = [float(exit_price)]
+        if len(highs):
+            favorable_prices.append(
+                float(np.max(highs)) if position.side == PositionSide.LONG
+                else float(np.min(lows))
+            )
+            adverse_prices.append(
+                float(np.min(lows)) if position.side == PositionSide.LONG
+                else float(np.max(highs))
+            )
+        if position.side == PositionSide.LONG:
+            favorable = max(favorable_prices) - entry
+            adverse = entry - min(adverse_prices)
+        else:
+            favorable = entry - min(favorable_prices)
+            adverse = max(adverse_prices) - entry
+        risk = position.initial_risk_points
+        return max(0.0, favorable / risk), max(0.0, adverse / risk)
 
     def _shadow_entry_outcomes(
         self, position: _Position

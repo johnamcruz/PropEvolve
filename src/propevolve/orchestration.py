@@ -281,12 +281,21 @@ class _EconomicEvidenceGate:
 
     def evaluate(self, request: GateRequest) -> GateResult:
         outputs = request.receipt.outputs
+        parent_ids = tuple(str(value) for value in outputs.get(
+            "parent_candidate_ids", ()
+        ))
+        parent_requirements = request.stage.config.get(
+            "parent_improvement_requirements", ()
+        )
         if outputs.get("seed_results") is not None:
             failures = []
             seed_evidence = []
             for result in outputs["seed_results"]:
                 evidence = self._evaluate_outputs(
-                    result, request.stage.config["selection_requirements"]
+                    result,
+                    request.stage.config["selection_requirements"],
+                    parent_ids=parent_ids,
+                    parent_requirements=parent_requirements,
                 )
                 seed_evidence.append({"seed": result["seed"], **evidence})
                 failures.extend(
@@ -313,7 +322,10 @@ class _EconomicEvidenceGate:
                 evidence,
             )
         evidence = self._evaluate_outputs(
-            outputs, request.stage.config["selection_requirements"]
+            outputs,
+            request.stage.config["selection_requirements"],
+            parent_ids=parent_ids,
+            parent_requirements=parent_requirements,
         )
         failures = evidence["failures"]
         evaluation_status = evidence["evaluation_status"]
@@ -335,7 +347,14 @@ class _EconomicEvidenceGate:
             evidence,
         )
 
-    def _evaluate_outputs(self, outputs: Mapping, requirements) -> dict:
+    def _evaluate_outputs(
+        self,
+        outputs: Mapping,
+        requirements,
+        *,
+        parent_ids: tuple[str, ...],
+        parent_requirements,
+    ) -> dict:
         candidate = self._archive.load_candidate(str(outputs["candidate_id"]))
         evaluation = self._archive.load_evaluation(str(outputs["evaluation_id"]))
         path = Path(str(outputs["evaluation_path"]))
@@ -370,10 +389,53 @@ class _EconomicEvidenceGate:
                     "threshold": threshold,
                     "actual": value,
                 })
+        parent_values = {}
+        if parent_ids and parent_requirements:
+            parent_evaluations = []
+            for parent_id in parent_ids:
+                parent = self._archive.latest_evaluation(parent_id)
+                if parent is None:
+                    raise ValueError(
+                        f"parent candidate has no evaluation: {parent_id}"
+                    )
+                parent_evaluations.append(parent)
+            for requirement in parent_requirements:
+                metric = requirement["metric"]
+                if metric not in evaluation.metrics or any(
+                    metric not in parent.metrics for parent in parent_evaluations
+                ):
+                    raise ValueError(
+                        f"parent-improvement metric is missing: {metric}"
+                    )
+                current = float(evaluation.metrics[metric])
+                parents = [float(parent.metrics[metric]) for parent in parent_evaluations]
+                direction = requirement["direction"]
+                baseline = max(parents) if direction == "maximize" else min(parents)
+                minimum_delta = float(requirement["minimum_delta"])
+                improvement = (
+                    current - baseline
+                    if direction == "maximize"
+                    else baseline - current
+                )
+                parent_values[metric] = {
+                    "actual": current,
+                    "parent": baseline,
+                    "improvement": improvement,
+                    "minimum_delta": minimum_delta,
+                }
+                if improvement <= minimum_delta:
+                    failures.append({
+                        "metric": metric,
+                        "direction": direction,
+                        "parent": baseline,
+                        "minimum_delta": minimum_delta,
+                        "actual": current,
+                    })
         evidence = {
             "candidate_id": candidate.candidate_id,
             "evaluation_id": evaluation.evaluation_id,
             "values": values,
+            "parent_improvements": parent_values,
             "failures": failures,
             "evaluation_status": evaluation.status,
         }
@@ -506,9 +568,19 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "a candidate infeasible regardless of pass rate. First diagnose whether "
         "the next bounded revision should change risk headroom, terminal reward "
         "strength, MLL-proximity shaping, near-target lead protection, large-win "
-        "credit, or terminal-aware replay. Only optimize pass rate among "
-        "zero-blow candidates, and reject reward settings that collapse into "
-        "inactivity or excessive timeouts. "
+        "credit, terminal-aware replay, management exploration, or ratchet "
+        "activation/giveback. Use closed-trade MFE, MAE, MFE-to-realized gap, "
+        "capture ratio, winner round-trip rate, exit reasons, and PASS-versus-"
+        "TIMEOUT slices to distinguish entry quality from winner-retention "
+        "failure. Treat MFE/MAE as diagnostics rather than direct optimization "
+        "targets so a short-horizon scalping policy cannot win by construction. "
+        "Only optimize pass rate among zero-blow candidates. A promotable "
+        "revision must improve pass rate and retained-winner economics relative "
+        "to its matched parent while preserving zero blow; reject reward settings "
+        "that collapse the profitable right tail, inactivity, or timeouts. Once "
+        "a causal mechanism family is identified, prefer uncertainty-aware "
+        "numeric search inside only that bounded family over either global brute "
+        "force or unrelated one-field guesses. "
         "If optional surrogate advice is present, treat it only as uncertainty-aware "
         "diagnostics and proposals; reasoning remains responsible for accepting, "
         "refining, or rejecting it. Return REVISE with one complete "
@@ -588,6 +660,9 @@ def _plan(config: Mapping) -> TrainingPlan:
                 ),
                 "selection_requirements": list(
                     budget_stage["selection_requirements"]
+                ),
+                "parent_improvement_requirements": list(
+                    budget_stage.get("parent_improvement_requirements", ())
                 ),
                 "diagnostic_targets": list(campaign.get("diagnostic_targets", ())),
                 "revision_bounds": dict(
