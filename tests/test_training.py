@@ -293,6 +293,11 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
 
     assert candidate.model_path.is_file()
     assert evaluation.path.is_file()
+    diagnostic_path = tmp_path / "run" / "training-diagnostics.jsonl"
+    assert diagnostic_path.is_file()
+    diagnostics = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
+    assert diagnostics
+    assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
     assert evaluation.candidate_id == candidate.candidate_id
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
     assert set(evaluation.metrics) >= {
@@ -310,6 +315,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
 def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     agent = Agent()
     replay = BalancedSequenceReplay(capacity_episodes=10, sequence_length=2, seed=1)
+    diagnostics = []
 
     result = train_agent(
         agent,
@@ -325,6 +331,7 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
         epsilon_end=0.02,
         episode_tickers=None,
         ticker_seed=1,
+        episode_diagnostic_callback=diagnostics.append,
     )
 
     assert result.passes == 2
@@ -335,6 +342,11 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     assert result.mean_loss == 0.5
     assert result.trade_win_rate == 0.5
     assert result.average_win_r == 2.5
+    assert len(diagnostics) == 2
+    assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
+    assert diagnostics[-1]["episode"] == 2
+    assert diagnostics[-1]["outcome"] == "pass"
+    assert diagnostics[-1]["expectancy_r"] == 0.0
 
 
 def test_training_resumes_from_an_episode_boundary() -> None:

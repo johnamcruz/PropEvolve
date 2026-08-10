@@ -201,6 +201,17 @@ class _Position:
     protective_stop: float | None = None
     peak_favorable_r: float = 0.0
     ratchet_active: bool = False
+    entry_index: int = 0
+
+
+@dataclass(frozen=True)
+class _ClosedTrade:
+    pnl: float
+    realized_r: float
+    peak_favorable_r: float
+    ratchet_activated: bool
+    exit_reason: str
+    hold_bars: int
 
 
 class HistoricalChallengeEnv:
@@ -313,6 +324,7 @@ class HistoricalChallengeEnv:
         self._terminated = False
         self._primary_side = "flat"
         self._closed_trade_pnls = []
+        self._closed_trades: list[_ClosedTrade] = []
         self._trading_days_elapsed = 1
         return self._observation(), {
             "ticker": ticker,
@@ -353,14 +365,17 @@ class HistoricalChallengeEnv:
         self._index = next_index
         outcome = None
         if self._account.outcome(worst_equity) == "blow":
+            info.setdefault("exit_reason", "challenge_blow")
             self._liquidate(worst_price, info)
             outcome = "blow"
         else:
             current_equity = self._equity(float(self._market.close[self._index]))
             if self._account.outcome(current_equity) == "pass":
+                info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "pass"
             elif self._index >= self._end:
+                info.setdefault("exit_reason", "episode_timeout")
                 self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "timeout"
         if outcome is None and self._position is not None:
@@ -483,12 +498,14 @@ class HistoricalChallengeEnv:
                     fill,
                     initial_risk_points=initial_risk_points,
                     protective_stop=protective_stop,
+                    entry_index=self._index + 1,
                 )
                 self._primary_side = "long" if side == PositionSide.LONG else "short"
                 info.update({"fill_price": fill, "fill_side": self._primary_side, "fill_size": size})
             return
         if action == Action.CLOSE:
             closing_size = position.size
+            info["exit_reason"] = "voluntary_close"
             self._liquidate(fill, info)
             info.update({
                 "fill_price": fill,
@@ -581,6 +598,17 @@ class HistoricalChallengeEnv:
         trades = len(self._closed_trade_pnls)
         winners = [value for value in self._closed_trade_pnls if value > 0.0]
         risk_denominator = self.spec.per_trade_risk_dollars or self.spec.max_loss
+        realized_rs = [trade.realized_r for trade in self._closed_trades]
+        losing_rs = [value for value in realized_rs if value < 0.0]
+        activated = [trade for trade in self._closed_trades if trade.ratchet_activated]
+        exit_counts = {
+            reason: sum(trade.exit_reason == reason for trade in self._closed_trades)
+            for reason in ("voluntary_close", "initial_stop", "ratchet_stop")
+        }
+        terminal_liquidations = sum(
+            trade.exit_reason in {"challenge_pass", "challenge_blow", "episode_timeout"}
+            for trade in self._closed_trades
+        )
         return {
             "trade_count": trades,
             "win_count": len(winners),
@@ -593,11 +621,42 @@ class HistoricalChallengeEnv:
                 if winners else 0.0
             ),
             "winning_r_sum": float(np.sum(winners)) / risk_denominator,
+            "avg_loss_r": float(np.mean(losing_rs)) if losing_rs else 0.0,
+            "expectancy_r": float(np.mean(realized_rs)) if realized_rs else 0.0,
+            "avg_mfe_r": (
+                float(np.mean([trade.peak_favorable_r for trade in self._closed_trades]))
+                if self._closed_trades else 0.0
+            ),
+            "ratchet_activation_rate": len(activated) / trades if trades else 0.0,
+            "activated_avg_realized_r": (
+                float(np.mean([trade.realized_r for trade in activated]))
+                if activated else 0.0
+            ),
+            "avg_hold_bars": (
+                float(np.mean([trade.hold_bars for trade in self._closed_trades]))
+                if self._closed_trades else 0.0
+            ),
+            "voluntary_close_count": exit_counts["voluntary_close"],
+            "initial_stop_count": exit_counts["initial_stop"],
+            "ratchet_stop_count": exit_counts["ratchet_stop"],
+            "terminal_liquidation_count": terminal_liquidations,
         }
 
     def _liquidate(self, price: float, info: dict) -> None:
         if self._position is not None:
+            position = self._position
+            exit_index = int(info.get("fill_index", self._index))
             info["fees_paid"] += self._close_size(price, self._position.size)
+            pnl = self._closed_trade_pnls[-1]
+            risk = self.spec.per_trade_risk_dollars or self.spec.max_loss
+            self._closed_trades.append(_ClosedTrade(
+                pnl=pnl,
+                realized_r=pnl / risk,
+                peak_favorable_r=position.peak_favorable_r,
+                ratchet_activated=position.ratchet_active,
+                exit_reason=str(info.get("exit_reason", "unknown")),
+                hold_bars=max(0, exit_index - position.entry_index),
+            ))
 
     def _adverse_price(self, index: int) -> float:
         assert self._market is not None

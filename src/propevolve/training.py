@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -248,6 +249,7 @@ class HistoricalCandidateRunner:
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
+        diagnostics_path = output / "training-diagnostics.jsonl"
         resume_identity = _training_resume_identity(config, cache_root, teacher_config)
         resume = None
         if recovery_path.is_file():
@@ -260,6 +262,8 @@ class HistoricalCandidateRunner:
             train_environment.restore_rng_state(manifest["environment_rng_state"])
             agent = loaded
         else:
+            if diagnostics_path.exists():
+                raise ValueError("training diagnostics exist without resumable recovery")
             agent = RecurrentC51Agent(
                 observation_dim,
                 seed=seed,
@@ -306,6 +310,9 @@ class HistoricalCandidateRunner:
             ),
             teacher_lookup=(
                 teacher_targets.target if teacher_targets is not None else None
+            ),
+            episode_diagnostic_callback=lambda payload: _append_jsonl(
+                diagnostics_path, payload
             ),
         )
         agent.discard_teacher()
@@ -476,6 +483,12 @@ def _save_training_recovery(
     os.replace(temporary, path)
 
 
+def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        stream.write("\n")
+
+
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else root / path
@@ -547,6 +560,7 @@ def train_agent(
     checkpoint_every_episodes: int = 0,
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
+    episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -661,6 +675,42 @@ def train_agent(
             loss_sum=progress.loss_sum + sum(episode_losses),
             loss_count=progress.loss_count + len(episode_losses),
         )
+        if episode_diagnostic_callback is not None:
+            episode_diagnostic_callback({
+                "schema": "propevolve_episode_diagnostic_v1",
+                "episode": progress.completed_episodes,
+                "ticker": str(terminal_info["ticker"]),
+                "outcome": outcome,
+                "reward": total_reward,
+                "environment_steps": progress.environment_steps,
+                "trade_count": int(terminal_info.get("trade_count", 0)),
+                "win_rate": float(terminal_info.get("win_rate", 0.0)),
+                "avg_win_r": float(terminal_info.get("avg_win_r", 0.0)),
+                "avg_loss_r": float(terminal_info.get("avg_loss_r", 0.0)),
+                "expectancy_r": float(terminal_info.get("expectancy_r", 0.0)),
+                "avg_mfe_r": float(terminal_info.get("avg_mfe_r", 0.0)),
+                "ratchet_activation_rate": float(
+                    terminal_info.get("ratchet_activation_rate", 0.0)
+                ),
+                "activated_avg_realized_r": float(
+                    terminal_info.get("activated_avg_realized_r", 0.0)
+                ),
+                "avg_hold_bars": float(terminal_info.get("avg_hold_bars", 0.0)),
+                "voluntary_close_count": int(
+                    terminal_info.get("voluntary_close_count", 0)
+                ),
+                "initial_stop_count": int(
+                    terminal_info.get("initial_stop_count", 0)
+                ),
+                "ratchet_stop_count": int(
+                    terminal_info.get("ratchet_stop_count", 0)
+                ),
+                "terminal_liquidation_count": int(
+                    terminal_info.get("terminal_liquidation_count", 0)
+                ),
+                "terminal_pnl": terminal_pnl,
+                "primary_side": str(terminal_info.get("primary_side", "flat")),
+            })
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "
             f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)} "

@@ -194,6 +194,11 @@ def test_mechanical_stop_limits_trade_to_one_r_including_fees() -> None:
     assert info["exit_reason"] == "initial_stop"
     assert info["realized_pnl"] == pytest.approx(-200.0)
     assert info["trade_count"] == 1
+    assert info["initial_stop_count"] == 1
+    assert info["ratchet_stop_count"] == 0
+    assert info["voluntary_close_count"] == 0
+    assert info["avg_loss_r"] == pytest.approx(-1.0)
+    assert info["expectancy_r"] == pytest.approx(-1.0)
 
 
 def test_ratchet_activates_at_two_r_on_the_following_bar() -> None:
@@ -234,6 +239,49 @@ def test_ratchet_activates_at_two_r_on_the_following_bar() -> None:
     assert stopped["realized_pnl"] == 300.0
     assert stopped["avg_win_r"] == 1.5
     assert stopped["winning_r_sum"] == 1.5
+    assert stopped["ratchet_stop_count"] == 1
+    assert stopped["ratchet_activation_rate"] == 1.0
+    assert stopped["activated_avg_realized_r"] == 1.5
+
+
+def test_voluntary_close_reports_entry_quality_and_winner_retention() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(5) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 105.0, 105.0, 105.0], np.float32),
+        high=np.array([101.0, 108.0, 106.0, 106.0, 106.0], np.float32),
+        low=np.array([99.0, 99.0, 104.0, 104.0, 104.0], np.float32),
+        close=np.array([100.0, 105.0, 105.0, 105.0, 105.0], np.float32),
+        embeddings=np.zeros((5, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, _ = env.step(Action.ENTER_LONG_1)
+    assert not terminated
+    _, _, terminated, _, closed = env.step(Action.CLOSE)
+
+    assert not terminated
+    assert closed["exit_reason"] == "voluntary_close"
+    assert closed["voluntary_close_count"] == 1
+    assert closed["ratchet_stop_count"] == 0
+    assert closed["avg_mfe_r"] == pytest.approx(0.8)
+    assert closed["avg_hold_bars"] == 1.0
+    assert closed["expectancy_r"] == pytest.approx(0.5)
 
 
 def test_ratchet_lock_floor_protects_two_r_at_activation() -> None:
