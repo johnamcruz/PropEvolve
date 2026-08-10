@@ -320,7 +320,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     }
 
 
-def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
+def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) -> None:
     agent = Agent()
     replay = BalancedSequenceReplay(capacity_episodes=10, sequence_length=2, seed=1)
     diagnostics = []
@@ -361,8 +361,10 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     assert diagnostics[-1]["mean_training_loss"] == 0.5
     assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
     assert diagnostics[-1]["cumulative_blow_rate"] == 0.0
+    assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0
     assert diagnostics[-1]["action_counts"]["WAIT"] == 4
     assert diagnostics[-1]["shadow_h50_complete_trades"] == 0
+    assert "winR=+0.000R avg_balance=+6000.00 steps=4/8" in capsys.readouterr().out
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:

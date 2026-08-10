@@ -889,6 +889,9 @@ def train_agent(
             loss_sum=progress.loss_sum + sum(episode_losses),
             loss_count=progress.loss_count + len(episode_losses),
         )
+        cumulative_average_balance = (
+            progress.terminal_pnl_sum / progress.terminal_pnl_count
+        )
         if episode_diagnostic_callback is not None:
             diagnostic = {
                 "schema": "propevolve_episode_diagnostic_v1",
@@ -943,6 +946,7 @@ def train_agent(
                 "cumulative_timeouts": progress.timeouts,
                 "cumulative_pass_rate": progress.passes / progress.completed_episodes,
                 "cumulative_blow_rate": progress.blows / progress.completed_episodes,
+                "cumulative_average_balance": cumulative_average_balance,
                 "action_counts": {
                     action.name: action_counts[action] for action in Action
                 },
@@ -975,6 +979,7 @@ def train_agent(
             f"trades={int(terminal_info.get('trade_count', 0))} "
             f"WR={float(terminal_info.get('win_rate', 0.0)):.1%} "
             f"winR={float(terminal_info.get('avg_win_r', 0.0)):+.3f}R "
+            f"avg_balance={cumulative_average_balance:+.2f} "
             f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}",
             flush=True,
         )
