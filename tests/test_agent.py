@@ -150,6 +150,54 @@ def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     assert agent.online.teacher_output is None
 
 
+def test_warm_start_preserves_policy_but_resets_training_state_and_teacher(
+    tmp_path: Path,
+) -> None:
+    parent = _agent(2, seed=11)
+    with torch.no_grad():
+        parent.online.input[1].weight.fill_(0.25)
+        parent.target.input[1].weight.fill_(0.5)
+    parent._updates = 17
+    checkpoint = parent.save(
+        tmp_path / "parent.pt", manifest={"candidate_id": "parent-1"}
+    )
+
+    child, manifest = RecurrentC51Agent.warm_start(
+        checkpoint,
+        config={
+            "observation_dim": 2,
+            "hidden_dim": 8,
+            "atoms": 11,
+            "value_min": -3.0,
+            "value_max": 3.0,
+            "gamma": 0.997,
+            "learning_rate": 5e-5,
+            "weight_decay": 1e-5,
+            "gradient_clip": 10.0,
+            "target_sync_updates": 250,
+            "device": "cpu",
+            "seed": 29,
+            "teacher_channels": 4,
+            "teacher_loss_weight": 0.2,
+        },
+    )
+
+    torch.testing.assert_close(
+        child.online.input[1].weight,
+        parent.online.input[1].weight,
+    )
+    torch.testing.assert_close(
+        child.target.input[1].weight,
+        parent.target.input[1].weight,
+    )
+    assert child.teacher_channels == 4
+    assert child.online.teacher_output is not None
+    assert child._updates == 0
+    assert child.optimizer.state == {}
+    assert child.learning_rate == 5e-5
+    assert manifest == {"candidate_id": "parent-1"}
+
+
 @pytest.mark.skipif(
     not torch.backends.mps.is_available(),
     reason="MPS is unavailable on this test host",

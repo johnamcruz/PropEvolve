@@ -292,7 +292,8 @@ def load_experiment_config(path: str | Path) -> dict:
         }
         optional_stage_fields = {
             "seed", "seeds", "max_parallel", "allow_revisions",
-            "parent_improvement_requirements",
+            "parent_improvement_requirements", "warm_start_parent",
+            "curriculum_override", "revision_paths",
         }
         if (
             not isinstance(stage, dict)
@@ -342,6 +343,41 @@ def load_experiment_config(path: str | Path) -> dict:
             raise ValueError("campaign max_parallel requires seeds")
         if not isinstance(stage.get("allow_revisions", True), bool):
             raise ValueError("campaign budget stage revision policy is invalid")
+        if not isinstance(stage.get("warm_start_parent", False), bool):
+            raise ValueError("campaign warm-start policy is invalid")
+        curriculum_override = stage.get("curriculum_override", {})
+        if not isinstance(curriculum_override, dict) or any(
+            not str(path).strip() for path in curriculum_override
+        ):
+            raise ValueError("campaign curriculum override is invalid")
+        if any(
+            path not in payload["evolution"]["allowed_revision_paths"]
+            for path in curriculum_override
+        ):
+            raise ValueError("campaign curriculum override is not allowlisted")
+        for override_path, value in curriculum_override.items():
+            bounds = revision_bounds.get(override_path)
+            if bounds is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not float(bounds["minimum"])
+                <= float(value)
+                <= float(bounds["maximum"])
+            ):
+                raise ValueError("campaign curriculum override exceeds its bounds")
+        revision_paths = stage.get(
+            "revision_paths", payload["evolution"]["allowed_revision_paths"]
+        )
+        if (
+            not isinstance(revision_paths, (list, tuple))
+            or len(set(revision_paths)) != len(revision_paths)
+            or any(
+                path not in payload["evolution"]["allowed_revision_paths"]
+                for path in revision_paths
+            )
+        ):
+            raise ValueError("campaign stage revision paths are invalid")
+        stage["revision_paths"] = tuple(revision_paths)
         for requirement in stage_requirements:
             if (
                 not isinstance(requirement, dict)

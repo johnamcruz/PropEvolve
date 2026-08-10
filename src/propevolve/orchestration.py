@@ -143,14 +143,24 @@ class _CandidateStageAdapter:
         runner: CandidateRunner,
         policy: RevisionPolicy,
         revision_root: Path,
+        archive: CandidateArchive,
     ) -> None:
         self._base_config = base_config
         self._runner = runner
         self._policy = policy
         self._revision_root = revision_root
+        self._archive = archive
 
     def execute(self, request: StageRequest) -> StageReceipt:
         public = _public_config(self._base_config)
+        illegal = set(request.config_override) - set(
+            request.stage.config.get("revision_paths", ())
+        )
+        if illegal:
+            raise ValueError(
+                "reasoning revised fields outside the current curriculum stage: "
+                + ", ".join(sorted(illegal))
+            )
         previous_receipt = next(
             (
                 receipt
@@ -166,7 +176,11 @@ class _CandidateStageAdapter:
                 previous_receipt.outputs.get("effective_config_override", {})
             )
         )
-        combined_override = {**inherited_override, **request.config_override}
+        combined_override = {
+            **inherited_override,
+            **dict(request.stage.config.get("curriculum_override", {})),
+            **request.config_override,
+        }
         if combined_override:
             revision = self._policy.apply(public, combined_override)
             revision.write(
@@ -210,6 +224,15 @@ class _CandidateStageAdapter:
             seed_config["_archive_output"] = base_output
             seed_config["_path"] = self._base_config["_path"]
             seed_config["_root"] = self._base_config["_root"]
+            if prior is not None and bool(
+                request.stage.config.get("warm_start_parent", False)
+            ):
+                parent = self._archive.load_candidate(str(prior))
+                seed_config["_warm_start_model"] = {
+                    "candidate_id": parent.candidate_id,
+                    "model_path": str(parent.model_path),
+                    "model_sha256": parent.manifest["model_sha256"],
+                }
             candidate, evaluation = self._runner.run(
                 seed_config,
                 parent_candidate_ids=parents,
@@ -664,9 +687,29 @@ def _plan(config: Mapping) -> TrainingPlan:
                 "parent_improvement_requirements": list(
                     budget_stage.get("parent_improvement_requirements", ())
                 ),
+                "warm_start_parent": bool(
+                    budget_stage.get("warm_start_parent", False)
+                ),
+                "curriculum_override": dict(
+                    budget_stage.get("curriculum_override", {})
+                ),
                 "diagnostic_targets": list(campaign.get("diagnostic_targets", ())),
                 "revision_bounds": dict(
-                    config["evolution"].get("revision_bounds", {})
+                    (
+                        path,
+                        config["evolution"].get("revision_bounds", {})[path],
+                    )
+                    for path in budget_stage.get(
+                        "revision_paths",
+                        config["evolution"]["allowed_revision_paths"],
+                    )
+                    if path in config["evolution"].get("revision_bounds", {})
+                ),
+                "revision_paths": list(
+                    budget_stage.get(
+                        "revision_paths",
+                        config["evolution"]["allowed_revision_paths"],
+                    )
                 ),
                 "frozen_recipe_sha256": frozen_recipe_sha256,
             },
@@ -883,6 +926,7 @@ def run_evolution_campaign(
                     candidate_runner,
                     policy,
                     state_root,
+                    archive,
                 )
             },
             gates={_GATE_ADAPTER: _EconomicEvidenceGate(archive)},

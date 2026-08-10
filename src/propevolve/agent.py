@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 import torch
@@ -356,6 +356,51 @@ class RecurrentC51Agent:
             },
         }, path)
         return path
+
+    @classmethod
+    def warm_start(
+        cls,
+        path: str | Path,
+        *,
+        config: Mapping[str, object],
+    ) -> tuple["RecurrentC51Agent", dict]:
+        """Load policy weights while resetting optimization and teacher state."""
+        payload = torch.load(
+            Path(path),
+            map_location=str(config["device"]),
+            weights_only=False,
+        )
+        if payload.get("schema") != "propevolve_recurrent_c51_v1":
+            raise ValueError("unsupported PropEvolve model bundle")
+        parent = dict(payload["config"])
+        requested = dict(config)
+        structural = (
+            "observation_dim",
+            "hidden_dim",
+            "atoms",
+            "value_min",
+            "value_max",
+        )
+        if any(parent[field] != requested[field] for field in structural):
+            raise ValueError("warm-start policy architecture drifted")
+        agent = cls(**requested)
+
+        def load_shared(network: nn.Module, state: Mapping[str, torch.Tensor]) -> None:
+            shared = {
+                key: value
+                for key, value in state.items()
+                if not key.startswith("teacher_output.")
+            }
+            missing, unexpected = network.load_state_dict(shared, strict=False)
+            invalid_missing = [
+                key for key in missing if not key.startswith("teacher_output.")
+            ]
+            if invalid_missing or unexpected:
+                raise ValueError("warm-start policy state drifted")
+
+        load_shared(agent.online, payload["online"])
+        load_shared(agent.target, payload["target"])
+        return agent, dict(payload["manifest"])
 
     @classmethod
     def load(cls, path: str | Path, *, device: str) -> tuple["RecurrentC51Agent", dict]:

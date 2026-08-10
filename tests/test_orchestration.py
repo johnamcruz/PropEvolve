@@ -201,6 +201,16 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     tmp_path: Path,
 ) -> None:
     config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["campaign"]["budget_stages"] = [{
+        "name": "historical_candidate",
+        "minimum_environment_steps": payload["training"][
+            "minimum_environment_steps"
+        ],
+        "selection_requirements": payload["campaign"]["selection_requirements"],
+        "warm_start_parent": True,
+    }]
+    config_path.write_text(json.dumps(payload))
     output = tmp_path / "runs/evolution-test"
     runner = FakeCandidateRunner(output)
 
@@ -228,6 +238,12 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     candidates = runner.archive.list_candidates()
     child = next(item for item in candidates if item.model_path.read_bytes() == b"256")
     parent = next(item for item in candidates if item.model_path.read_bytes() == b"128")
+    assert "_warm_start_model" not in runner.configs[0]
+    assert runner.configs[1]["_warm_start_model"] == {
+        "candidate_id": parent.candidate_id,
+        "model_path": str(parent.model_path),
+        "model_sha256": parent.manifest["model_sha256"],
+    }
     assert child.manifest["parent_candidate_ids"] == [parent.candidate_id]
     assert reasoning.packet_paths
 

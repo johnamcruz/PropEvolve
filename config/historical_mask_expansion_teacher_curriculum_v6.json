@@ -1,0 +1,555 @@
+{
+  "schema": "propevolve_historical_training_v1",
+  "assets": "config/local-assets.json",
+  "tickers": [
+    "NQ",
+    "ES",
+    "GC",
+    "RTY",
+    "YM",
+    "CL",
+    "SI",
+    "ZB",
+    "ZN"
+  ],
+  "deployment_tickers": [
+    "NQ"
+  ],
+  "training_only_tickers": [
+    "CL",
+    "SI",
+    "ZB",
+    "ZN"
+  ],
+  "timeframe_minutes": 3,
+  "cache_root": "cache/chronos2_mask_full_3min_pre2026_v2",
+  "cache": {
+    "format": "ffm_frozen_representation_v2",
+    "encoder_identity_sha256": "1b8b7f001b0b4e501aa47ca90a3c2fd31d0b41dbd1d896e98ce084f6ed325710",
+    "context_length": 256,
+    "stride": 1,
+    "chunk_windows": 256,
+    "batch_series": 512,
+    "fast_group_attention": true,
+    "device": "auto"
+  },
+  "teacher": {
+    "kind": "expansion",
+    "cache_root": "cache/expansion_teacher_9market_3min_pre2025_v1",
+    "channels": [
+      "long_attempt_probability",
+      "long_clean_retained_given_attempt_probability",
+      "short_attempt_probability",
+      "short_clean_retained_given_attempt_probability"
+    ],
+    "loss_weight": 0.2
+  },
+  "challenge": {
+    "profit_target": 6000,
+    "max_loss": 3000,
+    "episode_days": 30,
+    "bars_per_day": 480,
+    "max_position_size": 1,
+    "minimum_mll_headroom": 500,
+    "trailing_mll_lock": true,
+    "terminal_pass_reward": 250,
+    "terminal_blow_reward": -1500,
+    "terminal_timeout_reward": -2,
+    "terminal_pass_speed_reward_per_day": 20,
+    "reward_scale": 1000,
+    "per_trade_risk_dollars": 200,
+    "ratchet_activation_r": 2,
+    "ratchet_giveback_r": 0.5,
+    "mll_proximity_penalty_coefficient": 0.0001,
+    "lead_giveback_penalty_coefficient": 0,
+    "large_win_threshold_r": 2,
+    "large_win_bonus_coefficient": 0,
+    "ratchet_lock_floor_r": 2
+  },
+  "point_values": {
+    "NQ": 20,
+    "ES": 50,
+    "GC": 100,
+    "RTY": 50,
+    "YM": 5,
+    "CL": 1000,
+    "SI": 5000,
+    "ZB": 1000,
+    "ZN": 1000
+  },
+  "round_trip_fees": {
+    "NQ": 3.84,
+    "ES": 3.84,
+    "GC": 4.3,
+    "RTY": 3.84,
+    "YM": 3.84,
+    "CL": 4.02,
+    "SI": 4.32,
+    "ZB": 2.76,
+    "ZN": 2.58
+  },
+  "temporal": {
+    "train_start": "2021-01-01",
+    "train_end": "2025-01-01",
+    "validation_start": "2025-01-01",
+    "validation_end": "2026-01-01",
+    "sealed_start": "2026-01-01"
+  },
+  "agent": {
+    "hidden_dim": 128,
+    "atoms": 51,
+    "value_min": -3,
+    "value_max": 3,
+    "gamma": 0.997,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
+    "gradient_clip": 10,
+    "target_sync_updates": 250,
+    "device": "mps"
+  },
+  "training": {
+    "episodes": 10000,
+    "minimum_environment_steps": 1000000,
+    "validation_episodes": 200,
+    "replay_capacity_episodes": 500,
+    "replay_capacity_transitions": 500000,
+    "sequence_length": 32,
+    "warmup_episodes": 8,
+    "updates_per_episode": 32,
+    "batch_sequences": 16,
+    "recurrent_horizon": 64,
+    "epsilon_start": 0.25,
+    "epsilon_end": 0.02,
+    "management_epsilon_start": 0.05,
+    "management_epsilon_end": 0.01,
+    "seed": 314159,
+    "checkpoint_every_episodes": 5,
+    "terminal_sequence_fraction": 0.5
+  },
+  "evolution": {
+    "hypothesis": "A four-stage warm-start curriculum will first learn survival, then 2R+ winner retention, then challenge completion, while each stage preserves all previously passed safety gates before frozen multi-seed confirmation.",
+    "parent_candidate_ids": [],
+    "allowed_revision_paths": [
+      "agent.learning_rate",
+      "agent.weight_decay",
+      "agent.gradient_clip",
+      "agent.target_sync_updates",
+      "challenge.per_trade_risk_dollars",
+      "challenge.ratchet_activation_r",
+      "challenge.ratchet_giveback_r",
+      "training.episodes",
+      "training.replay_capacity_episodes",
+      "training.sequence_length",
+      "training.warmup_episodes",
+      "training.updates_per_episode",
+      "training.batch_sequences",
+      "training.recurrent_horizon",
+      "training.epsilon_start",
+      "training.epsilon_end",
+      "training.management_epsilon_start",
+      "training.management_epsilon_end",
+      "challenge.minimum_mll_headroom",
+      "challenge.terminal_pass_reward",
+      "challenge.terminal_blow_reward",
+      "challenge.terminal_timeout_reward",
+      "challenge.terminal_pass_speed_reward_per_day",
+      "challenge.mll_proximity_penalty_coefficient",
+      "challenge.lead_giveback_penalty_coefficient",
+      "challenge.large_win_threshold_r",
+      "challenge.large_win_bonus_coefficient",
+      "training.terminal_sequence_fraction",
+      "challenge.ratchet_lock_floor_r"
+    ],
+    "frozen_paths": [
+      "assets",
+      "cache",
+      "cache_root",
+      "campaign.near_blow_loss_fraction",
+      "challenge.bars_per_day",
+      "challenge.episode_days",
+      "challenge.max_loss",
+      "challenge.max_position_size",
+      "challenge.profit_target",
+      "challenge.reward_scale",
+      "challenge.trailing_mll_lock",
+      "deployment_tickers",
+      "point_values",
+      "round_trip_fees",
+      "teacher",
+      "temporal",
+      "tickers",
+      "timeframe_minutes",
+      "training.checkpoint_every_episodes",
+      "training.minimum_environment_steps",
+      "training.replay_capacity_transitions",
+      "training_only_tickers"
+    ],
+    "revision_bounds": {
+      "challenge.per_trade_risk_dollars": {
+        "minimum": 100,
+        "maximum": 500
+      },
+      "challenge.ratchet_activation_r": {
+        "minimum": 1.5,
+        "maximum": 3
+      },
+      "challenge.ratchet_giveback_r": {
+        "minimum": 0.25,
+        "maximum": 1
+      },
+      "challenge.minimum_mll_headroom": {
+        "minimum": 250,
+        "maximum": 1500
+      },
+      "challenge.terminal_pass_reward": {
+        "minimum": 100,
+        "maximum": 500
+      },
+      "challenge.terminal_blow_reward": {
+        "minimum": -2500,
+        "maximum": -1000
+      },
+      "challenge.terminal_timeout_reward": {
+        "minimum": -20,
+        "maximum": 0
+      },
+      "challenge.terminal_pass_speed_reward_per_day": {
+        "minimum": 0,
+        "maximum": 50
+      },
+      "challenge.mll_proximity_penalty_coefficient": {
+        "minimum": 0,
+        "maximum": 0.01
+      },
+      "challenge.lead_giveback_penalty_coefficient": {
+        "minimum": 0,
+        "maximum": 0.01
+      },
+      "challenge.large_win_threshold_r": {
+        "minimum": 1,
+        "maximum": 3
+      },
+      "challenge.large_win_bonus_coefficient": {
+        "minimum": 0,
+        "maximum": 0.5
+      },
+      "training.management_epsilon_start": {
+        "minimum": 0,
+        "maximum": 0.25
+      },
+      "training.management_epsilon_end": {
+        "minimum": 0,
+        "maximum": 0.05
+      },
+      "training.terminal_sequence_fraction": {
+        "minimum": 0.25,
+        "maximum": 1
+      },
+      "challenge.ratchet_lock_floor_r": {
+        "minimum": 0,
+        "maximum": 2
+      },
+      "agent.learning_rate": {
+        "minimum": 0.00001,
+        "maximum": 0.0001
+      }
+    }
+  },
+  "campaign": {
+    "state_root": "runs/historical_mask_expansion_teacher_curriculum_v6/ml-loop-state",
+    "max_revisions_per_stage": 24,
+    "budget_stages": [
+      {
+        "name": "safety_foundation_1m",
+        "minimum_environment_steps": 1000000,
+        "allow_revisions": true,
+        "warm_start_parent": false,
+        "curriculum_override": {
+          "challenge.lead_giveback_penalty_coefficient": 0,
+          "challenge.large_win_bonus_coefficient": 0
+        },
+        "revision_paths": [
+          "agent.learning_rate",
+          "challenge.per_trade_risk_dollars",
+          "challenge.minimum_mll_headroom",
+          "challenge.mll_proximity_penalty_coefficient",
+          "challenge.terminal_blow_reward",
+          "challenge.terminal_timeout_reward",
+          "training.terminal_sequence_fraction",
+          "training.management_epsilon_start",
+          "training.management_epsilon_end"
+        ],
+        "selection_requirements": [
+          {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0
+          },
+          {
+            "metric": "selection.near_blow_timeout_rate",
+            "operator": "<=",
+            "value": 0.05
+          },
+          {
+            "metric": "selection.pass_rate",
+            "operator": ">=",
+            "value": 0.05
+          }
+        ]
+      },
+      {
+        "name": "winner_retention_1m",
+        "minimum_environment_steps": 1000000,
+        "allow_revisions": true,
+        "warm_start_parent": true,
+        "curriculum_override": {
+          "agent.learning_rate": 0.000075,
+          "challenge.lead_giveback_penalty_coefficient": 0,
+          "challenge.large_win_bonus_coefficient": 0.1
+        },
+        "revision_paths": [
+          "agent.learning_rate",
+          "challenge.ratchet_activation_r",
+          "challenge.ratchet_giveback_r",
+          "challenge.ratchet_lock_floor_r",
+          "challenge.large_win_threshold_r",
+          "challenge.large_win_bonus_coefficient",
+          "training.management_epsilon_start",
+          "training.management_epsilon_end"
+        ],
+        "selection_requirements": [
+          {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0
+          },
+          {
+            "metric": "selection.near_blow_timeout_rate",
+            "operator": "<=",
+            "value": 0.05
+          },
+          {
+            "metric": "selection.pass_rate",
+            "operator": ">=",
+            "value": 0.1
+          }
+        ],
+        "parent_improvement_requirements": [
+          {
+            "metric": "selection.two_r_mfe_capture_ratio",
+            "direction": "maximize",
+            "minimum_delta": 0
+          }
+        ]
+      },
+      {
+        "name": "challenge_completion_2m",
+        "minimum_environment_steps": 2000000,
+        "allow_revisions": true,
+        "warm_start_parent": true,
+        "curriculum_override": {
+          "agent.learning_rate": 0.00005,
+          "challenge.lead_giveback_penalty_coefficient": 0.001
+        },
+        "revision_paths": [
+          "agent.learning_rate",
+          "challenge.lead_giveback_penalty_coefficient",
+          "challenge.terminal_pass_reward",
+          "challenge.terminal_pass_speed_reward_per_day",
+          "challenge.per_trade_risk_dollars",
+          "training.management_epsilon_start",
+          "training.management_epsilon_end"
+        ],
+        "selection_requirements": [
+          {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0
+          },
+          {
+            "metric": "selection.near_blow_timeout_rate",
+            "operator": "<=",
+            "value": 0.05
+          },
+          {
+            "metric": "selection.pass_rate",
+            "operator": ">=",
+            "value": 0.25
+          },
+          {
+            "metric": "selection.expectancy_r",
+            "operator": ">=",
+            "value": 0
+          }
+        ],
+        "parent_improvement_requirements": [
+          {
+            "metric": "selection.pass_rate",
+            "direction": "maximize",
+            "minimum_delta": 0
+          },
+          {
+            "metric": "selection.expectancy_r",
+            "direction": "maximize",
+            "minimum_delta": 0
+          }
+        ]
+      },
+      {
+        "name": "confirmation_5m_multiseed",
+        "minimum_environment_steps": 5000000,
+        "allow_revisions": false,
+        "warm_start_parent": true,
+        "curriculum_override": {
+          "agent.learning_rate": 0.000025
+        },
+        "revision_paths": [],
+        "seeds": [
+          11111,
+          22222,
+          33333,
+          44444,
+          55555,
+          66666,
+          77777,
+          88888
+        ],
+        "max_parallel": 3,
+        "selection_requirements": [
+          {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0
+          },
+          {
+            "metric": "selection.near_blow_timeout_rate",
+            "operator": "<=",
+            "value": 0.05
+          },
+          {
+            "metric": "selection.two_r_mfe_capture_ratio",
+            "operator": ">=",
+            "value": 0.5
+          },
+          {
+            "metric": "selection.pass_rate",
+            "operator": ">=",
+            "value": 0.5
+          },
+          {
+            "metric": "selection.trade_win_rate",
+            "operator": ">=",
+            "value": 0.4
+          },
+          {
+            "metric": "selection.average_win_r",
+            "operator": ">=",
+            "value": 2
+          },
+          {
+            "metric": "selection.expectancy_r",
+            "operator": ">=",
+            "value": 0
+          }
+        ]
+      }
+    ],
+    "finalization": {
+      "registry_root": "runs/historical_mask_expansion_teacher_curriculum_v6/registry",
+      "export_root": "runs/historical_mask_expansion_teacher_curriculum_v6/export",
+      "minimum_seed_count": 8,
+      "ranking": [
+        {
+          "metric": "selection.blow_rate",
+          "direction": "minimize"
+        },
+        {
+          "metric": "selection.near_blow_timeout_rate",
+          "direction": "minimize"
+        },
+        {
+          "metric": "selection.two_r_mfe_capture_ratio",
+          "direction": "maximize"
+        },
+        {
+          "metric": "selection.pass_rate",
+          "direction": "maximize"
+        },
+        {
+          "metric": "selection.expectancy_r",
+          "direction": "maximize"
+        }
+      ]
+    },
+    "reasoning": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "timeout_seconds": 1800,
+      "proposer": "gepa_reflective"
+    },
+    "selection_requirements": [
+      {
+        "metric": "selection.blow_rate",
+        "operator": "==",
+        "value": 0
+      },
+      {
+        "metric": "selection.near_blow_timeout_rate",
+        "operator": "<=",
+        "value": 0.05
+      },
+      {
+        "metric": "selection.pass_rate",
+        "operator": ">=",
+        "value": 0.5
+      }
+    ],
+    "diagnostic_targets": [
+      {
+        "metric": "selection.trade_win_rate",
+        "operator": ">=",
+        "value": 0.4
+      },
+      {
+        "metric": "selection.average_win_r",
+        "operator": ">=",
+        "value": 2
+      },
+      {
+        "metric": "selection.expectancy_r",
+        "operator": ">=",
+        "value": 0
+      }
+    ],
+    "niches": [
+      {
+        "name": "lowest_blow",
+        "metric": "selection.blow_rate",
+        "maximize": false
+      },
+      {
+        "name": "lowest_near_blow",
+        "metric": "selection.near_blow_timeout_rate",
+        "maximize": false
+      },
+      {
+        "name": "best_two_r_retention",
+        "metric": "selection.two_r_mfe_capture_ratio",
+        "maximize": true
+      },
+      {
+        "name": "highest_pass",
+        "metric": "selection.pass_rate",
+        "maximize": true
+      },
+      {
+        "name": "best_expectancy",
+        "metric": "selection.expectancy_r",
+        "maximize": true
+      }
+    ],
+    "near_blow_loss_fraction": 0.75
+  },
+  "output": "runs/historical_mask_expansion_teacher_curriculum_v6"
+}

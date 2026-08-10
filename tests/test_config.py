@@ -94,6 +94,46 @@ def test_winner_retention_recipe_enables_economic_shaping_and_near_blow_gate() -
     assert "campaign.near_blow_loss_fraction" in config["evolution"]["frozen_paths"]
 
 
+def test_curriculum_recipe_teaches_four_priorities_by_warm_started_stage() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_curriculum_v6.json"
+    )
+
+    stages = config["campaign"]["budget_stages"]
+    assert [stage["name"] for stage in stages] == [
+        "safety_foundation_1m",
+        "winner_retention_1m",
+        "challenge_completion_2m",
+        "confirmation_5m_multiseed",
+    ]
+    assert stages[0]["curriculum_override"] == {
+        "challenge.lead_giveback_penalty_coefficient": 0,
+        "challenge.large_win_bonus_coefficient": 0,
+    }
+    assert "challenge.large_win_bonus_coefficient" not in stages[0][
+        "revision_paths"
+    ]
+    assert "challenge.lead_giveback_penalty_coefficient" not in stages[0][
+        "revision_paths"
+    ]
+    assert stages[1]["curriculum_override"] == {
+        "agent.learning_rate": 0.000075,
+        "challenge.lead_giveback_penalty_coefficient": 0,
+        "challenge.large_win_bonus_coefficient": 0.1,
+    }
+    assert "challenge.large_win_bonus_coefficient" in stages[1]["revision_paths"]
+    assert "challenge.lead_giveback_penalty_coefficient" not in stages[1][
+        "revision_paths"
+    ]
+    assert stages[2]["curriculum_override"] == {
+        "agent.learning_rate": 0.00005,
+        "challenge.lead_giveback_penalty_coefficient": 0.001,
+    }
+    assert "challenge.lead_giveback_penalty_coefficient" in stages[2][
+        "revision_paths"
+    ]
+
+
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(
     tmp_path: Path,
 ) -> None:

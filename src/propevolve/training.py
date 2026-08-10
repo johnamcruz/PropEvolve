@@ -407,11 +407,37 @@ class HistoricalCandidateRunner:
         else:
             if diagnostics_path.exists():
                 raise ValueError("training diagnostics exist without resumable recovery")
-            agent = RecurrentC51Agent(
-                observation_dim,
-                seed=seed,
-                **agent_settings,
-            )
+            warm_start = config.get("_warm_start_model")
+            if warm_start is None:
+                agent = RecurrentC51Agent(
+                    observation_dim,
+                    seed=seed,
+                    **agent_settings,
+                )
+            else:
+                warm_path = Path(str(warm_start["model_path"])).resolve(strict=True)
+                if _path_sha256(warm_path) != str(warm_start["model_sha256"]):
+                    raise ValueError("warm-start model identity drifted")
+                agent, parent_contract = RecurrentC51Agent.warm_start(
+                    warm_path,
+                    config={
+                        "observation_dim": observation_dim,
+                        "seed": seed,
+                        **agent_settings,
+                    },
+                )
+                expected_parent = {
+                    "checkpoint_sha256": assets.checkpoint_sha256,
+                    "training_tickers": list(config["tickers"]),
+                    "deployment_tickers": list(config["deployment_tickers"]),
+                    "training_only_tickers": list(config["training_only_tickers"]),
+                    "temporal": dict(temporal),
+                }
+                if any(
+                    parent_contract.get(field) != expected
+                    for field, expected in expected_parent.items()
+                ):
+                    raise ValueError("warm-start causal contract drifted")
         training_config = config["training"]
         replay = BalancedSequenceReplay(
             capacity_episodes=int(training_config["replay_capacity_episodes"]),
@@ -500,6 +526,14 @@ class HistoricalCandidateRunner:
             "round_trip_fees": dict(config["round_trip_fees"]),
             "sealed_start": temporal["sealed_start"],
             "sealed_holdout_touched": False,
+            "warm_start_parent": (
+                None
+                if config.get("_warm_start_model") is None
+                else {
+                    "candidate_id": config["_warm_start_model"]["candidate_id"],
+                    "model_sha256": config["_warm_start_model"]["model_sha256"],
+                }
+            ),
             "teacher": (
                 None
                 if teacher_config is None
@@ -636,7 +670,24 @@ def _training_resume_identity(
     teacher_config: dict | None,
 ) -> str:
     root = Path(config["_root"])
-    digest = hashlib.sha256(Path(config["_path"]).read_bytes())
+    digest = hashlib.sha256(json.dumps(
+        {
+            key: value
+            for key, value in config.items()
+            if not str(key).startswith("_")
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode())
+    if config.get("_warm_start_model") is not None:
+        digest.update(json.dumps(
+            {
+                "candidate_id": config["_warm_start_model"]["candidate_id"],
+                "model_sha256": config["_warm_start_model"]["model_sha256"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode())
     for ticker in sorted(config["tickers"]):
         digest.update((cache_root / ticker / "manifest.json").read_bytes())
         if teacher_config is not None:
