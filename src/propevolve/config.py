@@ -102,6 +102,7 @@ def load_experiment_config(path: str | Path) -> dict:
     challenge.setdefault("lead_giveback_penalty_coefficient", 0.0)
     challenge.setdefault("large_win_threshold_r", 2.0)
     challenge.setdefault("large_win_bonus_coefficient", 0.0)
+    challenge.setdefault("ratchet_lock_floor_r", 0.0)
     if challenge["max_position_size"] != 1:
         raise ValueError("the initial PropEvolve recipe supports one contract")
     if not isinstance(challenge["trailing_mll_lock"], bool):
@@ -113,6 +114,7 @@ def load_experiment_config(path: str | Path) -> dict:
             "lead_giveback_penalty_coefficient",
             "large_win_threshold_r",
             "large_win_bonus_coefficient",
+            "ratchet_lock_floor_r",
         )
     ):
         raise ValueError("challenge reward-shaping settings must be nonnegative")

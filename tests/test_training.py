@@ -300,6 +300,10 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "selection.pass_rate",
         "selection.blow_rate",
         "selection.pass_minus_blow",
+        "selection.timeout_mean_trade_count",
+        "selection.timeout_trade_win_rate",
+        "selection.timeout_average_win_r",
+        "selection.timeout_mean_terminal_pnl",
     }
 
 
@@ -416,6 +420,42 @@ def test_evaluation_never_updates_agent() -> None:
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
     assert result.passes == 2
     assert agent.updates == 0
+
+
+def test_evaluation_reports_pass_and_timeout_economics_separately() -> None:
+    class OutcomeEnvironment:
+        def __init__(self) -> None:
+            self.episode = -1
+
+        def reset(self):
+            self.episode += 1
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,)
+            }
+
+        def step(self, action):
+            outcome = ("pass", "timeout")[self.episode]
+            info = {
+                "valid_actions": (),
+                "outcome": outcome,
+                "trade_count": (4, 10)[self.episode],
+                "win_count": (2, 3)[self.episode],
+                "winning_r_sum": (6.0, 3.0)[self.episode],
+                "equity_pnl": (6_000.0, 1_500.0)[self.episode],
+            }
+            return np.array([1.0], np.float32), 1.0, True, False, info
+
+    result = evaluate_agent(
+        Agent(), OutcomeEnvironment(), episodes=2, recurrent_horizon=2
+    )
+
+    assert result.outcome("pass").mean_trade_count == 4.0
+    assert result.outcome("pass").trade_win_rate == 0.5
+    assert result.outcome("pass").average_win_r == 3.0
+    assert result.outcome("timeout").mean_trade_count == 10.0
+    assert result.outcome("timeout").trade_win_rate == 0.3
+    assert result.outcome("timeout").average_win_r == 1.0
+    assert result.outcome("timeout").mean_terminal_pnl == 1_500.0
 
 
 def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:

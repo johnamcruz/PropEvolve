@@ -30,6 +30,37 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class OutcomeStatistics:
+    outcome: str
+    episodes: int
+    trade_count: int
+    win_count: int
+    winning_r_sum: float
+    terminal_pnl_sum: float
+    reward_sum: float
+
+    @property
+    def mean_trade_count(self) -> float:
+        return self.trade_count / self.episodes if self.episodes else 0.0
+
+    @property
+    def trade_win_rate(self) -> float:
+        return self.win_count / self.trade_count if self.trade_count else 0.0
+
+    @property
+    def average_win_r(self) -> float:
+        return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+    @property
+    def mean_terminal_pnl(self) -> float:
+        return self.terminal_pnl_sum / self.episodes if self.episodes else 0.0
+
+    @property
+    def mean_reward(self) -> float:
+        return self.reward_sum / self.episodes if self.episodes else 0.0
+
+
+@dataclass(frozen=True)
 class TrainingResult:
     episodes: int
     environment_steps: int
@@ -43,6 +74,7 @@ class TrainingResult:
     mean_terminal_pnl: float
     mean_reward: float
     mean_loss: float
+    outcome_statistics: tuple[OutcomeStatistics, ...] = ()
 
     @property
     def trade_win_rate(self) -> float:
@@ -51,6 +83,26 @@ class TrainingResult:
     @property
     def average_win_r(self) -> float:
         return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+    def outcome(self, name: str) -> OutcomeStatistics:
+        for statistics in self.outcome_statistics:
+            if statistics.outcome == name:
+                return statistics
+        raise KeyError(f"outcome statistics are unavailable for {name}")
+
+
+def _outcome_metric_values(result: TrainingResult) -> dict[str, float]:
+    metrics = {}
+    for statistics in result.outcome_statistics:
+        prefix = statistics.outcome
+        metrics.update({
+            f"{prefix}_mean_trade_count": statistics.mean_trade_count,
+            f"{prefix}_trade_win_rate": statistics.trade_win_rate,
+            f"{prefix}_average_win_r": statistics.average_win_r,
+            f"{prefix}_mean_terminal_pnl": statistics.mean_terminal_pnl,
+            f"{prefix}_mean_reward": statistics.mean_reward,
+        })
+    return metrics
 
 
 @dataclass(frozen=True)
@@ -339,7 +391,7 @@ class HistoricalCandidateRunner:
         def selection_metrics(_candidate):
             pass_rate = validation.passes / validation.episodes
             blow_rate = validation.blows / validation.episodes
-            return {
+            metrics = {
                 "pass_rate": pass_rate,
                 "blow_rate": blow_rate,
                 "pass_minus_blow": pass_rate - blow_rate,
@@ -355,6 +407,8 @@ class HistoricalCandidateRunner:
                     profit_target=challenge.profit_target,
                 ),
             }
+            metrics.update(_outcome_metric_values(validation))
+            return metrics
 
         cascade = EvaluatorCascade(
             archive,
@@ -663,6 +717,17 @@ def evaluate_agent(
     trade_count = win_count = 0
     winning_r_sum = 0.0
     environment_steps = 0
+    by_outcome = {
+        outcome: {
+            "episodes": 0,
+            "trade_count": 0,
+            "win_count": 0,
+            "winning_r_sum": 0.0,
+            "terminal_pnl_sum": 0.0,
+            "reward_sum": 0.0,
+        }
+        for outcome in outcomes
+    }
     for _ in range(episodes):
         observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
@@ -682,12 +747,24 @@ def evaluate_agent(
             environment_steps += 1
             if terminated:
                 break
-        outcomes[str(info["outcome"])] += 1
+        outcome = str(info["outcome"])
+        outcomes[outcome] += 1
         rewards.append(total)
-        terminal_pnls.append(float(info.get("equity_pnl", 0.0)))
-        trade_count += int(info.get("trade_count", 0))
-        win_count += int(info.get("win_count", 0))
-        winning_r_sum += float(info.get("winning_r_sum", 0.0))
+        terminal_pnl = float(info.get("equity_pnl", 0.0))
+        episode_trades = int(info.get("trade_count", 0))
+        episode_wins = int(info.get("win_count", 0))
+        episode_winning_r = float(info.get("winning_r_sum", 0.0))
+        terminal_pnls.append(terminal_pnl)
+        trade_count += episode_trades
+        win_count += episode_wins
+        winning_r_sum += episode_winning_r
+        outcome_values = by_outcome[outcome]
+        outcome_values["episodes"] += 1
+        outcome_values["trade_count"] += episode_trades
+        outcome_values["win_count"] += episode_wins
+        outcome_values["winning_r_sum"] += episode_winning_r
+        outcome_values["terminal_pnl_sum"] += terminal_pnl
+        outcome_values["reward_sum"] += total
     return TrainingResult(
         episodes=episodes,
         environment_steps=environment_steps,
@@ -701,4 +778,9 @@ def evaluate_agent(
         mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_reward=float(np.mean(rewards)),
         mean_loss=float("nan"),
+        outcome_statistics=tuple(
+            OutcomeStatistics(outcome=outcome, **values)
+            for outcome, values in by_outcome.items()
+            if values["episodes"]
+        ),
     )

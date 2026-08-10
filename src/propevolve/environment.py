@@ -30,6 +30,7 @@ class ChallengeSpec:
     per_trade_risk_dollars: float | None = None
     ratchet_activation_r: float | None = None
     ratchet_giveback_r: float | None = None
+    ratchet_lock_floor_r: float = 0.0
     mll_proximity_penalty_coefficient: float = 0.0
     lead_giveback_penalty_coefficient: float = 0.0
     large_win_threshold_r: float = 2.0
@@ -54,6 +55,7 @@ class ChallengeSpec:
             self.lead_giveback_penalty_coefficient,
             self.large_win_threshold_r,
             self.large_win_bonus_coefficient,
+            self.ratchet_lock_floor_r,
         ) < 0:
             raise ValueError("reward-shaping settings must be nonnegative")
         ratchet = (
@@ -68,8 +70,12 @@ class ChallengeSpec:
                 float(self.per_trade_risk_dollars) <= 0
                 or float(self.ratchet_giveback_r) <= 0
                 or float(self.ratchet_activation_r) <= float(self.ratchet_giveback_r)
+                or float(self.ratchet_lock_floor_r)
+                > float(self.ratchet_activation_r)
             ):
                 raise ValueError("trade risk and ratchet settings are invalid")
+        elif self.ratchet_lock_floor_r > 0:
+            raise ValueError("ratchet lock floor requires declared trade risk")
         if self.large_win_bonus_coefficient > 0 and self.per_trade_risk_dollars is None:
             raise ValueError("large-win reward requires declared per-trade risk")
 
@@ -534,7 +540,10 @@ class HistoricalChallengeEnv:
         activation = float(self.spec.ratchet_activation_r)
         giveback = float(self.spec.ratchet_giveback_r)
         if position.peak_favorable_r >= activation:
-            protected_r = position.peak_favorable_r - giveback
+            protected_r = max(
+                position.peak_favorable_r - giveback,
+                float(self.spec.ratchet_lock_floor_r),
+            )
             candidate = (
                 position.average_entry + protected_r * position.initial_risk_points
                 if position.side == PositionSide.LONG

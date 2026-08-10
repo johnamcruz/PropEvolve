@@ -140,6 +140,7 @@ def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path)
         "per_trade_risk_dollars": 200.0,
         "ratchet_activation_r": 2.0,
         "ratchet_giveback_r": 0.5,
+        "ratchet_lock_floor_r": 2.0,
     })
     path = tmp_path / "ratchet.json"
     path.write_text(json.dumps(payload))
@@ -149,6 +150,7 @@ def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path)
     assert config["challenge"]["per_trade_risk_dollars"] == 200.0
     assert config["challenge"]["ratchet_activation_r"] == 2.0
     assert config["challenge"]["ratchet_giveback_r"] == 0.5
+    assert config["challenge"]["ratchet_lock_floor_r"] == 2.0
 
 
 def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
@@ -193,3 +195,19 @@ def test_large_win_expansion_challenger_is_bounded_and_distinct() -> None:
         "validation_end": "2026-01-01",
         "sealed_start": "2026-01-01",
     }
+
+
+def test_expansion_ratchet_floor_challenger_is_one_isolated_revision() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_ratchet_floor_v1.json"
+    )
+
+    assert config["challenge"]["ratchet_activation_r"] == 2.0
+    assert config["challenge"]["ratchet_giveback_r"] == 0.5
+    assert config["challenge"]["ratchet_lock_floor_r"] == 2.0
+    assert config["challenge"]["large_win_bonus_coefficient"] == 0.0
+    assert config["training"]["minimum_environment_steps"] == 2_000_000
+    assert (
+        config["output"]
+        == "runs/historical_mask_expansion_teacher_ratchet_floor_v1"
+    )

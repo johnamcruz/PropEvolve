@@ -162,7 +162,10 @@ def test_timeout_occurs_after_exact_cme_trading_session_count() -> None:
 
 
 def test_mechanical_stop_limits_trade_to_one_r_including_fees() -> None:
-    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(4) * np.timedelta64(3, "m")
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(4) * np.timedelta64(3, "m")
+    )
     market = MarketSeries(
         ticker="NQ",
         timestamps=timestamps,
@@ -233,6 +236,41 @@ def test_ratchet_activates_at_two_r_on_the_following_bar() -> None:
     assert stopped["winning_r_sum"] == 1.5
 
 
+def test_ratchet_lock_floor_protects_two_r_at_activation() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(4) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 116.0, 116.0], np.float32),
+        high=np.array([101.0, 120.0, 117.0, 117.0], np.float32),
+        low=np.array([99.0, 95.0, 114.0, 115.0], np.float32),
+        close=np.array([100.0, 110.0, 116.0, 116.0], np.float32),
+        embeddings=np.zeros((4, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+            ratchet_lock_floor_r=2.0,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, activation = env.step(Action.ENTER_LONG_1)
+
+    assert not terminated
+    assert activation["ratchet_active"] is True
+    assert activation["protective_stop_price"] == 120.0
+
+
 def test_short_ratchet_uses_an_independent_downside_path() -> None:
     timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
     market = MarketSeries(
@@ -265,6 +303,38 @@ def test_short_ratchet_uses_an_independent_downside_path() -> None:
     assert stopped["exit_reason"] == "ratchet_stop"
     assert stopped["realized_pnl"] == 300.0
     assert stopped["avg_win_r"] == 1.5
+
+
+def test_short_ratchet_lock_floor_protects_two_r_at_activation() -> None:
+    timestamps = np.datetime64("2024-01-02T23:00") + np.arange(4) * np.timedelta64(3, "m")
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 84.0, 84.0], np.float32),
+        high=np.array([101.0, 105.0, 86.0, 85.0], np.float32),
+        low=np.array([99.0, 80.0, 83.0, 83.0], np.float32),
+        close=np.array([100.0, 90.0, 84.0, 84.0], np.float32),
+        embeddings=np.zeros((4, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+            ratchet_lock_floor_r=2.0,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, activation = env.step(Action.ENTER_SHORT_1)
+
+    assert not terminated
+    assert activation["ratchet_active"] is True
+    assert activation["protective_stop_price"] == 80.0
 
 
 def test_pass_speed_reward_uses_completed_cme_sessions_not_row_count() -> None:
