@@ -132,6 +132,10 @@ def test_curriculum_recipe_teaches_four_priorities_by_warm_started_stage() -> No
     assert "challenge.lead_giveback_penalty_coefficient" in stages[2][
         "revision_paths"
     ]
+    assert config["challenge"]["mll_proximity_penalty_coefficient"] > 0
+    assert config["evolution"]["revision_bounds"][
+        "challenge.mll_proximity_penalty_coefficient"
+    ]["minimum"] > 0
 
 
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(

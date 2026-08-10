@@ -446,15 +446,20 @@ class HistoricalChallengeEnv:
     ) -> tuple[float, dict[str, float]]:
         proximity_penalty = 0.0
         lead_giveback_penalty = 0.0
-        if self._position is not None and self._account is not None:
+        if self._account is not None:
             cushion_fraction = min(
                 1.0,
-                self._account.mll_headroom(equity) / self.spec.max_loss,
+                max(
+                    0.0,
+                    self._account.mll_headroom(equity) / self.spec.max_loss,
+                ),
             )
             proximity_penalty = (
                 self.spec.mll_proximity_penalty_coefficient
                 * (1.0 - cushion_fraction) ** 2
             )
+
+        if self._position is not None and self._account is not None:
             progress = min(
                 1.0,
                 max(0.0, self._account.realized_pnl / self.spec.profit_target),

@@ -146,6 +146,46 @@ def test_round_trip_fee_is_included_before_declaring_a_pass() -> None:
     assert info["equity_pnl"] == 10.0
 
 
+def test_flat_account_keeps_mll_proximity_penalty_after_realizing_drawdown() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(6) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 90.0, 90.0, 90.0, 90.0], np.float32),
+        high=np.array([101.0, 101.0, 91.0, 91.0, 91.0, 91.0], np.float32),
+        low=np.array([99.0, 90.0, 89.0, 89.0, 89.0, 89.0], np.float32),
+        close=np.array([100.0, 90.0, 90.0, 90.0, 90.0, 90.0], np.float32),
+        embeddings=np.zeros((6, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            max_loss=300.0,
+            minimum_mll_headroom=0.0,
+            mll_proximity_penalty_coefficient=0.1,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+
+    _, close_reward, terminated, _, close_info = env.step(Action.CLOSE)
+    _, wait_reward, _, _, wait_info = env.step(Action.WAIT)
+
+    expected_penalty = 0.1 * (1.0 - 100.0 / 300.0) ** 2
+    assert not terminated
+    assert close_info["equity_pnl"] == -200.0
+    assert close_info["mll_proximity_penalty"] == pytest.approx(expected_penalty)
+    assert wait_info["mll_proximity_penalty"] == pytest.approx(expected_penalty)
+    assert close_reward == pytest.approx(-expected_penalty)
+    assert wait_reward == pytest.approx(-expected_penalty)
+
+
 def test_timeout_occurs_after_exact_cme_trading_session_count() -> None:
     timestamps = np.asarray(
         [

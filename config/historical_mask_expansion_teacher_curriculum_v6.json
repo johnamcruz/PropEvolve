@@ -218,7 +218,7 @@
         "maximum": 50
       },
       "challenge.mll_proximity_penalty_coefficient": {
-        "minimum": 0,
+        "minimum": 0.000001,
         "maximum": 0.01
       },
       "challenge.lead_giveback_penalty_coefficient": {
