@@ -282,7 +282,7 @@ def load_experiment_config(path: str | Path) -> dict:
         required_stage_fields = {
             "name", "minimum_environment_steps", "selection_requirements"
         }
-        optional_stage_fields = {"seed", "allow_revisions"}
+        optional_stage_fields = {"seed", "seeds", "max_parallel", "allow_revisions"}
         if (
             not isinstance(stage, dict)
             or not required_stage_fields <= set(stage)
@@ -306,6 +306,29 @@ def load_experiment_config(path: str | Path) -> dict:
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
         ):
             raise ValueError("campaign budget stage seed is invalid")
+        seeds = stage.get("seeds")
+        max_parallel = stage.get("max_parallel")
+        if seed is not None and seeds is not None:
+            raise ValueError("campaign budget stage cannot set seed and seeds")
+        if seeds is not None:
+            if (
+                not isinstance(seeds, list)
+                or not seeds
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in seeds
+                )
+                or len(set(seeds)) != len(seeds)
+                or isinstance(max_parallel, bool)
+                or not isinstance(max_parallel, int)
+                or max_parallel < 1
+                or max_parallel > len(seeds)
+                or stage.get("allow_revisions", True) is not False
+            ):
+                raise ValueError("campaign multi-seed stage contract is invalid")
+            stage["seeds"] = tuple(seeds)
+        elif max_parallel is not None:
+            raise ValueError("campaign max_parallel requires seeds")
         if not isinstance(stage.get("allow_revisions", True), bool):
             raise ValueError("campaign budget stage revision policy is invalid")
         for requirement in stage_requirements:
@@ -322,6 +345,38 @@ def load_experiment_config(path: str | Path) -> dict:
     if len(set(names)) != len(names) or budgets != sorted(budgets):
         raise ValueError("campaign budget stages must have unique names and increasing budgets")
     campaign["budget_stages"] = tuple(budget_stages)
+    finalization = campaign.get("finalization")
+    if finalization is not None:
+        if not isinstance(finalization, dict):
+            raise ValueError("campaign finalization must be an object")
+        required = {
+            "registry_root", "export_root", "minimum_seed_count", "ranking"
+        }
+        if set(finalization) != required:
+            raise ValueError("campaign finalization contract is invalid")
+        minimum_seed_count = finalization["minimum_seed_count"]
+        ranking = finalization["ranking"]
+        if (
+            not str(finalization["registry_root"]).strip()
+            or not str(finalization["export_root"]).strip()
+            or isinstance(minimum_seed_count, bool)
+            or not isinstance(minimum_seed_count, int)
+            or minimum_seed_count < 1
+            or not isinstance(ranking, list)
+            or not ranking
+        ):
+            raise ValueError("campaign finalization contract is invalid")
+        seed_count = sum(len(stage.get("seeds", ())) for stage in budget_stages)
+        if minimum_seed_count > seed_count:
+            raise ValueError("campaign finalization requires more seeds than declared")
+        for rule in ranking:
+            if (
+                not isinstance(rule, dict)
+                or set(rule) != {"metric", "direction"}
+                or not str(rule["metric"]).strip()
+                or rule["direction"] not in {"minimize", "maximize"}
+            ):
+                raise ValueError("campaign finalization ranking is invalid")
     diagnostics = campaign.get("diagnostic_targets", [])
     if not isinstance(diagnostics, list):
         raise ValueError("campaign diagnostic targets must be an array")

@@ -247,15 +247,8 @@ def test_staged_budget_recipe_screens_confirms_then_freezes_eight_final_seeds() 
         1_000_000,
         2_000_000,
         5_000_000,
-        5_000_000,
-        5_000_000,
-        5_000_000,
-        5_000_000,
-        5_000_000,
-        5_000_000,
-        5_000_000,
     ]
-    assert [stage.get("seed") for stage in stages[-8:]] == [
+    assert stages[-1]["seeds"] == (
         11111,
         22222,
         33333,
@@ -264,8 +257,10 @@ def test_staged_budget_recipe_screens_confirms_then_freezes_eight_final_seeds() 
         66666,
         77777,
         88888,
-    ]
-    assert all(stage["allow_revisions"] is False for stage in stages[-8:])
+    )
+    assert stages[-1]["max_parallel"] == 3
+    assert stages[-1]["allow_revisions"] is False
+    assert config["campaign"]["finalization"]["minimum_seed_count"] == 8
     assert stages[-1]["selection_requirements"] == [
         {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
         {"metric": "selection.blow_rate", "operator": "==", "value": 0},

@@ -280,93 +280,10 @@
         ]
       },
       {
-        "name": "final_5m_seed_11111",
+        "name": "final_5m_multiseed",
         "minimum_environment_steps": 5000000,
-        "seed": 11111,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_22222",
-        "minimum_environment_steps": 5000000,
-        "seed": 22222,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_33333",
-        "minimum_environment_steps": 5000000,
-        "seed": 33333,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_44444",
-        "minimum_environment_steps": 5000000,
-        "seed": 44444,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_55555",
-        "minimum_environment_steps": 5000000,
-        "seed": 55555,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_66666",
-        "minimum_environment_steps": 5000000,
-        "seed": 66666,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_77777",
-        "minimum_environment_steps": 5000000,
-        "seed": 77777,
-        "allow_revisions": false,
-        "selection_requirements": [
-          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
-          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
-          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
-          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
-        ]
-      },
-      {
-        "name": "final_5m_seed_88888",
-        "minimum_environment_steps": 5000000,
-        "seed": 88888,
+        "seeds": [11111, 22222, 33333, 44444, 55555, 66666, 77777, 88888],
+        "max_parallel": 3,
         "allow_revisions": false,
         "selection_requirements": [
           {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
@@ -376,6 +293,18 @@
         ]
       }
     ],
+    "finalization": {
+      "registry_root": "runs/historical_mask_expansion_teacher_staged_budget_v4/registry",
+      "export_root": "runs/historical_mask_expansion_teacher_staged_budget_v4/export",
+      "minimum_seed_count": 8,
+      "ranking": [
+        {"metric": "selection.blow_rate", "direction": "minimize"},
+        {"metric": "selection.pass_rate", "direction": "maximize"},
+        {"metric": "selection.average_win_r", "direction": "maximize"},
+        {"metric": "selection.trade_win_rate", "direction": "maximize"},
+        {"metric": "selection.mean_terminal_pnl", "direction": "maximize"}
+      ]
+    },
     "reasoning": {
       "provider": "codex",
       "model": "gpt-5.6-sol",

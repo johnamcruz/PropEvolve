@@ -238,11 +238,23 @@ def test_campaign_advances_through_screen_confirm_and_final_budgets(
             "selection_requirements": payload["campaign"]["selection_requirements"],
         },
         {
-            "name": "final_5m",
+            "name": "final_5m_multiseed",
             "minimum_environment_steps": 5_000_000,
+            "seeds": [11111, 22222, 33333],
+            "max_parallel": 3,
+            "allow_revisions": False,
             "selection_requirements": payload["campaign"]["selection_requirements"],
         },
     ]
+    payload["campaign"]["finalization"] = {
+        "registry_root": "runs/evolution-test/registry",
+        "export_root": "runs/evolution-test/export",
+        "minimum_seed_count": 3,
+        "ranking": [
+            {"metric": "selection.blow_rate", "direction": "minimize"},
+            {"metric": "selection.pass_rate", "direction": "maximize"},
+        ],
+    }
     config_path.write_text(json.dumps(payload))
     runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
 
@@ -255,19 +267,39 @@ def test_campaign_advances_through_screen_confirm_and_final_budgets(
     )
 
     assert state.phase is Phase.COMPLETE
-    assert [item["training"]["minimum_environment_steps"] for item in runner.configs] == [
+    assert [item["training"]["minimum_environment_steps"] for item in runner.configs[:3]] == [
         1_000_000,
         1_000_000,
         2_000_000,
-        5_000_000,
     ]
-    assert [item["agent"]["hidden_dim"] for item in runner.configs] == [
+    assert [item["agent"]["hidden_dim"] for item in runner.configs[:3]] == [
         128,
         256,
         256,
-        256,
     ]
-    assert len({item["output"] for item in runner.configs}) == 4
+    final_configs = runner.configs[3:]
+    assert sorted(item["training"]["seed"] for item in final_configs) == [
+        11111,
+        22222,
+        33333,
+    ]
+    assert all(
+        item["training"]["minimum_environment_steps"] == 5_000_000
+        for item in final_configs
+    )
+    assert all(item["agent"]["hidden_dim"] == 256 for item in final_configs)
+    assert len({item["output"] for item in runner.configs}) == 6
+    report = json.loads(
+        (tmp_path / "runs/evolution-test/export/gauntlet-report.json").read_text()
+    )
+    assert report["status"] == "PASS"
+    assert report["evaluated_seed_count"] == 3
+    assert report["selected_seed"] == 11111
+    assert (tmp_path / "runs/evolution-test/export/model.pt").is_file()
+    champion = json.loads(
+        (tmp_path / "runs/evolution-test/registry/champion.json").read_text()
+    )
+    assert champion["candidate_id"] == report["selected_candidate_id"]
 
 
 def test_optional_gepa_proposer_adds_authenticated_actionable_side_information(

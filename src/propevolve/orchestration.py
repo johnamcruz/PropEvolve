@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 import fcntl
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Mapping, Protocol
 
 from ml_training_loop import (
@@ -34,7 +38,7 @@ from ml_training_loop.skills import BundledSkillBootstrapper
 from ml_training_loop.stores import JsonRunStore
 
 from .config import load_experiment_config
-from .evolution import CandidateArchive, Niche, RevisionPolicy
+from .evolution import CandidateArchive, ModelRegistry, Niche, RevisionPolicy
 from .reasoning import GepaReflectiveReasoningAdapter
 
 
@@ -132,23 +136,7 @@ class _CandidateStageAdapter:
             effective = revision.config
         else:
             effective = public
-        effective["training"] = dict(effective["training"])
-        effective["training"]["minimum_environment_steps"] = int(
-            request.stage.config["minimum_environment_steps"]
-        )
-        if request.stage.config.get("seed") is not None:
-            effective["training"]["seed"] = int(request.stage.config["seed"])
         base_output = str(self._base_config["output"])
-        effective["output"] = str(
-            Path(base_output)
-            / "campaign-runs"
-            / request.run_id
-            / request.stage.name
-            / f"attempt-{request.attempt}"
-        )
-        effective["_archive_output"] = base_output
-        effective["_path"] = self._base_config["_path"]
-        effective["_root"] = self._base_config["_root"]
         prior = (
             None
             if previous_receipt is None
@@ -159,26 +147,44 @@ class _CandidateStageAdapter:
             if prior is not None
             else tuple(self._base_config["evolution"]["parent_candidate_ids"])
         )
-        candidate, evaluation = self._runner.run(
-            effective,
-            parent_candidate_ids=parents,
-            hypothesis=str(self._base_config["evolution"]["hypothesis"]),
-        )
-        output_root = Path(str(effective["output"]))
-        if not output_root.is_absolute():
-            output_root = Path(str(effective["_root"])) / output_root
-        diagnostic_summary = output_root / "training-diagnostic-summary.json"
-        diagnostic_reference = None
-        if diagnostic_summary.is_file():
-            diagnostic_reference = {
-                "path": str(diagnostic_summary),
-                "file_sha256": _sha256(diagnostic_summary),
-            }
-        return StageReceipt(
-            stage=request.stage.name,
-            attempt=request.attempt,
-            status="complete",
-            outputs={
+
+        def run_one(seed: int | None) -> dict:
+            seed_config = deepcopy(effective)
+            seed_config["training"] = dict(seed_config["training"])
+            seed_config["training"]["minimum_environment_steps"] = int(
+                request.stage.config["minimum_environment_steps"]
+            )
+            if seed is not None:
+                seed_config["training"]["seed"] = int(seed)
+            seed_path = "" if seed is None else f"seed-{seed}"
+            seed_config["output"] = str(
+                Path(base_output)
+                / "campaign-runs"
+                / request.run_id
+                / request.stage.name
+                / seed_path
+                / f"attempt-{request.attempt}"
+            )
+            seed_config["_archive_output"] = base_output
+            seed_config["_path"] = self._base_config["_path"]
+            seed_config["_root"] = self._base_config["_root"]
+            candidate, evaluation = self._runner.run(
+                seed_config,
+                parent_candidate_ids=parents,
+                hypothesis=str(self._base_config["evolution"]["hypothesis"]),
+            )
+            output_root = Path(str(seed_config["output"]))
+            if not output_root.is_absolute():
+                output_root = Path(str(seed_config["_root"])) / output_root
+            diagnostic_summary = output_root / "training-diagnostic-summary.json"
+            diagnostic_reference = None
+            if diagnostic_summary.is_file():
+                diagnostic_reference = {
+                    "path": str(diagnostic_summary),
+                    "file_sha256": _sha256(diagnostic_summary),
+                }
+            return {
+                "seed": seed,
                 "candidate_id": candidate.candidate_id,
                 "candidate_manifest": str(candidate.path / "manifest.json"),
                 "candidate_model_sha256": candidate.manifest["model_sha256"],
@@ -187,9 +193,42 @@ class _CandidateStageAdapter:
                 "evaluation_sha256": _sha256(evaluation.path),
                 "evaluation_status": evaluation.status,
                 "metrics": dict(evaluation.metrics),
+                "training_diagnostic_summary": diagnostic_reference,
+            }
+
+        seeds = request.stage.config.get("seeds")
+        if seeds is not None:
+            results = []
+            with ThreadPoolExecutor(
+                max_workers=int(request.stage.config["max_parallel"])
+            ) as executor:
+                futures = {
+                    executor.submit(run_one, int(seed)): int(seed)
+                    for seed in seeds
+                }
+                for future in as_completed(futures):
+                    results.append(future.result())
+            results.sort(key=lambda item: int(item["seed"]))
+            return StageReceipt(
+                stage=request.stage.name,
+                attempt=request.attempt,
+                status="complete",
+                outputs={
+                    "seed_results": results,
+                    "parent_candidate_ids": list(parents),
+                    "effective_config_override": combined_override,
+                },
+            )
+
+        result = run_one(request.stage.config.get("seed"))
+        return StageReceipt(
+            stage=request.stage.name,
+            attempt=request.attempt,
+            status="complete",
+            outputs={
+                **result,
                 "parent_candidate_ids": list(parents),
                 "effective_config_override": combined_override,
-                "training_diagnostic_summary": diagnostic_reference,
             },
         )
 
@@ -200,6 +239,61 @@ class _EconomicEvidenceGate:
 
     def evaluate(self, request: GateRequest) -> GateResult:
         outputs = request.receipt.outputs
+        if outputs.get("seed_results") is not None:
+            failures = []
+            seed_evidence = []
+            for result in outputs["seed_results"]:
+                evidence = self._evaluate_outputs(
+                    result, request.stage.config["selection_requirements"]
+                )
+                seed_evidence.append({"seed": result["seed"], **evidence})
+                failures.extend(
+                    {"seed": result["seed"], **failure}
+                    for failure in evidence["failures"]
+                )
+                if evidence["evaluation_status"] != "PASS":
+                    failures.append({
+                        "seed": result["seed"],
+                        "metric": "evaluation_status",
+                        "expected": "PASS",
+                        "actual": evidence["evaluation_status"],
+                    })
+            evidence = {"seeds": seed_evidence, "failures": failures}
+            if failures:
+                return GateResult(
+                    Decision.STOP,
+                    "frozen multi-seed confirmation failed its economic gate",
+                    evidence,
+                )
+            return GateResult(
+                Decision.PROCEED,
+                "all frozen final seeds passed the economic gate",
+                evidence,
+            )
+        evidence = self._evaluate_outputs(
+            outputs, request.stage.config["selection_requirements"]
+        )
+        failures = evidence["failures"]
+        evaluation_status = evidence["evaluation_status"]
+        if failures or evaluation_status != "PASS":
+            if not bool(request.stage.config.get("allow_revisions", True)):
+                return GateResult(
+                    Decision.STOP,
+                    "frozen final recipe failed multi-seed economic confirmation",
+                    evidence,
+                )
+            return GateResult(
+                Decision.REVISE,
+                "challenger missed the declared economic selection gate",
+                evidence,
+            )
+        return GateResult(
+            Decision.PROCEED,
+            "challenger passed the declared economic selection gate",
+            evidence,
+        )
+
+    def _evaluate_outputs(self, outputs: Mapping, requirements) -> dict:
         candidate = self._archive.load_candidate(str(outputs["candidate_id"]))
         evaluation = self._archive.load_evaluation(str(outputs["evaluation_id"]))
         path = Path(str(outputs["evaluation_path"]))
@@ -212,7 +306,7 @@ class _EconomicEvidenceGate:
             raise ValueError("candidate evaluation handoff identity drifted")
         failures = []
         values = {}
-        for requirement in request.stage.config["selection_requirements"]:
+        for requirement in requirements:
             metric = requirement["metric"]
             if metric not in evaluation.metrics:
                 raise ValueError(f"required economic metric is missing: {metric}")
@@ -239,24 +333,9 @@ class _EconomicEvidenceGate:
             "evaluation_id": evaluation.evaluation_id,
             "values": values,
             "failures": failures,
+            "evaluation_status": evaluation.status,
         }
-        if failures or evaluation.status != "PASS":
-            if not bool(request.stage.config.get("allow_revisions", True)):
-                return GateResult(
-                    Decision.STOP,
-                    "frozen final recipe failed multi-seed economic confirmation",
-                    evidence,
-                )
-            return GateResult(
-                Decision.REVISE,
-                "challenger missed the declared economic selection gate",
-                evidence,
-            )
-        return GateResult(
-            Decision.PROCEED,
-            "challenger passed the declared economic selection gate",
-            evidence,
-        )
+        return evidence
 
 
 class _ArchiveReasoningAdapter:
@@ -459,6 +538,8 @@ def _plan(config: Mapping) -> TrainingPlan:
                     budget_stage["minimum_environment_steps"]
                 ),
                 "seed": budget_stage.get("seed"),
+                "seeds": budget_stage.get("seeds"),
+                "max_parallel": budget_stage.get("max_parallel"),
                 "allow_revisions": bool(
                     budget_stage.get("allow_revisions", True)
                 ),
@@ -492,6 +573,139 @@ def _niches(config: Mapping) -> tuple[Niche, ...]:
         str(item["metric"]),
         bool(item.get("maximize", True)),
     ) for item in config["campaign"]["niches"])
+
+
+def _campaign_path(config: Mapping, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else Path(str(config["_root"])) / path
+
+
+def _finalize_campaign(config: Mapping, state, archive: CandidateArchive) -> None:
+    """Select and package one champion after every declared seed passed."""
+    finalization = config["campaign"].get("finalization")
+    if finalization is None or state.phase.value != "COMPLETE":
+        return
+    seeded_stages = {
+        str(stage["name"]): tuple(int(seed) for seed in stage.get("seeds", ()))
+        for stage in config["campaign"]["budget_stages"]
+        if stage.get("seeds") is not None
+    }
+    receipts = {
+        receipt.stage: receipt for receipt in state.receipts
+        if receipt.stage in seeded_stages and receipt.outputs.get("seed_results")
+    }
+    minimum = int(finalization["minimum_seed_count"])
+    if len(receipts) != len(seeded_stages):
+        raise ValueError(
+            "completed campaign lacks the declared final-seed evidence"
+        )
+
+    rows = []
+    for stage_name, declared_seeds in seeded_stages.items():
+        results = receipts[stage_name].outputs["seed_results"]
+        if tuple(sorted(int(item["seed"]) for item in results)) != tuple(
+            sorted(declared_seeds)
+        ):
+            raise ValueError("final-seed receipt disagrees with the declared seeds")
+        for outputs in results:
+            candidate = archive.load_candidate(str(outputs["candidate_id"]))
+            evaluation = archive.load_evaluation(str(outputs["evaluation_id"]))
+            if evaluation.candidate_id != candidate.candidate_id:
+                raise ValueError("final-seed candidate and evaluation disagree")
+            if evaluation.status != "PASS":
+                raise ValueError("only passing final-seed candidates may be ranked")
+            rows.append({
+                "stage": stage_name,
+                "seed": int(outputs["seed"]),
+                "candidate_id": candidate.candidate_id,
+                "evaluation_id": evaluation.evaluation_id,
+                "metrics": dict(evaluation.metrics),
+            })
+    if len(rows) < minimum:
+        raise ValueError("completed campaign has too few final-seed candidates")
+
+    def rank(row: Mapping) -> tuple:
+        values = []
+        for rule in finalization["ranking"]:
+            metric = str(rule["metric"])
+            if metric not in row["metrics"]:
+                raise ValueError(f"final ranking metric is missing: {metric}")
+            value = float(row["metrics"][metric])
+            values.append(value if rule["direction"] == "minimize" else -value)
+        values.extend((int(row["seed"]), str(row["candidate_id"])))
+        return tuple(values)
+
+    selected = min(rows, key=rank)
+    candidate = archive.load_candidate(str(selected["candidate_id"]))
+    evaluation = archive.load_evaluation(str(selected["evaluation_id"]))
+    report_body = {
+        "schema": "propevolve_multiseed_gauntlet_v1",
+        "run_id": state.run_id,
+        "status": "PASS",
+        "evaluated_seed_count": len(rows),
+        "minimum_seed_count": minimum,
+        "ranking": list(finalization["ranking"]),
+        "selected_seed": int(selected["seed"]),
+        "selected_candidate_id": candidate.candidate_id,
+        "selected_evaluation_id": evaluation.evaluation_id,
+        "seed_evidence": rows,
+    }
+    report_identity = hashlib.sha256(json.dumps(
+        report_body, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    report = {**report_body, "identity_sha256": report_identity}
+
+    registry = ModelRegistry(
+        _campaign_path(config, str(finalization["registry_root"])), archive
+    )
+    try:
+        current = registry.champion()
+    except ValueError as error:
+        if "no champion" not in str(error):
+            raise
+        current = None
+    if (
+        current is None
+        or current["candidate_id"] != candidate.candidate_id
+        or current["evaluation_id"] != evaluation.evaluation_id
+    ):
+        registry.activate(
+            candidate.candidate_id,
+            evaluation.evaluation_id,
+            reason=f"multi-seed gauntlet passed for {state.run_id}",
+        )
+
+    export_root = _campaign_path(config, str(finalization["export_root"]))
+    if export_root.exists():
+        existing = export_root / "gauntlet-report.json"
+        if not existing.is_file() or json.loads(existing.read_text()) != report:
+            raise ValueError("existing campaign export has a different identity")
+        return
+    export_root.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".export-", dir=export_root.parent))
+    try:
+        shutil.copyfile(candidate.model_path, temporary / "model.pt")
+        for name in ("manifest.json", "contract.json", "recipe.json"):
+            shutil.copyfile(candidate.path / name, temporary / name)
+        (temporary / "gauntlet-report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n"
+        )
+        bundle = {
+            "schema": "propevolve_export_bundle_v1",
+            "candidate_id": candidate.candidate_id,
+            "evaluation_id": evaluation.evaluation_id,
+            "model_sha256": _sha256(temporary / "model.pt"),
+            "gauntlet_report_sha256": _sha256(
+                temporary / "gauntlet-report.json"
+            ),
+        }
+        (temporary / "bundle-manifest.json").write_text(
+            json.dumps(bundle, indent=2, sort_keys=True) + "\n"
+        )
+        temporary.rename(export_root)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
 
 
 def run_evolution_campaign(
@@ -567,6 +781,8 @@ def run_evolution_campaign(
         except BlockingIOError as error:
             raise RuntimeError(f"PropEvolve campaign is already active: {run_id}") from error
         try:
-            return loop.run(_plan(config), run_id=run_id)
+            state = loop.run(_plan(config), run_id=run_id)
+            _finalize_campaign(config, state, archive)
+            return state
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
