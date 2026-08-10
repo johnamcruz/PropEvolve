@@ -506,6 +506,9 @@ class HistoricalCandidateRunner:
             episodes=int(training_config["validation_episodes"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
             near_blow_loss_threshold=near_blow_loss_threshold,
+            stop_on_first_blow=bool(
+                config.get("_validation_stop_on_blow", False)
+            ),
         )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
@@ -608,10 +611,18 @@ class HistoricalCandidateRunner:
         def selection_metrics(_candidate):
             pass_rate = validation.passes / validation.episodes
             blow_rate = validation.blows / validation.episodes
+            requested_validation_episodes = int(
+                training_config["validation_episodes"]
+            )
             metrics = {
                 "pass_rate": pass_rate,
                 "blow_rate": blow_rate,
                 "pass_minus_blow": pass_rate - blow_rate,
+                "evaluated_episodes": float(validation.episodes),
+                "requested_episodes": float(requested_validation_episodes),
+                "short_circuited": float(
+                    validation.episodes < requested_validation_episodes
+                ),
                 "mean_reward": validation.mean_reward,
                 "environment_steps": float(validation.environment_steps),
                 "trade_win_rate": validation.trade_win_rate,
@@ -1376,6 +1387,7 @@ def evaluate_agent(
     episodes: int,
     recurrent_horizon: int,
     near_blow_loss_threshold: float | None = None,
+    stop_on_first_blow: bool = False,
 ) -> TrainingResult:
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
@@ -1412,6 +1424,7 @@ def evaluate_agent(
         }
         for outcome in outcomes
     }
+    evaluated_episodes = 0
     for episode_index in range(episodes):
         observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
@@ -1513,8 +1526,16 @@ def evaluate_agent(
             f"cumulative_timeout={outcomes['timeout']}",
             flush=True,
         )
+        evaluated_episodes = episode_index + 1
+        if stop_on_first_blow and outcome == "blow":
+            print(
+                "[validation] SHORT_CIRCUIT reason=zero_blow_gate "
+                f"episode={evaluated_episodes}/{episodes}",
+                flush=True,
+            )
+            break
     result = TrainingResult(
-        episodes=episodes,
+        episodes=evaluated_episodes,
         environment_steps=environment_steps,
         passes=outcomes["pass"],
         blows=outcomes["blow"],
@@ -1543,8 +1564,13 @@ def evaluate_agent(
         two_r_round_trip_count=two_r_round_trip_count,
         near_blow_timeout_count=near_blow_timeout_count,
     )
+    episode_display = (
+        str(episodes)
+        if evaluated_episodes == episodes
+        else f"{evaluated_episodes}/{episodes}"
+    )
     print(
-        f"[validation] COMPLETE episodes={episodes} "
+        f"[validation] COMPLETE episodes={episode_display} "
         f"pass={result.passes} blow={result.blows} timeout={result.timeouts} "
         f"near_blow_timeout={result.near_blow_timeout_count} "
         f"({result.near_blow_timeout_rate:.1%}) "

@@ -457,6 +457,7 @@ def test_campaign_reasoning_can_revise_bounded_reward_and_replay_fields(
 
     assert state.phase is Phase.COMPLETE
     assert len(runner.configs) == 2
+    assert all(config["_validation_stop_on_blow"] for config in runner.configs)
     assert (
         runner.configs[-1]["challenge"]["mll_proximity_penalty_coefficient"]
         == 0.0002

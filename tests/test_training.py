@@ -639,6 +639,52 @@ def test_evaluation_counts_timeouts_near_the_loss_limit(capsys) -> None:
     assert "near_blow_timeout=1 (50.0%)" in capsys.readouterr().out
 
 
+def test_evaluation_short_circuits_after_first_blow_when_zero_blow_is_required(
+    capsys,
+) -> None:
+    class BlowThenPassEnvironment:
+        def __init__(self) -> None:
+            self.reset_count = 0
+
+        def reset(self):
+            self.reset_count += 1
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            outcome = "blow" if self.reset_count == 1 else "pass"
+            pnl = -3_000.0 if outcome == "blow" else 6_000.0
+            return np.array([0.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": outcome,
+                "ticker": "NQ",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": pnl,
+            }
+
+    environment = BlowThenPassEnvironment()
+
+    result = evaluate_agent(
+        Agent(),
+        environment,
+        episodes=200,
+        recurrent_horizon=2,
+        stop_on_first_blow=True,
+    )
+
+    assert result.episodes == 1
+    assert result.blows == 1
+    assert result.passes == result.timeouts == 0
+    assert environment.reset_count == 1
+    output = capsys.readouterr().out
+    assert "SHORT_CIRCUIT reason=zero_blow_gate" in output
+    assert "COMPLETE episodes=1/200" in output
+
+
 def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
     tickers = ("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN")
     environment = MultiMarketEnvironment()

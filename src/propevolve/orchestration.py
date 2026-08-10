@@ -206,6 +206,14 @@ class _CandidateStageAdapter:
 
         def run_one(seed: int | None) -> dict:
             seed_config = deepcopy(effective)
+            seed_config["_validation_stop_on_blow"] = any(
+                requirement.get("metric") == "selection.blow_rate"
+                and requirement.get("operator") == "=="
+                and float(requirement.get("value")) == 0.0
+                for requirement in request.stage.config[
+                    "selection_requirements"
+                ]
+            )
             seed_config["training"] = dict(seed_config["training"])
             seed_config["training"]["minimum_environment_steps"] = int(
                 request.stage.config["minimum_environment_steps"]
