@@ -93,6 +93,7 @@ class MarketSeries:
     low: np.ndarray
     close: np.ndarray
     embeddings: np.ndarray
+    embeddings_authenticated: bool = False
 
     def __post_init__(self) -> None:
         lengths = {
@@ -104,7 +105,10 @@ class MarketSeries:
         prices = np.column_stack((self.open, self.high, self.low, self.close))
         if self.embeddings.ndim != 2 or not np.isfinite(prices).all():
             raise ValueError("market prices and embeddings must be finite matrices")
-        if not np.isfinite(self.embeddings).all():
+        if (
+            not self.embeddings_authenticated
+            and not np.isfinite(self.embeddings).all()
+        ):
             raise ValueError("market prices and embeddings must be finite matrices")
         if (
             (self.high < np.maximum(self.open, self.close)).any()

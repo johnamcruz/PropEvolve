@@ -10,6 +10,7 @@ from propevolve.environment import (
     MarketSeries,
     PropChallengeAccount,
 )
+from propevolve.observation import AccountState, ObservationAssembler
 
 
 def _spec(**overrides) -> ChallengeSpec:
@@ -42,6 +43,29 @@ def _market(*, low_at_one: float = 100.5) -> MarketSeries:
         close=np.array([100, 102, 103, 104, 105, 106, 107, 108], np.float32),
         embeddings=np.stack((values, values + 10), axis=1),
     )
+
+
+def test_authenticated_cache_defers_embedding_finite_check_to_observation() -> None:
+    values = np.arange(8, dtype=np.float32)
+    embeddings = np.stack((values, values + 10), axis=1)
+    embeddings[0, 0] = np.nan
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=(
+            np.datetime64("2024-01-01T00:00")
+            + np.arange(8).astype("timedelta64[m]")
+        ),
+        open=np.arange(100, 108, dtype=np.float32),
+        high=np.arange(101, 109, dtype=np.float32),
+        low=np.arange(99, 107, dtype=np.float32),
+        close=np.arange(100, 108, dtype=np.float32),
+        embeddings=embeddings,
+        embeddings_authenticated=True,
+    )
+
+    assembler = ObservationAssembler(2, max_loss=3_000, profit_target=6_000)
+    with pytest.raises(ValueError, match="embedding must be finite"):
+        assembler.assemble(market.embeddings[0], AccountState())
 
 
 def test_combine_accumulates_pnl_across_trades_and_sessions_until_pass() -> None:

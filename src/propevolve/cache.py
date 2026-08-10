@@ -114,6 +114,7 @@ def load_market_series(
         low=frame["low"].to_numpy(np.float32)[indices],
         close=frame["close"].to_numpy(np.float32)[indices],
         embeddings=_contiguous_embedding_view(cache.embeddings, cache_rows),
+        embeddings_authenticated=True,
     )
 
 

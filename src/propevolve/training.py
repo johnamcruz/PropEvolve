@@ -671,12 +671,21 @@ def load_markets(
     root = Path(cache_root)
     markets = {}
     for ticker in tickers:
+        print(
+            f"[market-load] START ticker={ticker} period=[{start},{end})",
+            flush=True,
+        )
         markets[ticker] = load_market_series(
             Path(asset_contract.market_data) / f"{ticker}_{timeframe_minutes}min.csv",
             root / ticker,
             ticker=ticker,
             start=start,
             end=end,
+        )
+        print(
+            f"[market-load] COMPLETE ticker={ticker} "
+            f"rows={len(markets[ticker].timestamps):,}",
+            flush=True,
         )
     return markets
 
