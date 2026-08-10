@@ -3,10 +3,12 @@
 PropEvolve is a self-improving RL trading agent that **learns, remembers,
 adapts, and trades within prop-firm constraints**.
 
-The first model learns the complete trading decision directly from causal,
-frozen FFM/Chronos2 market-context embeddings plus normalized account and
-execution state. The policy is native to PropEvolve and does not depend on
-external trading policies, signal models, or handcrafted trend indicators.
+The agent learns the complete trading decision directly from causal, frozen
+FFM/Chronos2 market-context embeddings plus normalized account and execution
+state. During the current curriculum, an authenticated Expansion model acts as
+a temporary training teacher. The final policy is native to PropEvolve: it does
+not require that teacher, an external trading policy, or handcrafted trend
+indicators at inference time.
 
 ## Objective
 
@@ -25,7 +27,7 @@ The same normalized state works whether the account is expressed as `$0 →
 $6k` with a `-$3k` floor or as a `$3k` cushion targeting `$9k` with a `$0`
 floor.
 
-## Initial architecture
+## Current architecture
 
 ```text
 Promoted frozen Mask Chronos2 checkpoint
@@ -53,6 +55,10 @@ causal 3-minute OHLCV windows
                    bounded balanced replay
                                │
                  offline challenger improvement
+                               ^
+                               |
+             temporary Expansion teacher loss
+              (training only; discarded by stage)
 ```
 
 The policy uses one state-dependent discrete action set:
@@ -76,12 +82,14 @@ fills, fees, intrabar blow precedence, EOD trailing MLL, passmark locking,
 pass/blow/timeout priority, and faster-pass reward. Terminal reward ratios are
 preserved under a constant scale suitable for distributional value learning.
 
-The first matched baseline uses only frozen FFM embeddings as market context.
-If that baseline cannot learn reliable entry timing, a later declared ablation
-may append causal out-of-fold Expansion Launch/Persistence scores. Those scores
-would be training and inference context, never a hard entry rule; PropEvolve
-would still learn direction, timing, sizing, and abstention from challenge
-economics. No specialist augmentation may inspect the sealed 2026 period.
+The completed matched baseline used only frozen FFM embeddings as market
+context. The current experiment adds causal, pre-2025 Expansion targets as a
+temporary distillation teacher. They shape the shared recurrent policy during
+training but are omitted from validation and deployment observations. The
+student must therefore internalize useful expansion semantics while learning
+direction, timing, trade management, and abstention from challenge economics.
+No teacher or specialist may inspect the 2025 selection period or sealed 2026
+period.
 
 The promoted training recipe selects accelerators in the order CUDA, Apple
 Metal (`mps`), then CPU. Replay storage and environment simulation remain on
@@ -168,23 +176,35 @@ commit if any test fails. It uses `.venv/bin/python` when available; set
 `PROPEVOLVE_PYTHON` to an explicit interpreter when the environment lives
 elsewhere.
 
-Validate the frozen experiment contract:
+Validate the current curriculum contract:
 
 ```bash
-propevolve validate-config --config config/historical_mask_v1.json
+propevolve validate-config \
+  --config config/historical_mask_expansion_teacher_curriculum_v6.json
 ```
 
 Import the declared authenticated cache without copying its embedding arrays,
 or build the nine frozen embeddings when the recipe selects native mode:
 
 ```bash
-propevolve build-cache --config config/historical_mask_v1.json
+propevolve build-cache \
+  --config config/historical_mask_expansion_teacher_curriculum_v6.json
 ```
 
-Then train the historical challenger and evaluate naturally on NQ 2025:
+Build the authenticated, training-only Expansion teacher targets if they are
+not already present:
 
 ```bash
-propevolve train --config config/historical_mask_v1.json
+propevolve build-expansion-teacher-cache \
+  --config config/expansion_teacher_cache_v1.json
+```
+
+Then start or resume the complete reasoning-guided curriculum:
+
+```bash
+propevolve evolve \
+  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
+  --run-id expansion-curriculum-v6r1
 ```
 
 The development recipe trains on 2021–2024 and uses 2025 for selection. After
@@ -229,13 +249,17 @@ champion weights remain frozen, and activation or rollback always records an
 append-only receipt. Start or interruption-safely resume a campaign with:
 
 ```bash
-propevolve evolve --config config/historical_mask_v1.json --run-id mask-v1
+propevolve evolve \
+  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
+  --run-id expansion-curriculum-v6r1
 ```
 
 Inspect durable state without launching work with:
 
 ```bash
-propevolve evolve-status --config config/historical_mask_v1.json --run-id mask-v1
+propevolve evolve-status \
+  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
+  --run-id expansion-curriculum-v6r1
 ```
 
 Reasoning remains the campaign controller. The shared loop's optional
@@ -298,6 +322,46 @@ physically excludes 2025 selection and the sealed 2026 period.
 Permanent detector inputs are considered only if teacher-free distillation
 fails and a matched ablation proves that the additional live dependency raises
 pass rate or expectancy while reducing blow risk.
+
+## Current staged curriculum
+
+The active recipe teaches one economic competency at a time. A stage advances
+only after its chronological selection evidence passes its declared gates:
+
+```text
+Stage 1: Safety foundation (1M environment steps)
+  -> zero blowouts, limited near-blow timeouts, initial pass capability
+Stage 2: Winner retention (1M environment steps)
+  -> preserve Stage 1 safety and improve capture of trades reaching 2R+
+Stage 3: Challenge completion (2M environment steps)
+  -> preserve safety and retention while improving pass rate and expectancy
+Stage 4: Frozen confirmation (5M steps x 8 seeds, at most 3 in parallel)
+  -> no recipe revisions; require robust economic and side-balanced evidence
+```
+
+Stages 2–4 warm-start from the authenticated policy weights selected by the
+preceding stage. They do not restart policy learning. Optimizer state, replay
+memory, exploration state, and the temporary teacher head are deliberately
+reset at each stage so the next lesson is learned from fresh experience without
+discarding the policy's acquired representation and behavior.
+
+When a revisable stage misses a gate, the authenticated diagnostic report is
+sent to the configured reasoning proposer. It may change exactly one bounded,
+allowlisted recipe revision relevant to that stage and rerun it. It cannot
+change market data, cache or teacher lineage, temporal splits, costs, prop
+rules, deployment markets, or the sealed holdout. The confirmation stage is
+fully frozen and cannot reason around a failed gate.
+
+The curriculum's promotion priorities are ordered deliberately:
+
+1. zero blowouts;
+2. fewer near-blow timeouts;
+3. stronger retention of 2R-or-larger opportunities;
+4. higher challenge pass rate and positive expectancy.
+
+This is curriculum learning, not four unrelated searches. Each accepted stage
+becomes the parent of the next candidate, and the final multi-seed gauntlet
+tests the accumulated policy rather than selecting a new recipe.
 
 ## Economics and evidence
 
