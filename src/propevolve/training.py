@@ -1036,7 +1036,7 @@ def evaluate_agent(
         }
         for outcome in outcomes
     }
-    for _ in range(episodes):
+    for episode_index in range(episodes):
         observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
         hidden = None
@@ -1073,7 +1073,24 @@ def evaluate_agent(
         outcome_values["winning_r_sum"] += episode_winning_r
         outcome_values["terminal_pnl_sum"] += terminal_pnl
         outcome_values["reward_sum"] += total
-    return TrainingResult(
+        episode_win_rate = (
+            episode_wins / episode_trades if episode_trades else 0.0
+        )
+        episode_average_win_r = (
+            episode_winning_r / episode_wins if episode_wins else 0.0
+        )
+        print(
+            f"[validation] episode={episode_index + 1}/{episodes} "
+            f"ticker={info.get('ticker', '?')} outcome={outcome} "
+            f"reward={total:+.4f} trades={episode_trades} "
+            f"WR={episode_win_rate:.1%} winR={episode_average_win_r:+.3f}R "
+            f"pnl={terminal_pnl:+.2f} "
+            f"cumulative_pass={outcomes['pass']} "
+            f"cumulative_blow={outcomes['blow']} "
+            f"cumulative_timeout={outcomes['timeout']}",
+            flush=True,
+        )
+    result = TrainingResult(
         episodes=episodes,
         environment_steps=environment_steps,
         passes=outcomes["pass"],
@@ -1092,3 +1109,11 @@ def evaluate_agent(
             if values["episodes"]
         ),
     )
+    print(
+        f"[validation] COMPLETE episodes={episodes} "
+        f"pass={result.passes} blow={result.blows} timeout={result.timeouts} "
+        f"WR={result.trade_win_rate:.1%} winR={result.average_win_r:+.3f}R "
+        f"mean_pnl={result.mean_terminal_pnl:+.2f}",
+        flush=True,
+    )
+    return result

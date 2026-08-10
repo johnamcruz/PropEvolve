@@ -509,7 +509,7 @@ def test_evaluation_never_updates_agent() -> None:
     assert agent.updates == 0
 
 
-def test_evaluation_reports_pass_and_timeout_economics_separately() -> None:
+def test_evaluation_reports_pass_and_timeout_economics_separately(capsys) -> None:
     class OutcomeEnvironment:
         def __init__(self) -> None:
             self.episode = -1
@@ -524,6 +524,7 @@ def test_evaluation_reports_pass_and_timeout_economics_separately() -> None:
             outcome = ("pass", "timeout")[self.episode]
             info = {
                 "valid_actions": (),
+                "ticker": ("NQ", "SI")[self.episode],
                 "outcome": outcome,
                 "trade_count": (4, 10)[self.episode],
                 "win_count": (2, 3)[self.episode],
@@ -543,6 +544,21 @@ def test_evaluation_reports_pass_and_timeout_economics_separately() -> None:
     assert result.outcome("timeout").trade_win_rate == 0.3
     assert result.outcome("timeout").average_win_r == 1.0
     assert result.outcome("timeout").mean_terminal_pnl == 1_500.0
+    output = capsys.readouterr().out
+    assert (
+        "[validation] episode=1/2 ticker=NQ outcome=pass "
+        "reward=+1.0000 trades=4 WR=50.0% winR=+3.000R pnl=+6000.00 "
+        "cumulative_pass=1 cumulative_blow=0 cumulative_timeout=0"
+    ) in output
+    assert (
+        "[validation] episode=2/2 ticker=SI outcome=timeout "
+        "reward=+1.0000 trades=10 WR=30.0% winR=+1.000R pnl=+1500.00 "
+        "cumulative_pass=1 cumulative_blow=0 cumulative_timeout=1"
+    ) in output
+    assert (
+        "[validation] COMPLETE episodes=2 pass=1 blow=0 timeout=1 "
+        "WR=35.7% winR=+1.800R mean_pnl=+3750.00"
+    ) in output
 
 
 def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:
