@@ -68,6 +68,7 @@ def test_winner_retention_recipe_enables_economic_shaping_and_near_blow_gate() -
 
     assert config["challenge"]["lead_giveback_penalty_coefficient"] > 0
     assert config["challenge"]["large_win_bonus_coefficient"] > 0
+    assert config["challenge"]["minimum_mll_headroom"] == 500
     assert config["campaign"]["near_blow_loss_fraction"] == 0.75
     screen = config["campaign"]["budget_stages"][0]
     assert {
