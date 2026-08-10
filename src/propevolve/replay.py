@@ -21,6 +21,7 @@ class Transition:
     valid_actions: tuple[Action, ...]
     next_valid_actions: tuple[Action, ...]
     teacher_target: np.ndarray | None = None
+    safety_priority: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class _StoredEpisode:
     valid_masks: np.ndarray
     next_valid_masks: np.ndarray
     teacher_targets: np.ndarray | None
+    safety_priorities: np.ndarray
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -63,6 +65,11 @@ class _StoredEpisode:
     @classmethod
     def from_episode(cls, episode: Episode) -> "_StoredEpisode":
         transitions = episode.transitions
+        if any(
+            not np.isfinite(item.safety_priority) or item.safety_priority < 0
+            for item in transitions
+        ):
+            raise ValueError("replay safety priority is invalid")
         for current, following in zip(transitions, transitions[1:]):
             if not np.array_equal(current.next_observation, following.observation):
                 raise ValueError("replay episode observations are not contiguous")
@@ -106,6 +113,9 @@ class _StoredEpisode:
                 for item in transitions
             ], np.bool_),
             teacher_targets=teacher_targets,
+            safety_priorities=np.asarray(
+                [item.safety_priority for item in transitions], np.float32
+            ),
         )
 
     def sequence(self, start: int, length: int) -> tuple[Transition, ...]:
@@ -131,6 +141,7 @@ class _StoredEpisode:
                     or not np.isfinite(self.teacher_targets[index]).all()
                     else self.teacher_targets[index]
                 ),
+                safety_priority=float(self.safety_priorities[index]),
             )
             for index in range(start, stop)
         )
@@ -146,12 +157,18 @@ class BalancedSequenceReplay:
         *,
         capacity_transitions: int | None = None,
         terminal_sequence_fraction: float = 0.0,
+        safety_sequence_fraction: float = 0.0,
         seed: int,
     ) -> None:
         if capacity_episodes < 1 or sequence_length < 1:
             raise ValueError("replay capacity and sequence length must be positive")
         if not 0.0 <= terminal_sequence_fraction <= 1.0:
             raise ValueError("terminal sequence fraction must be between zero and one")
+        if (
+            not 0.0 <= safety_sequence_fraction <= 1.0
+            or terminal_sequence_fraction + safety_sequence_fraction > 1.0
+        ):
+            raise ValueError("replay sequence fractions are invalid")
         self.capacity = int(capacity_episodes)
         if capacity_transitions is not None and capacity_transitions < sequence_length:
             raise ValueError("replay transition capacity is smaller than one sequence")
@@ -160,6 +177,7 @@ class BalancedSequenceReplay:
         )
         self.sequence_length = int(sequence_length)
         self.terminal_sequence_fraction = float(terminal_sequence_fraction)
+        self.safety_sequence_fraction = float(safety_sequence_fraction)
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -221,12 +239,15 @@ class BalancedSequenceReplay:
     def sample(self, count: int) -> tuple[tuple[Transition, ...], ...]:
         sequences = []
         terminal_count = round(count * self.terminal_sequence_fraction)
+        safety_count = round(count * self.safety_sequence_fraction)
         for index, episode in enumerate(self.sample_episodes(count)):
             last_start = episode.transition_count - self.sequence_length
-            start = (
-                last_start
-                if index < terminal_count
-                else self._random.randint(0, last_start)
-            )
+            if index < terminal_count:
+                start = last_start
+            elif index < terminal_count + safety_count:
+                critical = int(np.argmax(episode.safety_priorities))
+                start = max(0, min(last_start, critical - self.sequence_length + 1))
+            else:
+                start = self._random.randint(0, last_start)
             sequences.append(episode.sequence(start, self.sequence_length))
         return tuple(sequences)

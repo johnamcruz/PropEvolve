@@ -136,6 +136,8 @@ def test_curriculum_recipe_teaches_four_priorities_by_warm_started_stage() -> No
     assert config["evolution"]["revision_bounds"][
         "challenge.mll_proximity_penalty_coefficient"
     ]["minimum"] > 0
+    assert config["training"]["safety_sequence_fraction"] == 0.25
+    assert "training.safety_sequence_fraction" in stages[0]["revision_paths"]
 
 
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(

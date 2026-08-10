@@ -448,6 +448,9 @@ class HistoricalCandidateRunner:
             terminal_sequence_fraction=float(
                 training_config["terminal_sequence_fraction"]
             ),
+            safety_sequence_fraction=float(
+                training_config.get("safety_sequence_fraction", 0.0)
+            ),
             seed=seed,
         )
         training = train_agent(
@@ -1111,6 +1114,9 @@ def train_agent(
                 valid_actions=valid,
                 next_valid_actions=next_valid,
                 teacher_target=teacher_target,
+                safety_priority=float(
+                    info.get("mll_proximity_penalty", 0.0)
+                ),
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid

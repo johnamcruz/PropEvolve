@@ -124,7 +124,8 @@
     "management_epsilon_end": 0.01,
     "seed": 314159,
     "checkpoint_every_episodes": 5,
-    "terminal_sequence_fraction": 0.5
+    "terminal_sequence_fraction": 0.5,
+    "safety_sequence_fraction": 0.25
   },
   "evolution": {
     "hypothesis": "A four-stage warm-start curriculum will first learn survival, then 2R+ winner retention, then challenge completion, while each stage preserves all previously passed safety gates before frozen multi-seed confirmation.",
@@ -158,6 +159,7 @@
       "challenge.large_win_threshold_r",
       "challenge.large_win_bonus_coefficient",
       "training.terminal_sequence_fraction",
+      "training.safety_sequence_fraction",
       "challenge.ratchet_lock_floor_r"
     ],
     "frozen_paths": [
@@ -243,7 +245,11 @@
       },
       "training.terminal_sequence_fraction": {
         "minimum": 0.25,
-        "maximum": 1
+        "maximum": 0.75
+      },
+      "training.safety_sequence_fraction": {
+        "minimum": 0.1,
+        "maximum": 0.25
       },
       "challenge.ratchet_lock_floor_r": {
         "minimum": 0,
@@ -276,6 +282,7 @@
           "challenge.terminal_blow_reward",
           "challenge.terminal_timeout_reward",
           "training.terminal_sequence_fraction",
+          "training.safety_sequence_fraction",
           "training.management_epsilon_start",
           "training.management_epsilon_end"
         ],
