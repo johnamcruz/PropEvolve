@@ -219,6 +219,7 @@ __marimo__/
 
 # Recreated local links and generated PropEvolve artifacts.
 .DS_Store
+.private/
 config/local-assets.json
 data/ohlcv
 checkpoints/
