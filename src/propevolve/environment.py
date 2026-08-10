@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -255,6 +256,16 @@ class HistoricalChallengeEnv:
         self._primary_side = "flat"
         self._closed_trade_pnls: list[float] = []
         self._trading_days_elapsed = 0
+
+    def rng_state(self) -> dict:
+        """Return the episode-sampling RNG state for exact boundary recovery."""
+        return copy.deepcopy(self._rng.bit_generator.state)
+
+    def restore_rng_state(self, state: dict) -> None:
+        """Restore episode sampling only while no episode is active."""
+        if not self._terminated:
+            raise RuntimeError("environment RNG can only be restored between episodes")
+        self._rng.bit_generator.state = copy.deepcopy(state)
 
     def reset(self, *, options: dict | None = None) -> tuple[np.ndarray, dict]:
         options = options or {}

@@ -159,3 +159,15 @@ def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="declared together"):
         load_experiment_config(path)
+
+
+def test_expansion_teacher_recipe_is_training_only_and_frozen() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_v1.json"
+    )
+
+    assert config["teacher"]["kind"] == "expansion"
+    assert config["teacher"]["loss_weight"] == 0.2
+    assert config["temporal"]["train_end"] == "2025-01-01"
+    assert config["temporal"]["sealed_start"] == "2026-01-01"
+    assert "teacher" in config["evolution"]["frozen_paths"]

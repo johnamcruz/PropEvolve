@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import math
+import os
 from pathlib import Path
 import tempfile
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
@@ -50,6 +51,49 @@ class TrainingResult:
     @property
     def average_win_r(self) -> float:
         return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+
+@dataclass(frozen=True)
+class TrainingProgress:
+    """Cumulative state captured only after a complete training episode."""
+
+    completed_episodes: int = 0
+    environment_steps: int = 0
+    passes: int = 0
+    blows: int = 0
+    timeouts: int = 0
+    trade_count: int = 0
+    win_count: int = 0
+    winning_r_sum: float = 0.0
+    worst_pnl: float = math.inf
+    terminal_pnl_sum: float = 0.0
+    terminal_pnl_count: int = 0
+    reward_sum: float = 0.0
+    reward_count: int = 0
+    loss_sum: float = 0.0
+    loss_count: int = 0
+
+    def result(self) -> TrainingResult:
+        if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
+            raise ValueError("training progress has no completed episodes")
+        return TrainingResult(
+            episodes=self.completed_episodes,
+            environment_steps=self.environment_steps,
+            passes=self.passes,
+            blows=self.blows,
+            timeouts=self.timeouts,
+            trade_count=self.trade_count,
+            win_count=self.win_count,
+            winning_r_sum=self.winning_r_sum,
+            worst_pnl=self.worst_pnl,
+            mean_terminal_pnl=self.terminal_pnl_sum / self.terminal_pnl_count,
+            mean_reward=self.reward_sum / self.reward_count,
+            mean_loss=(
+                self.loss_sum / self.loss_count
+                if self.loss_count
+                else float("nan")
+            ),
+        )
 
 
 def prop_safety_objective(
@@ -113,6 +157,17 @@ class HistoricalCandidateRunner:
             end=temporal["validation_end"],
             sealed_start=temporal["sealed_start"],
         )
+        teacher_config = config.get("teacher")
+        teacher_targets = None
+        if teacher_config is not None:
+            from .expansion_teacher import CHANNELS, ExpansionTeacherTargets
+
+            if tuple(teacher_config["channels"]) != CHANNELS:
+                raise ValueError("Expansion teacher channel order drifted")
+            teacher_targets = ExpansionTeacherTargets.load(
+                _resolve(root, teacher_config["cache_root"]),
+                train_markets,
+            )
         challenge = ChallengeSpec(**config["challenge"])
         seed = int(config["training"]["seed"])
         train_environment = HistoricalChallengeEnv(
@@ -132,14 +187,38 @@ class HistoricalCandidateRunner:
             seed=seed + 1,
         )
         observation_dim = next(iter(train_markets.values())).embeddings.shape[1] + 12
-        agent = RecurrentC51Agent(
-            observation_dim,
-            seed=seed,
-            **dict(config["agent"]),
-        )
+        agent_settings = dict(config["agent"])
+        if teacher_config is not None:
+            agent_settings.update(
+                teacher_channels=len(teacher_config["channels"]),
+                teacher_loss_weight=float(teacher_config["loss_weight"]),
+            )
+        output = _resolve(root, config["output"])
+        output.mkdir(parents=True, exist_ok=True)
+        recovery_path = output / "training-recovery.pt"
+        resume_identity = _training_resume_identity(config, cache_root, teacher_config)
+        resume = None
+        if recovery_path.is_file():
+            loaded, manifest = RecurrentC51Agent.load(
+                recovery_path, device=agent_settings["device"]
+            )
+            if manifest.get("resume_identity") != resume_identity:
+                raise ValueError("training recovery identity drifted")
+            resume = TrainingProgress(**manifest["progress"])
+            train_environment.restore_rng_state(manifest["environment_rng_state"])
+            agent = loaded
+        else:
+            agent = RecurrentC51Agent(
+                observation_dim,
+                seed=seed,
+                **agent_settings,
+            )
         training_config = config["training"]
         replay = BalancedSequenceReplay(
             capacity_episodes=int(training_config["replay_capacity_episodes"]),
+            capacity_transitions=int(
+                training_config["replay_capacity_transitions"]
+            ),
             sequence_length=int(training_config["sequence_length"]),
             terminal_sequence_fraction=float(
                 training_config["terminal_sequence_fraction"]
@@ -162,15 +241,28 @@ class HistoricalCandidateRunner:
             epsilon_end=float(training_config["epsilon_end"]),
             episode_tickers=tuple(config["tickers"]),
             ticker_seed=seed,
+            resume=resume,
+            checkpoint_every_episodes=int(
+                training_config["checkpoint_every_episodes"]
+            ),
+            checkpoint_callback=lambda progress: _save_training_recovery(
+                agent,
+                recovery_path,
+                resume_identity=resume_identity,
+                progress=progress,
+                environment_rng_state=train_environment.rng_state(),
+            ),
+            teacher_lookup=(
+                teacher_targets.target if teacher_targets is not None else None
+            ),
         )
+        agent.discard_teacher()
         validation = evaluate_agent(
             agent,
             validation_environment,
             episodes=int(training_config["validation_episodes"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
         )
-        output = _resolve(root, config["output"])
-        output.mkdir(parents=True, exist_ok=True)
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
             "checkpoint_sha256": assets.checkpoint_sha256,
@@ -190,6 +282,24 @@ class HistoricalCandidateRunner:
             "round_trip_fees": dict(config["round_trip_fees"]),
             "sealed_start": temporal["sealed_start"],
             "sealed_holdout_touched": False,
+            "teacher": (
+                None
+                if teacher_config is None
+                else {
+                    "kind": "expansion",
+                    "training_only": True,
+                    "cache_manifest_sha256": {
+                        ticker: hashlib.sha256(
+                            (
+                                _resolve(root, teacher_config["cache_root"])
+                                / ticker
+                                / "manifest.json"
+                            ).read_bytes()
+                        ).hexdigest()
+                        for ticker in sorted(config["tickers"])
+                    },
+                }
+            ),
         }
         archive = CandidateArchive(output / "archive")
         recipe = {
@@ -269,6 +379,49 @@ class HistoricalCandidateRunner:
         return candidate, cascade.evaluate(candidate.candidate_id)
 
 
+def _training_resume_identity(
+    config: dict,
+    cache_root: Path,
+    teacher_config: dict | None,
+) -> str:
+    root = Path(config["_root"])
+    digest = hashlib.sha256(Path(config["_path"]).read_bytes())
+    for ticker in sorted(config["tickers"]):
+        digest.update((cache_root / ticker / "manifest.json").read_bytes())
+        if teacher_config is not None:
+            digest.update(
+                (
+                    _resolve(root, teacher_config["cache_root"])
+                    / ticker
+                    / "manifest.json"
+                ).read_bytes()
+            )
+    for module in (Path(__file__), Path(__file__).with_name("agent.py"), Path(__file__).with_name("replay.py"), Path(__file__).with_name("environment.py")):
+        digest.update(module.read_bytes())
+    return digest.hexdigest()
+
+
+def _save_training_recovery(
+    agent: RecurrentC51Agent,
+    path: Path,
+    *,
+    resume_identity: str,
+    progress: TrainingProgress,
+    environment_rng_state: dict,
+) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    agent.save(
+        temporary,
+        manifest={
+            "resume_identity": resume_identity,
+            "progress": asdict(progress),
+            "environment_rng_state": environment_rng_state,
+            "replay_restored": False,
+        },
+    )
+    os.replace(temporary, path)
+
+
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else root / path
@@ -336,6 +489,10 @@ def train_agent(
     epsilon_end: float,
     episode_tickers: tuple[str, ...] | None,
     ticker_seed: int,
+    resume: TrainingProgress | None = None,
+    checkpoint_every_episodes: int = 0,
+    checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
+    teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -344,14 +501,16 @@ def train_agent(
         episodes=episodes,
         seed=ticker_seed,
     )
-    outcomes = {"pass": 0, "blow": 0, "timeout": 0}
-    rewards, losses = [], []
-    terminal_pnls = []
-    trade_count = win_count = 0
-    winning_r_sum = 0.0
-    environment_steps = 0
-    completed_episodes = 0
-    for episode_index in range(episodes):
+    if checkpoint_every_episodes < 0:
+        raise ValueError("checkpoint interval cannot be negative")
+    if checkpoint_every_episodes and checkpoint_callback is None:
+        raise ValueError("checkpoint callback is required when checkpointing is enabled")
+    progress = resume or TrainingProgress()
+    if progress.completed_episodes > episodes:
+        raise ValueError("resume progress exceeds the episode ceiling")
+    if progress.environment_steps > minimum_environment_steps:
+        raise ValueError("resume progress exceeds the environment-step budget")
+    for episode_index in range(progress.completed_episodes, episodes):
         if ticker_schedule is None:
             observation, reset_info = environment.reset()
         else:
@@ -359,13 +518,17 @@ def train_agent(
                 options={"ticker": ticker_schedule[episode_index]}
             )
         valid = tuple(reset_info["valid_actions"])
+        decision_index = int(reset_info.get("start", 0))
+        episode_ticker = str(reset_info.get("ticker", ""))
         hidden = None
         transitions = []
         total_reward = 0.0
         # Decay exploration against actual market interaction, not the
         # emergency episode ceiling. Early pass/blow episodes vary greatly in
         # length, so episode-index decay would not represent equal experience.
-        step_progress = min(1.0, environment_steps / minimum_environment_steps)
+        step_progress = min(
+            1.0, progress.environment_steps / minimum_environment_steps
+        )
         epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
         terminal_info = reset_info
         step_index = 0
@@ -380,6 +543,11 @@ def train_agent(
             )
             next_observation, reward, terminated, _, info = environment.step(action)
             next_valid = tuple(info["valid_actions"])
+            teacher_target = (
+                teacher_lookup(episode_ticker, decision_index)
+                if teacher_lookup is not None
+                else None
+            )
             transitions.append(Transition(
                 observation=observation,
                 action=Action(action),
@@ -388,22 +556,20 @@ def train_agent(
                 terminated=terminated,
                 valid_actions=valid,
                 next_valid_actions=next_valid,
+                teacher_target=teacher_target,
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid
             terminal_info = info
+            decision_index = int(info.get("fill_index", decision_index + 1))
             step_index += 1
-            environment_steps += 1
+            episode_steps = step_index
             if terminated:
                 break
         outcome = str(terminal_info["outcome"])
-        outcomes[outcome] += 1
-        rewards.append(total_reward)
-        terminal_pnls.append(float(terminal_info.get("equity_pnl", 0.0)))
-        trade_count += int(terminal_info.get("trade_count", 0))
-        win_count += int(terminal_info.get("win_count", 0))
-        winning_r_sum += float(terminal_info.get("winning_r_sum", 0.0))
-        completed_episodes += 1
+        if outcome not in {"pass", "blow", "timeout"}:
+            raise ValueError(f"unknown terminal outcome: {outcome}")
+        terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
         if len(transitions) >= replay.sequence_length:
             replay.add(Episode(
                 episode_id=f"historical-{episode_index}-{time.time_ns()}",
@@ -413,38 +579,56 @@ def train_agent(
                 ended_at_ns=time.time_ns(),
                 transitions=tuple(transitions),
             ))
-        if episode_index + 1 >= warmup_episodes and len(replay):
+        episode_losses = []
+        if len(replay) >= warmup_episodes:
             for _ in range(updates_per_episode):
-                losses.append(agent.train_batch(replay.sample(batch_sequences)))
+                episode_losses.append(
+                    agent.train_batch(replay.sample(batch_sequences))
+                )
+        progress = TrainingProgress(
+            completed_episodes=episode_index + 1,
+            environment_steps=progress.environment_steps + episode_steps,
+            passes=progress.passes + int(outcome == "pass"),
+            blows=progress.blows + int(outcome == "blow"),
+            timeouts=progress.timeouts + int(outcome == "timeout"),
+            trade_count=(
+                progress.trade_count + int(terminal_info.get("trade_count", 0))
+            ),
+            win_count=progress.win_count + int(terminal_info.get("win_count", 0)),
+            winning_r_sum=(
+                progress.winning_r_sum
+                + float(terminal_info.get("winning_r_sum", 0.0))
+            ),
+            worst_pnl=min(progress.worst_pnl, terminal_pnl),
+            terminal_pnl_sum=progress.terminal_pnl_sum + terminal_pnl,
+            terminal_pnl_count=progress.terminal_pnl_count + 1,
+            reward_sum=progress.reward_sum + total_reward,
+            reward_count=progress.reward_count + 1,
+            loss_sum=progress.loss_sum + sum(episode_losses),
+            loss_count=progress.loss_count + len(episode_losses),
+        )
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "
             f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)} "
             f"trades={int(terminal_info.get('trade_count', 0))} "
             f"WR={float(terminal_info.get('win_rate', 0.0)):.1%} "
             f"winR={float(terminal_info.get('avg_win_r', 0.0)):+.3f}R "
-            f"steps={environment_steps:,}/{minimum_environment_steps:,}",
+            f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}",
             flush=True,
         )
-        if environment_steps >= minimum_environment_steps:
+        if (
+            checkpoint_every_episodes
+            and progress.completed_episodes % checkpoint_every_episodes == 0
+        ):
+            assert checkpoint_callback is not None
+            checkpoint_callback(progress)
+        if progress.environment_steps >= minimum_environment_steps:
             break
-    if environment_steps < minimum_environment_steps:
+    if progress.environment_steps < minimum_environment_steps:
         raise RuntimeError(
             "episode safety ceiling reached before the minimum environment-step budget"
         )
-    return TrainingResult(
-        episodes=completed_episodes,
-        environment_steps=environment_steps,
-        passes=outcomes["pass"],
-        blows=outcomes["blow"],
-        timeouts=outcomes["timeout"],
-        trade_count=trade_count,
-        win_count=win_count,
-        winning_r_sum=winning_r_sum,
-        worst_pnl=float(np.min(terminal_pnls)),
-        mean_terminal_pnl=float(np.mean(terminal_pnls)),
-        mean_reward=float(np.mean(rewards)),
-        mean_loss=float(np.mean(losses)) if losses else float("nan"),
-    )
+    return progress.result()
 
 
 def _balanced_ticker_schedule(

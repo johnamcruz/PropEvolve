@@ -17,6 +17,7 @@ from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import (
     HistoricalCandidateRunner,
     TrainingResult,
+    TrainingProgress,
     assert_temporal_role,
     evaluate_agent,
     prop_safety_objective,
@@ -270,6 +271,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "minimum_environment_steps": 2,
             "validation_episodes": 1,
             "replay_capacity_episodes": 2,
+            "replay_capacity_transitions": 8,
             "sequence_length": 1,
             "terminal_sequence_fraction": 0.5,
             "warmup_episodes": 1,
@@ -279,6 +281,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "epsilon_start": 0.0,
             "epsilon_end": 0.0,
             "seed": 7,
+            "checkpoint_every_episodes": 1,
         },
     }
 
@@ -328,6 +331,59 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     assert result.mean_loss == 0.5
     assert result.trade_win_rate == 0.5
     assert result.average_win_r == 2.5
+
+
+def test_training_resumes_from_an_episode_boundary() -> None:
+    checkpoints: list[TrainingProgress] = []
+    first = train_agent(
+        Agent(),
+        Environment(),
+        episodes=1,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            capacity_transitions=16,
+            sequence_length=2,
+            seed=5,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=5,
+        checkpoint_every_episodes=1,
+        checkpoint_callback=checkpoints.append,
+    )
+    assert first.environment_steps == 4
+
+    resumed = train_agent(
+        Agent(),
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            capacity_transitions=16,
+            sequence_length=2,
+            seed=5,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=5,
+        resume=checkpoints[-1],
+    )
+
+    assert resumed.episodes == 2
+    assert resumed.environment_steps == 8
+    assert resumed.passes == 2
 
 
 def test_prop_safety_objective_hard_ranks_any_blow_below_zero_blow() -> None:

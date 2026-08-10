@@ -371,6 +371,47 @@ class ExpansionTeacherCache:
         return cls(root, probabilities, availability, timestamps, manifest)
 
 
+@dataclass(frozen=True)
+class ExpansionTeacherTargets:
+    """Training-only teacher scores aligned exactly to each market row."""
+
+    probabilities: dict[str, np.ndarray]
+    availability: dict[str, np.ndarray]
+
+    @classmethod
+    def load(
+        cls,
+        cache_root: str | Path,
+        markets: dict[str, object],
+    ) -> "ExpansionTeacherTargets":
+        root = Path(cache_root)
+        probabilities: dict[str, np.ndarray] = {}
+        availability: dict[str, np.ndarray] = {}
+        for ticker, market in markets.items():
+            cache = ExpansionTeacherCache.load(root / ticker)
+            market_timestamps = np.asarray(getattr(market, "timestamps"))
+            indices = np.searchsorted(cache.timestamps, market_timestamps)
+            if (
+                (indices >= len(cache.timestamps)).any()
+                or not np.array_equal(cache.timestamps[indices], market_timestamps)
+            ):
+                raise ValueError(
+                    f"Expansion teacher rows do not align to training market {ticker}"
+                )
+            probabilities[ticker] = cache.probabilities[indices]
+            availability[ticker] = cache.availability[indices]
+        return cls(probabilities=probabilities, availability=availability)
+
+    def target(self, ticker: str, row: int) -> np.ndarray | None:
+        if ticker not in self.probabilities:
+            raise ValueError(f"Expansion teacher has no aligned market {ticker}")
+        if row < 0 or row >= len(self.probabilities[ticker]):
+            raise IndexError("Expansion teacher row is outside the aligned market")
+        if not bool(self.availability[ticker][row]):
+            return None
+        return np.asarray(self.probabilities[ticker][row], dtype=np.float32)
+
+
 def _flush_scores(
     pending: list[torch.Tensor],
     probabilities: np.memmap,
@@ -691,6 +732,7 @@ __all__ = [
     "CHANNELS",
     "ExpansionTeacher",
     "ExpansionTeacherCache",
+    "ExpansionTeacherTargets",
     "build_expansion_teacher_cache",
     "build_expansion_teacher_caches",
     "load_builder_config",

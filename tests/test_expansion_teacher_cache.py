@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from propevolve.expansion_teacher import (
     ExpansionTeacher,
     ExpansionTeacherCache,
+    ExpansionTeacherTargets,
     build_expansion_teacher_cache,
     load_builder_config,
 )
@@ -149,6 +151,33 @@ def test_builder_rejects_embedding_cache_identity_drift(tmp_path: Path) -> None:
             batch_size=4,
             synchronization_batches=2,
         )
+
+
+def test_teacher_targets_require_exact_training_row_alignment(tmp_path: Path) -> None:
+    source = _embedding_cache(tmp_path)
+    teacher = ExpansionTeacher.load("models/teachers/manifest.json", device="cpu")
+    destination = tmp_path / "teacher/NQ"
+    build_expansion_teacher_cache(
+        teacher=teacher,
+        embedding_cache=source,
+        destination=destination,
+        ticker="NQ",
+        training_end_exclusive="2025-01-01",
+        expected_cache_identity_sha256=(
+            "1087cb9b2d7bd1dd51e219dd5d792cb52368b1221f6255f662db02d900dd72ca"
+        ),
+        batch_size=4,
+        synchronization_batches=2,
+    )
+    cache = ExpansionTeacherCache.load(destination)
+
+    targets = ExpansionTeacherTargets.load(
+        tmp_path / "teacher",
+        {"NQ": SimpleNamespace(timestamps=cache.timestamps)},
+    )
+
+    assert targets.target("NQ", 0) is None
+    assert targets.target("NQ", 49).shape == (4,)
 
 
 def test_promoted_builder_config_is_bounded_to_training_data() -> None:

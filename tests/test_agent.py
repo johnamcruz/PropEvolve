@@ -82,6 +82,7 @@ def test_agent_scores_long_and_short_hypotheses_in_the_same_decision() -> None:
         hidden=None,
         valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
         epsilon=0.0,
+        return_action_values=True,
     )
 
     assert np.isfinite(action_values[[
@@ -114,6 +115,36 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert np.isfinite(loss)
     assert loss > 0
     assert not torch.equal(before, agent.online.output.weight.detach())
+
+
+def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(2, seed=23, teacher_channels=4, teacher_loss_weight=0.2)
+    sequence = tuple(
+        Transition(
+            observation=np.array([index, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([index + 1, 0], np.float32),
+            terminated=index == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+            teacher_target=np.array([0.9, 0.8, 0.1, 0.2], np.float32),
+        )
+        for index in range(4)
+    )
+    before = agent.online.input[1].weight.detach().clone()
+
+    loss = agent.train_batch((sequence, sequence))
+    agent.discard_teacher()
+    checkpoint = agent.save(tmp_path / "teacher-free.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert np.isfinite(loss)
+    assert not torch.equal(before, agent.online.input[1].weight.detach())
+    assert agent.teacher_channels == restored.teacher_channels == 0
+    assert agent.online.teacher_output is None
 
 
 @pytest.mark.skipif(
@@ -150,6 +181,7 @@ def test_mps_training_update_action_selection_and_checkpoint_resume(
         hidden=None,
         valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
         epsilon=0.0,
+        return_action_values=True,
     )
     checkpoint = agent.save(tmp_path / "agent.pt", manifest={"device": "mps"})
     restored, manifest = RecurrentC51Agent.load(checkpoint, device="mps")

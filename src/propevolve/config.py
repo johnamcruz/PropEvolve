@@ -48,6 +48,7 @@ REQUIRED_RECIPE_FIELDS = {
         "minimum_environment_steps",
         "validation_episodes",
         "replay_capacity_episodes",
+        "replay_capacity_transitions",
         "sequence_length",
         "warmup_episodes",
         "updates_per_episode",
@@ -56,6 +57,7 @@ REQUIRED_RECIPE_FIELDS = {
         "epsilon_start",
         "epsilon_end",
         "seed",
+        "checkpoint_every_episodes",
     },
 }
 
@@ -141,10 +143,34 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     training = payload["training"]
     training.setdefault("terminal_sequence_fraction", 0.0)
+    if (
+        isinstance(training["replay_capacity_transitions"], bool)
+        or int(training["replay_capacity_transitions"])
+        < int(training["sequence_length"])
+    ):
+        raise ValueError("training replay transition capacity is invalid")
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
     if not 0 <= float(training["terminal_sequence_fraction"]) <= 1:
         raise ValueError("training terminal sequence fraction must be between zero and one")
+    if (
+        isinstance(training["checkpoint_every_episodes"], bool)
+        or int(training["checkpoint_every_episodes"]) < 1
+    ):
+        raise ValueError("training checkpoint interval must be positive")
+    teacher = payload.get("teacher")
+    if teacher is not None:
+        from .expansion_teacher import CHANNELS
+
+        if (
+            not isinstance(teacher, dict)
+            or set(teacher) != {"kind", "cache_root", "channels", "loss_weight"}
+            or teacher.get("kind") != "expansion"
+            or tuple(teacher.get("channels", ())) != CHANNELS
+            or float(teacher.get("loss_weight", 0.0)) <= 0
+            or not str(teacher.get("cache_root", "")).strip()
+        ):
+            raise ValueError("training-only Expansion teacher contract is invalid")
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),

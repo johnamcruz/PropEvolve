@@ -33,6 +33,17 @@
     "fast_group_attention": true,
     "device": "auto"
   },
+  "teacher": {
+    "kind": "expansion",
+    "cache_root": "cache/expansion_teacher_9market_3min_pre2025_v1",
+    "channels": [
+      "long_attempt_probability",
+      "long_clean_retained_given_attempt_probability",
+      "short_attempt_probability",
+      "short_clean_retained_given_attempt_probability"
+    ],
+    "loss_weight": 0.2
+  },
   "challenge": {
     "profit_target": 6000,
     "max_loss": 3000,
@@ -113,7 +124,7 @@
     "terminal_sequence_fraction": 0.5
   },
   "evolution": {
-    "hypothesis": "Session-correct pass rewards, terminal-aware recurrent replay, and bounded safety shaping can reduce greedy-policy blow rate without suppressing challenge completion.",
+    "hypothesis": "Training-only Expansion supervision can teach the recurrent policy expansion semantics while preserving the zero-blow safety behavior of the matched Mask baseline.",
     "parent_candidate_ids": [],
     "allowed_revision_paths": [
       "agent.hidden_dim",
@@ -156,6 +167,7 @@
       "timeframe_minutes",
       "cache_root",
       "cache",
+      "teacher",
       "challenge.profit_target",
       "challenge.max_loss",
       "challenge.episode_days",
@@ -226,7 +238,7 @@
     }
   },
   "campaign": {
-    "state_root": "runs/historical_mask_safety_replay_v1/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_teacher_v1/ml-loop-state",
     "max_revisions_per_stage": 24,
     "reasoning": {
       "provider": "codex",
@@ -281,5 +293,5 @@
       }
     ]
   },
-  "output": "runs/historical_mask_safety_replay_v1"
+  "output": "runs/historical_mask_expansion_teacher_v1"
 }

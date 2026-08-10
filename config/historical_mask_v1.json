@@ -62,6 +62,7 @@
     "minimum_environment_steps": 5000000,
     "validation_episodes": 25,
     "replay_capacity_episodes": 500,
+    "replay_capacity_transitions": 500000,
     "sequence_length": 32,
     "warmup_episodes": 8,
     "updates_per_episode": 32,
@@ -69,7 +70,8 @@
     "recurrent_horizon": 64,
     "epsilon_start": 0.25,
     "epsilon_end": 0.02,
-    "seed": 314159
+    "seed": 314159,
+    "checkpoint_every_episodes": 5
   },
   "evolution": {
     "hypothesis": "A recurrent distributional value agent can improve prop-challenge outcomes using frozen causal market embeddings and account state.",
@@ -106,7 +108,9 @@
       "point_values",
       "round_trip_fees",
       "temporal",
-      "training.minimum_environment_steps"
+      "training.minimum_environment_steps",
+      "training.checkpoint_every_episodes",
+      "training.replay_capacity_transitions"
     ]
   },
   "campaign": {

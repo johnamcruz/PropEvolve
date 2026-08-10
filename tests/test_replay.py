@@ -71,3 +71,68 @@ def test_replay_anchors_declared_fraction_of_sequences_at_terminal_outcomes() ->
         tuple(int(item.observation[0]) for item in sequence)
         for sequence in batch
     } == {(3, 4, 5), (103, 104, 105)}
+
+
+def test_replay_caps_compact_storage_by_transition_budget() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=20,
+        capacity_transitions=12,
+        sequence_length=3,
+        seed=17,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    replay.add(_episode("ES", "timeout", "short", 100))
+    replay.add(_episode("GC", "timeout", "long", 200))
+
+    assert replay.transition_count <= 12
+    assert len(replay) == 2
+    assert len(replay.sample(2)) == 2
+
+
+def test_replay_preserves_optional_training_only_teacher_targets() -> None:
+    episode = _episode("NQ", "pass", "long", 0)
+    taught = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(
+                **{
+                    **item.__dict__,
+                    "teacher_target": np.array([0.8, 0.7, 0.2, 0.1], np.float32),
+                }
+            )
+            for item in episode.transitions
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        capacity_transitions=12,
+        sequence_length=3,
+        seed=19,
+    )
+
+    replay.add(taught)
+    sampled = replay.sample(1)[0]
+
+    assert all(item.teacher_target is not None for item in sampled)
+    np.testing.assert_allclose(sampled[0].teacher_target, [0.8, 0.7, 0.2, 0.1])
+
+
+def test_replay_eviction_preserves_rare_terminal_outcomes() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=3,
+        capacity_transitions=18,
+        sequence_length=3,
+        seed=29,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    replay.add(_episode("ES", "timeout", "long", 100))
+    replay.add(_episode("GC", "timeout", "long", 200))
+    replay.add(_episode("CL", "timeout", "long", 300))
+
+    retained = replay.sample_episodes(20)
+
+    assert "pass" in {episode.outcome for episode in retained}
