@@ -364,7 +364,10 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0
     assert diagnostics[-1]["action_counts"]["WAIT"] == 4
     assert diagnostics[-1]["shadow_h50_complete_trades"] == 0
-    assert "winR=+0.000R avg_balance=+6000.00 steps=4/8" in capsys.readouterr().out
+    assert (
+        "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
+        in capsys.readouterr().out
+    )
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:

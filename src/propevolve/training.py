@@ -979,6 +979,7 @@ def train_agent(
             f"trades={int(terminal_info.get('trade_count', 0))} "
             f"WR={float(terminal_info.get('win_rate', 0.0)):.1%} "
             f"winR={float(terminal_info.get('avg_win_r', 0.0)):+.3f}R "
+            f"balance={terminal_pnl:+.2f} "
             f"avg_balance={cumulative_average_balance:+.2f} "
             f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}",
             flush=True,
