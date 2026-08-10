@@ -374,7 +374,10 @@ class HistoricalCandidateRunner:
                 }
             ),
         }
-        archive = CandidateArchive(output / "archive")
+        archive_output = _resolve(
+            root, str(config.get("_archive_output", config["output"]))
+        )
+        archive = CandidateArchive(archive_output / "archive")
         recipe = {
             key: value for key, value in config.items() if not key.startswith("_")
         }

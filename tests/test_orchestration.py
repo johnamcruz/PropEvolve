@@ -221,6 +221,55 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     assert reasoning.packet_paths
 
 
+def test_campaign_advances_through_screen_confirm_and_final_budgets(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["campaign"]["budget_stages"] = [
+        {
+            "name": "screen_1m",
+            "minimum_environment_steps": 1_000_000,
+            "selection_requirements": payload["campaign"]["selection_requirements"],
+        },
+        {
+            "name": "confirm_2m",
+            "minimum_environment_steps": 2_000_000,
+            "selection_requirements": payload["campaign"]["selection_requirements"],
+        },
+        {
+            "name": "final_5m",
+            "minimum_environment_steps": 5_000_000,
+            "selection_requirements": payload["campaign"]["selection_requirements"],
+        },
+    ]
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="staged-budget-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert [item["training"]["minimum_environment_steps"] for item in runner.configs] == [
+        1_000_000,
+        1_000_000,
+        2_000_000,
+        5_000_000,
+    ]
+    assert [item["agent"]["hidden_dim"] for item in runner.configs] == [
+        128,
+        256,
+        256,
+        256,
+    ]
+    assert len({item["output"] for item in runner.configs}) == 4
+
+
 def test_optional_gepa_proposer_adds_authenticated_actionable_side_information(
     tmp_path: Path,
 ) -> None:

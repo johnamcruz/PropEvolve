@@ -235,3 +235,30 @@ def test_management_exploration_challenger_preserves_the_matched_contract() -> N
     assert "training.management_epsilon_end" in challenger["evolution"][
         "allowed_revision_paths"
     ]
+
+
+def test_staged_budget_recipe_screens_confirms_then_freezes_three_final_seeds() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_staged_budget_v4.json"
+    )
+    stages = config["campaign"]["budget_stages"]
+
+    assert [stage["minimum_environment_steps"] for stage in stages] == [
+        1_000_000,
+        2_000_000,
+        5_000_000,
+        5_000_000,
+        5_000_000,
+    ]
+    assert [stage.get("seed") for stage in stages[-3:]] == [
+        314159,
+        271828,
+        161803,
+    ]
+    assert all(stage["allow_revisions"] is False for stage in stages[-3:])
+    assert stages[-1]["selection_requirements"] == [
+        {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+        {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+        {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+        {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0},
+    ]

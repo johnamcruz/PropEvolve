@@ -265,6 +265,63 @@ def load_experiment_config(path: str | Path) -> dict:
             or not isinstance(requirement.get("value"), (int, float))
         ):
             raise ValueError("campaign selection requirement is invalid")
+    budget_stages = campaign.get("budget_stages")
+    if budget_stages is None:
+        budget_stages = [{
+            "name": "historical_candidate",
+            "minimum_environment_steps": int(
+                training["minimum_environment_steps"]
+            ),
+            "selection_requirements": requirements,
+        }]
+    if not isinstance(budget_stages, list) or not budget_stages:
+        raise ValueError("campaign budget stages must be a nonempty array")
+    names = []
+    budgets = []
+    for stage in budget_stages:
+        required_stage_fields = {
+            "name", "minimum_environment_steps", "selection_requirements"
+        }
+        optional_stage_fields = {"seed", "allow_revisions"}
+        if (
+            not isinstance(stage, dict)
+            or not required_stage_fields <= set(stage)
+            or set(stage) - required_stage_fields - optional_stage_fields
+        ):
+            raise ValueError("campaign budget stage contract is invalid")
+        name = str(stage["name"])
+        budget = stage["minimum_environment_steps"]
+        stage_requirements = stage["selection_requirements"]
+        if (
+            not name
+            or isinstance(budget, bool)
+            or not isinstance(budget, int)
+            or budget < 1
+            or not isinstance(stage_requirements, list)
+            or not stage_requirements
+        ):
+            raise ValueError("campaign budget stage contract is invalid")
+        seed = stage.get("seed")
+        if seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+        ):
+            raise ValueError("campaign budget stage seed is invalid")
+        if not isinstance(stage.get("allow_revisions", True), bool):
+            raise ValueError("campaign budget stage revision policy is invalid")
+        for requirement in stage_requirements:
+            if (
+                not isinstance(requirement, dict)
+                or requirement.get("operator") not in {">", ">=", "<", "<=", "=="}
+                or not str(requirement.get("metric", "")).strip()
+                or isinstance(requirement.get("value"), bool)
+                or not isinstance(requirement.get("value"), (int, float))
+            ):
+                raise ValueError("campaign budget stage requirement is invalid")
+        names.append(name)
+        budgets.append(budget)
+    if len(set(names)) != len(names) or budgets != sorted(budgets):
+        raise ValueError("campaign budget stages must have unique names and increasing budgets")
+    campaign["budget_stages"] = tuple(budget_stages)
     diagnostics = campaign.get("diagnostic_targets", [])
     if not isinstance(diagnostics, list):
         raise ValueError("campaign diagnostic targets must be an array")

@@ -105,8 +105,24 @@ class _CandidateStageAdapter:
 
     def execute(self, request: StageRequest) -> StageReceipt:
         public = _public_config(self._base_config)
-        if request.config_override:
-            revision = self._policy.apply(public, request.config_override)
+        previous_receipt = next(
+            (
+                receipt
+                for receipt in reversed(request.prior_receipts)
+                if receipt.outputs.get("candidate_id") is not None
+            ),
+            None,
+        )
+        inherited_override = (
+            {}
+            if previous_receipt is None
+            else dict(
+                previous_receipt.outputs.get("effective_config_override", {})
+            )
+        )
+        combined_override = {**inherited_override, **request.config_override}
+        if combined_override:
+            revision = self._policy.apply(public, combined_override)
             revision.write(
                 self._revision_root
                 / request.run_id
@@ -116,15 +132,27 @@ class _CandidateStageAdapter:
             effective = revision.config
         else:
             effective = public
+        effective["training"] = dict(effective["training"])
+        effective["training"]["minimum_environment_steps"] = int(
+            request.stage.config["minimum_environment_steps"]
+        )
+        if request.stage.config.get("seed") is not None:
+            effective["training"]["seed"] = int(request.stage.config["seed"])
+        base_output = str(self._base_config["output"])
+        effective["output"] = str(
+            Path(base_output)
+            / "campaign-runs"
+            / request.run_id
+            / request.stage.name
+            / f"attempt-{request.attempt}"
+        )
+        effective["_archive_output"] = base_output
         effective["_path"] = self._base_config["_path"]
         effective["_root"] = self._base_config["_root"]
-        prior = next(
-            (
-                receipt.outputs.get("candidate_id")
-                for receipt in reversed(request.prior_receipts)
-                if receipt.stage == request.stage.name
-            ),
-            None,
+        prior = (
+            None
+            if previous_receipt is None
+            else previous_receipt.outputs.get("candidate_id")
         )
         parents = (
             (str(prior),)
@@ -160,7 +188,7 @@ class _CandidateStageAdapter:
                 "evaluation_status": evaluation.status,
                 "metrics": dict(evaluation.metrics),
                 "parent_candidate_ids": list(parents),
-                "effective_config_override": dict(request.config_override),
+                "effective_config_override": combined_override,
                 "training_diagnostic_summary": diagnostic_reference,
             },
         )
@@ -213,6 +241,12 @@ class _EconomicEvidenceGate:
             "failures": failures,
         }
         if failures or evaluation.status != "PASS":
+            if not bool(request.stage.config.get("allow_revisions", True)):
+                return GateResult(
+                    Decision.STOP,
+                    "frozen final recipe failed multi-seed economic confirmation",
+                    evidence,
+                )
             return GateResult(
                 Decision.REVISE,
                 "challenger missed the declared economic selection gate",
@@ -403,35 +437,45 @@ def _build_codex_provider(config: Mapping, state_root: Path) -> ReasoningAdapter
 
 def _plan(config: Mapping) -> TrainingPlan:
     campaign = config["campaign"]
+    frozen_recipe_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                path: _config_value(config, path)
+                for path in config["evolution"]["frozen_paths"]
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     return TrainingPlan(
         name="propevolve-offline-evolution",
-        stages=(StageSpec(
-            name="historical_candidate",
+        stages=tuple(StageSpec(
+            name=str(budget_stage["name"]),
             stage_adapter=_STAGE_ADAPTER,
             gate_adapter=_GATE_ADAPTER,
             config={
-                "schema": "propevolve_evolution_stage_v1",
-                "selection_requirements": list(campaign["selection_requirements"]),
+                "schema": "propevolve_evolution_stage_v2",
+                "minimum_environment_steps": int(
+                    budget_stage["minimum_environment_steps"]
+                ),
+                "seed": budget_stage.get("seed"),
+                "allow_revisions": bool(
+                    budget_stage.get("allow_revisions", True)
+                ),
+                "selection_requirements": list(
+                    budget_stage["selection_requirements"]
+                ),
                 "diagnostic_targets": list(campaign.get("diagnostic_targets", ())),
                 "revision_bounds": dict(
                     config["evolution"].get("revision_bounds", {})
                 ),
-                "frozen_recipe_sha256": hashlib.sha256(
-                    json.dumps(
-                        {
-                            path: _config_value(config, path)
-                            for path in config["evolution"]["frozen_paths"]
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).hexdigest(),
+                "frozen_recipe_sha256": frozen_recipe_sha256,
             },
             required_skills=(
                 "ml-train-select-model",
                 "ml-validate-temporal",
             ),
-        ),),
+        ) for budget_stage in campaign["budget_stages"]),
         required_skills=(
             "ml-rigor-workflow",
             "ml-audit-data-labels",
