@@ -133,6 +133,7 @@ class RecurrentC51Agent:
         self.gradient_clip = float(gradient_clip)
         self.teacher_channels = int(teacher_channels)
         self.teacher_loss_weight = float(teacher_loss_weight)
+        self.last_train_metrics: dict[str, float] = {}
         self.support = torch.linspace(value_min, value_max, atoms, device=self.device)
         self.online = RecurrentC51Network(
             observation_dim, len(Action), atoms, hidden_dim, self.teacher_channels
@@ -233,7 +234,9 @@ class RecurrentC51Agent:
             projected = self._project_distribution(
                 target_distribution, rewards, terminated
             )
-        loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
+        rl_loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
+        loss = rl_loss
+        teacher_loss_value = 0.0
         if self.teacher_channels:
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
@@ -260,6 +263,7 @@ class RecurrentC51Agent:
                     teacher_logits[teacher_rows],
                     teacher_targets_tensor[teacher_rows],
                 )
+                teacher_loss_value = float(teacher_loss.detach().cpu())
                 loss = loss + self.teacher_loss_weight * teacher_loss
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -268,7 +272,13 @@ class RecurrentC51Agent:
         self._updates += 1
         if self._updates % self.target_sync_updates == 0:
             self.target.load_state_dict(self.online.state_dict())
-        return float(loss.detach().cpu())
+        total_loss = float(loss.detach().cpu())
+        self.last_train_metrics = {
+            "rl_loss": float(rl_loss.detach().cpu()),
+            "teacher_loss": teacher_loss_value,
+            "total_loss": total_loss,
+        }
+        return total_loss
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""

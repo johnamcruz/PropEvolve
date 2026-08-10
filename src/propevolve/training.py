@@ -295,6 +295,16 @@ class HistoricalCandidateRunner:
             recurrent_horizon=int(training_config["recurrent_horizon"]),
             epsilon_start=float(training_config["epsilon_start"]),
             epsilon_end=float(training_config["epsilon_end"]),
+            management_epsilon_start=float(
+                training_config.get(
+                    "management_epsilon_start", training_config["epsilon_start"]
+                )
+            ),
+            management_epsilon_end=float(
+                training_config.get(
+                    "management_epsilon_end", training_config["epsilon_end"]
+                )
+            ),
             episode_tickers=tuple(config["tickers"]),
             ticker_seed=seed,
             resume=resume,
@@ -314,6 +324,10 @@ class HistoricalCandidateRunner:
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
             ),
+        )
+        _write_training_diagnostic_summary(
+            diagnostics_path,
+            output / "training-diagnostic-summary.json",
         )
         agent.discard_teacher()
         validation = evaluate_agent(
@@ -489,6 +503,153 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
         stream.write("\n")
 
 
+def _path_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
+    episodes = len(rows)
+    trades = sum(int(row.get("trade_count", 0)) for row in rows)
+    wins = sum(
+        float(row.get("trade_count", 0)) * float(row.get("win_rate", 0.0))
+        for row in rows
+    )
+    activated = sum(
+        float(row.get("trade_count", 0))
+        * float(row.get("ratchet_activation_rate", 0.0))
+        for row in rows
+    )
+
+    def weighted(field: str, weights: list[float]) -> float:
+        total = sum(weights)
+        return (
+            sum(float(row.get(field, 0.0) or 0.0) * weight for row, weight in zip(rows, weights))
+            / total
+            if total else 0.0
+        )
+
+    trade_weights = [float(row.get("trade_count", 0)) for row in rows]
+    win_weights = [
+        float(row.get("trade_count", 0)) * float(row.get("win_rate", 0.0))
+        for row in rows
+    ]
+    loss_weights = [
+        float(row.get("trade_count", 0)) * (1.0 - float(row.get("win_rate", 0.0)))
+        for row in rows
+    ]
+    activation_weights = [
+        float(row.get("trade_count", 0))
+        * float(row.get("ratchet_activation_rate", 0.0))
+        for row in rows
+    ]
+    update_weights = [float(row.get("updates", 0)) for row in rows]
+    teacher_weights = [float(row.get("teacher_scored_entries", 0)) for row in rows]
+    result: dict[str, object] = {
+        "episodes": episodes,
+        "passes": sum(row.get("outcome") == "pass" for row in rows),
+        "blows": sum(row.get("outcome") == "blow" for row in rows),
+        "timeouts": sum(row.get("outcome") == "timeout" for row in rows),
+        "pass_rate": (
+            sum(row.get("outcome") == "pass" for row in rows) / episodes
+            if episodes else 0.0
+        ),
+        "blow_rate": (
+            sum(row.get("outcome") == "blow" for row in rows) / episodes
+            if episodes else 0.0
+        ),
+        "trades": trades,
+        "trade_win_rate": wins / trades if trades else 0.0,
+        "average_win_r": weighted("avg_win_r", win_weights),
+        "average_loss_r": weighted("avg_loss_r", loss_weights),
+        "expectancy_r": weighted("expectancy_r", trade_weights),
+        "average_mfe_r": weighted("avg_mfe_r", trade_weights),
+        "ratchet_activation_rate": activated / trades if trades else 0.0,
+        "activated_average_realized_r": weighted(
+            "activated_avg_realized_r", activation_weights
+        ),
+        "average_hold_bars": weighted("avg_hold_bars", trade_weights),
+        "voluntary_close_count": sum(
+            int(row.get("voluntary_close_count", 0)) for row in rows
+        ),
+        "initial_stop_count": sum(
+            int(row.get("initial_stop_count", 0)) for row in rows
+        ),
+        "ratchet_stop_count": sum(
+            int(row.get("ratchet_stop_count", 0)) for row in rows
+        ),
+        "terminal_liquidation_count": sum(
+            int(row.get("terminal_liquidation_count", 0)) for row in rows
+        ),
+        "environment_steps": max(
+            (int(row.get("environment_steps", 0)) for row in rows), default=0
+        ),
+        "latest_entry_epsilon": (
+            float(rows[-1].get("entry_epsilon", 0.0)) if rows else 0.0
+        ),
+        "latest_management_epsilon": (
+            float(rows[-1].get("management_epsilon", 0.0)) if rows else 0.0
+        ),
+        "mean_training_loss": weighted("mean_training_loss", update_weights),
+        "mean_rl_loss": weighted("mean_rl_loss", update_weights),
+        "mean_teacher_loss": weighted("mean_teacher_loss", update_weights),
+        "teacher_scored_entries": int(sum(teacher_weights)),
+        "selected_side_attempt_probability_mean": weighted(
+            "selected_side_attempt_probability_mean", teacher_weights
+        ),
+        "selected_side_clean_retained_probability_mean": weighted(
+            "selected_side_clean_retained_probability_mean", teacher_weights
+        ),
+        "action_counts": {
+            action.name: sum(
+                int(row.get("action_counts", {}).get(action.name, 0)) for row in rows
+            )
+            for action in Action
+        },
+    }
+    for horizon in (5, 10, 20, 50):
+        prefix = f"shadow_h{horizon}"
+        horizon_weights = [
+            float(row.get(f"{prefix}_complete_trades", 0)) for row in rows
+        ]
+        result[prefix] = {
+            "complete_trades": int(sum(horizon_weights)),
+            "average_mfe_r": weighted(f"{prefix}_avg_mfe_r", horizon_weights),
+            "average_mae_r": weighted(f"{prefix}_avg_mae_r", horizon_weights),
+            "hit_2r_before_1r_rate": weighted(
+                f"{prefix}_2r_before_1r_rate", horizon_weights
+            ),
+            "hit_3r_before_1r_rate": weighted(
+                f"{prefix}_3r_before_1r_rate", horizon_weights
+            ),
+        }
+    return result
+
+
+def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
+    rows = [json.loads(line) for line in source.read_text().splitlines() if line]
+    by_ticker = {
+        ticker: _diagnostic_aggregate([
+            row for row in rows if str(row.get("ticker")) == ticker
+        ])
+        for ticker in sorted({str(row.get("ticker")) for row in rows})
+    }
+    payload = {
+        "schema": "propevolve_training_diagnostic_summary_v1",
+        "source": source.name,
+        "source_sha256": _path_sha256(source),
+        "overall": _diagnostic_aggregate(rows),
+        "recent_20": _diagnostic_aggregate(rows[-20:]),
+        "by_ticker": by_ticker,
+    }
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, destination)
+
+
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else root / path
@@ -554,6 +715,8 @@ def train_agent(
     recurrent_horizon: int,
     epsilon_start: float,
     epsilon_end: float,
+    management_epsilon_start: float | None = None,
+    management_epsilon_end: float | None = None,
     episode_tickers: tuple[str, ...] | None,
     ticker_seed: int,
     resume: TrainingProgress | None = None,
@@ -564,6 +727,18 @@ def train_agent(
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
+    management_epsilon_start = (
+        epsilon_start
+        if management_epsilon_start is None
+        else float(management_epsilon_start)
+    )
+    management_epsilon_end = (
+        epsilon_end
+        if management_epsilon_end is None
+        else float(management_epsilon_end)
+    )
+    if not 0 <= management_epsilon_end <= management_epsilon_start <= 1:
+        raise ValueError("management epsilon schedule is invalid")
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -590,6 +765,8 @@ def train_agent(
         episode_ticker = str(reset_info.get("ticker", ""))
         hidden = None
         transitions = []
+        action_counts = {action: 0 for action in Action}
+        selected_entry_teacher_targets: list[tuple[float, float]] = []
         total_reward = 0.0
         # Decay exploration against actual market interaction, not the
         # emergency episode ceiling. Early pass/blow episodes vary greatly in
@@ -598,17 +775,27 @@ def train_agent(
             1.0, progress.environment_steps / minimum_environment_steps
         )
         epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
+        management_epsilon = (
+            management_epsilon_start
+            + (management_epsilon_end - management_epsilon_start) * step_progress
+        )
         terminal_info = reset_info
         step_index = 0
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
+            action_epsilon = (
+                management_epsilon
+                if set(valid) == {Action.HOLD, Action.CLOSE}
+                else epsilon
+            )
             action, hidden, _ = agent.select_action(
                 observation,
                 hidden=hidden,
                 valid_actions=valid,
-                epsilon=epsilon,
+                epsilon=action_epsilon,
             )
+            action_counts[Action(action)] += 1
             next_observation, reward, terminated, _, info = environment.step(action)
             next_valid = tuple(info["valid_actions"])
             teacher_target = (
@@ -616,6 +803,14 @@ def train_agent(
                 if teacher_lookup is not None
                 else None
             )
+            if teacher_target is not None and action in {
+                Action.ENTER_LONG_1, Action.ENTER_SHORT_1
+            }:
+                offset = 0 if action == Action.ENTER_LONG_1 else 2
+                selected_entry_teacher_targets.append((
+                    float(teacher_target[offset]),
+                    float(teacher_target[offset + 1]),
+                ))
             transitions.append(Transition(
                 observation=observation,
                 action=Action(action),
@@ -648,11 +843,18 @@ def train_agent(
                 transitions=tuple(transitions),
             ))
         episode_losses = []
+        episode_rl_losses = []
+        episode_teacher_losses = []
         if len(replay) >= warmup_episodes:
             for _ in range(updates_per_episode):
-                episode_losses.append(
-                    agent.train_batch(replay.sample(batch_sequences))
-                )
+                episode_losses.append(agent.train_batch(replay.sample(batch_sequences)))
+                train_metrics = getattr(agent, "last_train_metrics", {})
+                if "rl_loss" in train_metrics:
+                    episode_rl_losses.append(float(train_metrics["rl_loss"]))
+                if "teacher_loss" in train_metrics:
+                    episode_teacher_losses.append(
+                        float(train_metrics["teacher_loss"])
+                    )
         progress = TrainingProgress(
             completed_episodes=episode_index + 1,
             environment_steps=progress.environment_steps + episode_steps,
@@ -676,7 +878,7 @@ def train_agent(
             loss_count=progress.loss_count + len(episode_losses),
         )
         if episode_diagnostic_callback is not None:
-            episode_diagnostic_callback({
+            diagnostic = {
                 "schema": "propevolve_episode_diagnostic_v1",
                 "episode": progress.completed_episodes,
                 "ticker": str(terminal_info["ticker"]),
@@ -710,7 +912,51 @@ def train_agent(
                 ),
                 "terminal_pnl": terminal_pnl,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
-            })
+                "entry_epsilon": epsilon,
+                "management_epsilon": management_epsilon,
+                "updates": len(episode_losses),
+                "mean_training_loss": (
+                    float(np.mean(episode_losses)) if episode_losses else None
+                ),
+                "mean_rl_loss": (
+                    float(np.mean(episode_rl_losses))
+                    if episode_rl_losses else None
+                ),
+                "mean_teacher_loss": (
+                    float(np.mean(episode_teacher_losses))
+                    if episode_teacher_losses else None
+                ),
+                "cumulative_passes": progress.passes,
+                "cumulative_blows": progress.blows,
+                "cumulative_timeouts": progress.timeouts,
+                "cumulative_pass_rate": progress.passes / progress.completed_episodes,
+                "cumulative_blow_rate": progress.blows / progress.completed_episodes,
+                "action_counts": {
+                    action.name: action_counts[action] for action in Action
+                },
+                "teacher_scored_entries": len(selected_entry_teacher_targets),
+                "selected_side_attempt_probability_mean": (
+                    float(np.mean([value[0] for value in selected_entry_teacher_targets]))
+                    if selected_entry_teacher_targets else None
+                ),
+                "selected_side_clean_retained_probability_mean": (
+                    float(np.mean([value[1] for value in selected_entry_teacher_targets]))
+                    if selected_entry_teacher_targets else None
+                ),
+            }
+            for horizon in (5, 10, 20, 50):
+                prefix = f"shadow_h{horizon}"
+                for suffix in (
+                    "complete_trades",
+                    "avg_mfe_r",
+                    "avg_mae_r",
+                    "2r_before_1r_rate",
+                    "3r_before_1r_rate",
+                ):
+                    diagnostic[f"{prefix}_{suffix}"] = terminal_info.get(
+                        f"{prefix}_{suffix}", 0
+                    )
+            episode_diagnostic_callback(diagnostic)
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "
             f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)} "

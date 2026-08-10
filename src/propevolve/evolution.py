@@ -300,6 +300,7 @@ class CandidateArchive:
         inspiration_candidate_ids: Sequence[str],
         frozen_contract: Mapping,
         failure_taxonomy: Sequence[str] = (),
+        training_diagnostics: Mapping | None = None,
     ) -> ReasoningPacket:
         champion = self.load_candidate(champion_candidate_id)
 
@@ -323,6 +324,9 @@ class CandidateArchive:
                 for candidate_id in inspiration_candidate_ids
             ],
             "failure_taxonomy": [str(value) for value in failure_taxonomy],
+            "training_diagnostics": (
+                None if training_diagnostics is None else dict(training_diagnostics)
+            ),
         }
         packet_sha256 = _object_sha256(payload)
         payload["packet_sha256"] = packet_sha256

@@ -142,6 +142,10 @@ def test_reasoning_packet_is_authenticated_and_contains_prior_evidence(
         inspiration_candidate_ids=(challenger.candidate_id,),
         frozen_contract={"split": "2021-2025", "max_loss": 3000},
         failure_taxonomy=("excessive_abstention",),
+        training_diagnostics={
+            "schema": "propevolve_training_diagnostic_summary_v1",
+            "overall": {"ratchet_activation_rate": 0.03},
+        },
     )
 
     payload = json.loads(packet.path.read_text())
@@ -150,6 +154,9 @@ def test_reasoning_packet_is_authenticated_and_contains_prior_evidence(
         evaluation.evaluation_id
     )
     assert payload["failure_taxonomy"] == ["excessive_abstention"]
+    assert payload["training_diagnostics"]["overall"][
+        "ratchet_activation_rate"
+    ] == 0.03
 
 
 def test_revision_policy_changes_only_allowlisted_json_fields() -> None:

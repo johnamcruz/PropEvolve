@@ -284,6 +284,51 @@ def test_voluntary_close_reports_entry_quality_and_winner_retention() -> None:
     assert closed["expectancy_r"] == pytest.approx(0.5)
 
 
+def test_closed_entry_reports_counterfactual_multi_horizon_expansion() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(60) * np.timedelta64(3, "m")
+    )
+    open_ = np.full(60, 100.0, np.float32)
+    high = np.full(60, 105.0, np.float32)
+    low = np.full(60, 95.0, np.float32)
+    close = np.full(60, 100.0, np.float32)
+    high[3] = 120.0
+    high[7] = 130.0
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        embeddings=np.zeros((60, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            bars_per_day=59,
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    env.step(Action.ENTER_LONG_1)
+    _, _, _, _, closed = env.step(Action.CLOSE)
+
+    assert closed["shadow_h5_complete_trades"] == 1
+    assert closed["shadow_h5_avg_mfe_r"] == 2.0
+    assert closed["shadow_h5_avg_mae_r"] == 0.5
+    assert closed["shadow_h5_2r_before_1r_rate"] == 1.0
+    assert closed["shadow_h5_3r_before_1r_rate"] == 0.0
+    assert closed["shadow_h10_3r_before_1r_rate"] == 1.0
+    assert closed["shadow_h50_complete_trades"] == 1
+
+
 def test_ratchet_lock_floor_protects_two_r_at_activation() -> None:
     timestamps = (
         np.datetime64("2024-01-02T23:00")

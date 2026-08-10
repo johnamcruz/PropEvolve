@@ -145,6 +145,8 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     training = payload["training"]
     training.setdefault("terminal_sequence_fraction", 0.0)
+    training.setdefault("management_epsilon_start", training["epsilon_start"])
+    training.setdefault("management_epsilon_end", training["epsilon_end"])
     if (
         isinstance(training["replay_capacity_transitions"], bool)
         or int(training["replay_capacity_transitions"])
@@ -153,6 +155,13 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("training replay transition capacity is invalid")
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
+    if not (
+        0
+        <= float(training["management_epsilon_end"])
+        <= float(training["management_epsilon_start"])
+        <= 1
+    ):
+        raise ValueError("training management epsilon schedule is invalid")
     if not 0 <= float(training["terminal_sequence_fraction"]) <= 1:
         raise ValueError("training terminal sequence fraction must be between zero and one")
     if (

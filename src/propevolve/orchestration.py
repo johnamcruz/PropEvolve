@@ -136,6 +136,16 @@ class _CandidateStageAdapter:
             parent_candidate_ids=parents,
             hypothesis=str(self._base_config["evolution"]["hypothesis"]),
         )
+        output_root = Path(str(effective["output"]))
+        if not output_root.is_absolute():
+            output_root = Path(str(effective["_root"])) / output_root
+        diagnostic_summary = output_root / "training-diagnostic-summary.json"
+        diagnostic_reference = None
+        if diagnostic_summary.is_file():
+            diagnostic_reference = {
+                "path": str(diagnostic_summary),
+                "file_sha256": _sha256(diagnostic_summary),
+            }
         return StageReceipt(
             stage=request.stage.name,
             attempt=request.attempt,
@@ -151,6 +161,7 @@ class _CandidateStageAdapter:
                 "metrics": dict(evaluation.metrics),
                 "parent_candidate_ids": list(parents),
                 "effective_config_override": dict(request.config_override),
+                "training_diagnostic_summary": diagnostic_reference,
             },
         )
 
@@ -246,11 +257,30 @@ class _ArchiveReasoningAdapter:
             str(item.get("metric", item))
             for item in request.gate.evidence.get("failures", ())
         )
+        training_diagnostics = None
+        diagnostic_reference = request.receipt.outputs.get(
+            "training_diagnostic_summary"
+        )
+        if diagnostic_reference is not None:
+            diagnostic_path = Path(str(diagnostic_reference["path"]))
+            if (
+                not diagnostic_path.is_file()
+                or _sha256(diagnostic_path)
+                != diagnostic_reference.get("file_sha256")
+            ):
+                raise ValueError("training diagnostic summary identity drifted")
+            training_diagnostics = json.loads(diagnostic_path.read_text())
+            if (
+                training_diagnostics.get("schema")
+                != "propevolve_training_diagnostic_summary_v1"
+            ):
+                raise ValueError("training diagnostic summary schema drifted")
         packet = self._archive.create_reasoning_packet(
             champion_candidate_id=current,
             inspiration_candidate_ids=inspirations,
             frozen_contract=frozen_contract,
             failure_taxonomy=failures,
+            training_diagnostics=training_diagnostics,
         )
         enriched = replace(
             request,

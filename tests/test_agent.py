@@ -137,6 +137,9 @@ def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     before = agent.online.input[1].weight.detach().clone()
 
     loss = agent.train_batch((sequence, sequence))
+    assert agent.last_train_metrics["rl_loss"] > 0
+    assert agent.last_train_metrics["teacher_loss"] > 0
+    assert agent.last_train_metrics["total_loss"] == pytest.approx(loss)
     agent.discard_teacher()
     checkpoint = agent.save(tmp_path / "teacher-free.pt", manifest={})
     restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")

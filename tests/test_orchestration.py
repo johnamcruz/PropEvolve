@@ -31,6 +31,15 @@ class FakeCandidateRunner:
 
     def run(self, config, *, parent_candidate_ids, hypothesis):
         self.configs.append(config)
+        output = Path(config["_root"]) / config["output"]
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "training-diagnostic-summary.json").write_text(json.dumps({
+            "schema": "propevolve_training_diagnostic_summary_v1",
+            "overall": {
+                "ratchet_activation_rate": 0.03,
+                "voluntary_close_count": 100,
+            },
+        }))
         hidden_dim = int(config["agent"]["hidden_dim"])
         model = self.archive.root / f"candidate-{hidden_dim}.pt"
         model.write_bytes(str(hidden_dim).encode())
@@ -75,6 +84,10 @@ class ImproveHiddenDimension:
         assert reference["file_sha256"] == hashlib.sha256(packet.read_bytes()).hexdigest()
         assert "frozen_recipe_sha256" in request.stage.config
         assert "frozen_contract_sha256" not in request.stage.config
+        assert payload["training_diagnostics"]["overall"] == {
+            "ratchet_activation_rate": 0.03,
+            "voluntary_close_count": 100,
+        }
         self.packet_paths.append(packet)
         return ReasoningOutcome(
             Decision.REVISE,

@@ -298,6 +298,14 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     diagnostics = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
     assert diagnostics
     assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
+    summary_path = tmp_path / "run" / "training-diagnostic-summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["schema"] == "propevolve_training_diagnostic_summary_v1"
+    assert summary["source_sha256"] == hashlib.sha256(
+        diagnostic_path.read_bytes()
+    ).hexdigest()
+    assert summary["overall"]["episodes"] == len(diagnostics)
+    assert summary["by_ticker"]["NQ"]["episodes"] == len(diagnostics)
     assert evaluation.candidate_id == candidate.candidate_id
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
     assert set(evaluation.metrics) >= {
@@ -347,6 +355,73 @@ def test_training_collects_episodes_then_updates_from_balanced_replay() -> None:
     assert diagnostics[-1]["episode"] == 2
     assert diagnostics[-1]["outcome"] == "pass"
     assert diagnostics[-1]["expectancy_r"] == 0.0
+    assert diagnostics[-1]["entry_epsilon"] == pytest.approx(0.135)
+    assert diagnostics[-1]["management_epsilon"] == pytest.approx(0.135)
+    assert diagnostics[-1]["updates"] == 1
+    assert diagnostics[-1]["mean_training_loss"] == 0.5
+    assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
+    assert diagnostics[-1]["cumulative_blow_rate"] == 0.0
+    assert diagnostics[-1]["action_counts"]["WAIT"] == 4
+    assert diagnostics[-1]["shadow_h50_complete_trades"] == 0
+
+
+def test_training_uses_lower_exploration_for_position_management() -> None:
+    class RecordingAgent(Agent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.epsilons = []
+
+        def select_action(self, observation, *, hidden, valid_actions, epsilon):
+            self.epsilons.append((valid_actions, epsilon))
+            return valid_actions[0], None, None
+
+    class PositionEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT, Action.ENTER_LONG_1),
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 2
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.HOLD, Action.CLOSE),
+                "outcome": "timeout" if terminated else None,
+                "ticker": "NQ",
+                "primary_side": "long",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    agent = RecordingAgent()
+    train_agent(
+        agent,
+        PositionEnvironment(),
+        episodes=1,
+        minimum_environment_steps=2,
+        replay=BalancedSequenceReplay(capacity_episodes=2, sequence_length=1, seed=3),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        management_epsilon_start=0.05,
+        management_epsilon_end=0.01,
+        episode_tickers=None,
+        ticker_seed=3,
+    )
+
+    assert agent.epsilons == [
+        ((Action.WAIT, Action.ENTER_LONG_1), 0.25),
+        ((Action.HOLD, Action.CLOSE), 0.05),
+    ]
 
 
 def test_training_resumes_from_an_episode_boundary() -> None:

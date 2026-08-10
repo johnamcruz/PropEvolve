@@ -211,3 +211,27 @@ def test_expansion_ratchet_floor_challenger_is_one_isolated_revision() -> None:
         config["output"]
         == "runs/historical_mask_expansion_teacher_ratchet_floor_v1"
     )
+
+
+def test_management_exploration_challenger_preserves_the_matched_contract() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_teacher_ratchet_floor_diagnostics_v2.json"
+    )
+    challenger = load_experiment_config(
+        "config/historical_mask_expansion_teacher_management_exploration_v3.json"
+    )
+
+    for section in ("cache", "teacher", "challenge", "temporal", "agent"):
+        assert challenger[section] == baseline[section]
+    assert challenger["training"] == {
+        **baseline["training"],
+        "management_epsilon_start": 0.05,
+        "management_epsilon_end": 0.01,
+    }
+    assert challenger["output"].endswith("management_exploration_v3")
+    assert "training.management_epsilon_start" in challenger["evolution"][
+        "allowed_revision_paths"
+    ]
+    assert "training.management_epsilon_end" in challenger["evolution"][
+        "allowed_revision_paths"
+    ]

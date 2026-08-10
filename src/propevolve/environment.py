@@ -212,6 +212,17 @@ class _ClosedTrade:
     ratchet_activated: bool
     exit_reason: str
     hold_bars: int
+    shadow_outcomes: tuple["_ShadowOutcome", ...]
+
+
+@dataclass(frozen=True)
+class _ShadowOutcome:
+    horizon: int
+    complete: bool
+    mfe_r: float
+    mae_r: float
+    hit_2r_before_1r: bool
+    hit_3r_before_1r: bool
 
 
 class HistoricalChallengeEnv:
@@ -609,7 +620,7 @@ class HistoricalChallengeEnv:
             trade.exit_reason in {"challenge_pass", "challenge_blow", "episode_timeout"}
             for trade in self._closed_trades
         )
-        return {
+        statistics: dict[str, float | int] = {
             "trade_count": trades,
             "win_count": len(winners),
             "win_rate": len(winners) / trades if trades else 0.0,
@@ -641,6 +652,32 @@ class HistoricalChallengeEnv:
             "ratchet_stop_count": exit_counts["ratchet_stop"],
             "terminal_liquidation_count": terminal_liquidations,
         }
+        for horizon in (5, 10, 20, 50):
+            outcomes = [
+                outcome
+                for trade in self._closed_trades
+                for outcome in trade.shadow_outcomes
+                if outcome.horizon == horizon and outcome.complete
+            ]
+            prefix = f"shadow_h{horizon}"
+            statistics[f"{prefix}_complete_trades"] = len(outcomes)
+            statistics[f"{prefix}_avg_mfe_r"] = (
+                float(np.mean([outcome.mfe_r for outcome in outcomes]))
+                if outcomes else 0.0
+            )
+            statistics[f"{prefix}_avg_mae_r"] = (
+                float(np.mean([outcome.mae_r for outcome in outcomes]))
+                if outcomes else 0.0
+            )
+            statistics[f"{prefix}_2r_before_1r_rate"] = (
+                sum(outcome.hit_2r_before_1r for outcome in outcomes) / len(outcomes)
+                if outcomes else 0.0
+            )
+            statistics[f"{prefix}_3r_before_1r_rate"] = (
+                sum(outcome.hit_3r_before_1r for outcome in outcomes) / len(outcomes)
+                if outcomes else 0.0
+            )
+        return statistics
 
     def _liquidate(self, price: float, info: dict) -> None:
         if self._position is not None:
@@ -656,7 +693,51 @@ class HistoricalChallengeEnv:
                 ratchet_activated=position.ratchet_active,
                 exit_reason=str(info.get("exit_reason", "unknown")),
                 hold_bars=max(0, exit_index - position.entry_index),
+                shadow_outcomes=self._shadow_entry_outcomes(position),
             ))
+
+    def _shadow_entry_outcomes(
+        self, position: _Position
+    ) -> tuple[_ShadowOutcome, ...]:
+        if position.initial_risk_points is None:
+            return ()
+        assert self._market is not None
+        risk_points = position.initial_risk_points
+        outcomes = []
+        for horizon in (5, 10, 20, 50):
+            stop = position.entry_index + horizon
+            complete = stop <= self._end + 1
+            bounded_stop = min(stop, self._end + 1)
+            if bounded_stop <= position.entry_index:
+                continue
+            highs = self._market.high[position.entry_index:bounded_stop]
+            lows = self._market.low[position.entry_index:bounded_stop]
+            if position.side == PositionSide.LONG:
+                favorable = (highs - position.average_entry) / risk_points
+                adverse = (position.average_entry - lows) / risk_points
+            else:
+                favorable = (position.average_entry - lows) / risk_points
+                adverse = (highs - position.average_entry) / risk_points
+
+            def target_before_stop(target_r: float) -> bool:
+                for favorable_r, adverse_r in zip(favorable, adverse):
+                    # Conservative OHLC ambiguity: an adverse and favorable
+                    # touch on the same bar is counted as stop-first.
+                    if adverse_r >= 1.0:
+                        return False
+                    if favorable_r >= target_r:
+                        return True
+                return False
+
+            outcomes.append(_ShadowOutcome(
+                horizon=horizon,
+                complete=complete,
+                mfe_r=max(0.0, float(np.max(favorable))),
+                mae_r=max(0.0, float(np.max(adverse))),
+                hit_2r_before_1r=target_before_stop(2.0),
+                hit_3r_before_1r=target_before_stop(3.0),
+            ))
+        return tuple(outcomes)
 
     def _adverse_price(self, index: int) -> float:
         assert self._market is not None
