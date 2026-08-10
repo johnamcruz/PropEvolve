@@ -253,6 +253,14 @@ def load_experiment_config(path: str | Path) -> dict:
         )
     reasoning["proposer"] = proposer
     campaign["reasoning"] = reasoning
+    near_blow_loss_fraction = campaign.get("near_blow_loss_fraction", 0.75)
+    if (
+        isinstance(near_blow_loss_fraction, bool)
+        or not isinstance(near_blow_loss_fraction, (int, float))
+        or not 0 < float(near_blow_loss_fraction) <= 1
+    ):
+        raise ValueError("campaign near-blow loss fraction must be in (0, 1]")
+    campaign["near_blow_loss_fraction"] = float(near_blow_loss_fraction)
     requirements = campaign.get("selection_requirements") or ()
     if not isinstance(requirements, list) or not requirements:
         raise ValueError("campaign selection requirements must be nonempty")

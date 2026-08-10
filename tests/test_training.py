@@ -319,6 +319,8 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "selection.timeout_average_win_r",
         "selection.timeout_mean_terminal_pnl",
         "selection.average_mfe_r",
+        "selection.expectancy_r",
+        "selection.near_blow_timeout_rate",
         "selection.average_mae_r",
         "selection.mfe_capture_ratio",
         "selection.gave_it_all_back_rate",
@@ -516,6 +518,31 @@ def test_prop_safety_objective_hard_ranks_any_blow_below_zero_blow() -> None:
     ) >= 0.0
 
 
+def test_prop_safety_objective_penalizes_near_blow_timeouts() -> None:
+    common = dict(
+        episodes=100,
+        environment_steps=1000,
+        passes=10,
+        blows=0,
+        timeouts=90,
+        trade_count=100,
+        win_count=40,
+        winning_r_sum=80.0,
+        worst_pnl=-2_500.0,
+        mean_terminal_pnl=-500.0,
+        mean_reward=0.0,
+        mean_loss=1.0,
+    )
+    safe = TrainingResult(near_blow_timeout_count=0, **common)
+    near_blow = TrainingResult(near_blow_timeout_count=45, **common)
+
+    assert prop_safety_objective(
+        safe, max_loss=3_000.0, profit_target=6_000.0
+    ) > prop_safety_objective(
+        near_blow, max_loss=3_000.0, profit_target=6_000.0
+    )
+
+
 def test_evaluation_never_updates_agent() -> None:
     agent = Agent()
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
@@ -571,8 +598,45 @@ def test_evaluation_reports_pass_and_timeout_economics_separately(capsys) -> Non
     ) in output
     assert (
         "[validation] COMPLETE episodes=2 pass=1 blow=0 timeout=1 "
-        "WR=35.7% winR=+1.800R mean_pnl=+3750.00"
+        "near_blow_timeout=0 (0.0%) WR=35.7% winR=+1.800R "
+        "mean_pnl=+3750.00"
     ) in output
+
+
+def test_evaluation_counts_timeouts_near_the_loss_limit(capsys) -> None:
+    class NearBlowEnvironment:
+        def __init__(self) -> None:
+            self.episode = -1
+
+        def reset(self):
+            self.episode += 1
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,)
+            }
+
+        def step(self, action):
+            pnl = (-2_500.0, -1_000.0)[self.episode]
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "outcome": "timeout",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": pnl,
+            }
+
+    result = evaluate_agent(
+        Agent(),
+        NearBlowEnvironment(),
+        episodes=2,
+        recurrent_horizon=2,
+        near_blow_loss_threshold=2_250.0,
+    )
+
+    assert result.near_blow_timeout_count == 1
+    assert result.near_blow_timeout_rate == 0.5
+    assert "near_blow_timeout=1 (50.0%)" in capsys.readouterr().out
 
 
 def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:

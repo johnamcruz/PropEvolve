@@ -113,6 +113,7 @@ class TrainingResult:
     mean_terminal_pnl: float
     mean_reward: float
     mean_loss: float
+    trade_r_sum: float = 0.0
     outcome_statistics: tuple[OutcomeStatistics, ...] = ()
     mfe_sum: float = 0.0
     mae_sum: float = 0.0
@@ -123,6 +124,7 @@ class TrainingResult:
     two_r_eligible_count: int = 0
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
+    near_blow_timeout_count: int = 0
 
     @property
     def trade_win_rate(self) -> float:
@@ -131,6 +133,10 @@ class TrainingResult:
     @property
     def average_win_r(self) -> float:
         return self.winning_r_sum / self.win_count if self.win_count else 0.0
+
+    @property
+    def expectancy_r(self) -> float:
+        return self.trade_r_sum / self.trade_count if self.trade_count else 0.0
 
     @property
     def average_mfe_r(self) -> float:
@@ -175,6 +181,13 @@ class TrainingResult:
             if self.two_r_eligible_count else 0.0
         )
 
+    @property
+    def near_blow_timeout_rate(self) -> float:
+        return (
+            self.near_blow_timeout_count / self.timeouts
+            if self.timeouts else 0.0
+        )
+
     def outcome(self, name: str) -> OutcomeStatistics:
         for statistics in self.outcome_statistics:
             if statistics.outcome == name:
@@ -213,6 +226,7 @@ class TrainingProgress:
     trade_count: int = 0
     win_count: int = 0
     winning_r_sum: float = 0.0
+    trade_r_sum: float = 0.0
     worst_pnl: float = math.inf
     terminal_pnl_sum: float = 0.0
     terminal_pnl_count: int = 0
@@ -229,6 +243,7 @@ class TrainingProgress:
     two_r_eligible_count: int = 0
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
+    near_blow_timeout_count: int = 0
 
     def result(self) -> TrainingResult:
         if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
@@ -242,6 +257,7 @@ class TrainingProgress:
             trade_count=self.trade_count,
             win_count=self.win_count,
             winning_r_sum=self.winning_r_sum,
+            trade_r_sum=self.trade_r_sum,
             worst_pnl=self.worst_pnl,
             mean_terminal_pnl=self.terminal_pnl_sum / self.terminal_pnl_count,
             mean_reward=self.reward_sum / self.reward_count,
@@ -259,6 +275,7 @@ class TrainingProgress:
             two_r_eligible_count=self.two_r_eligible_count,
             two_r_capture_sum=self.two_r_capture_sum,
             two_r_round_trip_count=self.two_r_round_trip_count,
+            near_blow_timeout_count=self.near_blow_timeout_count,
         )
 
 
@@ -274,7 +291,12 @@ def prop_safety_objective(
         return -1.0 - result.blows / result.episodes - overage
     margin = max(0.0, min(1.0, (max_loss + result.worst_pnl) / max_loss))
     progress = max(0.0, result.mean_terminal_pnl / profit_target)
-    return result.passes / result.episodes + 0.05 * margin + 0.02 * progress
+    return (
+        result.passes / result.episodes
+        + 0.05 * margin
+        + 0.02 * progress
+        - 0.5 * result.near_blow_timeout_rate
+    )
 
 
 class HistoricalCandidateRunner:
@@ -335,6 +357,14 @@ class HistoricalCandidateRunner:
                 train_markets,
             )
         challenge = ChallengeSpec(**config["challenge"])
+        near_blow_loss_threshold = (
+            float(
+                config.get("campaign", {}).get(
+                    "near_blow_loss_fraction", 0.75
+                )
+            )
+            * challenge.max_loss
+        )
         seed = int(config["training"]["seed"])
         train_environment = HistoricalChallengeEnv(
             train_markets,
@@ -437,6 +467,7 @@ class HistoricalCandidateRunner:
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
             ),
+            near_blow_loss_threshold=near_blow_loss_threshold,
         )
         _write_training_diagnostic_summary(
             diagnostics_path,
@@ -448,6 +479,7 @@ class HistoricalCandidateRunner:
             validation_environment,
             episodes=int(training_config["validation_episodes"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
+            near_blow_loss_threshold=near_blow_loss_threshold,
         )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
@@ -513,6 +545,7 @@ class HistoricalCandidateRunner:
                 "environment_steps": float(training.environment_steps),
                 "trade_win_rate": training.trade_win_rate,
                 "average_win_r": training.average_win_r,
+                "expectancy_r": training.expectancy_r,
                 "worst_pnl": training.worst_pnl,
                 "mean_terminal_pnl": training.mean_terminal_pnl,
                 "safety_objective": prop_safety_objective(
@@ -529,6 +562,10 @@ class HistoricalCandidateRunner:
                 "two_r_gave_it_all_back_rate": (
                     training.two_r_gave_it_all_back_rate
                 ),
+                "near_blow_timeout_count": float(
+                    training.near_blow_timeout_count
+                ),
+                "near_blow_timeout_rate": training.near_blow_timeout_rate,
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
@@ -545,6 +582,7 @@ class HistoricalCandidateRunner:
                 "environment_steps": float(validation.environment_steps),
                 "trade_win_rate": validation.trade_win_rate,
                 "average_win_r": validation.average_win_r,
+                "expectancy_r": validation.expectancy_r,
                 "worst_pnl": validation.worst_pnl,
                 "mean_terminal_pnl": validation.mean_terminal_pnl,
                 "safety_objective": prop_safety_objective(
@@ -561,6 +599,10 @@ class HistoricalCandidateRunner:
                 "two_r_gave_it_all_back_rate": (
                     validation.two_r_gave_it_all_back_rate
                 ),
+                "near_blow_timeout_count": float(
+                    validation.near_blow_timeout_count
+                ),
+                "near_blow_timeout_rate": validation.near_blow_timeout_rate,
             }
             metrics.update(_outcome_metric_values(validation))
             return metrics
@@ -687,6 +729,9 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "passes": sum(row.get("outcome") == "pass" for row in rows),
         "blows": sum(row.get("outcome") == "blow" for row in rows),
         "timeouts": sum(row.get("outcome") == "timeout" for row in rows),
+        "near_blow_timeout_count": sum(
+            bool(row.get("near_blow_timeout", False)) for row in rows
+        ),
         "pass_rate": (
             sum(row.get("outcome") == "pass" for row in rows) / episodes
             if episodes else 0.0
@@ -771,6 +816,10 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
             for action in Action
         },
     }
+    timeouts = int(result["timeouts"])
+    result["near_blow_timeout_rate"] = (
+        int(result["near_blow_timeout_count"]) / timeouts if timeouts else 0.0
+    )
     for horizon in (5, 10, 20, 50):
         prefix = f"shadow_h{horizon}"
         horizon_weights = [
@@ -901,6 +950,7 @@ def train_agent(
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
+    near_blow_loss_threshold: float | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -916,6 +966,8 @@ def train_agent(
     )
     if not 0 <= management_epsilon_end <= management_epsilon_start <= 1:
         raise ValueError("management epsilon schedule is invalid")
+    if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
+        raise ValueError("near-blow loss threshold must be positive")
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -1010,6 +1062,11 @@ def train_agent(
         if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
         terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
+        near_blow_timeout = bool(
+            outcome == "timeout"
+            and near_blow_loss_threshold is not None
+            and terminal_pnl <= -near_blow_loss_threshold
+        )
         if len(transitions) >= replay.sequence_length:
             replay.add(Episode(
                 episode_id=f"historical-{episode_index}-{time.time_ns()}",
@@ -1045,6 +1102,11 @@ def train_agent(
             winning_r_sum=(
                 progress.winning_r_sum
                 + float(terminal_info.get("winning_r_sum", 0.0))
+            ),
+            trade_r_sum=(
+                progress.trade_r_sum
+                + float(terminal_info.get("expectancy_r", 0.0))
+                * int(terminal_info.get("trade_count", 0))
             ),
             worst_pnl=min(progress.worst_pnl, terminal_pnl),
             terminal_pnl_sum=progress.terminal_pnl_sum + terminal_pnl,
@@ -1099,6 +1161,9 @@ def train_agent(
                     float(terminal_info.get("two_r_gave_it_all_back_rate", 0.0))
                     * int(terminal_info.get("two_r_eligible_count", 0))
                 )
+            ),
+            near_blow_timeout_count=(
+                progress.near_blow_timeout_count + int(near_blow_timeout)
             ),
         )
         cumulative_average_balance = (
@@ -1160,6 +1225,7 @@ def train_agent(
                     terminal_info.get("terminal_liquidation_count", 0)
                 ),
                 "terminal_pnl": terminal_pnl,
+                "near_blow_timeout": near_blow_timeout,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
@@ -1258,17 +1324,22 @@ def evaluate_agent(
     *,
     episodes: int,
     recurrent_horizon: int,
+    near_blow_loss_threshold: float | None = None,
 ) -> TrainingResult:
+    if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
+        raise ValueError("near-blow loss threshold must be positive")
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []
     terminal_pnls = []
     trade_count = win_count = 0
     winning_r_sum = 0.0
+    trade_r_sum = 0.0
     mfe_sum = mae_sum = 0.0
     retention_eligible_count = retention_round_trip_count = 0
     retention_capture_sum = retention_gap_sum = 0.0
     two_r_eligible_count = two_r_round_trip_count = 0
     two_r_capture_sum = 0.0
+    near_blow_timeout_count = 0
     environment_steps = 0
     by_outcome = {
         outcome: {
@@ -1313,9 +1384,16 @@ def evaluate_agent(
         outcomes[outcome] += 1
         rewards.append(total)
         terminal_pnl = float(info.get("equity_pnl", 0.0))
+        near_blow_timeout = bool(
+            outcome == "timeout"
+            and near_blow_loss_threshold is not None
+            and terminal_pnl <= -near_blow_loss_threshold
+        )
+        near_blow_timeout_count += int(near_blow_timeout)
         episode_trades = int(info.get("trade_count", 0))
         episode_wins = int(info.get("win_count", 0))
         episode_winning_r = float(info.get("winning_r_sum", 0.0))
+        episode_trade_r = float(info.get("expectancy_r", 0.0)) * episode_trades
         episode_mfe_sum = float(info.get("avg_mfe_r", 0.0)) * episode_trades
         episode_mae_sum = float(info.get("avg_mae_r", 0.0)) * episode_trades
         episode_retention_count = int(info.get("retention_eligible_count", 0))
@@ -1341,6 +1419,7 @@ def evaluate_agent(
         trade_count += episode_trades
         win_count += episode_wins
         winning_r_sum += episode_winning_r
+        trade_r_sum += episode_trade_r
         mfe_sum += episode_mfe_sum
         mae_sum += episode_mae_sum
         retention_eligible_count += episode_retention_count
@@ -1392,6 +1471,7 @@ def evaluate_agent(
         trade_count=trade_count,
         win_count=win_count,
         winning_r_sum=winning_r_sum,
+        trade_r_sum=trade_r_sum,
         worst_pnl=float(np.min(terminal_pnls)),
         mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_reward=float(np.mean(rewards)),
@@ -1410,10 +1490,13 @@ def evaluate_agent(
         two_r_eligible_count=two_r_eligible_count,
         two_r_capture_sum=two_r_capture_sum,
         two_r_round_trip_count=two_r_round_trip_count,
+        near_blow_timeout_count=near_blow_timeout_count,
     )
     print(
         f"[validation] COMPLETE episodes={episodes} "
         f"pass={result.passes} blow={result.blows} timeout={result.timeouts} "
+        f"near_blow_timeout={result.near_blow_timeout_count} "
+        f"({result.near_blow_timeout_rate:.1%}) "
         f"WR={result.trade_win_rate:.1%} winR={result.average_win_r:+.3f}R "
         f"mean_pnl={result.mean_terminal_pnl:+.2f}",
         flush=True,

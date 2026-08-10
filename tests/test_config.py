@@ -61,6 +61,38 @@ def test_safety_replay_recipe_exposes_only_bounded_training_reward_revisions() -
         assert path in config["evolution"]["frozen_paths"]
 
 
+def test_winner_retention_recipe_enables_economic_shaping_and_near_blow_gate() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_teacher_winner_retention_v5.json"
+    )
+
+    assert config["challenge"]["lead_giveback_penalty_coefficient"] > 0
+    assert config["challenge"]["large_win_bonus_coefficient"] > 0
+    assert config["campaign"]["near_blow_loss_fraction"] == 0.75
+    screen = config["campaign"]["budget_stages"][0]
+    assert {
+        "metric": "selection.near_blow_timeout_rate",
+        "operator": "<=",
+        "value": 0.05,
+    } in screen["selection_requirements"]
+    assert screen["parent_improvement_requirements"] == [{
+        "metric": "selection.two_r_mfe_capture_ratio",
+        "direction": "maximize",
+        "minimum_delta": 0.0,
+    }]
+    assert [
+        rule["metric"]
+        for rule in config["campaign"]["finalization"]["ranking"]
+    ] == [
+        "selection.blow_rate",
+        "selection.near_blow_timeout_rate",
+        "selection.two_r_mfe_capture_ratio",
+        "selection.pass_rate",
+        "selection.expectancy_r",
+    ]
+    assert "campaign.near_blow_loss_fraction" in config["evolution"]["frozen_paths"]
+
+
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(
     tmp_path: Path,
 ) -> None:
