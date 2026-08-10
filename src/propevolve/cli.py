@@ -39,6 +39,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     evolve.add_argument("--config", required=True)
     evolve.add_argument("--run-id", required=True)
+    evolve.add_argument(
+        "--recover-reasoning",
+        action="store_true",
+        help="resume from the latest durable NEEDS_REASONING checkpoint",
+    )
     status = subparsers.add_parser("evolve-status", help="show durable campaign state")
     status.add_argument("--config", required=True)
     status.add_argument("--run-id", required=True)
@@ -193,10 +198,19 @@ def _state_payload(state) -> dict:
     return payload
 
 
-def _evolve(config_path: str, run_id: str) -> int:
+def _evolve(
+    config_path: str,
+    run_id: str,
+    *,
+    recover_reasoning: bool = False,
+) -> int:
     from .orchestration import run_evolution_campaign
 
-    state = run_evolution_campaign(config_path, run_id=run_id)
+    state = run_evolution_campaign(
+        config_path,
+        run_id=run_id,
+        recover_reasoning=recover_reasoning,
+    )
     print(json.dumps(_state_payload(state), indent=2, sort_keys=True, default=str))
     return 0 if state.phase.value == "COMPLETE" else 2
 
@@ -240,7 +254,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "train":
         return _train(config)
     if args.command == "evolve":
-        return _evolve(args.config, args.run_id)
+        return _evolve(
+            args.config,
+            args.run_id,
+            recover_reasoning=args.recover_reasoning,
+        )
     if args.command == "evolve-status":
         return _evolve_status(config, args.run_id)
     raise RuntimeError(f"unhandled command: {args.command}")

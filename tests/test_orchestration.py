@@ -14,7 +14,10 @@ from ml_training_loop import (
 from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
-from propevolve.orchestration import run_evolution_campaign
+from propevolve.orchestration import (
+    _resolve_codex_executable,
+    run_evolution_campaign,
+)
 
 
 class ReadySkills:
@@ -152,6 +155,11 @@ class IncreaseSafetyShaping:
         )
 
 
+class MissingReasoningExecutable:
+    def revise(self, request):
+        raise FileNotFoundError("Codex executable not found: codex")
+
+
 class RecordingSurrogate:
     def __init__(self) -> None:
         self.requests = []
@@ -219,6 +227,49 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     parent = next(item for item in candidates if item.model_path.read_bytes() == b"128")
     assert child.manifest["parent_candidate_ids"] == [parent.candidate_id]
     assert reasoning.packet_paths
+
+
+def test_campaign_recovers_blocked_reasoning_without_retraining_candidate(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    blocked = run_evolution_campaign(
+        config_path,
+        run_id="recover-provider-test",
+        candidate_runner=runner,
+        reasoning=MissingReasoningExecutable(),
+        skills=ReadySkills(),
+    )
+    assert blocked.phase is Phase.BLOCKED
+    assert len(runner.configs) == 1
+
+    completed = run_evolution_campaign(
+        config_path,
+        run_id="recover-provider-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+        recover_reasoning=True,
+    )
+
+    assert completed.phase is Phase.COMPLETE
+    assert len(runner.configs) == 2
+    assert [config["agent"]["hidden_dim"] for config in runner.configs] == [128, 256]
+
+
+def test_codex_executable_can_be_supplied_outside_launchd_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PROPEVOLVE_CODEX_EXECUTABLE", str(executable))
+
+    assert _resolve_codex_executable({}) == executable.resolve()
 
 
 def test_campaign_advances_through_screen_confirm_and_final_budgets(

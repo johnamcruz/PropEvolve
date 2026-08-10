@@ -62,8 +62,8 @@ def test_evolve_command_dispatches_the_shared_training_loop(
 ) -> None:
     calls = []
 
-    def fake_campaign(config_path, *, run_id):
-        calls.append((config_path, run_id))
+    def fake_campaign(config_path, *, run_id, recover_reasoning=False):
+        calls.append((config_path, run_id, recover_reasoning))
         return RunState(run_id, "plan", Phase.COMPLETE)
 
     monkeypatch.setattr(
@@ -79,8 +79,32 @@ def test_evolve_command_dispatches_the_shared_training_loop(
     ])
 
     assert code == 0
-    assert calls == [("config/historical_mask_v1.json", "fake-e2e")]
+    assert calls == [("config/historical_mask_v1.json", "fake-e2e", False)]
     assert json.loads(capsys.readouterr().out)["phase"] == "COMPLETE"
+
+
+def test_evolve_command_can_recover_the_last_reasoning_checkpoint(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def fake_campaign(config_path, *, run_id, recover_reasoning=False):
+        calls.append((config_path, run_id, recover_reasoning))
+        return RunState(run_id, "plan", Phase.COMPLETE)
+
+    monkeypatch.setattr(
+        propevolve.orchestration,
+        "run_evolution_campaign",
+        fake_campaign,
+    )
+
+    assert main([
+        "evolve",
+        "--config", "config/historical_mask_v1.json",
+        "--run-id", "recover-e2e",
+        "--recover-reasoning",
+    ]) == 0
+    assert calls == [("config/historical_mask_v1.json", "recover-e2e", True)]
 
 
 def test_expansion_teacher_cache_command_dispatches_requested_tickers(

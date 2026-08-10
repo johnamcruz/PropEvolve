@@ -8,6 +8,7 @@ from copy import deepcopy
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -16,6 +17,7 @@ from typing import Mapping, Protocol
 from ml_training_loop import (
     Decision,
     GateResult,
+    Phase,
     ReasoningOutcome,
     Revision,
     StageReceipt,
@@ -33,7 +35,10 @@ from ml_training_loop.interfaces import (
     StageRequest,
     SurrogateAdvisor,
 )
-from ml_training_loop.integrations import CodexCliReasoningAdapter
+from ml_training_loop.integrations import (
+    CodexCliReasoningAdapter,
+    SubprocessCodexExecutor,
+)
 from ml_training_loop.skills import BundledSkillBootstrapper
 from ml_training_loop.stores import JsonRunStore
 
@@ -45,6 +50,43 @@ from .reasoning import GepaReflectiveReasoningAdapter
 _STAGE_ADAPTER = "propevolve-candidate"
 _GATE_ADAPTER = "propevolve-economic-evidence"
 _DEFAULT_REASONING = object()
+
+
+def _resolve_codex_executable(reasoning: Mapping) -> Path:
+    """Resolve Codex when unattended launchd jobs lack the editor's PATH."""
+
+    explicit = reasoning.get("executable") or os.environ.get(
+        "PROPEVOLVE_CODEX_EXECUTABLE"
+    )
+    if explicit:
+        path = Path(str(explicit)).expanduser().resolve()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise FileNotFoundError(
+                f"configured Codex executable is unavailable: {path}"
+            )
+        return path
+
+    discovered = shutil.which("codex")
+    if discovered:
+        return Path(discovered).resolve()
+
+    home = Path.home()
+    candidates = tuple(
+        path
+        for pattern in (
+            ".vscode/extensions/openai.chatgpt-*/bin/*/codex",
+            ".vscode-insiders/extensions/openai.chatgpt-*/bin/*/codex",
+            ".cursor/extensions/openai.chatgpt-*/bin/*/codex",
+        )
+        for path in home.glob(pattern)
+        if path.is_file() and os.access(path, os.X_OK)
+    )
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime).resolve()
+    raise FileNotFoundError(
+        "Codex executable is unavailable; install Codex, add it to PATH, or set "
+        "PROPEVOLVE_CODEX_EXECUTABLE"
+    )
 
 
 class CandidateRunner(Protocol):
@@ -507,6 +549,7 @@ def _build_codex_provider(config: Mapping, state_root: Path) -> ReasoningAdapter
         receipt_root=state_root / "provider-receipts",
         prompt_builder=_reasoning_prompt,
         revision_validator=validate,
+        executor=SubprocessCodexExecutor(_resolve_codex_executable(reasoning)),
         model=str(reasoning.get("model", "gpt-5.6-sol")),
         reasoning_effort=str(reasoning.get("reasoning_effort", "medium")),
         sandbox="read-only",
@@ -716,6 +759,7 @@ def run_evolution_campaign(
     reasoning: ReasoningAdapter | None | object = _DEFAULT_REASONING,
     surrogate: SurrogateAdvisor | None = None,
     skills: SkillBootstrapper | None = None,
+    recover_reasoning: bool = False,
 ):
     """Run or interruption-safely resume offline challenger evolution."""
     config = load_experiment_config(config_path)
@@ -781,7 +825,24 @@ def run_evolution_campaign(
         except BlockingIOError as error:
             raise RuntimeError(f"PropEvolve campaign is already active: {run_id}") from error
         try:
-            state = loop.run(_plan(config), run_id=run_id)
+            plan = _plan(config)
+            if recover_reasoning:
+                checkpoints = tuple(
+                    checkpoint
+                    for checkpoint in loop.history(run_id)
+                    if checkpoint.state.phase is Phase.NEEDS_REASONING
+                )
+                if not checkpoints:
+                    raise ValueError(
+                        "campaign has no durable NEEDS_REASONING checkpoint to recover"
+                    )
+                state = loop.recover(
+                    plan,
+                    run_id,
+                    checkpoints[-1].checkpoint_id,
+                )
+            else:
+                state = loop.run(plan, run_id=run_id)
             _finalize_campaign(config, state, archive)
             return state
         finally:
