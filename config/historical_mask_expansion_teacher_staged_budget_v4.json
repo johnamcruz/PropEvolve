@@ -280,9 +280,9 @@
         ]
       },
       {
-        "name": "final_5m_seed_314159",
+        "name": "final_5m_seed_11111",
         "minimum_environment_steps": 5000000,
-        "seed": 314159,
+        "seed": 11111,
         "allow_revisions": false,
         "selection_requirements": [
           {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
@@ -292,9 +292,9 @@
         ]
       },
       {
-        "name": "final_5m_seed_271828",
+        "name": "final_5m_seed_22222",
         "minimum_environment_steps": 5000000,
-        "seed": 271828,
+        "seed": 22222,
         "allow_revisions": false,
         "selection_requirements": [
           {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
@@ -304,9 +304,69 @@
         ]
       },
       {
-        "name": "final_5m_seed_161803",
+        "name": "final_5m_seed_33333",
         "minimum_environment_steps": 5000000,
-        "seed": 161803,
+        "seed": 33333,
+        "allow_revisions": false,
+        "selection_requirements": [
+          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+        ]
+      },
+      {
+        "name": "final_5m_seed_44444",
+        "minimum_environment_steps": 5000000,
+        "seed": 44444,
+        "allow_revisions": false,
+        "selection_requirements": [
+          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+        ]
+      },
+      {
+        "name": "final_5m_seed_55555",
+        "minimum_environment_steps": 5000000,
+        "seed": 55555,
+        "allow_revisions": false,
+        "selection_requirements": [
+          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+        ]
+      },
+      {
+        "name": "final_5m_seed_66666",
+        "minimum_environment_steps": 5000000,
+        "seed": 66666,
+        "allow_revisions": false,
+        "selection_requirements": [
+          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+        ]
+      },
+      {
+        "name": "final_5m_seed_77777",
+        "minimum_environment_steps": 5000000,
+        "seed": 77777,
+        "allow_revisions": false,
+        "selection_requirements": [
+          {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
+          {"metric": "selection.blow_rate", "operator": "==", "value": 0},
+          {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
+          {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0}
+        ]
+      },
+      {
+        "name": "final_5m_seed_88888",
+        "minimum_environment_steps": 5000000,
+        "seed": 88888,
         "allow_revisions": false,
         "selection_requirements": [
           {"metric": "selection.pass_rate", "operator": ">=", "value": 0.5},
