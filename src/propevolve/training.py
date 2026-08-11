@@ -345,16 +345,15 @@ class HistoricalCandidateRunner:
             end=temporal["validation_end"],
             sealed_start=temporal["sealed_start"],
         )
-        teacher_config = config.get("teacher")
+        teacher_specs = tuple(config.get("teachers", ()))
         teacher_targets = None
-        if teacher_config is not None:
-            from .expansion_teacher import CHANNELS, ExpansionTeacherTargets
+        if teacher_specs:
+            from .teachers import load_teacher_targets
 
-            if tuple(teacher_config["channels"]) != CHANNELS:
-                raise ValueError("Expansion teacher channel order drifted")
-            teacher_targets = ExpansionTeacherTargets.load(
-                _resolve(root, teacher_config["cache_root"]),
-                train_markets,
+            teacher_targets = load_teacher_targets(
+                teacher_specs,
+                root=root,
+                markets=train_markets,
             )
         challenge = ChallengeSpec(**config["challenge"])
         near_blow_loss_threshold = (
@@ -384,19 +383,22 @@ class HistoricalCandidateRunner:
         )
         observation_dim = next(iter(train_markets.values())).embeddings.shape[1] + 12
         agent_settings = dict(config["agent"])
-        if teacher_config is not None:
+        if teacher_targets is not None:
             agent_settings.update(
-                teacher_channels=len(teacher_config["channels"]),
-                teacher_loss_weight=float(teacher_config["loss_weight"]),
-                teacher_entry_search_loss_weight=float(
-                    teacher_config["entry_search_loss_weight"]
+                teacher_channels=len(teacher_targets.channels),
+                teacher_loss_weight=sum(
+                    float(spec["loss_weight"]) for spec in teacher_specs
+                ),
+                teacher_channel_loss_weights=teacher_targets.channel_loss_weights,
+                teacher_entry_search_loss_weight=(
+                    teacher_targets.entry_search_loss_weight
                 ),
             )
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
         diagnostics_path = output / "training-diagnostics.jsonl"
-        resume_identity = _training_resume_identity(config, cache_root, teacher_config)
+        resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
         resume = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
@@ -546,16 +548,14 @@ class HistoricalCandidateRunner:
                     "model_sha256": config["_warm_start_model"]["model_sha256"],
                 }
             ),
-            "teacher": (
-                None
-                if teacher_config is None
-                else {
-                    "kind": "expansion",
+            "teachers": [
+                {
+                    "kind": spec["kind"],
                     "training_only": True,
                     "cache_manifest_sha256": {
                         ticker: hashlib.sha256(
                             (
-                                _resolve(root, teacher_config["cache_root"])
+                                _resolve(root, spec["cache_root"])
                                 / ticker
                                 / "manifest.json"
                             ).read_bytes()
@@ -563,7 +563,8 @@ class HistoricalCandidateRunner:
                         for ticker in sorted(config["tickers"])
                     },
                 }
-            ),
+                for spec in teacher_specs
+            ],
         }
         archive_output = _resolve(
             root, str(config.get("_archive_output", config["output"]))
@@ -687,7 +688,7 @@ class HistoricalCandidateRunner:
 def _training_resume_identity(
     config: dict,
     cache_root: Path,
-    teacher_config: dict | None,
+    teacher_specs: tuple[dict, ...],
 ) -> str:
     root = Path(config["_root"])
     digest = hashlib.sha256(json.dumps(
@@ -710,10 +711,10 @@ def _training_resume_identity(
         ).encode())
     for ticker in sorted(config["tickers"]):
         digest.update((cache_root / ticker / "manifest.json").read_bytes())
-        if teacher_config is not None:
+        for teacher_spec in teacher_specs:
             digest.update(
                 (
-                    _resolve(root, teacher_config["cache_root"])
+                    _resolve(root, teacher_spec["cache_root"])
                     / ticker
                     / "manifest.json"
                 ).read_bytes()

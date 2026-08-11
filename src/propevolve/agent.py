@@ -106,6 +106,7 @@ class RecurrentC51Agent:
         seed: int,
         teacher_channels: int = 0,
         teacher_loss_weight: float = 0.0,
+        teacher_channel_loss_weights: Sequence[float] | None = None,
         teacher_entry_search_loss_weight: float = 0.0,
     ) -> None:
         if atoms < 2 or value_min >= value_max:
@@ -122,6 +123,20 @@ class RecurrentC51Agent:
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
             raise ValueError("teacher channels and loss weight must be enabled together")
+        if teacher_channel_loss_weights is None:
+            teacher_channel_loss_weights = (
+                (float(teacher_loss_weight) / int(teacher_channels),) * int(teacher_channels)
+                if teacher_channels else ()
+            )
+        teacher_channel_loss_weights = tuple(
+            float(value) for value in teacher_channel_loss_weights
+        )
+        if (
+            len(teacher_channel_loss_weights) != int(teacher_channels)
+            or any(value < 0 for value in teacher_channel_loss_weights)
+            or (teacher_channels and not any(teacher_channel_loss_weights))
+        ):
+            raise ValueError("teacher channel loss weights are invalid")
         torch.manual_seed(seed)
         self.seed = int(seed)
         self._rng = np.random.default_rng(seed)
@@ -138,6 +153,7 @@ class RecurrentC51Agent:
         self.gradient_clip = float(gradient_clip)
         self.teacher_channels = int(teacher_channels)
         self.teacher_loss_weight = float(teacher_loss_weight)
+        self.teacher_channel_loss_weights = teacher_channel_loss_weights
         self.teacher_entry_search_loss_weight = float(
             teacher_entry_search_loss_weight
         )
@@ -268,12 +284,19 @@ class RecurrentC51Agent:
             if teacher_rows.any():
                 assert self.online.teacher_output is not None
                 teacher_logits = self.online.teacher_output(recurrent)
-                teacher_loss = nn.functional.binary_cross_entropy_with_logits(
+                teacher_losses = nn.functional.binary_cross_entropy_with_logits(
                     teacher_logits[teacher_rows],
                     teacher_targets_tensor[teacher_rows],
+                    reduction="none",
                 )
+                channel_weights = torch.as_tensor(
+                    self.teacher_channel_loss_weights,
+                    dtype=teacher_losses.dtype,
+                    device=self.device,
+                )
+                teacher_loss = (teacher_losses * channel_weights).sum(dim=-1).mean()
                 teacher_loss_value = float(teacher_loss.detach().cpu())
-                loss = loss + self.teacher_loss_weight * teacher_loss
+                loss = loss + teacher_loss
                 if self.teacher_entry_search_loss_weight:
                     valid_masks = torch.as_tensor(
                         [[
@@ -360,6 +383,7 @@ class RecurrentC51Agent:
         self.target = target
         self.teacher_channels = 0
         self.teacher_loss_weight = 0.0
+        self.teacher_channel_loss_weights = ()
         self.teacher_entry_search_loss_weight = 0.0
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
@@ -412,6 +436,7 @@ class RecurrentC51Agent:
                 "seed": self.seed,
                 "teacher_channels": self.teacher_channels,
                 "teacher_loss_weight": self.teacher_loss_weight,
+                "teacher_channel_loss_weights": self.teacher_channel_loss_weights,
                 "teacher_entry_search_loss_weight": (
                     self.teacher_entry_search_loss_weight
                 ),

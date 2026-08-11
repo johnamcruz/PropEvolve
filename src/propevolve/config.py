@@ -182,24 +182,48 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("training checkpoint interval must be positive")
     teacher = payload.get("teacher")
+    teachers = payload.get("teachers")
+    if teacher is not None and teachers is not None:
+        raise ValueError("declare teacher or teachers, not both")
     if teacher is not None:
-        from .expansion_teacher import CHANNELS
-
-        teacher.setdefault("entry_search_loss_weight", 0.0)
+        teachers = [teacher]
+    if teachers is not None:
+        from .teachers.expansion import CHANNELS as EXPANSION_CHANNELS
+        from .teachers.regime import CHANNELS as REGIME_CHANNELS
 
         if (
-            not isinstance(teacher, dict)
-            or set(teacher) != {
-                "kind", "cache_root", "channels", "loss_weight",
-                "entry_search_loss_weight",
-            }
-            or teacher.get("kind") != "expansion"
-            or tuple(teacher.get("channels", ())) != CHANNELS
-            or float(teacher.get("loss_weight", 0.0)) <= 0
-            or float(teacher.get("entry_search_loss_weight", 0.0)) < 0
-            or not str(teacher.get("cache_root", "")).strip()
+            not isinstance(teachers, list)
+            or not teachers
+            or len({item.get("kind") for item in teachers if isinstance(item, dict)})
+            != len(teachers)
         ):
-            raise ValueError("training-only Expansion teacher contract is invalid")
+            raise ValueError("training-only teacher collection is invalid")
+        expected_channels = {
+            "expansion": EXPANSION_CHANNELS,
+            "regime": REGIME_CHANNELS,
+        }
+        for index, item in enumerate(teachers):
+            if not isinstance(item, dict):
+                raise ValueError("training-only teacher contract is invalid")
+            item.setdefault("entry_search_loss_weight", 0.0)
+            kind = item.get("kind")
+            if (
+                set(item) != {
+                    "kind", "cache_root", "channels", "loss_weight",
+                    "entry_search_loss_weight",
+                }
+                or kind not in expected_channels
+                or tuple(item.get("channels", ())) != expected_channels[kind]
+                or float(item.get("loss_weight", 0.0)) <= 0
+                or float(item.get("entry_search_loss_weight", 0.0)) < 0
+                or (kind != "expansion" and float(item["entry_search_loss_weight"]) != 0)
+                or not str(item.get("cache_root", "")).strip()
+            ):
+                label = "Expansion" if kind == "expansion" else "Regime"
+                raise ValueError(f"training-only {label} teacher contract is invalid")
+            if float(item["entry_search_loss_weight"]) > 0 and index != 0:
+                raise ValueError("entry-guiding Expansion teacher must be first")
+        payload["teachers"] = tuple(teachers)
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),

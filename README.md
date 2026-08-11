@@ -382,7 +382,7 @@ one allowlisted JSON revision, while the existing evaluator and hard zero-blow
 gate remain authoritative. It does not add GEPA as a runtime dependency or
 permit reasoning to mutate the frozen research contract.
 
-## Expansion, Pivot, and Trend teachers
+## Expansion, Regime, Pivot, and Trend teachers
 
 The first matched baseline uses only frozen embeddings and account state. If
 that context is insufficient, causal OOF Expansion, Pivot, or Trend predictions
@@ -390,12 +390,13 @@ may be used as **temporary training teachers**. Teacher outputs never enter the
 student’s deployed observation, their influence decays during training, and the
 final teacher-free student must earn temporal OOS economic lift.
 
-`models/teachers/` currently contains only the authenticated nine-market,
-3-minute Expansion checkpoint that matches PropEvolve's imported Chronos2 Mask
-caches. No Pivot teacher is currently approved. Expansion teacher targets must
-be regenerated from that checkpoint for all nine markets before a teacher
-experiment is enabled; unrelated or merely timestamp-compatible score buses
-are rejected.
+`teachers/` owns the common teacher manifest and separate `expansion/`,
+`regime/`, and `trend/` adapters. Expansion and Regime currently contain
+authenticated nine-market, 3-minute checkpoints matching PropEvolve's imported
+Chronos2 Mask caches; Trend is reserved for the queued teacher. No Pivot teacher
+is currently approved. Every target cache must be regenerated from its declared
+checkpoint for all nine markets before a teacher experiment is enabled;
+unrelated or merely timestamp-compatible score buses are rejected.
 
 After the matched baseline completes, generate the training-only Expansion
 teacher caches with the existing Mask embeddings:
@@ -403,6 +404,9 @@ teacher caches with the existing Mask embeddings:
 ```bash
 propevolve build-expansion-teacher-cache \
   --config config/expansion_teacher_cache_v1.json
+
+propevolve build-regime-teacher-cache \
+  --config config/regime_teacher_cache_v1.json
 ```
 
 The builder loads the model once on MPS, scores one ticker at a time, starts at

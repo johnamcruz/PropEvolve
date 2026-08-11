@@ -32,6 +32,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     expansion_teacher.add_argument("--config", required=True)
     expansion_teacher.add_argument("--ticker", action="append")
+    regime_teacher = subparsers.add_parser(
+        "build-regime-teacher-cache",
+        help="score the verified Regime teacher over existing Mask caches",
+    )
+    regime_teacher.add_argument("--config", required=True)
+    regime_teacher.add_argument("--ticker", action="append")
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
     evolve = subparsers.add_parser(
@@ -148,9 +154,22 @@ def _build_expansion_teacher_caches(
     config_path: str,
     requested_tickers: Sequence[str],
 ) -> int:
-    from .expansion_teacher import build_expansion_teacher_caches
+    from .teachers.expansion import build_expansion_teacher_caches
 
     build_expansion_teacher_caches(
+        config_path,
+        requested_tickers=tuple(requested_tickers),
+    )
+    return 0
+
+
+def _build_regime_teacher_caches(
+    config_path: str,
+    requested_tickers: Sequence[str],
+) -> int:
+    from .teachers.regime import build_regime_teacher_caches
+
+    build_regime_teacher_caches(
         config_path,
         requested_tickers=tuple(requested_tickers),
     )
@@ -241,6 +260,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "build-expansion-teacher-cache":
         return _build_expansion_teacher_caches(
+            args.config,
+            tuple(args.ticker or ()),
+        )
+    if args.command == "build-regime-teacher-cache":
+        return _build_regime_teacher_caches(
             args.config,
             tuple(args.ticker or ()),
         )

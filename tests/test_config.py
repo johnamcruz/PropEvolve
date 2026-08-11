@@ -154,6 +154,74 @@ def test_expansion_entry_search_recipe_is_training_only_and_matched() -> None:
     assert config["output"].endswith("historical_mask_expansion_entry_search_curriculum_v7")
 
 
+def test_config_accepts_expansion_and_regime_as_frozen_training_only_teachers(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_entry_search_curriculum_v7.json"
+    ).read_text())
+    expansion = payload.pop("teacher")
+    payload["teachers"] = [
+        expansion,
+        {
+            "kind": "regime",
+            "cache_root": "cache/regime_teacher_9market_3min_pre2025_v1",
+            "channels": [
+                "structure_chop_probability",
+                "structure_neutral_probability",
+                "structure_trend_probability",
+                "structure_chop_persistence_probability",
+                "structure_trend_onset_probability",
+                "structure_trend_persistence_probability",
+                "structure_trend_weakening_probability",
+                "structure_other_transition_probability",
+                "kaufman_efficiency",
+                "volatility_low_probability",
+                "volatility_normal_probability",
+                "volatility_high_probability",
+                "volatility_low_persistence_probability",
+                "volatility_expansion_onset_probability",
+                "volatility_high_persistence_probability",
+                "volatility_contraction_probability",
+                "volatility_other_transition_probability",
+                "volatility_percentile",
+            ],
+            "loss_weight": 0.1,
+            "entry_search_loss_weight": 0.0,
+        },
+    ]
+    payload["evolution"]["frozen_paths"].remove("teacher")
+    payload["evolution"]["frozen_paths"].append("teachers")
+    path = tmp_path / "combined-teachers.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert [teacher["kind"] for teacher in config["teachers"]] == [
+        "expansion", "regime"
+    ]
+    assert config.get("teacher") is None
+
+    payload["teachers"][1]["channels"] = ["wrong"]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="Regime teacher contract"):
+        load_experiment_config(path)
+
+
+def test_expansion_regime_curriculum_is_teacher_free_at_selection() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_curriculum_v8.json"
+    )
+
+    assert [teacher["kind"] for teacher in config["teachers"]] == [
+        "expansion", "regime"
+    ]
+    assert config["teachers"][0]["entry_search_loss_weight"] == 0.3
+    assert config["teachers"][1]["entry_search_loss_weight"] == 0.0
+    assert "teachers" in config["evolution"]["frozen_paths"]
+    assert config["sealed_confirmation"]["teacher_free"] is True
+
+
 def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:
     config = load_experiment_config(
         "config/historical_mask_expansion_entry_search_curriculum_v7.json"

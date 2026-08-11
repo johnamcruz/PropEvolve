@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from propevolve.expansion_teacher import (
+from propevolve.teachers.base import BaseTeacher
+from propevolve.teachers.expansion import (
     ExpansionTeacher,
     ExpansionTeacherCache,
     ExpansionTeacherTargets,
@@ -19,7 +20,7 @@ from propevolve.expansion_teacher import (
 
 def test_verified_expansion_teacher_matches_original_golden_scores() -> None:
     teacher = ExpansionTeacher.load(
-        "models/teachers/manifest.json",
+        "teachers/manifest.json",
         device="cpu",
     )
     trajectory = (
@@ -31,6 +32,7 @@ def test_verified_expansion_teacher_matches_original_golden_scores() -> None:
 
     probabilities = teacher.score(trajectory, ticker="NQ")
 
+    assert isinstance(teacher, BaseTeacher)
     np.testing.assert_allclose(
         probabilities,
         [[0.6735228608968472, 0.6628845980562301,
@@ -97,7 +99,7 @@ def _embedding_cache(tmp_path: Path) -> Path:
 
 def test_builder_physically_censors_selection_and_is_resumable(tmp_path: Path) -> None:
     source = _embedding_cache(tmp_path)
-    teacher = ExpansionTeacher.load("models/teachers/manifest.json", device="cpu")
+    teacher = ExpansionTeacher.load("teachers/manifest.json", device="cpu")
     destination = tmp_path / "teacher/NQ"
 
     result = build_expansion_teacher_cache(
@@ -138,7 +140,7 @@ def test_builder_physically_censors_selection_and_is_resumable(tmp_path: Path) -
 
 def test_builder_rejects_embedding_cache_identity_drift(tmp_path: Path) -> None:
     source = _embedding_cache(tmp_path)
-    teacher = ExpansionTeacher.load("models/teachers/manifest.json", device="cpu")
+    teacher = ExpansionTeacher.load("teachers/manifest.json", device="cpu")
 
     with pytest.raises(ValueError, match="cache identity mismatch"):
         build_expansion_teacher_cache(
@@ -155,7 +157,7 @@ def test_builder_rejects_embedding_cache_identity_drift(tmp_path: Path) -> None:
 
 def test_teacher_targets_require_exact_training_row_alignment(tmp_path: Path) -> None:
     source = _embedding_cache(tmp_path)
-    teacher = ExpansionTeacher.load("models/teachers/manifest.json", device="cpu")
+    teacher = ExpansionTeacher.load("teachers/manifest.json", device="cpu")
     destination = tmp_path / "teacher/NQ"
     build_expansion_teacher_cache(
         teacher=teacher,

@@ -20,7 +20,7 @@ embeddings and account state.
 - Treatment: four soft Expansion probabilities supervise a temporary head on
   the shared recurrent representation during training only.
 - Teacher: authenticated nine-market 3-minute Expansion checkpoint in
-  `models/teachers/manifest.json`; targets end strictly before 2025.
+  `teachers/manifest.json`; targets end strictly before 2025.
 
 ## Gates
 

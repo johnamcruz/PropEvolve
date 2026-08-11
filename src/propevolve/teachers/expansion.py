@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 import numpy as np
 import pandas as pd
@@ -16,8 +16,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .agent import resolve_device
-from .cache import EmbeddingCache
+from ..agent import resolve_device
+from ..cache import EmbeddingCache
+from .base import BaseTeacher
 
 
 TEACHER_CACHE_SCHEMA = "propevolve_expansion_teacher_cache_v1"
@@ -191,19 +192,16 @@ class _ExpansionModel(nn.Module):
 
 
 @dataclass(frozen=True)
-class ExpansionTeacher:
+class ExpansionTeacher(BaseTeacher):
     """Verified Expansion artifact with stream-specific calibrated scoring."""
 
     model: _ExpansionModel
-    device: torch.device
-    channels: tuple[str, ...]
     stream_names: tuple[str, ...]
     calibration_scales: torch.Tensor
     calibration_biases: torch.Tensor
-    manifest: dict
-    checkpoint_sha256: str
-    context_length: int
-    embedding_dim: int
+
+    kind: ClassVar[str] = "expansion"
+    channels: ClassVar[tuple[str, ...]] = CHANNELS
 
     @classmethod
     def load(cls, manifest_path: str | Path, *, device: str) -> "ExpansionTeacher":
@@ -279,7 +277,6 @@ class ExpansionTeacher:
         return cls(
             model=model,
             device=resolved_device,
-            channels=CHANNELS,
             stream_names=tuple(names),
             calibration_scales=torch.as_tensor(
                 scales, dtype=torch.float32, device=resolved_device
@@ -300,31 +297,20 @@ class ExpansionTeacher:
         except ValueError as exc:
             raise ValueError(f"Expansion teacher does not support {ticker}@3min") from exc
 
-    def _score_trusted(self, trajectory: torch.Tensor, *, ticker: str) -> torch.Tensor:
+    def _score_trusted(
+        self,
+        trajectory: torch.Tensor,
+        *,
+        ticker: str | None = None,
+    ) -> torch.Tensor:
+        if ticker is None:
+            raise ValueError("Expansion teacher scoring requires a ticker")
         logits = self.model(trajectory.to(self.device, dtype=torch.float32))
         stream_id = self._stream_id(ticker)
         return torch.sigmoid(
             logits * self.calibration_scales[stream_id]
             + self.calibration_biases[stream_id]
         )
-
-    def score(self, trajectory: np.ndarray, *, ticker: str) -> np.ndarray:
-        values = np.asarray(trajectory)
-        expected = (self.context_length, self.embedding_dim)
-        if (
-            values.ndim != 3
-            or tuple(values.shape[1:]) != expected
-            or not np.isfinite(values).all()
-        ):
-            raise ValueError(
-                f"Expansion teacher trajectories must be finite [rows,{expected[0]},{expected[1]}]"
-            )
-        with torch.inference_mode():
-            result = self._score_trusted(
-                torch.from_numpy(np.ascontiguousarray(values)), ticker=ticker
-            )
-        return result.cpu().numpy()
-
 
 @dataclass(frozen=True)
 class ExpansionTeacherCache:

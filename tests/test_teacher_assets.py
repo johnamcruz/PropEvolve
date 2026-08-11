@@ -16,7 +16,7 @@ def _sha256(path: Path) -> str:
 
 
 def test_only_verified_matching_expansion_teacher_is_packaged() -> None:
-    root = Path("models/teachers")
+    root = Path("teachers")
     manifest = json.loads((root / "manifest.json").read_text())
     expansion = manifest["expansion"]
     checkpoint = root / expansion["checkpoint"]

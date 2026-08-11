@@ -1,0 +1,104 @@
+"""Composition seam for training-only soft teachers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+import numpy as np
+
+
+class _Targets(Protocol):
+    def target(self, ticker: str, row: int) -> np.ndarray | None: ...
+
+
+@dataclass(frozen=True)
+class TeacherTargetSource:
+    kind: str
+    channels: tuple[str, ...]
+    targets: _Targets
+    loss_weight: float
+    entry_search_loss_weight: float
+
+    def __post_init__(self) -> None:
+        if (
+            self.kind not in {"expansion", "regime"}
+            or not self.channels
+            or len(set(self.channels)) != len(self.channels)
+            or self.loss_weight <= 0
+            or self.entry_search_loss_weight < 0
+            or (self.kind != "expansion" and self.entry_search_loss_weight != 0)
+        ):
+            raise ValueError("training-only teacher source is invalid")
+
+
+@dataclass(frozen=True)
+class CombinedTeacherTargets:
+    sources: tuple[TeacherTargetSource, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.sources
+            or len({source.kind for source in self.sources}) != len(self.sources)
+            or (self.entry_search_loss_weight > 0 and self.sources[0].kind != "expansion")
+        ):
+            raise ValueError("combined teacher ordering or identity is invalid")
+
+    @property
+    def channels(self) -> tuple[str, ...]:
+        return tuple(channel for source in self.sources for channel in source.channels)
+
+    @property
+    def channel_loss_weights(self) -> tuple[float, ...]:
+        return tuple(
+            source.loss_weight / len(source.channels)
+            for source in self.sources
+            for _ in source.channels
+        )
+
+    @property
+    def entry_search_loss_weight(self) -> float:
+        return sum(source.entry_search_loss_weight for source in self.sources)
+
+    def target(self, ticker: str, row: int) -> np.ndarray | None:
+        values = [source.targets.target(ticker, row) for source in self.sources]
+        if any(value is None for value in values):
+            return None
+        return np.concatenate(values).astype(np.float32, copy=False)
+
+
+def load_teacher_targets(
+    specs: tuple[dict, ...],
+    *,
+    root: Path,
+    markets: dict[str, object],
+) -> CombinedTeacherTargets:
+    sources = []
+    for spec in specs:
+        kind = str(spec["kind"])
+        if kind == "expansion":
+            from .expansion import ExpansionTeacherTargets
+
+            targets = ExpansionTeacherTargets.load(root / spec["cache_root"], markets)
+        elif kind == "regime":
+            from .regime import RegimeTeacherTargets
+
+            targets = RegimeTeacherTargets.load(root / spec["cache_root"], markets)
+        else:  # pragma: no cover - configuration validation owns this boundary
+            raise ValueError(f"unsupported teacher kind: {kind}")
+        sources.append(TeacherTargetSource(
+            kind=kind,
+            channels=tuple(spec["channels"]),
+            targets=targets,
+            loss_weight=float(spec["loss_weight"]),
+            entry_search_loss_weight=float(spec["entry_search_loss_weight"]),
+        ))
+    return CombinedTeacherTargets(tuple(sources))
+
+
+__all__ = [
+    "CombinedTeacherTargets",
+    "TeacherTargetSource",
+    "load_teacher_targets",
+]

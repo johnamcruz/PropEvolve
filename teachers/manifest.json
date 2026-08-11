@@ -60,5 +60,57 @@
       "short_attempt_probability",
       "short_clean_retained_given_attempt_probability"
     ]
+  },
+  "regime": {
+    "checkpoint": "regime/regime_teacher.pt",
+    "checkpoint_sha256": "55772c83d28b9b706f0d262f9b7b916165946f8ee1ff8978261baa61faea5587",
+    "artifact_schema": "frozen-mask-structure-volatility-regime-teacher-v2",
+    "training_schema": "structure-volatility-regime-teacher-training-v2",
+    "universe": ["CL", "ES", "GC", "NQ", "RTY", "SI", "YM", "ZB", "ZN"],
+    "timeframe": "3min",
+    "input": "50-step causal frozen Chronos2 Mask trajectory",
+    "encoder_identity_sha256": "1b8b7f001b0b4e501aa47ca90a3c2fd31d0b41dbd1d896e98ce084f6ed325710",
+    "cache_identity_sha256s": {
+      "CL": "0a79dc7afcdfcea6851fe6a7dc7e4ee30b23d4ae09085869f47858cdb92b8a93",
+      "ES": "b0f6cc95663aaf261cbdd69edf8b1e3a565664d70e60ceb73416dff2290895fe",
+      "GC": "86ff588ed2fb65c063033e118759047c357bf051f967c54ba0a466f5575f7a78",
+      "NQ": "1087cb9b2d7bd1dd51e219dd5d792cb52368b1221f6255f662db02d900dd72ca",
+      "RTY": "7919cba9997e8ccbf5f90034d06e14985a756f36bd027b3abf4d07d7c5fc2b66",
+      "SI": "3ce0e32208a42fc258337028ffdbad520472161b9b1960844f819072dae30afe",
+      "YM": "7b3924c030c92cf4ec534888a77f2afad36ce865ceb25e2433333a4432271b86",
+      "ZB": "2bb0418bc5ef1f6d100fafea3230a04b88a2023627c172064bc513ff4954f186",
+      "ZN": "439533532c35097c1e3be023883a5d834e01189fd9439b2d7a7dbaf73349c3f2"
+    },
+    "embeddings_sha256s": {
+      "CL": "02014d28b79dafa28606f111ebb6f79b3c2c9787b5a82e77a50b61ffde57d78b",
+      "ES": "0146fa1eb74da064a3e5e689a84375ee8e795285db6ae7cc48564d8c67de27f1",
+      "GC": "01efcb6325d373af38057bb75a2669a1b2583c3796561d8870a245445fc7a85c",
+      "NQ": "35e025c51631327f96a26838ed76d85448d7defde64c4d54b89b5ae19de723bc",
+      "RTY": "a9dca8bcce7aae20cbfaa2b57c437ed45b7dea9e058096699f87927b1861e08d",
+      "SI": "6b2d0d9d0556831026c9ef15e9ba55ccbdf12284ff84d3b3e801c8d44c217e5a",
+      "YM": "c8e41d34eb2c31462691e13daaa6ddf36128adccd781abef3f97d97b6af0c0b0",
+      "ZB": "3b0dc08e027f6fcdf2ba8906491e1151a31d9e420f46ac9a5464ed3c9ea0df3a",
+      "ZN": "b5972553a5c3ee4fdc5f0f5dd7c492b5fdb9a091bf0022d9e3fe2772a1702266"
+    },
+    "channels": [
+      "structure_chop_probability",
+      "structure_neutral_probability",
+      "structure_trend_probability",
+      "structure_chop_persistence_probability",
+      "structure_trend_onset_probability",
+      "structure_trend_persistence_probability",
+      "structure_trend_weakening_probability",
+      "structure_other_transition_probability",
+      "kaufman_efficiency",
+      "volatility_low_probability",
+      "volatility_normal_probability",
+      "volatility_high_probability",
+      "volatility_low_persistence_probability",
+      "volatility_expansion_onset_probability",
+      "volatility_high_persistence_probability",
+      "volatility_contraction_probability",
+      "volatility_other_transition_probability",
+      "volatility_percentile"
+    ]
   }
 }

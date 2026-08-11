@@ -6,7 +6,8 @@ import json
 from ml_training_loop import Phase, RunState
 from ml_training_loop.stores import JsonRunStore
 import propevolve.orchestration
-import propevolve.expansion_teacher
+import propevolve.teachers.expansion
+import propevolve.teachers.regime
 from propevolve.cli import main
 
 
@@ -117,7 +118,7 @@ def test_expansion_teacher_cache_command_dispatches_requested_tickers(
         return ()
 
     monkeypatch.setattr(
-        propevolve.expansion_teacher,
+        propevolve.teachers.expansion,
         "build_expansion_teacher_caches",
         fake_builder,
     )
@@ -133,3 +134,26 @@ def test_expansion_teacher_cache_command_dispatches_requested_tickers(
     assert calls == [
         ("config/expansion_teacher_cache_v1.json", ("NQ", "ES"))
     ]
+
+
+def test_regime_teacher_cache_command_dispatches_requested_tickers(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        propevolve.teachers.regime,
+        "build_regime_teacher_caches",
+        lambda config, *, requested_tickers: calls.append(
+            (config, requested_tickers)
+        ),
+    )
+
+    result = main([
+        "build-regime-teacher-cache",
+        "--config", "config/regime_teacher_cache_v1.json",
+        "--ticker", "NQ",
+        "--ticker", "ES",
+    ])
+
+    assert result == 0
+    assert calls == [("config/regime_teacher_cache_v1.json", ("NQ", "ES"))]

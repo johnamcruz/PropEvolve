@@ -150,6 +150,43 @@ def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     assert agent.online.teacher_output is None
 
 
+def test_teacher_channel_weights_keep_specialist_losses_independent() -> None:
+    first = _agent(
+        2,
+        seed=31,
+        teacher_channels=2,
+        teacher_loss_weight=0.2,
+        teacher_channel_loss_weights=(0.2, 0.0),
+    )
+    second = _agent(
+        2,
+        seed=31,
+        teacher_channels=2,
+        teacher_loss_weight=0.2,
+        teacher_channel_loss_weights=(0.2, 0.0),
+    )
+
+    def sequence(second_target: float) -> tuple[Transition, ...]:
+        return tuple(
+            Transition(
+                observation=np.array([index, 0], np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array([index + 1, 0], np.float32),
+                terminated=index == 3,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=(Action.WAIT,),
+                teacher_target=np.array([0.8, second_target], np.float32),
+            )
+            for index in range(4)
+        )
+
+    loss_a = first.train_batch((sequence(0.0), sequence(0.0)))
+    loss_b = second.train_batch((sequence(1.0), sequence(1.0)))
+
+    assert loss_a == pytest.approx(loss_b)
+
+
 def test_expansion_teacher_softly_guides_entry_values_without_training_management() -> None:
     agent = _agent(
         2,
