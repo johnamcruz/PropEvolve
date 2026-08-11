@@ -429,6 +429,42 @@ def test_expansion_regime_trend_profile_is_a_matched_two_teacher_benchmark() -> 
         for stage in config["campaign"]["budget_stages"]
     )
 
+
+def test_target_sync_challenger_changes_only_the_diagnosed_learning_boundary() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_v8.json"
+    )
+    challenger = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_sync_v8b.json"
+    )
+
+    for section in (
+        "cache",
+        "cache_root",
+        "teachers",
+        "observation",
+        "challenge",
+        "temporal",
+        "training",
+        "runtime",
+        "sealed_confirmation",
+    ):
+        assert challenger[section] == baseline[section]
+    assert challenger["agent"] == {
+        **baseline["agent"],
+        "target_sync_updates": 1_000,
+    }
+    assert challenger["campaign"]["budget_stages"] == baseline["campaign"][
+        "budget_stages"
+    ]
+    assert challenger["campaign"]["selection_requirements"] == baseline[
+        "campaign"
+    ]["selection_requirements"]
+    assert challenger["campaign"]["diagnostic_targets"] == baseline["campaign"][
+        "diagnostic_targets"
+    ]
+
+
 def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:
     config = load_experiment_config(
         "config/historical_mask_expansion_entry_search_curriculum_v7.json"
