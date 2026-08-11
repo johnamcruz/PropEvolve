@@ -288,9 +288,20 @@ class RecurrentC51Agent:
         values = q_values.cpu().numpy() if return_action_values else None
         return selected, next_hidden.detach(), values
 
-    def train_batch(self, sequences: Sequence[Sequence[Transition]]) -> float:
+    def train_batch(
+        self,
+        sequences: Sequence[Sequence[Transition]],
+        *,
+        teacher_weight_scale: float = 1.0,
+    ) -> float:
         if not sequences:
             raise ValueError("training batch cannot be empty")
+        teacher_weight_scale = float(teacher_weight_scale)
+        if (
+            not np.isfinite(teacher_weight_scale)
+            or not 0 <= teacher_weight_scale <= 1
+        ):
+            raise ValueError("teacher weight scale must be between zero and one")
         lengths = {len(sequence) for sequence in sequences}
         if len(lengths) != 1 or next(iter(lengths)) < 1:
             raise ValueError("training sequences must have one positive length")
@@ -403,7 +414,7 @@ class RecurrentC51Agent:
                     device=self.device,
                 )
                 teacher_loss = (teacher_losses * channel_weights).sum(dim=-1).mean()
-                loss = loss + teacher_loss
+                loss = loss + teacher_weight_scale * teacher_loss
                 if self.teacher_entry_search_loss_weight:
                     valid_masks_numpy = np.asarray(
                         [[
@@ -447,7 +458,7 @@ class RecurrentC51Agent:
                                 short_advantage[entry_rows], short_target[entry_rows]
                             )
                         )
-                        loss = loss + (
+                        loss = loss + teacher_weight_scale * (
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
@@ -468,6 +479,7 @@ class RecurrentC51Agent:
             "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
+            "teacher_weight_scale": teacher_weight_scale,
             "total_loss": total_loss,
         }
         return total_loss

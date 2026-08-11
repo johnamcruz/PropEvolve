@@ -408,8 +408,11 @@ permit reasoning to mutate the frozen research contract.
 The first matched baseline uses only frozen embeddings and account state. If
 that context is insufficient, causal OOF Expansion, Pivot, or Trend predictions
 may be used as **temporary training teachers**. Teacher outputs never enter the
-student’s deployed observation, their influence decays during training, and the
-final teacher-free student must earn temporal OOS economic lift.
+student’s deployed observation. JSON-configured curricula gradually decay every
+auxiliary teacher loss while deterministically hiding an increasing fraction of
+teacher targets, so the student first learns the semantics and then must act
+without dependable guidance. The final teacher-free student must earn temporal
+OOS economic lift.
 
 `teachers/` owns the common teacher manifest and separate `expansion/`,
 `regime/`, and `trend/` adapters. Expansion, Regime, and Trend contain

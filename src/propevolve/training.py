@@ -513,6 +513,15 @@ class HistoricalCandidateRunner:
             teacher_lookup=(
                 teacher_targets.target if teacher_targets is not None else None
             ),
+            teacher_loss_end_scale=float(
+                training_config.get("teacher_loss_end_scale", 1.0)
+            ),
+            teacher_guidance_dropout_start=float(
+                training_config.get("teacher_guidance_dropout_start", 0.0)
+            ),
+            teacher_guidance_dropout_end=float(
+                training_config.get("teacher_guidance_dropout_end", 0.0)
+            ),
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
             ),
@@ -1012,6 +1021,24 @@ def assert_temporal_role(
             raise ValueError(f"{role} market {ticker} touches the sealed holdout")
 
 
+def _teacher_guidance_is_visible(
+    *,
+    seed: int,
+    episode_index: int,
+    ticker: str,
+    decision_index: int,
+    dropout_probability: float,
+) -> bool:
+    """Return a resume-stable teacher mask without mutable RNG state."""
+    if dropout_probability <= 0:
+        return True
+    if dropout_probability >= 1:
+        return False
+    identity = f"{seed}:{episode_index}:{ticker}:{decision_index}".encode("utf-8")
+    draw = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big") / 2**64
+    return draw >= dropout_probability
+
+
 def train_agent(
     agent: RecurrentC51Agent,
     environment: HistoricalChallengeEnv,
@@ -1034,6 +1061,9 @@ def train_agent(
     checkpoint_every_episodes: int = 0,
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
+    teacher_loss_end_scale: float = 1.0,
+    teacher_guidance_dropout_start: float = 0.0,
+    teacher_guidance_dropout_end: float = 0.0,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     near_blow_loss_threshold: float | None = None,
 ) -> TrainingResult:
@@ -1055,6 +1085,15 @@ def train_agent(
         raise ValueError("management epsilon schedule is invalid")
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
+    if not 0 <= teacher_loss_end_scale <= 1:
+        raise ValueError("teacher loss end scale must be between zero and one")
+    if not (
+        0
+        <= teacher_guidance_dropout_start
+        <= teacher_guidance_dropout_end
+        <= 1
+    ):
+        raise ValueError("teacher guidance dropout schedule is invalid")
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -1095,6 +1134,17 @@ def train_agent(
             management_epsilon_start
             + (management_epsilon_end - management_epsilon_start) * step_progress
         )
+        teacher_weight_scale = 1.0 + (
+            teacher_loss_end_scale - 1.0
+        ) * step_progress
+        teacher_guidance_dropout_probability = (
+            teacher_guidance_dropout_start
+            + (
+                teacher_guidance_dropout_end
+                - teacher_guidance_dropout_start
+            )
+            * step_progress
+        )
         terminal_info = reset_info
         step_index = 0
         while True:
@@ -1119,6 +1169,14 @@ def train_agent(
                 if teacher_lookup is not None
                 else None
             )
+            if teacher_target is not None and not _teacher_guidance_is_visible(
+                seed=ticker_seed,
+                episode_index=episode_index,
+                ticker=episode_ticker,
+                decision_index=decision_index,
+                dropout_probability=teacher_guidance_dropout_probability,
+            ):
+                teacher_target = None
             entry_opportunity_priority = 0.0
             if teacher_target is not None:
                 entry_opportunity_priority = max(
@@ -1179,7 +1237,10 @@ def train_agent(
         episode_entry_search_losses = []
         if len(replay) >= warmup_episodes:
             def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
-                episode_losses.append(agent.train_batch(batch))
+                episode_losses.append(agent.train_batch(
+                    batch,
+                    teacher_weight_scale=teacher_weight_scale,
+                ))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
                     episode_rl_losses.append(float(train_metrics["rl_loss"]))
@@ -1348,6 +1409,10 @@ def train_agent(
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
+                "teacher_weight_scale": teacher_weight_scale,
+                "teacher_guidance_dropout_probability": (
+                    teacher_guidance_dropout_probability
+                ),
                 "updates": len(episode_losses),
                 "mean_training_loss": (
                     float(np.mean(episode_losses)) if episode_losses else None

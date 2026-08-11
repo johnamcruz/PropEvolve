@@ -304,6 +304,22 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError(f"training-only {label} teacher contract is invalid")
             if float(item["entry_search_loss_weight"]) > 0 and index != 0:
                 raise ValueError("entry-guiding Expansion teacher must be first")
+        training.setdefault("teacher_loss_end_scale", 1.0)
+        training.setdefault("teacher_guidance_dropout_start", 0.0)
+        training.setdefault("teacher_guidance_dropout_end", 0.0)
+        if (
+            isinstance(training["teacher_loss_end_scale"], bool)
+            or not 0 <= float(training["teacher_loss_end_scale"]) <= 1
+        ):
+            raise ValueError("teacher loss end scale must be between zero and one")
+        if isinstance(training["teacher_guidance_dropout_start"], bool) or isinstance(
+            training["teacher_guidance_dropout_end"], bool
+        ):
+            raise ValueError("teacher guidance dropout schedule is invalid")
+        dropout_start = float(training["teacher_guidance_dropout_start"])
+        dropout_end = float(training["teacher_guidance_dropout_end"])
+        if not 0 <= dropout_start <= dropout_end <= 1:
+            raise ValueError("teacher guidance dropout schedule is invalid")
         payload["teachers"] = tuple(teachers)
     temporal = payload.get("temporal") or {}
     ordered = [

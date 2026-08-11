@@ -53,6 +53,24 @@ def test_runtime_performance_contract_is_explicit_and_fail_closed(
         load_experiment_config(path)
 
 
+def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:
+    source = Path("config/historical_mask_expansion_regime_curriculum_v8.json")
+    payload = json.loads(source.read_text())
+    path = tmp_path / "teacher-curriculum.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["training"]["teacher_loss_end_scale"] == 0.1
+    assert config["training"]["teacher_guidance_dropout_start"] == 0.0
+    assert config["training"]["teacher_guidance_dropout_end"] == 0.5
+
+    payload["training"]["teacher_guidance_dropout_start"] = 0.75
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="teacher guidance dropout"):
+        load_experiment_config(path)
+
+
 def test_legacy_schema_v1_recipe_keeps_eager_fp32_runtime(tmp_path: Path) -> None:
     payload = json.loads(Path("config/historical_mask_v1.json").read_text())
     payload.pop("runtime")

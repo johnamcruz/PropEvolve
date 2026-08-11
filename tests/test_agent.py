@@ -302,6 +302,49 @@ def test_expansion_teacher_softly_guides_entry_values_without_training_managemen
     assert agent.last_train_metrics["entry_search_loss"] == 0.0
 
 
+def test_teacher_curriculum_scales_every_auxiliary_loss_without_hiding_diagnostics() -> None:
+    full = _agent(
+        2,
+        seed=37,
+        teacher_channels=4,
+        teacher_loss_weight=0.2,
+        teacher_entry_search_loss_weight=0.3,
+    )
+    autonomous = _agent(
+        2,
+        seed=37,
+        teacher_channels=4,
+        teacher_loss_weight=0.2,
+        teacher_entry_search_loss_weight=0.3,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([index, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([index + 1, 0], np.float32),
+            terminated=index == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+            next_valid_actions=(
+                Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1
+            ),
+            teacher_target=np.array([0.9, 0.8, 0.1, 0.2], np.float32),
+        )
+        for index in range(4)
+    )
+
+    full.train_batch((sequence, sequence), teacher_weight_scale=1.0)
+    autonomous.train_batch((sequence, sequence), teacher_weight_scale=0.0)
+
+    assert autonomous.last_train_metrics["teacher_loss"] > 0
+    assert autonomous.last_train_metrics["entry_search_loss"] > 0
+    assert autonomous.last_train_metrics["teacher_weight_scale"] == 0.0
+    assert autonomous.last_train_metrics["total_loss"] == pytest.approx(
+        autonomous.last_train_metrics["rl_loss"]
+    )
+    assert full.last_train_metrics["total_loss"] > full.last_train_metrics["rl_loss"]
+
+
 def test_warm_start_preserves_policy_but_resets_training_state_and_teacher(
     tmp_path: Path,
 ) -> None:

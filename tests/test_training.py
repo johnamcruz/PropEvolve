@@ -32,8 +32,10 @@ class Agent:
     def select_action(self, observation, *, hidden, valid_actions, epsilon):
         return Action.WAIT, None, np.zeros(len(Action), np.float32)
 
-    def train_batch(self, sequences):
+    def train_batch(self, sequences, *, teacher_weight_scale=1.0):
         self.updates += 1
+        self.teacher_weight_scales = getattr(self, "teacher_weight_scales", [])
+        self.teacher_weight_scales.append(teacher_weight_scale)
         return 0.5
 
 
@@ -378,6 +380,8 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["gave_it_all_back_rate"] == 0.0
     assert diagnostics[-1]["entry_epsilon"] == pytest.approx(0.135)
     assert diagnostics[-1]["management_epsilon"] == pytest.approx(0.135)
+    assert diagnostics[-1]["teacher_weight_scale"] == 1.0
+    assert diagnostics[-1]["teacher_guidance_dropout_probability"] == 0.0
     assert diagnostics[-1]["updates"] == 1
     assert diagnostics[-1]["mean_training_loss"] == 0.5
     assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
@@ -389,6 +393,50 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
         in capsys.readouterr().out
     )
+
+
+def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
+    agent = Agent()
+    diagnostics = []
+    observed_targets = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            observed_targets.extend(
+                transition.teacher_target for transition in episode.transitions
+            )
+            super().add(episode)
+
+    train_agent(
+        agent,
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=CapturingReplay(capacity_episodes=10, sequence_length=2, seed=1),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=19,
+        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
+        teacher_loss_end_scale=0.2,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=1.0,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert all(target is not None for target in observed_targets[:4])
+    assert [target is not None for target in observed_targets[4:]] == [
+        True, False, True, False
+    ]
+    assert diagnostics[0]["teacher_weight_scale"] == 1.0
+    assert diagnostics[1]["teacher_weight_scale"] == pytest.approx(0.6)
+    assert diagnostics[0]["teacher_guidance_dropout_probability"] == 0.0
+    assert diagnostics[1]["teacher_guidance_dropout_probability"] == 0.5
+    assert agent.teacher_weight_scales == [1.0, pytest.approx(0.6)]
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:
