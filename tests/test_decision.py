@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from propevolve.decision import Action, ActionMasker, PositionSide
-from propevolve.observation import AccountState, ObservationAssembler
+from propevolve.observation import (
+    AccountState,
+    ObservationAssembler,
+    TradeManagementObservationSpec,
+)
 
 
 def test_observation_is_frozen_embedding_plus_normalized_account_state() -> None:
@@ -43,6 +47,34 @@ def test_observation_rejects_nonfinite_embeddings() -> None:
     account = AccountState()
     with pytest.raises(ValueError, match="finite"):
         assembler.assemble(np.array([1.0, np.nan], np.float32), account)
+
+
+def test_observation_exposes_normalized_causal_trade_management_state() -> None:
+    assembler = ObservationAssembler(
+        embedding_dim=2,
+        max_loss=3_000,
+        profit_target=6_000,
+        trade_management=TradeManagementObservationSpec.entry_risk_v1(
+            r_scale=10.0,
+            hold_horizon_bars=120,
+        ),
+    )
+    account = AccountState(
+        current_r=1.5,
+        peak_favorable_r=3.0,
+        giveback_r=1.5,
+        hold_bars=60,
+        ratchet_active=True,
+        protected_r=2.25,
+    )
+
+    value = assembler.assemble(np.asarray([1.0, 2.0], np.float32), account)
+
+    assert assembler.output_dim == 20
+    np.testing.assert_allclose(
+        value[-6:],
+        np.asarray([0.15, 0.30, 0.15, 0.50, 1.0, 0.225], np.float32),
+    )
 
 
 def test_risk_mask_exposes_only_state_valid_actions() -> None:

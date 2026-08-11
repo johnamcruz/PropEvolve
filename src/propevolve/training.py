@@ -31,6 +31,7 @@ from .evolution import (
     EvaluationStage,
     EvaluatorCascade,
 )
+from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
 
 if TYPE_CHECKING:
@@ -369,6 +370,9 @@ class HistoricalCandidateRunner:
                 markets=train_markets,
             )
         challenge = ChallengeSpec(**config["challenge"])
+        observation_spec = TradeManagementObservationSpec.from_config(
+            config.get("observation")
+        )
         near_blow_loss_threshold = (
             float(
                 config.get("campaign", {}).get(
@@ -383,6 +387,7 @@ class HistoricalCandidateRunner:
             tick_values=config["point_values"],
             round_trip_fees=config["round_trip_fees"],
             spec=challenge,
+            observation_spec=observation_spec,
             seed=seed,
         )
         validation_environment = HistoricalChallengeEnv(
@@ -392,9 +397,12 @@ class HistoricalCandidateRunner:
                 key: config["round_trip_fees"][key] for key in validation_markets
             },
             spec=challenge,
+            observation_spec=observation_spec,
             seed=seed + 1,
         )
-        observation_dim = next(iter(train_markets.values())).embeddings.shape[1] + 12
+        observation_dim = train_environment.observation_dim
+        if validation_environment.observation_dim != observation_dim:
+            raise ValueError("training and selection observation widths differ")
         agent_settings = dict(config["agent"])
         agent_settings.update(
             agent_runtime_settings(config.get("runtime", DEFAULT_RUNTIME))

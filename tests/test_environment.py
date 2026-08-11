@@ -10,7 +10,11 @@ from propevolve.environment import (
     MarketSeries,
     PropChallengeAccount,
 )
-from propevolve.observation import AccountState, ObservationAssembler
+from propevolve.observation import (
+    AccountState,
+    ObservationAssembler,
+    TradeManagementObservationSpec,
+)
 
 
 def _spec(**overrides) -> ChallengeSpec:
@@ -111,6 +115,37 @@ def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
     assert info["win_rate"] == 1.0
     assert info["avg_win_r"] == 20.0 / 3_000.0
     assert reward > 0.25
+
+
+def test_environment_management_observation_uses_only_current_trade_state() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            profit_target=6_000,
+            per_trade_risk_dollars=20,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+            ratchet_lock_floor_r=0.0,
+        ),
+        observation_spec=TradeManagementObservationSpec.entry_risk_v1(
+            r_scale=10.0,
+            hold_horizon_bars=120,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    observation, _, terminated, _, info = env.step(Action.ENTER_LONG_1)
+
+    assert not terminated
+    assert info["decision_index"] == 0
+    assert info["fill_index"] == 1
+    np.testing.assert_allclose(
+        observation[-6:],
+        np.asarray([0.1, 0.2, 0.1, 0.0, 1.0, 0.15], np.float32),
+    )
 
 
 def test_intrabar_adverse_excursion_enforces_mll_before_close_recovery() -> None:

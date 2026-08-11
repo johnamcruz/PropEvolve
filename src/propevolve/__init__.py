@@ -10,7 +10,11 @@ from .evolution import (
     Niche,
     RevisionPolicy,
 )
-from .observation import AccountState, ObservationAssembler
+from .observation import (
+    AccountState,
+    ObservationAssembler,
+    TradeManagementObservationSpec,
+)
 from .environment import PropChallengeAccount
 from .sealed_confirmation import evaluate_sealed_confirmation
 
@@ -25,6 +29,7 @@ __all__ = [
     "ModelRegistry",
     "Niche",
     "ObservationAssembler",
+    "TradeManagementObservationSpec",
     "PositionSide",
     "PropChallengeAccount",
     "RevisionPolicy",

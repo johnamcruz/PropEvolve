@@ -85,6 +85,17 @@
       "entry_search_loss_weight": 0.0
     }
   ],
+  "observation": {
+    "management_state": "entry_risk_v1",
+    "include_unrealized_r": true,
+    "include_peak_favorable_r": true,
+    "include_giveback_r": true,
+    "include_hold_fraction": true,
+    "include_ratchet_active": true,
+    "include_protected_r": true,
+    "r_scale": 10.0,
+    "hold_horizon_bars": 120
+  },
   "challenge": {
     "profit_target": 6000,
     "max_loss": 3000,
@@ -359,7 +370,7 @@
         "warm_start_parent": false,
         "curriculum_override": {
           "challenge.lead_giveback_penalty_coefficient": 0,
-          "challenge.large_win_bonus_coefficient": 0
+          "challenge.large_win_bonus_coefficient": 0.1
         },
         "revision_paths": [
           "agent.learning_rate",
@@ -368,6 +379,7 @@
           "challenge.mll_proximity_penalty_coefficient",
           "challenge.terminal_blow_reward",
           "challenge.terminal_timeout_reward",
+          "challenge.large_win_bonus_coefficient",
           "training.terminal_sequence_fraction",
           "training.safety_sequence_fraction",
           "training.management_epsilon_start",
@@ -388,6 +400,11 @@
             "metric": "selection.pass_rate",
             "operator": ">=",
             "value": 0.05
+          },
+          {
+            "metric": "selection.average_win_r",
+            "operator": ">=",
+            "value": 0.75
           }
         ]
       },
@@ -426,11 +443,21 @@
             "metric": "selection.pass_rate",
             "operator": ">=",
             "value": 0.1
+          },
+          {
+            "metric": "selection.average_win_r",
+            "operator": ">=",
+            "value": 1.25
           }
         ],
         "parent_improvement_requirements": [
           {
             "metric": "selection.two_r_mfe_capture_ratio",
+            "direction": "maximize",
+            "minimum_delta": 0
+          },
+          {
+            "metric": "selection.average_win_r",
             "direction": "maximize",
             "minimum_delta": 0
           }
@@ -474,6 +501,11 @@
             "metric": "selection.expectancy_r",
             "operator": ">=",
             "value": 0
+          },
+          {
+            "metric": "selection.average_win_r",
+            "operator": ">=",
+            "value": 1.5
           }
         ],
         "parent_improvement_requirements": [
@@ -484,6 +516,11 @@
           },
           {
             "metric": "selection.expectancy_r",
+            "direction": "maximize",
+            "minimum_delta": 0
+          },
+          {
+            "metric": "selection.average_win_r",
             "direction": "maximize",
             "minimum_delta": 0
           }

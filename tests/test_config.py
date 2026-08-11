@@ -353,6 +353,60 @@ def test_expansion_regime_trend_curriculum_is_teacher_free_at_selection() -> Non
     )
     assert "teachers" in config["evolution"]["frozen_paths"]
     assert config["sealed_confirmation"]["teacher_free"] is True
+    assert config["observation"] == {
+        "management_state": "entry_risk_v1",
+        "include_unrealized_r": True,
+        "include_peak_favorable_r": True,
+        "include_giveback_r": True,
+        "include_hold_fraction": True,
+        "include_ratchet_active": True,
+        "include_protected_r": True,
+        "r_scale": 10.0,
+        "hold_horizon_bars": 120,
+    }
+    stages = config["campaign"]["budget_stages"]
+    assert stages[0]["curriculum_override"][
+        "challenge.large_win_bonus_coefficient"
+    ] == 0.1
+    assert "challenge.large_win_bonus_coefficient" in stages[0]["revision_paths"]
+    expected_average_winner_r = (0.75, 1.25, 1.5, 2.0)
+    for stage, expected in zip(stages, expected_average_winner_r):
+        requirement = next(
+            item
+            for item in stage["selection_requirements"]
+            if item["metric"] == "selection.average_win_r"
+        )
+        assert requirement == {
+            "metric": "selection.average_win_r",
+            "operator": ">=",
+            "value": expected,
+        }
+    assert any(
+        item["metric"] == "selection.average_win_r"
+        for item in stages[1]["parent_improvement_requirements"]
+    )
+
+
+def test_trade_management_observation_contract_is_fail_closed(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(
+        Path(
+            "config/historical_mask_expansion_regime_trend_curriculum_v9.json"
+        ).read_text()
+    )
+    path = tmp_path / "invalid-observation.json"
+
+    payload["observation"]["include_peak_favorable_r"] = False
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="observation contract is invalid"):
+        load_experiment_config(path)
+
+    payload["observation"]["include_peak_favorable_r"] = True
+    payload["observation"]["r_scale"] = 0
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="observation contract is invalid"):
+        load_experiment_config(path)
 
 
 def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:

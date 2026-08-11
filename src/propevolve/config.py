@@ -131,6 +131,12 @@ def load_experiment_config(path: str | Path) -> dict:
     if isinstance(payload.get("training"), dict):
         payload["training"].setdefault("prefetch_batches", 0)
     _require_recipe_fields(payload)
+    try:
+        from .observation import TradeManagementObservationSpec
+
+        TradeManagementObservationSpec.from_config(payload.get("observation"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("observation contract is invalid") from error
     if "timeframe_minutes" not in payload:
         raise ValueError("timeframe_minutes recipe field is required")
     tickers = tuple(str(value) for value in payload.get("tickers", ()))

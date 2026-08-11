@@ -13,6 +13,7 @@ import propevolve.training as training_module
 from propevolve.cache import build_embedding_cache
 from propevolve.decision import Action
 from propevolve.environment import ChallengeSpec, MarketSeries
+from propevolve.observation import TradeManagementObservationSpec
 from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import (
     HistoricalCandidateRunner,
@@ -93,8 +94,17 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
     captured = []
 
     class CapturingEnvironment:
-        def __init__(self, markets, *, tick_values, round_trip_fees, spec, seed):
-            captured.append(spec)
+        def __init__(
+            self,
+            markets,
+            *,
+            tick_values,
+            round_trip_fees,
+            spec,
+            observation_spec,
+            seed,
+        ):
+            captured.append((spec, observation_spec))
             raise ReachedEnvironment
 
     monkeypatch.setattr(
@@ -158,7 +168,8 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
         )
 
     assert len(captured) == 1
-    assert isinstance(captured[0], ChallengeSpec)
+    assert isinstance(captured[0][0], ChallengeSpec)
+    assert captured[0][1] == TradeManagementObservationSpec()
 
 
 def test_historical_candidate_runs_the_complete_real_training_flow(

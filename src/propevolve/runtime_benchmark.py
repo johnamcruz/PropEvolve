@@ -163,6 +163,8 @@ def run_benchmark(
 
     if observation_dim is None:
         config = load_experiment_config(config_path)
+        from .observation import TradeManagementObservationSpec
+
         root = Path(config["_root"])
         cache_root = Path(config["cache_root"])
         if not cache_root.is_absolute():
@@ -170,7 +172,10 @@ def run_benchmark(
         manifest = json.loads(
             (cache_root / config["tickers"][0] / "manifest.json").read_text()
         )
-        observation_dim = int(manifest["embedding_dim"]) + 12
+        management = TradeManagementObservationSpec.from_config(
+            config.get("observation")
+        )
+        observation_dim = int(manifest["embedding_dim"]) + 12 + management.output_dim
     results = []
     for arm in runtime_benchmark_arms():
         environment = dict(os.environ)

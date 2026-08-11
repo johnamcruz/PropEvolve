@@ -10,7 +10,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from .decision import Action, ActionMasker, PositionSide
-from .observation import AccountState, ObservationAssembler
+from .observation import (
+    AccountState,
+    ObservationAssembler,
+    TradeManagementObservationSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -240,6 +244,7 @@ class HistoricalChallengeEnv:
         tick_values: dict[str, float],
         spec: ChallengeSpec,
         round_trip_fees: dict[str, float],
+        observation_spec: TradeManagementObservationSpec | None = None,
         seed: int,
     ) -> None:
         if not markets:
@@ -271,6 +276,7 @@ class HistoricalChallengeEnv:
             next(iter(embedding_dims)),
             max_loss=self.spec.max_loss,
             profit_target=self.spec.profit_target,
+            trade_management=observation_spec,
         )
         self._masker = ActionMasker(
             max_position_size=self.spec.max_position_size,
@@ -289,6 +295,10 @@ class HistoricalChallengeEnv:
         self._primary_side = "flat"
         self._closed_trade_pnls: list[float] = []
         self._trading_days_elapsed = 0
+
+    @property
+    def observation_dim(self) -> int:
+        return self._assembler.output_dim
 
     def rng_state(self) -> dict:
         """Return the episode-sampling RNG state for exact boundary recovery."""
@@ -874,6 +884,30 @@ class HistoricalChallengeEnv:
         side = PositionSide.FLAT if self._position is None else self._position.side
         size = 0 if self._position is None else self._position.size
         elapsed = self._index - self._start
+        current_r = 0.0
+        peak_favorable_r = 0.0
+        giveback_r = 0.0
+        hold_bars = 0
+        ratchet_active = False
+        protected_r = 0.0
+        if self._position is not None:
+            position = self._position
+            if position.initial_risk_points is not None:
+                current_points = (
+                    float(self._market.close[self._index])
+                    - position.average_entry
+                ) * int(position.side)
+                current_r = current_points / position.initial_risk_points
+                peak_favorable_r = position.peak_favorable_r
+                giveback_r = max(0.0, peak_favorable_r - current_r)
+                assert position.protective_stop is not None
+                protected_r = (
+                    (position.protective_stop - position.average_entry)
+                    * int(position.side)
+                    / position.initial_risk_points
+                )
+            hold_bars = max(0, self._index - position.entry_index)
+            ratchet_active = position.ratchet_active
         days_left = max(
             0, self.spec.episode_days - self._trading_days_elapsed + 1
         )
@@ -895,6 +929,12 @@ class HistoricalChallengeEnv:
                 if self._account is None
                 else self._account.mll_headroom(equity)
             ),
+            current_r=current_r,
+            peak_favorable_r=peak_favorable_r,
+            giveback_r=giveback_r,
+            hold_bars=hold_bars,
+            ratchet_active=ratchet_active,
+            protected_r=protected_r,
         )
 
     def _observation(self) -> np.ndarray:
