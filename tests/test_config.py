@@ -409,6 +409,26 @@ def test_trade_management_observation_contract_is_fail_closed(
         load_experiment_config(path)
 
 
+def test_expansion_regime_trend_profile_is_a_matched_two_teacher_benchmark() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_v8.json"
+    )
+
+    assert [teacher["kind"] for teacher in config["teachers"]] == [
+        "expansion",
+        "regime",
+    ]
+    assert config["observation"]["management_state"] == "entry_risk_v1"
+    assert config["sealed_confirmation"]["teacher_free"] is True
+    assert config["output"].endswith("expansion_regime_trend_profile_v8")
+    assert all(
+        any(
+            requirement["metric"] == "selection.average_win_r"
+            for requirement in stage["selection_requirements"]
+        )
+        for stage in config["campaign"]["budget_stages"]
+    )
+
 def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:
     config = load_experiment_config(
         "config/historical_mask_expansion_entry_search_curriculum_v7.json"
