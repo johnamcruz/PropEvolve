@@ -260,6 +260,28 @@ def load_experiment_config(path: str | Path) -> dict:
         or int(training["checkpoint_every_episodes"]) < 1
     ):
         raise ValueError("training checkpoint interval must be positive")
+    short_circuit = training.get("short_circuit")
+    if short_circuit is not None:
+        if (
+            not isinstance(short_circuit, dict)
+            or set(short_circuit) != {
+                "minimum_environment_steps",
+                "minimum_passes",
+                "maximum_blow_rate",
+            }
+            or isinstance(short_circuit["minimum_environment_steps"], bool)
+            or not isinstance(short_circuit["minimum_environment_steps"], int)
+            or not 1
+            <= short_circuit["minimum_environment_steps"]
+            <= int(training["minimum_environment_steps"])
+            or isinstance(short_circuit["minimum_passes"], bool)
+            or not isinstance(short_circuit["minimum_passes"], int)
+            or short_circuit["minimum_passes"] < 0
+            or isinstance(short_circuit["maximum_blow_rate"], bool)
+            or not isinstance(short_circuit["maximum_blow_rate"], (int, float))
+            or not 0 <= float(short_circuit["maximum_blow_rate"]) <= 1
+        ):
+            raise ValueError("training short circuit contract is invalid")
     teacher = payload.get("teacher")
     teachers = payload.get("teachers")
     if teacher is not None and teachers is not None:

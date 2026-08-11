@@ -369,7 +369,14 @@ class _EconomicEvidenceGate:
                 )
             return GateResult(
                 Decision.REVISE,
-                "challenger missed the declared economic selection gate",
+                (
+                    "training short circuit reached its declared evidence boundary"
+                    if any(
+                        failure.get("metric") == "training.short_circuited"
+                        for failure in failures
+                    )
+                    else "challenger missed the declared economic selection gate"
+                ),
                 evidence,
             )
         return GateResult(
@@ -396,6 +403,20 @@ class _EconomicEvidenceGate:
             or dict(evaluation.metrics) != dict(outputs.get("metrics", {}))
         ):
             raise ValueError("candidate evaluation handoff identity drifted")
+        if float(evaluation.metrics.get("training.short_circuited", 0.0)) == 1.0:
+            return {
+                "candidate_id": candidate.candidate_id,
+                "evaluation_id": evaluation.evaluation_id,
+                "values": {"training.short_circuited": 1.0},
+                "parent_improvements": {},
+                "failures": [{
+                    "metric": "training.short_circuited",
+                    "operator": "==",
+                    "threshold": 0.0,
+                    "actual": 1.0,
+                }],
+                "evaluation_status": evaluation.status,
+            }
         failures = []
         values = {}
         for requirement in requirements:

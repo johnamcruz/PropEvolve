@@ -77,6 +77,37 @@ class FakeCandidateRunner:
         return candidate, evaluation
 
 
+class ShortCircuitCandidateRunner(FakeCandidateRunner):
+    def run(self, config, *, parent_candidate_ids, hypothesis):
+        self.configs.append(config)
+        output = Path(config["_root"]) / config["output"]
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "training-diagnostic-summary.json").write_text(json.dumps({
+            "schema": "propevolve_training_diagnostic_summary_v1",
+            "overall": {
+                "short_circuited": True,
+                "short_circuit_reason": "passes 0 < 1",
+            },
+        }))
+        model = self.archive.root / "short-circuit.pt"
+        model.write_bytes(b"short-circuit")
+        candidate = self.archive.register_candidate(
+            model,
+            contract={"split": config["temporal"], "max_loss": 3000},
+            recipe=config,
+            parent_candidate_ids=parent_candidate_ids,
+            hypothesis=hypothesis,
+        )
+        evaluation = self.archive.record_evaluation(
+            candidate.candidate_id,
+            evaluator_contract={"name": "short-circuit-v1"},
+            metrics={"training.short_circuited": 1.0},
+            stages=({"name": "training", "status": "FAIL"},),
+            status="FAIL",
+        )
+        return candidate, evaluation
+
+
 class ImproveHiddenDimension:
     def __init__(self) -> None:
         self.packet_paths: list[Path] = []
@@ -246,6 +277,25 @@ def test_campaign_resumes_reasoning_and_links_revised_child_to_parent(
     }
     assert child.manifest["parent_candidate_ids"] == [parent.candidate_id]
     assert reasoning.packet_paths
+
+
+def test_training_short_circuit_hands_off_to_reasoning_without_selection_metrics(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    runner = ShortCircuitCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="training-short-circuit-test",
+        candidate_runner=runner,
+        reasoning=None,
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.NEEDS_REASONING
+    assert "short circuit" in state.message
+    assert len(runner.configs) == 1
 
 
 def test_campaign_recovers_blocked_reasoning_without_retraining_candidate(

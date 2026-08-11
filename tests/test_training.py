@@ -439,6 +439,130 @@ def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
     assert agent.teacher_weight_scales == [1.0, pytest.approx(0.6)]
 
 
+def test_teacher_diagnostics_preserve_named_source_channels() -> None:
+    class EnteringAgent(Agent):
+        def select_action(self, observation, *, hidden, valid_actions, epsilon):
+            return Action.ENTER_LONG_1, None, np.zeros(len(Action), np.float32)
+
+    diagnostics = []
+    train_agent(
+        EnteringAgent(),
+        Environment(),
+        episodes=1,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(capacity_episodes=2, sequence_length=2, seed=3),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=3,
+        teacher_lookup=lambda ticker, index: np.asarray(
+            [0.2, 0.7, 0.1, 0.6, 0.8, 0.05], dtype=np.float32
+        ),
+        teacher_channels=(
+            "long_attempt_probability",
+            "long_clean_retained_given_attempt_probability",
+            "short_attempt_probability",
+            "short_clean_retained_given_attempt_probability",
+            "structure_trend_probability",
+            "structure_chop_probability",
+        ),
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert diagnostics[0]["selected_teacher_channel_means"] == pytest.approx({
+        "long_attempt_probability": 0.2,
+        "long_clean_retained_given_attempt_probability": 0.7,
+        "short_attempt_probability": 0.1,
+        "short_clean_retained_given_attempt_probability": 0.6,
+        "structure_trend_probability": 0.8,
+        "structure_chop_probability": 0.05,
+    })
+
+
+def test_training_short_circuits_without_passes_at_declared_step_boundary() -> None:
+    checkpoints = []
+
+    class TimeoutEnvironment(Environment):
+        def step(self, action):
+            observation, reward, terminated, truncated, info = super().step(action)
+            if terminated:
+                info["outcome"] = "timeout"
+                info["equity_pnl"] = -500.0
+            return observation, reward, terminated, truncated, info
+
+    result = train_agent(
+        Agent(),
+        TimeoutEnvironment(),
+        episodes=3,
+        minimum_environment_steps=12,
+        replay=BalancedSequenceReplay(capacity_episodes=4, sequence_length=2, seed=5),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=5,
+        checkpoint_every_episodes=3,
+        checkpoint_callback=checkpoints.append,
+        short_circuit_minimum_environment_steps=4,
+        short_circuit_minimum_passes=1,
+        short_circuit_maximum_blow_rate=0.1,
+    )
+
+    assert result.environment_steps == 4
+    assert result.short_circuited is True
+    assert result.short_circuit_reason == "passes 0 < 1"
+    assert checkpoints[-1].short_circuit_reason == "passes 0 < 1"
+
+
+def test_training_short_circuits_only_when_blow_rate_exceeds_ceiling() -> None:
+    class PassThenBlowEnvironment(Environment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.episode = 0
+
+        def reset(self):
+            self.episode += 1
+            return super().reset()
+
+        def step(self, action):
+            observation, reward, terminated, truncated, info = super().step(action)
+            if terminated and self.episode == 2:
+                info["outcome"] = "blow"
+                info["equity_pnl"] = -3_000.0
+            return observation, reward, terminated, truncated, info
+
+    result = train_agent(
+        Agent(),
+        PassThenBlowEnvironment(),
+        episodes=3,
+        minimum_environment_steps=12,
+        replay=BalancedSequenceReplay(capacity_episodes=4, sequence_length=2, seed=7),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=7,
+        short_circuit_minimum_environment_steps=8,
+        short_circuit_minimum_passes=1,
+        short_circuit_maximum_blow_rate=0.1,
+    )
+
+    assert result.passes == 1
+    assert result.blows == 1
+    assert result.short_circuited is True
+    assert result.short_circuit_reason == "blow rate 0.500000 > 0.100000"
+
+
 def test_training_uses_lower_exploration_for_position_management() -> None:
     class RecordingAgent(Agent):
         def __init__(self) -> None:

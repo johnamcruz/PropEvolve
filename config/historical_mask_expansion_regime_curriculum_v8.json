@@ -187,6 +187,11 @@
     "teacher_loss_end_scale": 0.1,
     "teacher_guidance_dropout_start": 0.0,
     "teacher_guidance_dropout_end": 0.5,
+    "short_circuit": {
+      "minimum_environment_steps": 500000,
+      "minimum_passes": 1,
+      "maximum_blow_rate": 0.1
+    },
     "seed": 314159,
     "checkpoint_every_episodes": 5,
     "terminal_sequence_fraction": 0.5,

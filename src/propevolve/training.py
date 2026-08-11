@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
@@ -132,6 +132,8 @@ class TrainingResult:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    short_circuited: bool = False
+    short_circuit_reason: str | None = None
 
     @property
     def trade_win_rate(self) -> float:
@@ -251,6 +253,7 @@ class TrainingProgress:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    short_circuit_reason: str | None = None
 
     def result(self) -> TrainingResult:
         if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
@@ -283,6 +286,8 @@ class TrainingProgress:
             two_r_capture_sum=self.two_r_capture_sum,
             two_r_round_trip_count=self.two_r_round_trip_count,
             near_blow_timeout_count=self.near_blow_timeout_count,
+            short_circuited=self.short_circuit_reason is not None,
+            short_circuit_reason=self.short_circuit_reason,
         )
 
 
@@ -513,6 +518,9 @@ class HistoricalCandidateRunner:
             teacher_lookup=(
                 teacher_targets.target if teacher_targets is not None else None
             ),
+            teacher_channels=(
+                teacher_targets.channels if teacher_targets is not None else None
+            ),
             teacher_loss_end_scale=float(
                 training_config.get("teacher_loss_end_scale", 1.0)
             ),
@@ -521,6 +529,21 @@ class HistoricalCandidateRunner:
             ),
             teacher_guidance_dropout_end=float(
                 training_config.get("teacher_guidance_dropout_end", 0.0)
+            ),
+            short_circuit_minimum_environment_steps=(
+                int(training_config["short_circuit"]["minimum_environment_steps"])
+                if training_config.get("short_circuit") is not None
+                else None
+            ),
+            short_circuit_minimum_passes=(
+                int(training_config["short_circuit"]["minimum_passes"])
+                if training_config.get("short_circuit") is not None
+                else 0
+            ),
+            short_circuit_maximum_blow_rate=(
+                float(training_config["short_circuit"]["maximum_blow_rate"])
+                if training_config.get("short_circuit") is not None
+                else 1.0
             ),
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
@@ -532,16 +555,18 @@ class HistoricalCandidateRunner:
             output / "training-diagnostic-summary.json",
         )
         agent.discard_teacher()
-        validation = evaluate_agent(
-            agent,
-            validation_environment,
-            episodes=int(training_config["validation_episodes"]),
-            recurrent_horizon=int(training_config["recurrent_horizon"]),
-            near_blow_loss_threshold=near_blow_loss_threshold,
-            stop_on_first_blow=bool(
-                config.get("_validation_stop_on_blow", False)
-            ),
-        )
+        validation = None
+        if not training.short_circuited:
+            validation = evaluate_agent(
+                agent,
+                validation_environment,
+                episodes=int(training_config["validation_episodes"]),
+                recurrent_horizon=int(training_config["recurrent_horizon"]),
+                near_blow_loss_threshold=near_blow_loss_threshold,
+                stop_on_first_blow=bool(
+                    config.get("_validation_stop_on_blow", False)
+                ),
+            )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
             "checkpoint_sha256": assets.checkpoint_sha256,
@@ -634,12 +659,14 @@ class HistoricalCandidateRunner:
                     training.near_blow_timeout_count
                 ),
                 "near_blow_timeout_rate": training.near_blow_timeout_rate,
+                "short_circuited": float(training.short_circuited),
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
             return metrics
 
         def selection_metrics(_candidate):
+            assert validation is not None
             pass_rate = validation.passes / validation.episodes
             blow_rate = validation.blows / validation.episodes
             requested_validation_episodes = int(
@@ -695,7 +722,11 @@ class HistoricalCandidateRunner:
                 "decision_rule": "selection pass rate must exceed blow rate",
             },
             (
-                EvaluationStage("training", training_metrics),
+                EvaluationStage(
+                    "training",
+                    training_metrics,
+                    gates=(EvaluationGate("short_circuited", "==", 0.0),),
+                ),
                 EvaluationStage(
                     "selection",
                     selection_metrics,
@@ -817,6 +848,11 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
     ]
     update_weights = [float(row.get("updates", 0)) for row in rows]
     teacher_weights = [float(row.get("teacher_scored_entries", 0)) for row in rows]
+    teacher_channel_names = sorted({
+        str(channel)
+        for row in rows
+        for channel in (row.get("selected_teacher_channel_means") or {})
+    })
     result: dict[str, object] = {
         "episodes": episodes,
         "passes": sum(row.get("outcome") == "pass" for row in rows),
@@ -901,6 +937,32 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         ),
         "selected_side_clean_retained_probability_mean": weighted(
             "selected_side_clean_retained_probability_mean", teacher_weights
+        ),
+        "selected_teacher_channel_means": {
+            channel: (
+                sum(
+                    float((row.get("selected_teacher_channel_means") or {}).get(
+                        channel, 0.0
+                    )) * weight
+                    for row, weight in zip(rows, teacher_weights)
+                ) / sum(
+                    weight
+                    for row, weight in zip(rows, teacher_weights)
+                    if channel in (row.get("selected_teacher_channel_means") or {})
+                )
+            )
+            for channel in teacher_channel_names
+            if sum(
+                weight
+                for row, weight in zip(rows, teacher_weights)
+                if channel in (row.get("selected_teacher_channel_means") or {})
+            ) > 0
+        },
+        "short_circuited": bool(
+            rows and rows[-1].get("training_short_circuited", False)
+        ),
+        "short_circuit_reason": (
+            rows[-1].get("training_short_circuit_reason") if rows else None
         ),
         "action_counts": {
             action.name: sum(
@@ -1061,11 +1123,15 @@ def train_agent(
     checkpoint_every_episodes: int = 0,
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
+    teacher_channels: tuple[str, ...] | None = None,
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     near_blow_loss_threshold: float | None = None,
+    short_circuit_minimum_environment_steps: int | None = None,
+    short_circuit_minimum_passes: int = 0,
+    short_circuit_maximum_blow_rate: float = 1.0,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -1085,6 +1151,28 @@ def train_agent(
         raise ValueError("management epsilon schedule is invalid")
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
+    if (
+        short_circuit_minimum_environment_steps is not None
+        and (
+            isinstance(short_circuit_minimum_environment_steps, bool)
+            or not 1
+            <= short_circuit_minimum_environment_steps
+            <= minimum_environment_steps
+        )
+    ):
+        raise ValueError("training short-circuit step boundary is invalid")
+    if (
+        isinstance(short_circuit_minimum_passes, bool)
+        or short_circuit_minimum_passes < 0
+        or isinstance(short_circuit_maximum_blow_rate, bool)
+        or not 0 <= short_circuit_maximum_blow_rate <= 1
+    ):
+        raise ValueError("training short-circuit outcome boundary is invalid")
+    if teacher_channels is not None and (
+        len(set(teacher_channels)) != len(teacher_channels)
+        or not all(isinstance(channel, str) and channel for channel in teacher_channels)
+    ):
+        raise ValueError("teacher diagnostic channels are invalid")
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -1122,6 +1210,7 @@ def train_agent(
         transitions = []
         action_counts = {action: 0 for action in Action}
         selected_entry_teacher_targets: list[tuple[float, float]] = []
+        selected_teacher_targets: list[np.ndarray] = []
         total_reward = 0.0
         # Decay exploration against actual market interaction, not the
         # emergency episode ceiling. Early pass/blow episodes vary greatly in
@@ -1186,11 +1275,21 @@ def train_agent(
             if teacher_target is not None and action in {
                 Action.ENTER_LONG_1, Action.ENTER_SHORT_1
             }:
+                if (
+                    teacher_channels is not None
+                    and np.asarray(teacher_target).size != len(teacher_channels)
+                ):
+                    raise ValueError(
+                        "teacher diagnostic channel width does not match target"
+                    )
                 offset = 0 if action == Action.ENTER_LONG_1 else 2
                 selected_entry_teacher_targets.append((
                     float(teacher_target[offset]),
                     float(teacher_target[offset + 1]),
                 ))
+                selected_teacher_targets.append(
+                    np.asarray(teacher_target, dtype=np.float32).reshape(-1)
+                )
             transitions.append(Transition(
                 observation=observation,
                 action=Action(action),
@@ -1346,6 +1445,26 @@ def train_agent(
                 progress.near_blow_timeout_count + int(near_blow_timeout)
             ),
         )
+        if (
+            short_circuit_minimum_environment_steps is not None
+            and progress.environment_steps >= short_circuit_minimum_environment_steps
+        ):
+            reasons = []
+            if progress.passes < short_circuit_minimum_passes:
+                reasons.append(
+                    f"passes {progress.passes} < {short_circuit_minimum_passes}"
+                )
+            blow_rate = progress.blows / progress.completed_episodes
+            if blow_rate > short_circuit_maximum_blow_rate:
+                reasons.append(
+                    f"blow rate {blow_rate:.6f} > "
+                    f"{short_circuit_maximum_blow_rate:.6f}"
+                )
+            if reasons:
+                progress = replace(
+                    progress,
+                    short_circuit_reason="; ".join(reasons),
+                )
         cumulative_average_balance = (
             progress.terminal_pnl_sum / progress.terminal_pnl_count
         )
@@ -1447,6 +1566,21 @@ def train_agent(
                     float(np.mean([value[1] for value in selected_entry_teacher_targets]))
                     if selected_entry_teacher_targets else None
                 ),
+                "selected_teacher_channel_means": (
+                    {
+                        channel: float(value)
+                        for channel, value in zip(
+                            teacher_channels,
+                            np.mean(np.stack(selected_teacher_targets), axis=0),
+                        )
+                    }
+                    if teacher_channels is not None and selected_teacher_targets
+                    else None
+                ),
+                "training_short_circuited": (
+                    progress.short_circuit_reason is not None
+                ),
+                "training_short_circuit_reason": progress.short_circuit_reason,
             }
             for horizon in (5, 10, 20, 50):
                 prefix = f"shadow_h{horizon}"
@@ -1474,13 +1608,22 @@ def train_agent(
         )
         if (
             checkpoint_every_episodes
-            and progress.completed_episodes % checkpoint_every_episodes == 0
+            and (
+                progress.completed_episodes % checkpoint_every_episodes == 0
+                or progress.short_circuit_reason is not None
+            )
         ):
             assert checkpoint_callback is not None
             checkpoint_callback(progress)
-        if progress.environment_steps >= minimum_environment_steps:
+        if (
+            progress.short_circuit_reason is not None
+            or progress.environment_steps >= minimum_environment_steps
+        ):
             break
-    if progress.environment_steps < minimum_environment_steps:
+    if (
+        progress.short_circuit_reason is None
+        and progress.environment_steps < minimum_environment_steps
+    ):
         raise RuntimeError(
             "episode safety ceiling reached before the minimum environment-step budget"
         )
