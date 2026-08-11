@@ -60,6 +60,30 @@ class Environment:
             "win_count": 1 if terminated else 0,
             "winning_r_sum": 2.5 if terminated else 0.0,
             "equity_pnl": 6_000.0 if terminated else 0.0,
+            "largest_realized_trade": (
+                {
+                    "side": "long",
+                    "realized_r": 3.0,
+                    "mfe_r": 3.5,
+                    "mae_r": 0.25,
+                    "hold_bars": 20,
+                    "ratchet_activated": True,
+                    "exit_reason": "ratchet_stop",
+                }
+                if terminated else None
+            ),
+            "largest_mfe_trade": (
+                {
+                    "side": "long",
+                    "realized_r": 3.0,
+                    "mfe_r": 3.5,
+                    "mae_r": 0.25,
+                    "hold_bars": 20,
+                    "ratchet_activated": True,
+                    "exit_reason": "ratchet_stop",
+                }
+                if terminated else None
+            ),
         }
         return np.array([self.index], np.float32), 0.25, terminated, False, info
 
@@ -400,6 +424,8 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0
     assert diagnostics[-1]["action_counts"]["WAIT"] == 4
     assert diagnostics[-1]["shadow_h50_complete_trades"] == 0
+    assert diagnostics[-1]["largest_realized_trade"]["realized_r"] == 3.0
+    assert diagnostics[-1]["largest_mfe_trade"]["mfe_r"] == 3.5
     assert (
         "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
         in capsys.readouterr().out

@@ -382,6 +382,21 @@ def test_voluntary_close_reports_entry_quality_and_winner_retention() -> None:
     assert closed["avg_mae_r"] == pytest.approx(0.1)
     assert closed["avg_hold_bars"] == 1.0
     assert closed["expectancy_r"] == pytest.approx(0.5)
+    expected_context = {
+        "side": "long",
+        "entry_index": 1,
+        "exit_index": 2,
+        "entry_timestamp": "2024-01-02T23:03",
+        "exit_timestamp": "2024-01-02T23:06",
+        "hold_bars": 1,
+        "realized_r": pytest.approx(0.5),
+        "mfe_r": pytest.approx(0.8),
+        "mae_r": pytest.approx(0.1),
+        "ratchet_activated": False,
+        "exit_reason": "voluntary_close",
+    }
+    assert closed["largest_realized_trade"] == expected_context
+    assert closed["largest_mfe_trade"] == expected_context
 
 
 def test_trade_retention_reports_profit_capture_and_round_trips() -> None:

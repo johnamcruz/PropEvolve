@@ -218,6 +218,11 @@ class _ClosedTrade:
     realized_r: float
     peak_favorable_r: float
     peak_adverse_r: float
+    side: str
+    entry_index: int
+    exit_index: int
+    entry_timestamp: str
+    exit_timestamp: str
     ratchet_activated: bool
     exit_reason: str
     hold_bars: int
@@ -625,7 +630,23 @@ class HistoricalChallengeEnv:
             self._closed_trade_pnls.append(float(net_pnl))
         return fee
 
-    def _trade_statistics(self) -> dict[str, float | int]:
+    @staticmethod
+    def _trade_context(trade: _ClosedTrade) -> dict[str, object]:
+        return {
+            "side": trade.side,
+            "entry_index": trade.entry_index,
+            "exit_index": trade.exit_index,
+            "entry_timestamp": trade.entry_timestamp,
+            "exit_timestamp": trade.exit_timestamp,
+            "hold_bars": trade.hold_bars,
+            "realized_r": trade.realized_r,
+            "mfe_r": trade.peak_favorable_r,
+            "mae_r": trade.peak_adverse_r,
+            "ratchet_activated": trade.ratchet_activated,
+            "exit_reason": trade.exit_reason,
+        }
+
+    def _trade_statistics(self) -> dict[str, object]:
         trades = len(self._closed_trade_pnls)
         winners = [value for value in self._closed_trade_pnls if value > 0.0]
         risk_denominator = self.spec.per_trade_risk_dollars or self.spec.max_loss
@@ -646,7 +667,15 @@ class HistoricalChallengeEnv:
             trade.exit_reason in {"challenge_pass", "challenge_blow", "episode_timeout"}
             for trade in self._closed_trades
         )
-        statistics: dict[str, float | int] = {
+        largest_realized = (
+            max(self._closed_trades, key=lambda trade: trade.realized_r)
+            if self._closed_trades else None
+        )
+        largest_mfe = (
+            max(self._closed_trades, key=lambda trade: trade.peak_favorable_r)
+            if self._closed_trades else None
+        )
+        statistics: dict[str, object] = {
             "trade_count": trades,
             "win_count": len(winners),
             "win_rate": len(winners) / trades if trades else 0.0,
@@ -714,6 +743,14 @@ class HistoricalChallengeEnv:
             "initial_stop_count": exit_counts["initial_stop"],
             "ratchet_stop_count": exit_counts["ratchet_stop"],
             "terminal_liquidation_count": terminal_liquidations,
+            "largest_realized_trade": (
+                self._trade_context(largest_realized)
+                if largest_realized is not None else None
+            ),
+            "largest_mfe_trade": (
+                self._trade_context(largest_mfe)
+                if largest_mfe is not None else None
+            ),
         }
         for horizon in (5, 10, 20, 50):
             outcomes = [
@@ -761,6 +798,15 @@ class HistoricalChallengeEnv:
                 realized_r=pnl / risk,
                 peak_favorable_r=peak_favorable_r,
                 peak_adverse_r=peak_adverse_r,
+                side=position.side.name.removeprefix("ENTER_").lower(),
+                entry_index=position.entry_index,
+                exit_index=exit_index,
+                entry_timestamp=np.datetime_as_string(
+                    self._market.timestamps[position.entry_index], unit="m"
+                ),
+                exit_timestamp=np.datetime_as_string(
+                    self._market.timestamps[exit_index], unit="m"
+                ),
                 ratchet_activated=position.ratchet_active,
                 exit_reason=exit_reason,
                 hold_bars=max(0, exit_index - position.entry_index),

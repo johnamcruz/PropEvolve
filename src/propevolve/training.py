@@ -1531,6 +1531,10 @@ def train_agent(
                 "terminal_liquidation_count": int(
                     terminal_info.get("terminal_liquidation_count", 0)
                 ),
+                "largest_realized_trade": terminal_info.get(
+                    "largest_realized_trade"
+                ),
+                "largest_mfe_trade": terminal_info.get("largest_mfe_trade"),
                 "terminal_pnl": terminal_pnl,
                 "near_blow_timeout": near_blow_timeout,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
