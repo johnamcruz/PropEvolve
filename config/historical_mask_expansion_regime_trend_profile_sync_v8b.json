@@ -201,7 +201,14 @@
     "short_circuit": {
       "minimum_environment_steps": 500000,
       "minimum_passes": 1,
-      "maximum_blow_rate": 0.1
+      "maximum_blow_rate": 0.1,
+      "collapse": {
+        "window_episodes": 12,
+        "minimum_prior_passes": 2,
+        "maximum_recent_passes": 0,
+        "maximum_average_hold_bars": 4.0,
+        "minimum_voluntary_close_rate": 0.8
+      }
     },
     "seed": 314159,
     "checkpoint_every_episodes": 5,

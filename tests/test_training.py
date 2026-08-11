@@ -600,6 +600,70 @@ def test_training_short_circuits_only_when_blow_rate_exceeds_ceiling() -> None:
     assert result.short_circuit_reason == "blow rate 0.500000 > 0.100000"
 
 
+def test_training_short_circuits_a_close_churn_collapse_after_prior_passes() -> None:
+    class CollapseEnvironment:
+        def __init__(self) -> None:
+            self.episode = -1
+
+        def reset(self):
+            self.episode += 1
+            return np.array([0.0], np.float32), {
+                "ticker": "NQ",
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            passed = self.episode == 0
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "primary_side": "long",
+                "outcome": "pass" if passed else "timeout",
+                "trade_count": 10,
+                "win_count": 4,
+                "winning_r_sum": 2.0,
+                "equity_pnl": 6_000.0 if passed else -1_000.0,
+                "avg_hold_bars": 1.5,
+                "voluntary_close_count": 9,
+            }
+
+    result = train_agent(
+        Agent(),
+        CollapseEnvironment(),
+        episodes=10,
+        minimum_environment_steps=10,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=10,
+            sequence_length=1,
+            seed=1,
+        ),
+        warmup_episodes=10,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.1,
+        epsilon_end=0.01,
+        episode_tickers=None,
+        ticker_seed=1,
+        short_circuit_minimum_environment_steps=3,
+        short_circuit_minimum_passes=1,
+        short_circuit_maximum_blow_rate=0.1,
+        collapse_window_episodes=2,
+        collapse_minimum_prior_passes=1,
+        collapse_maximum_recent_passes=0,
+        collapse_maximum_average_hold_bars=4.0,
+        collapse_minimum_voluntary_close_rate=0.8,
+    )
+
+    assert result.episodes == 3
+    assert result.short_circuited is True
+    assert result.short_circuit_reason == (
+        "policy collapse: prior passes 1; recent passes 0/2; "
+        "recent average hold 1.500000 <= 4.000000; "
+        "recent voluntary-close rate 0.900000 >= 0.800000"
+    )
+
+
 def test_training_uses_lower_exploration_for_position_management() -> None:
     class RecordingAgent(Agent):
         def __init__(self) -> None:

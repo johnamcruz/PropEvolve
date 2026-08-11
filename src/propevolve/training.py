@@ -254,6 +254,9 @@ class TrainingProgress:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    recent_outcomes: tuple[str, ...] = ()
+    recent_average_hold_bars: tuple[float, ...] = ()
+    recent_voluntary_close_rates: tuple[float, ...] = ()
     short_circuit_reason: str | None = None
 
     def result(self) -> TrainingResult:
@@ -552,6 +555,31 @@ class HistoricalCandidateRunner:
                 float(training_config["short_circuit"]["maximum_blow_rate"])
                 if training_config.get("short_circuit") is not None
                 else 1.0
+            ),
+            collapse_window_episodes=int(
+                training_config.get("short_circuit", {})
+                .get("collapse", {})
+                .get("window_episodes", 0)
+            ),
+            collapse_minimum_prior_passes=int(
+                training_config.get("short_circuit", {})
+                .get("collapse", {})
+                .get("minimum_prior_passes", 0)
+            ),
+            collapse_maximum_recent_passes=int(
+                training_config.get("short_circuit", {})
+                .get("collapse", {})
+                .get("maximum_recent_passes", 0)
+            ),
+            collapse_maximum_average_hold_bars=float(
+                training_config.get("short_circuit", {})
+                .get("collapse", {})
+                .get("maximum_average_hold_bars", math.inf)
+            ),
+            collapse_minimum_voluntary_close_rate=float(
+                training_config.get("short_circuit", {})
+                .get("collapse", {})
+                .get("minimum_voluntary_close_rate", 1.0)
             ),
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
@@ -1140,6 +1168,11 @@ def train_agent(
     short_circuit_minimum_environment_steps: int | None = None,
     short_circuit_minimum_passes: int = 0,
     short_circuit_maximum_blow_rate: float = 1.0,
+    collapse_window_episodes: int = 0,
+    collapse_minimum_prior_passes: int = 0,
+    collapse_maximum_recent_passes: int = 0,
+    collapse_maximum_average_hold_bars: float = math.inf,
+    collapse_minimum_voluntary_close_rate: float = 1.0,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -1176,6 +1209,20 @@ def train_agent(
         or not 0 <= short_circuit_maximum_blow_rate <= 1
     ):
         raise ValueError("training short-circuit outcome boundary is invalid")
+    if collapse_window_episodes and (
+        isinstance(collapse_window_episodes, bool)
+        or collapse_window_episodes < 2
+        or isinstance(collapse_minimum_prior_passes, bool)
+        or collapse_minimum_prior_passes < 1
+        or isinstance(collapse_maximum_recent_passes, bool)
+        or not 0 <= collapse_maximum_recent_passes < collapse_window_episodes
+        or isinstance(collapse_maximum_average_hold_bars, bool)
+        or not np.isfinite(collapse_maximum_average_hold_bars)
+        or collapse_maximum_average_hold_bars <= 0
+        or isinstance(collapse_minimum_voluntary_close_rate, bool)
+        or not 0 <= collapse_minimum_voluntary_close_rate <= 1
+    ):
+        raise ValueError("training collapse detector boundary is invalid")
     if teacher_channels is not None and (
         len(set(teacher_channels)) != len(teacher_channels)
         or not all(isinstance(channel, str) and channel for channel in teacher_channels)
@@ -1376,6 +1423,26 @@ def train_agent(
             else:
                 for _ in range(updates_per_episode):
                     train_replay_batch(replay.sample(batch_sequences))
+        trade_count = int(terminal_info.get("trade_count", 0))
+        recent_outcomes = ()
+        recent_hold_bars = ()
+        recent_close_rates = ()
+        if collapse_window_episodes:
+            recent_outcomes = (
+                *tuple(progress.recent_outcomes),
+                outcome,
+            )[-collapse_window_episodes:]
+            recent_hold_bars = (
+                *tuple(progress.recent_average_hold_bars),
+                float(terminal_info.get("avg_hold_bars", 0.0)),
+            )[-collapse_window_episodes:]
+            recent_close_rates = (
+                *tuple(progress.recent_voluntary_close_rates),
+                (
+                    int(terminal_info.get("voluntary_close_count", 0))
+                    / trade_count if trade_count else 0.0
+                ),
+            )[-collapse_window_episodes:]
         progress = TrainingProgress(
             completed_episodes=episode_index + 1,
             environment_steps=progress.environment_steps + episode_steps,
@@ -1452,6 +1519,9 @@ def train_agent(
             near_blow_timeout_count=(
                 progress.near_blow_timeout_count + int(near_blow_timeout)
             ),
+            recent_outcomes=recent_outcomes,
+            recent_average_hold_bars=recent_hold_bars,
+            recent_voluntary_close_rates=recent_close_rates,
         )
         if (
             short_circuit_minimum_environment_steps is not None
@@ -1468,6 +1538,34 @@ def train_agent(
                     f"blow rate {blow_rate:.6f} > "
                     f"{short_circuit_maximum_blow_rate:.6f}"
                 )
+            if (
+                collapse_window_episodes
+                and len(progress.recent_outcomes) == collapse_window_episodes
+            ):
+                recent_passes = sum(
+                    outcome == "pass" for outcome in progress.recent_outcomes
+                )
+                prior_passes = progress.passes - recent_passes
+                recent_hold = float(np.mean(progress.recent_average_hold_bars))
+                recent_close_rate = float(
+                    np.mean(progress.recent_voluntary_close_rates)
+                )
+                if (
+                    prior_passes >= collapse_minimum_prior_passes
+                    and recent_passes <= collapse_maximum_recent_passes
+                    and recent_hold <= collapse_maximum_average_hold_bars
+                    and recent_close_rate >= collapse_minimum_voluntary_close_rate
+                ):
+                    reasons.append(
+                        "policy collapse: "
+                        f"prior passes {prior_passes}; "
+                        f"recent passes {recent_passes}/"
+                        f"{collapse_window_episodes}; "
+                        f"recent average hold {recent_hold:.6f} <= "
+                        f"{collapse_maximum_average_hold_bars:.6f}; "
+                        f"recent voluntary-close rate {recent_close_rate:.6f} >= "
+                        f"{collapse_minimum_voluntary_close_rate:.6f}"
+                    )
             if reasons:
                 progress = replace(
                     progress,

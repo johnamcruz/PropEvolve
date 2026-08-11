@@ -268,12 +268,16 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("training checkpoint interval must be positive")
     short_circuit = training.get("short_circuit")
     if short_circuit is not None:
+        required_short_circuit = {
+            "minimum_environment_steps",
+            "minimum_passes",
+            "maximum_blow_rate",
+        }
         if (
             not isinstance(short_circuit, dict)
-            or set(short_circuit) != {
-                "minimum_environment_steps",
-                "minimum_passes",
-                "maximum_blow_rate",
+            or frozenset(short_circuit) not in {
+                frozenset(required_short_circuit),
+                frozenset((*required_short_circuit, "collapse")),
             }
             or isinstance(short_circuit["minimum_environment_steps"], bool)
             or not isinstance(short_circuit["minimum_environment_steps"], int)
@@ -288,6 +292,39 @@ def load_experiment_config(path: str | Path) -> dict:
             or not 0 <= float(short_circuit["maximum_blow_rate"]) <= 1
         ):
             raise ValueError("training short circuit contract is invalid")
+        collapse = short_circuit.get("collapse")
+        if collapse is not None and (
+            not isinstance(collapse, dict)
+            or set(collapse) != {
+                "window_episodes",
+                "minimum_prior_passes",
+                "maximum_recent_passes",
+                "maximum_average_hold_bars",
+                "minimum_voluntary_close_rate",
+            }
+            or isinstance(collapse["window_episodes"], bool)
+            or not isinstance(collapse["window_episodes"], int)
+            or collapse["window_episodes"] < 2
+            or isinstance(collapse["minimum_prior_passes"], bool)
+            or not isinstance(collapse["minimum_prior_passes"], int)
+            or collapse["minimum_prior_passes"] < 1
+            or isinstance(collapse["maximum_recent_passes"], bool)
+            or not isinstance(collapse["maximum_recent_passes"], int)
+            or not 0
+            <= collapse["maximum_recent_passes"]
+            < collapse["window_episodes"]
+            or isinstance(collapse["maximum_average_hold_bars"], bool)
+            or not isinstance(
+                collapse["maximum_average_hold_bars"], (int, float)
+            )
+            or collapse["maximum_average_hold_bars"] <= 0
+            or isinstance(collapse["minimum_voluntary_close_rate"], bool)
+            or not isinstance(
+                collapse["minimum_voluntary_close_rate"], (int, float)
+            )
+            or not 0 <= collapse["minimum_voluntary_close_rate"] <= 1
+        ):
+            raise ValueError("training collapse detector contract is invalid")
     teacher = payload.get("teacher")
     teachers = payload.get("teachers")
     if teacher is not None and teachers is not None:

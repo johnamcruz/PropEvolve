@@ -90,6 +90,18 @@ def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="training short circuit"):
         load_experiment_config(path)
 
+    payload["training"]["short_circuit"]["maximum_blow_rate"] = 0.1
+    payload["training"]["short_circuit"]["collapse"] = {
+        "window_episodes": 1,
+        "minimum_prior_passes": 2,
+        "maximum_recent_passes": 0,
+        "maximum_average_hold_bars": 4.0,
+        "minimum_voluntary_close_rate": 0.8,
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="collapse detector"):
+        load_experiment_config(path)
+
 
 def test_legacy_schema_v1_recipe_keeps_eager_fp32_runtime(tmp_path: Path) -> None:
     payload = json.loads(Path("config/historical_mask_v1.json").read_text())
@@ -445,7 +457,6 @@ def test_target_sync_challenger_changes_only_the_diagnosed_learning_boundary() -
         "observation",
         "challenge",
         "temporal",
-        "training",
         "runtime",
         "sealed_confirmation",
     ):
@@ -453,6 +464,19 @@ def test_target_sync_challenger_changes_only_the_diagnosed_learning_boundary() -
     assert challenger["agent"] == {
         **baseline["agent"],
         "target_sync_updates": 1_000,
+    }
+    assert challenger["training"] == {
+        **baseline["training"],
+        "short_circuit": {
+            **baseline["training"]["short_circuit"],
+            "collapse": {
+                "window_episodes": 12,
+                "minimum_prior_passes": 2,
+                "maximum_recent_passes": 0,
+                "maximum_average_hold_bars": 4.0,
+                "minimum_voluntary_close_rate": 0.8,
+            },
+        },
     }
     assert challenger["campaign"]["budget_stages"] == baseline["campaign"][
         "budget_stages"
