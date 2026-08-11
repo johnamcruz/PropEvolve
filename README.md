@@ -480,9 +480,9 @@ Checkpoint roles are intentionally separate:
 - `training-recovery.pt` atomically saves the exact latest restart state,
   including policy and target networks, optimizer, mixed-precision scaler,
   progress, environment RNG, complete bounded replay, and replay sampler RNG;
-- `retained-pass-policy.pt` preserves a pre-update policy that demonstrated a
-  training pass so a detected collapse can roll back without claiming OOS
-  generalization;
+- `retained-pass-policies/` preserves every pre-update policy that demonstrated
+  a training pass, while `retained-pass-policy.pt` atomically identifies the
+  latest rollback anchor; neither is treated as OOS promotion evidence;
 - every completed candidate and its teacher-free evaluation receipt is stored
   immutably in the campaign archive, and a selected candidate may warm-start a
   later fine-tuning stage while temporary teacher heads and optimization state

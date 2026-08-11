@@ -165,6 +165,7 @@
     "value_max": 3,
     "gamma": 0.997,
     "n_step_return": 8,
+    "recurrent_burn_in": 64,
     "learning_rate": 0.0001,
     "weight_decay": 1e-05,
     "gradient_clip": 10,
@@ -189,7 +190,7 @@
     "validation_episodes": 200,
     "replay_capacity_episodes": 500,
     "replay_capacity_transitions": 500000,
-    "sequence_length": 32,
+    "sequence_length": 96,
     "warmup_episodes": 8,
     "updates_per_episode": 32,
     "batch_sequences": 16,
@@ -206,7 +207,7 @@
       "minimum_passes": 1,
       "maximum_blow_rate": 0.1,
       "collapse": {
-        "window_episodes": 12,
+        "window_episodes": 5,
         "minimum_prior_passes": 2,
         "maximum_recent_passes": 0,
         "maximum_average_hold_bars": 4.0,
@@ -220,7 +221,7 @@
     "entry_opportunity_sequence_fraction": 0.25
   },
   "evolution": {
-    "hypothesis": "Holding data, teachers, rewards, exploration, replay mix, Polyak targets, and causal GRU alignment fixed while using an eight-step recurrent return will propagate winner retention and churn costs soon enough to prevent premature-CLOSE policy collapse.",
+    "hypothesis": "Holding data, teachers, rewards, exploration, replay mix, and Polyak targets fixed while using a 64-step recurrent burn-in plus an eight-step return will align replay history with behavior and propagate winner-retention economics soon enough to prevent premature-CLOSE policy collapse.",
     "parent_candidate_ids": [],
     "allowed_revision_paths": [
       "agent.learning_rate",
@@ -233,11 +234,9 @@
       "challenge.ratchet_giveback_r",
       "training.episodes",
       "training.replay_capacity_episodes",
-      "training.sequence_length",
       "training.warmup_episodes",
       "training.updates_per_episode",
       "training.batch_sequences",
-      "training.recurrent_horizon",
       "training.epsilon_start",
       "training.epsilon_end",
       "training.management_epsilon_start",
@@ -257,6 +256,7 @@
     ],
     "frozen_paths": [
       "agent.n_step_return",
+      "agent.recurrent_burn_in",
       "runtime",
       "training.prefetch_batches",
       "assets",
@@ -281,6 +281,8 @@
       "training.checkpoint_every_episodes",
       "training.minimum_environment_steps",
       "training.replay_capacity_transitions",
+      "training.recurrent_horizon",
+      "training.sequence_length",
       "training_only_tickers",
       "training.entry_opportunity_sequence_fraction"
     ],
@@ -684,5 +686,3 @@
   },
   "output": "runs/historical_mask_expansion_regime_trend_profile_n_step_td_v8e"
 }
-
-

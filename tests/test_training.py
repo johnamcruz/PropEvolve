@@ -370,6 +370,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert diagnostics
     assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
     assert diagnostics[-1]["n_step_return"] == 1
+    assert diagnostics[-1]["recurrent_burn_in"] == 0
     summary_path = tmp_path / "run" / "training-diagnostic-summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["schema"] == "propevolve_training_diagnostic_summary_v1"
@@ -748,6 +749,33 @@ def test_training_preserves_a_pass_policy_before_any_following_updates() -> None
     assert agent.updates == 1
 
 
+def test_retained_pass_checkpoints_are_immutable_per_episode(tmp_path: Path) -> None:
+    class SavingAgent:
+        def save(self, path, *, manifest):
+            Path(path).write_text(json.dumps(manifest, sort_keys=True))
+
+    alias = tmp_path / "retained-pass-policy.pt"
+    for episode, ticker in ((3, "SI"), (9, "ZB")):
+        training_module._save_retained_policy(
+            SavingAgent(),
+            alias,
+            resume_identity="recipe-1",
+            evidence={
+                "episode": episode,
+                "ticker": ticker,
+                "outcome": "pass",
+                "terminal_pnl": 6_000.0,
+            },
+        )
+
+    retained = sorted((tmp_path / "retained-pass-policies").glob("*.pt"))
+    assert [path.name for path in retained] == [
+        "episode-000003-SI.pt",
+        "episode-000009-ZB.pt",
+    ]
+    assert json.loads(alias.read_text())["retention_evidence"]["episode"] == 9
+
+
 def test_training_uses_lower_exploration_for_position_management() -> None:
     class RecordingAgent(Agent):
         def __init__(self) -> None:
@@ -858,6 +886,73 @@ def test_training_resumes_from_an_episode_boundary() -> None:
     assert resumed.episodes == 2
     assert resumed.environment_steps == 8
     assert resumed.passes == 2
+
+
+def test_training_never_clears_a_resumed_terminal_collapse() -> None:
+    terminal = TrainingProgress(
+        completed_episodes=3,
+        environment_steps=3,
+        passes=1,
+        timeouts=2,
+        terminal_pnl_count=3,
+        reward_count=3,
+        short_circuit_reason="policy collapse",
+    )
+
+    result = train_agent(
+        Agent(),
+        Environment(),
+        episodes=10,
+        minimum_environment_steps=10,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=1,
+            seed=5,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=5,
+        resume=terminal,
+    )
+
+    assert result.episodes == 3
+    assert result.short_circuited is True
+    assert result.short_circuit_reason == "policy collapse"
+
+
+def test_training_checkpoints_the_final_episode_outside_periodic_interval() -> None:
+    checkpoints: list[TrainingProgress] = []
+
+    result = train_agent(
+        Agent(),
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            capacity_transitions=16,
+            sequence_length=2,
+            seed=5,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=5,
+        checkpoint_every_episodes=5,
+        checkpoint_callback=checkpoints.append,
+    )
+
+    assert result.environment_steps == 8
+    assert [checkpoint.completed_episodes for checkpoint in checkpoints] == [2]
 
 
 def test_prop_safety_objective_hard_ranks_any_blow_below_zero_blow() -> None:

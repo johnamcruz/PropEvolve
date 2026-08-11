@@ -320,6 +320,81 @@ def test_recurrent_double_dqn_propagates_configured_multi_step_returns() -> None
     assert agent.last_train_metrics["n_step_return"] == 3.0
 
 
+def test_eight_step_management_learning_prefers_a_delayed_winner_to_close() -> None:
+    """Regression: delayed HOLD value must not collapse into immediate CLOSE."""
+    agent = _agent(
+        2,
+        hidden_dim=16,
+        atoms=51,
+        value_min=-1.0,
+        value_max=2.0,
+        gamma=0.99,
+        n_step_return=8,
+        recurrent_burn_in=8,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        target_sync_updates=20,
+        seed=7,
+    )
+
+    def management_sequence(
+        initial_action: Action,
+        delayed_reward: float,
+    ) -> tuple[Transition, ...]:
+        return tuple(
+            Transition(
+                observation=np.array([index / 16, 0.0], np.float32),
+                action=initial_action if index == 8 else Action.HOLD,
+                reward=delayed_reward if index == 15 else 0.0,
+                next_observation=np.array([(index + 1) / 16, 0.0], np.float32),
+                terminated=(
+                    index == 15 if initial_action == Action.HOLD else index == 8
+                ),
+                valid_actions=(Action.HOLD, Action.CLOSE),
+                next_valid_actions=(Action.HOLD, Action.CLOSE),
+            )
+            for index in range(16)
+        )
+
+    hold = management_sequence(Action.HOLD, delayed_reward=1.0)
+    close = management_sequence(Action.CLOSE, delayed_reward=0.0)
+    for _ in range(300):
+        agent.train_batch((hold, close, hold, close))
+
+    hidden = None
+    for index in range(8):
+        _, hidden, _ = agent.select_action(
+            np.array([index / 16, 0.0], np.float32),
+            hidden=hidden,
+            valid_actions=(Action.HOLD,),
+            epsilon=0.0,
+        )
+    selected, _, action_values = agent.select_action(
+        np.array([0.5, 0.0], np.float32),
+        hidden=hidden,
+        valid_actions=(Action.HOLD, Action.CLOSE),
+        epsilon=0.0,
+        return_action_values=True,
+    )
+
+    assert selected == Action.HOLD
+    assert action_values[Action.HOLD] - action_values[Action.CLOSE] > 0.5
+    assert agent.last_train_metrics["sampled_hold_n_step_return"] > 0.9
+    assert agent.last_train_metrics["sampled_close_n_step_return"] == 0.0
+
+
+def test_checkpoint_round_trip_preserves_recurrent_credit_horizon(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(2, n_step_return=8, recurrent_burn_in=64)
+
+    checkpoint = agent.save(tmp_path / "credit-horizon.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert restored.n_step_return == 8
+    assert restored.recurrent_burn_in == 64
+
+
 def test_soft_target_update_moves_gradually_after_every_learner_update() -> None:
     agent = _agent(
         2,
@@ -603,6 +678,8 @@ def test_mps_training_update_action_selection_and_checkpoint_resume(
         device="mps",
         seed=17,
         target_sync_updates=1,
+        n_step_return=2,
+        recurrent_burn_in=1,
     )
     sequence = tuple(
         Transition(
@@ -635,4 +712,6 @@ def test_mps_training_update_action_selection_and_checkpoint_resume(
     assert hidden.device.type == "mps"
     assert np.isfinite(values[[int(Action.WAIT), int(Action.ENTER_LONG_1)]]).all()
     assert restored.device.type == "mps"
+    assert restored.n_step_return == 2
+    assert restored.recurrent_burn_in == 1
     assert manifest == {"device": "mps"}

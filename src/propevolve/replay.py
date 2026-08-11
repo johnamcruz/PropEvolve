@@ -304,7 +304,10 @@ class BalancedSequenceReplay:
                 or (actions < 0).any()
                 or (actions >= action_count).any()
                 or not valid_masks.any(axis=1).all()
-                or not next_valid_masks.any(axis=1).all()
+                or not np.array_equal(
+                    next_valid_masks.any(axis=1),
+                    ~terminated,
+                )
             ):
                 raise ValueError("replay checkpoint episode arrays are invalid")
             if teacher_targets is not None:

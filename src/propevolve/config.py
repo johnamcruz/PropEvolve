@@ -207,6 +207,7 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
     agent.setdefault("n_step_return", 1)
+    agent.setdefault("recurrent_burn_in", 0)
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     if (
@@ -265,6 +266,16 @@ def load_experiment_config(path: str | Path) -> dict:
         or not 1 <= int(agent["n_step_return"]) <= int(training["sequence_length"])
     ):
         raise ValueError("agent n-step return must fit the replay sequence")
+    if (
+        isinstance(agent["recurrent_burn_in"], bool)
+        or not isinstance(agent["recurrent_burn_in"], int)
+        or int(agent["recurrent_burn_in"]) < 0
+        or int(agent["recurrent_burn_in"]) + int(agent["n_step_return"])
+        > int(training["sequence_length"])
+    ):
+        raise ValueError(
+            "agent recurrent burn-in plus n-step return must fit the replay sequence"
+        )
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
     if not (

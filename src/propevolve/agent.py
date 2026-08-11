@@ -111,6 +111,7 @@ class RecurrentC51Agent:
         gradient_clip: float,
         target_sync_updates: int,
         n_step_return: int = 1,
+        recurrent_burn_in: int = 0,
         target_update_mode: str = "hard",
         target_soft_tau: float = 1.0,
         device: str,
@@ -130,6 +131,8 @@ class RecurrentC51Agent:
             raise ValueError("distributional support is invalid")
         if isinstance(n_step_return, bool) or int(n_step_return) < 1:
             raise ValueError("n-step return must be a positive integer")
+        if isinstance(recurrent_burn_in, bool) or int(recurrent_burn_in) < 0:
+            raise ValueError("recurrent burn-in must be a nonnegative integer")
         if learning_rate <= 0 or weight_decay < 0 or gradient_clip <= 0:
             raise ValueError("optimizer settings are invalid")
         if target_sync_updates < 1:
@@ -188,6 +191,7 @@ class RecurrentC51Agent:
         self.atoms = int(atoms)
         self.gamma = float(gamma)
         self.n_step_return = int(n_step_return)
+        self.recurrent_burn_in = int(recurrent_burn_in)
         self.learning_rate = float(learning_rate)
         self.value_min = float(value_min)
         self.value_max = float(value_max)
@@ -337,9 +341,13 @@ class RecurrentC51Agent:
         if len(lengths) != 1 or next(iter(lengths)) < 1:
             raise ValueError("training sequences must have one positive length")
         sequence_length = next(iter(lengths))
-        if sequence_length < self.n_step_return:
-            raise ValueError("training sequence is shorter than the n-step return")
-        training_steps = sequence_length - self.n_step_return + 1
+        if sequence_length < self.recurrent_burn_in + self.n_step_return:
+            raise ValueError(
+                "training sequence is shorter than recurrent burn-in plus n-step return"
+            )
+        training_steps = (
+            sequence_length - self.recurrent_burn_in - self.n_step_return + 1
+        )
         observations = torch.as_tensor(
             np.stack([[item.observation for item in sequence] for sequence in sequences]),
             dtype=torch.float32,
@@ -389,14 +397,23 @@ class RecurrentC51Agent:
             (observations[:, :1], next_observations), dim=1
         )
 
-        actions = all_actions[:, :training_steps]
-        immediate_rewards = all_rewards[:, :training_steps]
+        learning_start = self.recurrent_burn_in
+        actions = all_actions[:, learning_start:learning_start + training_steps]
+        immediate_rewards = all_rewards[
+            :, learning_start:learning_start + training_steps
+        ]
         n_step_rewards = torch.zeros_like(immediate_rewards)
         bootstrap_alive = torch.ones_like(immediate_rewards, dtype=torch.bool)
         discount = 1.0
         for offset in range(self.n_step_return):
-            reward_slice = all_rewards[:, offset:offset + training_steps]
-            terminated_slice = all_terminated[:, offset:offset + training_steps]
+            reward_slice = all_rewards[
+                :,
+                learning_start + offset:learning_start + offset + training_steps,
+            ]
+            terminated_slice = all_terminated[
+                :,
+                learning_start + offset:learning_start + offset + training_steps,
+            ]
             n_step_rewards = n_step_rewards + (
                 discount * bootstrap_alive.to(all_rewards.dtype) * reward_slice
             )
@@ -405,14 +422,23 @@ class RecurrentC51Agent:
         terminated = ~bootstrap_alive
         next_masks = all_next_masks[
             :,
-            self.n_step_return - 1:self.n_step_return - 1 + training_steps,
+            learning_start + self.n_step_return - 1:
+            learning_start + self.n_step_return - 1 + training_steps,
         ]
 
+        online_hidden = None
+        if self.recurrent_burn_in:
+            with torch.no_grad(), self._autocast():
+                _, online_hidden = self.online.recurrent_features(
+                    causal_observations[:, :self.recurrent_burn_in]
+                )
+            online_hidden = online_hidden.detach()
         with self._autocast():
             causal_recurrent, _ = self._call_with_compile_fallback(
                 self._online_recurrent,
                 self.online.recurrent_features,
-                causal_observations,
+                causal_observations[:, self.recurrent_burn_in:],
+                online_hidden,
             )
             recurrent = causal_recurrent[:, :-1]
             all_logits = self.online.distribution_logits(recurrent)
@@ -430,12 +456,18 @@ class RecurrentC51Agent:
             actions[..., None, None].expand(-1, -1, 1, self.atoms),
         ).squeeze(2)
         with torch.no_grad():
+            target_hidden = None
+            if self.recurrent_burn_in:
+                with self._autocast():
+                    _, target_hidden = self.target.recurrent_features(
+                        causal_observations[:, :self.recurrent_burn_in]
+                    )
             with self._autocast():
                 target_causal, _ = self._call_with_compile_fallback(
                     self._target_forward,
                     self.target.forward,
-                    causal_observations,
-                    None,
+                    causal_observations[:, self.recurrent_burn_in:],
+                    target_hidden,
                 )
                 target_next = target_causal[
                     :,
@@ -477,9 +509,12 @@ class RecurrentC51Agent:
             teacher_rows_numpy = np.isfinite(teacher_targets).all(axis=-1)
             teacher_targets_tensor = torch.as_tensor(
                 teacher_targets, dtype=torch.float32, device=self.device
+            )[:, self.recurrent_burn_in:]
+            teacher_rows = torch.as_tensor(
+                teacher_rows_numpy[:, self.recurrent_burn_in:],
+                device=self.device,
             )
-            teacher_rows = torch.as_tensor(teacher_rows_numpy, device=self.device)
-            if teacher_rows_numpy.any():
+            if bool(teacher_rows.any().item()):
                 assert self.online.teacher_output is not None
                 with self._autocast():
                     teacher_logits = self.online.teacher_output(recurrent)
@@ -498,11 +533,17 @@ class RecurrentC51Agent:
                 if self.teacher_entry_search_loss_weight:
                     entry_rows = (
                         teacher_rows
-                        & valid_masks[..., int(Action.WAIT)]
-                        & valid_masks[..., int(Action.ENTER_LONG_1)]
-                        & valid_masks[..., int(Action.ENTER_SHORT_1)]
+                        & valid_masks[
+                            :, self.recurrent_burn_in:, int(Action.WAIT)
+                        ]
+                        & valid_masks[
+                            :, self.recurrent_burn_in:, int(Action.ENTER_LONG_1)
+                        ]
+                        & valid_masks[
+                            :, self.recurrent_burn_in:, int(Action.ENTER_SHORT_1)
+                        ]
                     )
-                    if teacher_rows_numpy.any():
+                    if bool(teacher_rows.any().item()):
                         q_values = (all_logits.float().softmax(-1) * self.support).sum(-1)
                         long_target = (
                             teacher_targets_tensor[..., 0]
@@ -557,7 +598,9 @@ class RecurrentC51Agent:
         self._updates += 1
         self._update_target_network()
         q_values = (logits.softmax(-1) * self.support).sum(-1)
-        rl_valid_masks = valid_masks[:, :training_steps]
+        rl_valid_masks = valid_masks[
+            :, learning_start:learning_start + training_steps
+        ]
         management_rows = (
             rl_valid_masks[..., int(Action.HOLD)]
             & rl_valid_masks[..., int(Action.CLOSE)]
@@ -628,6 +671,7 @@ class RecurrentC51Agent:
                 sampled_management_close_fraction
             ),
             "n_step_return": float(self.n_step_return),
+            "recurrent_burn_in": float(self.recurrent_burn_in),
         }
         return total_loss
 
@@ -713,6 +757,7 @@ class RecurrentC51Agent:
                 "value_max": self.value_max,
                 "gamma": self.gamma,
                 "n_step_return": self.n_step_return,
+                "recurrent_burn_in": self.recurrent_burn_in,
                 "learning_rate": self.learning_rate,
                 "weight_decay": self.weight_decay,
                 "gradient_clip": self.gradient_clip,
@@ -796,6 +841,7 @@ class RecurrentC51Agent:
         config.setdefault("target_update_mode", "hard")
         config.setdefault("target_soft_tau", 1.0)
         config.setdefault("n_step_return", 1)
+        config.setdefault("recurrent_burn_in", 0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

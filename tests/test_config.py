@@ -60,16 +60,24 @@ def test_n_step_return_is_explicit_and_must_fit_replay_sequence(
         "config/historical_mask_expansion_regime_curriculum_v8.json"
     ).read_text())
     payload["agent"]["n_step_return"] = 8
+    payload["agent"]["recurrent_burn_in"] = 16
     path = tmp_path / "n-step.json"
     path.write_text(json.dumps(payload))
 
     config = load_experiment_config(path)
 
     assert config["agent"]["n_step_return"] == 8
+    assert config["agent"]["recurrent_burn_in"] == 16
 
     payload["agent"]["n_step_return"] = payload["training"]["sequence_length"] + 1
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="n-step return"):
+        load_experiment_config(path)
+
+    payload["agent"]["n_step_return"] = 8
+    payload["agent"]["recurrent_burn_in"] = payload["training"]["sequence_length"] - 7
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="burn-in"):
         load_experiment_config(path)
 
 
@@ -79,7 +87,25 @@ def test_v8e_recipe_really_uses_the_declared_eight_step_return() -> None:
     )
 
     assert config["agent"]["n_step_return"] == 8
+    assert config["agent"]["recurrent_burn_in"] == 64
+    assert config["training"]["sequence_length"] == 96
     assert "agent.n_step_return" in config["evolution"]["frozen_paths"]
+    assert "agent.recurrent_burn_in" in config["evolution"]["frozen_paths"]
+    assert "training.sequence_length" in config["evolution"]["frozen_paths"]
+    assert "training.recurrent_horizon" in config["evolution"]["frozen_paths"]
+    assert "training.sequence_length" not in config["evolution"][
+        "allowed_revision_paths"
+    ]
+    assert "training.recurrent_horizon" not in config["evolution"][
+        "allowed_revision_paths"
+    ]
+    assert config["training"]["short_circuit"]["collapse"] == {
+        "window_episodes": 5,
+        "minimum_prior_passes": 2,
+        "maximum_recent_passes": 0,
+        "maximum_average_hold_bars": 4.0,
+        "minimum_voluntary_close_rate": 0.8,
+    }
 
 
 def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ def _episode(ticker: str, outcome: str, side: str, offset: int) -> Episode:
             next_observation=np.array([offset + i + 1], np.float32),
             terminated=i == 5,
             valid_actions=(Action.WAIT,),
-            next_valid_actions=(Action.WAIT,),
+            next_valid_actions=() if i == 5 else (Action.WAIT,),
         )
         for i in range(6)
     )

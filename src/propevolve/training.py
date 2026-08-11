@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
 from typing import TYPE_CHECKING, Callable
@@ -870,8 +871,17 @@ def _save_retained_policy(
     resume_identity: str,
     evidence: dict[str, object],
 ) -> None:
-    """Atomically preserve the pre-update policy that demonstrated a pass."""
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    """Preserve every pass policy immutably and atomically advance latest alias."""
+    episode = int(evidence.get("episode", 0))
+    ticker = str(evidence.get("ticker", ""))
+    if episode < 1 or not ticker.isalnum():
+        raise ValueError("retained pass evidence identity is invalid")
+    archive = path.parent / "retained-pass-policies"
+    archive.mkdir(parents=True, exist_ok=True)
+    retained = archive / f"episode-{episode:06d}-{ticker}.pt"
+    if retained.exists():
+        raise ValueError("retained pass checkpoint already exists")
+    temporary = retained.with_suffix(retained.suffix + ".tmp")
     agent.save(
         temporary,
         manifest={
@@ -879,7 +889,10 @@ def _save_retained_policy(
             "retention_evidence": dict(evidence),
         },
     )
-    os.replace(temporary, path)
+    os.replace(temporary, retained)
+    alias_temporary = path.with_suffix(path.suffix + ".tmp")
+    shutil.copyfile(retained, alias_temporary)
+    os.replace(alias_temporary, path)
 
 
 def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
@@ -1329,6 +1342,8 @@ def train_agent(
         raise ValueError("resume progress exceeds the episode ceiling")
     if progress.environment_steps > minimum_environment_steps:
         raise ValueError("resume progress exceeds the environment-step budget")
+    if progress.short_circuit_reason is not None:
+        return progress.result()
     for episode_index in range(progress.completed_episodes, episodes):
         if ticker_schedule is None:
             observation, reset_info = environment.reset()
@@ -1750,6 +1765,9 @@ def train_agent(
                     teacher_guidance_dropout_probability
                 ),
                 "n_step_return": int(getattr(agent, "n_step_return", 1)),
+                "recurrent_burn_in": int(
+                    getattr(agent, "recurrent_burn_in", 0)
+                ),
                 "updates": len(episode_losses),
                 "mean_training_loss": (
                     float(np.mean(episode_losses)) if episode_losses else None
@@ -1835,6 +1853,7 @@ def train_agent(
             and (
                 progress.completed_episodes % checkpoint_every_episodes == 0
                 or progress.short_circuit_reason is not None
+                or progress.environment_steps >= minimum_environment_steps
             )
         ):
             assert checkpoint_callback is not None
