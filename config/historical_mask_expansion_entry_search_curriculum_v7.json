@@ -96,6 +96,29 @@
     "validation_end": "2026-01-01",
     "sealed_start": "2026-01-01"
   },
+  "sealed_confirmation": {
+    "start": "2026-01-01",
+    "end": "2027-01-01",
+    "episode_sessions": 30,
+    "window_mode": "non_overlapping",
+    "tickers": [
+      "NQ",
+      "ES",
+      "GC",
+      "RTY",
+      "YM",
+      "CL",
+      "SI",
+      "ZB",
+      "ZN"
+    ],
+    "minimum_episodes_per_ticker": 8,
+    "teacher_free": true,
+    "minimum_pass_rate": 0.5,
+    "minimum_per_market_pass_rate": 0.5,
+    "maximum_blow_rate": 0.0,
+    "minimum_expectancy_r": 0.0
+  },
   "agent": {
     "hidden_dim": 128,
     "atoms": 51,
@@ -180,6 +203,7 @@
       "point_values",
       "round_trip_fees",
       "teacher",
+      "sealed_confirmation",
       "temporal",
       "tickers",
       "timeframe_minutes",

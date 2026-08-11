@@ -154,6 +154,39 @@ def test_expansion_entry_search_recipe_is_training_only_and_matched() -> None:
     assert config["output"].endswith("historical_mask_expansion_entry_search_curriculum_v7")
 
 
+def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_entry_search_curriculum_v7.json"
+    )
+
+    confirmation = config["sealed_confirmation"]
+    assert confirmation["start"] == "2026-01-01"
+    assert confirmation["end"] == "2027-01-01"
+    assert confirmation["episode_sessions"] == 30
+    assert confirmation["window_mode"] == "non_overlapping"
+    assert confirmation["teacher_free"] is True
+    assert confirmation["tickers"] == config["tickers"]
+    assert confirmation["minimum_pass_rate"] == 0.5
+    assert confirmation["maximum_blow_rate"] == 0.0
+    assert "sealed_confirmation" in config["evolution"]["frozen_paths"]
+
+
+def test_config_rejects_sealed_confirmation_that_can_use_teachers(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(
+        Path(
+            "config/historical_mask_expansion_entry_search_curriculum_v7.json"
+        ).read_text()
+    )
+    payload["sealed_confirmation"]["teacher_free"] = False
+    path = tmp_path / "teacher-leak.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="teacher-free"):
+        load_experiment_config(path)
+
+
 def test_config_accepts_optional_gepa_reflective_reasoning_proposer(
     tmp_path: Path,
 ) -> None:

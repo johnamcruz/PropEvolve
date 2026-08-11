@@ -213,6 +213,18 @@ the complete recipe is frozen, a separate final-fit stage may retrain on
 never enter cache generation, replay, training, validation, reasoning packets,
 candidate selection, or recipe revision.
 
+The terminal robustness gate opens 2026 exactly once after the policy, seeds,
+economics, costs, and evaluator are frozen. It runs teacher-free,
+non-overlapping 30-session prop challenges independently for every declared
+market. A passing policy must achieve at least 50% aggregate and per-market
+pass rate, zero aggregate and per-market blow rate, and positive net expectancy.
+Timeouts remain non-passes. The receipt also exposes trade frequency,
+Long/Short usage, win rate, average winner R, 2R winner retention, near-blow
+frequency, terminal P&L, and every per-market result so aggregate performance
+cannot conceal a failed market. Any teacher access, overlapping window, missing
+market, incomplete 30-session episode, or inspected-row reuse invalidates the
+confirmation rather than producing a score.
+
 Embedding caches physically censor bars by close-time availability before
 Chronos encoding. Their authenticated manifest records
 `research_end_exclusive = 2026-01-01T00:00:00+00:00` and

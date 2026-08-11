@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 import json
 from pathlib import Path
 
@@ -214,6 +215,67 @@ def load_experiment_config(path: str | Path) -> dict:
         and ordered[3] <= ordered[4]
     ):
         raise ValueError("temporal train, validation, and sealed periods overlap")
+    sealed_confirmation = payload.get("sealed_confirmation")
+    if sealed_confirmation is not None:
+        required_confirmation = {
+            "start",
+            "end",
+            "episode_sessions",
+            "window_mode",
+            "tickers",
+            "minimum_episodes_per_ticker",
+            "teacher_free",
+            "minimum_pass_rate",
+            "minimum_per_market_pass_rate",
+            "maximum_blow_rate",
+            "minimum_expectancy_r",
+        }
+        if (
+            not isinstance(sealed_confirmation, dict)
+            or set(sealed_confirmation) != required_confirmation
+        ):
+            raise ValueError("sealed confirmation contract is invalid")
+        try:
+            sealed_start = date.fromisoformat(str(sealed_confirmation["start"]))
+            sealed_end = date.fromisoformat(str(sealed_confirmation["end"]))
+        except ValueError as error:
+            raise ValueError("sealed confirmation dates are invalid") from error
+        confirmation_tickers = tuple(
+            str(value) for value in sealed_confirmation["tickers"]
+        )
+        numeric_rates = (
+            sealed_confirmation["minimum_pass_rate"],
+            sealed_confirmation["minimum_per_market_pass_rate"],
+            sealed_confirmation["maximum_blow_rate"],
+        )
+        if (
+            sealed_confirmation["start"] != temporal["sealed_start"]
+            or sealed_start >= sealed_end
+            or sealed_confirmation["window_mode"] != "non_overlapping"
+            or sealed_confirmation["teacher_free"] is not True
+            or confirmation_tickers != tickers
+            or isinstance(sealed_confirmation["episode_sessions"], bool)
+            or int(sealed_confirmation["episode_sessions"])
+            != int(challenge["episode_days"])
+            or isinstance(sealed_confirmation["minimum_episodes_per_ticker"], bool)
+            or int(sealed_confirmation["minimum_episodes_per_ticker"]) < 1
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 1.0
+                for value in numeric_rates
+            )
+            or isinstance(sealed_confirmation["minimum_expectancy_r"], bool)
+            or not isinstance(
+                sealed_confirmation["minimum_expectancy_r"], (int, float)
+            )
+        ):
+            raise ValueError(
+                "sealed confirmation must be teacher-free, non-overlapping, "
+                "and aligned with the frozen challenge and ticker contract"
+            )
+        sealed_confirmation["tickers"] = confirmation_tickers
+        payload["sealed_confirmation"] = sealed_confirmation
     evolution = payload.get("evolution") or {}
     if not str(evolution.get("hypothesis", "")).strip():
         raise ValueError("evolution hypothesis is required")

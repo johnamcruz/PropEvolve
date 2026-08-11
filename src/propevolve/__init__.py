@@ -12,6 +12,7 @@ from .evolution import (
 )
 from .observation import AccountState, ObservationAssembler
 from .environment import PropChallengeAccount
+from .sealed_confirmation import evaluate_sealed_confirmation
 
 __all__ = [
     "AccountState",
@@ -27,4 +28,5 @@ __all__ = [
     "PositionSide",
     "PropChallengeAccount",
     "RevisionPolicy",
+    "evaluate_sealed_confirmation",
 ]
