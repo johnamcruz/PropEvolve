@@ -153,43 +153,122 @@ checkpoints/chronos2_mask_full/adapter_model.safetensors
 sha256 a5d31166f7cd36b3eb7f7d1242dd07d65c3eddda94d8c478e77a2e11307c1104
 ```
 
-Create or refresh the local links without copying assets:
+## Local setup and Mask cache generation
 
-```bash
-propevolve setup-assets \
-  --market-data "/path/to/ohlcv/data" \
-  --checkpoint "/path/to/chronos2_mask_full" \
-  --embedding-cache "/path/to/ffm/representation_cache"
+PropEvolve does not redistribute market data. Supply one UTC, bar-open OHLCV
+CSV per market using this layout:
+
+```text
+/path/to/ohlcv/data/
+├── NQ_3min.csv
+├── ES_3min.csv
+├── GC_3min.csv
+├── RTY_3min.csv
+├── YM_3min.csv
+├── CL_3min.csv
+├── SI_3min.csv
+├── ZB_3min.csv
+└── ZN_3min.csv
 ```
 
-## Running the historical POC
+Every CSV must contain ordered, unique `datetime`, `open`, `high`, `low`,
+`close`, and `volume` columns. `datetime` must be parseable as UTC bar-open
+time. PropEvolve validates timestamps, OHLC geometry, volume, source hashes,
+and close-time availability before encoding.
 
-Install PropEvolve and its pinned FFM package integration:
+Clone PropEvolve and the public FFM repository, then install PropEvolve with
+the pinned FFM integration:
 
 ```bash
+git clone https://github.com/johnamcruz/PropEvolve.git
+git clone https://github.com/johnamcruz/Futures-Foundation-Model.git
+cd PropEvolve
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e '.[dev,ffm]'
 git config core.hooksPath .githooks
 ```
+
+The promoted public checkpoint is available in the FFM checkout at
+`checkpoints/chronos2_mask_full`. Register local assets using generic paths;
+the command creates symbolic links and an ignored, hash-authenticated
+`config/local-assets.json` rather than copying large files:
+
+```bash
+propevolve setup-assets \
+  --workspace . \
+  --market-data "/path/to/ohlcv/data" \
+  --checkpoint "/path/to/Futures-Foundation-Model/checkpoints/chronos2_mask_full"
+```
+
+There are two supported cache paths.
+
+### First-time native generation
+
+Copy the active recipe to a local working recipe, do not commit that local
+copy, and set `cache.format` to `native`. Keep the checkpoint, context length,
+stride, temporal boundary, and all other recipe fields unchanged. Then
+validate the recipe and build one market as a quick integrity check:
+
+```bash
+cp config/historical_mask_expansion_entry_search_curriculum_v7.json \
+  config/local-experiment.json
+# Edit config/local-experiment.json: set cache.format to "native".
+
+propevolve validate-config --config config/local-experiment.json
+propevolve build-cache \
+  --config config/local-experiment.json \
+  --ticker NQ
+```
+
+After the NQ build succeeds, generate the remaining declared markets. Existing
+exact-identity caches are reported as `HIT` and are not rebuilt:
+
+```bash
+propevolve build-cache --config config/local-experiment.json
+```
+
+Native generation loads OHLCV through the installed FFM package and encodes it
+with the promoted Chronos2 Mask checkpoint. The cache contains only causal
+completed-bar embeddings strictly before the recipe's sealed boundary.
+
+### Import an existing authenticated FFM cache
+
+If an FFM representation cache already exists, register it during setup:
+
+```bash
+propevolve setup-assets \
+  --workspace . \
+  --market-data "/path/to/ohlcv/data" \
+  --checkpoint "/path/to/Futures-Foundation-Model/checkpoints/chronos2_mask_full" \
+  --embedding-cache "/path/to/ffm/representation_cache"
+```
+
+Keep `cache.format` as `ffm_frozen_representation_v2`, validate, and import:
+
+```bash
+propevolve validate-config \
+  --config config/historical_mask_expansion_entry_search_curriculum_v7.json
+propevolve build-cache \
+  --config config/historical_mask_expansion_entry_search_curriculum_v7.json
+```
+
+This path authenticates the FFM checkpoint, source rows, row map, embedding
+array, encoder identity, context length, stride, and pre-2026 boundary. It
+symlinks the large embedding array instead of duplicating it.
+
+Both paths write per-market manifests beneath the configured `cache_root`.
+Cache reuse is allowed only when every authenticated identity matches; a stale,
+partial, boundary-crossing, or differently encoded cache fails closed.
+
+## Running the historical POC
 
 The tracked pre-commit hook runs the complete unit-test suite and blocks the
 commit if any test fails. It uses `.venv/bin/python` when available; set
 `PROPEVOLVE_PYTHON` to an explicit interpreter when the environment lives
 elsewhere.
-
-Validate the current curriculum contract:
-
-```bash
-propevolve validate-config \
-  --config config/historical_mask_expansion_teacher_curriculum_v6.json
-```
-
-Import the declared authenticated cache without copying its embedding arrays,
-or build the nine frozen embeddings when the recipe selects native mode:
-
-```bash
-propevolve build-cache \
-  --config config/historical_mask_expansion_teacher_curriculum_v6.json
-```
 
 Build the authenticated, training-only Expansion teacher targets if they are
 not already present:
@@ -203,8 +282,8 @@ Then start or resume the complete reasoning-guided curriculum:
 
 ```bash
 propevolve evolve \
-  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
-  --run-id expansion-curriculum-v6r1
+  --config config/historical_mask_expansion_entry_search_curriculum_v7.json \
+  --run-id expansion-entry-curriculum-v7r1
 ```
 
 The development recipe trains on 2021–2024 and uses 2025 for selection. After
