@@ -73,6 +73,15 @@ def test_n_step_return_is_explicit_and_must_fit_replay_sequence(
         load_experiment_config(path)
 
 
+def test_v8e_recipe_really_uses_the_declared_eight_step_return() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_n_step_td_v8e.json"
+    )
+
+    assert config["agent"]["n_step_return"] == 8
+    assert "agent.n_step_return" in config["evolution"]["frozen_paths"]
+
+
 def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:
     source = Path("config/historical_mask_expansion_regime_curriculum_v8.json")
     payload = json.loads(source.read_text())

@@ -369,6 +369,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     diagnostics = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
     assert diagnostics
     assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
+    assert diagnostics[-1]["n_step_return"] == 1
     summary_path = tmp_path / "run" / "training-diagnostic-summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["schema"] == "propevolve_training_diagnostic_summary_v1"

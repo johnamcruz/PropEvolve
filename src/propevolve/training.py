@@ -1749,6 +1749,7 @@ def train_agent(
                 "teacher_guidance_dropout_probability": (
                     teacher_guidance_dropout_probability
                 ),
+                "n_step_return": int(getattr(agent, "n_step_return", 1)),
                 "updates": len(episode_losses),
                 "mean_training_loss": (
                     float(np.mean(episode_losses)) if episode_losses else None

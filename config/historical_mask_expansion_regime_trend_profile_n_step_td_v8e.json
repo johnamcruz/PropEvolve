@@ -164,6 +164,7 @@
     "value_min": -3,
     "value_max": 3,
     "gamma": 0.997,
+    "n_step_return": 8,
     "learning_rate": 0.0001,
     "weight_decay": 1e-05,
     "gradient_clip": 10,
@@ -255,6 +256,7 @@
       "challenge.ratchet_lock_floor_r"
     ],
     "frozen_paths": [
+      "agent.n_step_return",
       "runtime",
       "training.prefetch_batches",
       "assets",
@@ -682,6 +684,5 @@
   },
   "output": "runs/historical_mask_expansion_regime_trend_profile_n_step_td_v8e"
 }
-
 
 
