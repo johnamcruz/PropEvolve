@@ -412,12 +412,13 @@ student’s deployed observation, their influence decays during training, and th
 final teacher-free student must earn temporal OOS economic lift.
 
 `teachers/` owns the common teacher manifest and separate `expansion/`,
-`regime/`, and `trend/` adapters. Expansion and Regime currently contain
+`regime/`, and `trend/` adapters. Expansion, Regime, and Trend contain
 authenticated nine-market, 3-minute checkpoints matching PropEvolve's imported
-Chronos2 Mask caches; Trend is reserved for the queued teacher. No Pivot teacher
-is currently approved. Every target cache must be regenerated from its declared
-checkpoint for all nine markets before a teacher experiment is enabled;
-unrelated or merely timestamp-compatible score buses are rejected.
+Chronos2 Mask caches. Trend contributes separate Long/Short launch likelihood
+and conditional-quality confluence; it is never a trading signal or hard gate.
+No Pivot teacher is currently approved. Every target cache must be regenerated
+from its declared checkpoint for all nine markets before a teacher experiment
+is enabled; unrelated or merely timestamp-compatible score buses are rejected.
 
 After the matched baseline completes, generate the training-only Expansion
 teacher caches with the existing Mask embeddings:
@@ -428,6 +429,9 @@ propevolve build-expansion-teacher-cache \
 
 propevolve build-regime-teacher-cache \
   --config config/regime_teacher_cache_v1.json
+
+propevolve build-trend-teacher-cache \
+  --config config/trend_teacher_cache_v1.json
 ```
 
 The builder loads the model once on MPS, scores one ticker at a time, starts at

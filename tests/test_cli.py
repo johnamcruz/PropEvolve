@@ -8,6 +8,7 @@ from ml_training_loop.stores import JsonRunStore
 import propevolve.orchestration
 import propevolve.teachers.expansion
 import propevolve.teachers.regime
+import propevolve.teachers.trend
 from propevolve.cli import main
 
 
@@ -157,3 +158,26 @@ def test_regime_teacher_cache_command_dispatches_requested_tickers(
 
     assert result == 0
     assert calls == [("config/regime_teacher_cache_v1.json", ("NQ", "ES"))]
+
+
+def test_trend_teacher_cache_command_dispatches_requested_tickers(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        propevolve.teachers.trend,
+        "build_trend_teacher_caches",
+        lambda config, *, requested_tickers: calls.append(
+            (config, requested_tickers)
+        ),
+    )
+
+    result = main([
+        "build-trend-teacher-cache",
+        "--config", "config/trend_teacher_cache_v1.json",
+        "--ticker", "NQ",
+        "--ticker", "ES",
+    ])
+
+    assert result == 0
+    assert calls == [("config/trend_teacher_cache_v1.json", ("NQ", "ES"))]

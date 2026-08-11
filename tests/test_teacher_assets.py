@@ -43,3 +43,27 @@ def test_only_verified_matching_expansion_teacher_is_packaged() -> None:
     assert set(expansion["universe"]) == {
         "CL", "ES", "GC", "NQ", "RTY", "SI", "YM", "ZB", "ZN"
     }
+
+
+def test_verified_matching_trend_teacher_is_packaged() -> None:
+    root = Path("teachers")
+    manifest = json.loads((root / "manifest.json").read_text())
+    trend = manifest["trend"]
+    checkpoint = root / trend["checkpoint"]
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+
+    assert _sha256(checkpoint) == trend["checkpoint_sha256"]
+    assert payload["schema"] == trend["artifact_schema"]
+    assert payload["model_metadata"]["schema"] == trend["model_schema"]
+    assert payload["lineage"]["encoder_identity_sha256"] == (
+        trend["encoder_identity_sha256"]
+    )
+    assert set(payload["lineage"]["cache_sha256s"]) == set(
+        trend["cache_sha256s"].values()
+    )
+    assert tuple(trend["channels"]) == (
+        "long_launch_probability",
+        "short_launch_probability",
+        "long_conditional_quality",
+        "short_conditional_quality",
+    )

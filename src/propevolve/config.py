@@ -269,6 +269,7 @@ def load_experiment_config(path: str | Path) -> dict:
     if teachers is not None:
         from .teachers.expansion import CHANNELS as EXPANSION_CHANNELS
         from .teachers.regime import CHANNELS as REGIME_CHANNELS
+        from .teachers.trend import CHANNELS as TREND_CHANNELS
 
         if (
             not isinstance(teachers, list)
@@ -280,6 +281,7 @@ def load_experiment_config(path: str | Path) -> dict:
         expected_channels = {
             "expansion": EXPANSION_CHANNELS,
             "regime": REGIME_CHANNELS,
+            "trend": TREND_CHANNELS,
         }
         for index, item in enumerate(teachers):
             if not isinstance(item, dict):
@@ -298,7 +300,7 @@ def load_experiment_config(path: str | Path) -> dict:
                 or (kind != "expansion" and float(item["entry_search_loss_weight"]) != 0)
                 or not str(item.get("cache_root", "")).strip()
             ):
-                label = "Expansion" if kind == "expansion" else "Regime"
+                label = str(kind).title()
                 raise ValueError(f"training-only {label} teacher contract is invalid")
             if float(item["entry_search_loss_weight"]) > 0 and index != 0:
                 raise ValueError("entry-guiding Expansion teacher must be first")

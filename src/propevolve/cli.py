@@ -38,6 +38,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     regime_teacher.add_argument("--config", required=True)
     regime_teacher.add_argument("--ticker", action="append")
+    trend_teacher = subparsers.add_parser(
+        "build-trend-teacher-cache",
+        help="score the verified Trend teacher over existing Mask caches",
+    )
+    trend_teacher.add_argument("--config", required=True)
+    trend_teacher.add_argument("--ticker", action="append")
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
     benchmark = subparsers.add_parser(
@@ -185,6 +191,19 @@ def _build_regime_teacher_caches(
     return 0
 
 
+def _build_trend_teacher_caches(
+    config_path: str,
+    requested_tickers: Sequence[str],
+) -> int:
+    from .teachers.trend import build_trend_teacher_caches
+
+    build_trend_teacher_caches(
+        config_path,
+        requested_tickers=tuple(requested_tickers),
+    )
+    return 0
+
+
 def _utc_isoformat(value: str) -> str:
     from datetime import datetime, timezone
 
@@ -274,6 +293,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "build-regime-teacher-cache":
         return _build_regime_teacher_caches(
+            args.config,
+            tuple(args.ticker or ()),
+        )
+    if args.command == "build-trend-teacher-cache":
+        return _build_trend_teacher_caches(
             args.config,
             tuple(args.ticker or ()),
         )

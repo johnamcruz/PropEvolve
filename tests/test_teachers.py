@@ -25,14 +25,19 @@ def test_combined_teacher_targets_preserve_declared_channel_order() -> None:
         TeacherTargetSource("regime", ("trend", "chop"), _Targets(
             np.array([0.7, 0.3], np.float32)
         ), loss_weight=0.1, entry_search_loss_weight=0.0),
+        TeacherTargetSource("trend", ("long_launch", "short_launch"), _Targets(
+            np.array([0.6, 0.4], np.float32)
+        ), loss_weight=0.1, entry_search_loss_weight=0.0),
     ))
 
     np.testing.assert_array_equal(
         targets.target("NQ", 7),
-        np.array([0.8, 0.2, 0.7, 0.3], np.float32),
+        np.array([0.8, 0.2, 0.7, 0.3, 0.6, 0.4], np.float32),
     )
-    assert targets.channels == ("long", "short", "trend", "chop")
-    assert targets.channel_loss_weights == (0.1, 0.1, 0.05, 0.05)
+    assert targets.channels == (
+        "long", "short", "trend", "chop", "long_launch", "short_launch"
+    )
+    assert targets.channel_loss_weights == (0.1, 0.1, 0.05, 0.05, 0.05, 0.05)
     assert targets.entry_search_loss_weight == 0.3
 
 

@@ -8,12 +8,14 @@ from .composition import (
 )
 from .expansion import ExpansionTeacher
 from .regime import RegimeTeacher
+from .trend import TrendTeacher
 
 __all__ = [
     "BaseTeacher",
     "CombinedTeacherTargets",
     "ExpansionTeacher",
     "RegimeTeacher",
+    "TrendTeacher",
     "TeacherTargetSource",
     "load_teacher_targets",
 ]

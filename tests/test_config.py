@@ -220,7 +220,7 @@ def test_expansion_entry_search_recipe_is_training_only_and_matched() -> None:
     assert config["output"].endswith("historical_mask_expansion_entry_search_curriculum_v7")
 
 
-def test_config_accepts_expansion_and_regime_as_frozen_training_only_teachers(
+def test_config_accepts_three_frozen_training_only_teachers(
     tmp_path: Path,
 ) -> None:
     payload = json.loads(Path(
@@ -255,6 +255,18 @@ def test_config_accepts_expansion_and_regime_as_frozen_training_only_teachers(
             "loss_weight": 0.1,
             "entry_search_loss_weight": 0.0,
         },
+        {
+            "kind": "trend",
+            "cache_root": "cache/trend_teacher_9market_3min_pre2025_v1",
+            "channels": [
+                "long_launch_probability",
+                "short_launch_probability",
+                "long_conditional_quality",
+                "short_conditional_quality",
+            ],
+            "loss_weight": 0.1,
+            "entry_search_loss_weight": 0.0,
+        },
     ]
     payload["evolution"]["frozen_paths"].remove("teacher")
     payload["evolution"]["frozen_paths"].append("teachers")
@@ -264,7 +276,7 @@ def test_config_accepts_expansion_and_regime_as_frozen_training_only_teachers(
     config = load_experiment_config(path)
 
     assert [teacher["kind"] for teacher in config["teachers"]] == [
-        "expansion", "regime"
+        "expansion", "regime", "trend"
     ]
     assert config.get("teacher") is None
 
@@ -284,6 +296,23 @@ def test_expansion_regime_curriculum_is_teacher_free_at_selection() -> None:
     ]
     assert config["teachers"][0]["entry_search_loss_weight"] == 0.3
     assert config["teachers"][1]["entry_search_loss_weight"] == 0.0
+    assert "teachers" in config["evolution"]["frozen_paths"]
+    assert config["sealed_confirmation"]["teacher_free"] is True
+
+
+def test_expansion_regime_trend_curriculum_is_teacher_free_at_selection() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_curriculum_v9.json"
+    )
+
+    assert [teacher["kind"] for teacher in config["teachers"]] == [
+        "expansion", "regime", "trend"
+    ]
+    assert config["teachers"][0]["entry_search_loss_weight"] == 0.3
+    assert all(
+        teacher["entry_search_loss_weight"] == 0.0
+        for teacher in config["teachers"][1:]
+    )
     assert "teachers" in config["evolution"]["frozen_paths"]
     assert config["sealed_confirmation"]["teacher_free"] is True
 
