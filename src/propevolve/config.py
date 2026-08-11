@@ -4,7 +4,44 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import os
 from pathlib import Path
+
+
+DEFAULT_RUNTIME = {
+    "mixed_precision": "off",
+    "compile_model": False,
+    "compile_backend": "inductor",
+    "compile_mode": "default",
+    "mps_prefer_metal": False,
+    "mps_fast_math": False,
+    "benchmark_max_relative_loss_drift": 0.05,
+}
+AGENT_RUNTIME_FIELDS = (
+    "mixed_precision",
+    "compile_model",
+    "compile_backend",
+    "compile_mode",
+    "mps_prefer_metal",
+    "mps_fast_math",
+)
+
+
+def agent_runtime_settings(runtime: dict) -> dict:
+    """Project the serialized runtime contract onto agent constructor fields."""
+    return {field: runtime[field] for field in AGENT_RUNTIME_FIELDS}
+
+
+def configure_runtime_environment(runtime: dict) -> dict[str, str]:
+    """Set process-wide MPS flags before torch or MPS initialization."""
+    environment = {
+        "PYTORCH_MPS_PREFER_METAL": (
+            "1" if bool(runtime["mps_prefer_metal"]) else "0"
+        ),
+        "PYTORCH_MPS_FAST_MATH": "1" if bool(runtime["mps_fast_math"]) else "0",
+    }
+    os.environ.update(environment)
+    return environment
 
 
 REQUIRED_RECIPE_FIELDS = {
@@ -44,6 +81,15 @@ REQUIRED_RECIPE_FIELDS = {
         "target_sync_updates",
         "device",
     },
+    "runtime": {
+        "mixed_precision",
+        "compile_model",
+        "compile_backend",
+        "compile_mode",
+        "mps_prefer_metal",
+        "mps_fast_math",
+        "benchmark_max_relative_loss_drift",
+    },
     "training": {
         "episodes",
         "minimum_environment_steps",
@@ -59,6 +105,7 @@ REQUIRED_RECIPE_FIELDS = {
         "epsilon_end",
         "seed",
         "checkpoint_every_episodes",
+        "prefetch_batches",
     },
 }
 
@@ -78,6 +125,11 @@ def load_experiment_config(path: str | Path) -> dict:
     payload = json.loads(path.read_text())
     if payload.get("schema") != "propevolve_historical_training_v1":
         raise ValueError("unsupported PropEvolve experiment schema")
+    # Schema-v1 recipes created before runtime tuning preserve their original
+    # eager FP32 behavior. Current repository recipes serialize these fields.
+    payload.setdefault("runtime", dict(DEFAULT_RUNTIME))
+    if isinstance(payload.get("training"), dict):
+        payload["training"].setdefault("prefetch_batches", 0)
     _require_recipe_fields(payload)
     if "timeframe_minutes" not in payload:
         raise ValueError("timeframe_minutes recipe field is required")
@@ -144,12 +196,39 @@ def load_experiment_config(path: str | Path) -> dict:
     agent = payload["agent"]
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
+    runtime = payload["runtime"]
+    if runtime["mixed_precision"] not in {"off", "fp16"}:
+        raise ValueError("runtime mixed precision must be off or fp16")
+    if not isinstance(runtime["compile_model"], bool):
+        raise ValueError("runtime compile_model must be boolean")
+    if not isinstance(runtime["mps_prefer_metal"], bool):
+        raise ValueError("runtime mps_prefer_metal must be boolean")
+    if not isinstance(runtime["mps_fast_math"], bool):
+        raise ValueError("runtime mps_fast_math must be boolean")
+    if not str(runtime["compile_backend"]).strip():
+        raise ValueError("runtime compile backend is required")
+    if not str(runtime["compile_mode"]).strip():
+        raise ValueError("runtime compile mode is required")
+    if (
+        isinstance(runtime["benchmark_max_relative_loss_drift"], bool)
+        or not isinstance(
+            runtime["benchmark_max_relative_loss_drift"], (int, float)
+        )
+        or not 0 <= float(runtime["benchmark_max_relative_loss_drift"]) <= 1
+    ):
+        raise ValueError("runtime benchmark loss drift must be between zero and one")
     training = payload["training"]
     training.setdefault("terminal_sequence_fraction", 0.0)
     training.setdefault("safety_sequence_fraction", 0.0)
     training.setdefault("entry_opportunity_sequence_fraction", 0.0)
     training.setdefault("management_epsilon_start", training["epsilon_start"])
     training.setdefault("management_epsilon_end", training["epsilon_end"])
+    if (
+        isinstance(training["prefetch_batches"], bool)
+        or not isinstance(training["prefetch_batches"], int)
+        or not 0 <= training["prefetch_batches"] <= 2
+    ):
+        raise ValueError("training replay prefetch must be between zero and two")
     if (
         isinstance(training["replay_capacity_transitions"], bool)
         or int(training["replay_capacity_transitions"])

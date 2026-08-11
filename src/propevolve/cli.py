@@ -40,6 +40,15 @@ def _parser() -> argparse.ArgumentParser:
     regime_teacher.add_argument("--ticker", action="append")
     train = subparsers.add_parser("train", help="train and validate historical challenger")
     train.add_argument("--config", required=True)
+    benchmark = subparsers.add_parser(
+        "benchmark-runtime",
+        help="compare eager FP32, FP16, Metal matmul, and torch.compile updates",
+    )
+    benchmark.add_argument("--config", required=True)
+    benchmark.add_argument("--observation-dim", type=int)
+    benchmark.add_argument("--warmup-updates", type=int, default=5)
+    benchmark.add_argument("--measured-updates", type=int, default=20)
+    benchmark.add_argument("--output")
     evolve = subparsers.add_parser(
         "evolve", help="run or resume reasoning-guided offline evolution"
     )
@@ -277,6 +286,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _build_caches(config)
     if args.command == "train":
         return _train(config)
+    if args.command == "benchmark-runtime":
+        from .runtime_benchmark import run_benchmark
+
+        payload = run_benchmark(
+            args.config,
+            observation_dim=args.observation_dim,
+            warmup_updates=args.warmup_updates,
+            measured_updates=args.measured_updates,
+        )
+        rendered = json.dumps(payload, indent=2, sort_keys=True)
+        if args.output:
+            output = Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered + "\n")
+        print(rendered, flush=True)
+        return 0
     if args.command == "evolve":
         return _evolve(
             args.config,

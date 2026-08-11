@@ -106,7 +106,17 @@
     "target_sync_updates": 250,
     "device": "mps"
   },
+  "runtime": {
+    "mixed_precision": "off",
+    "compile_model": false,
+    "compile_backend": "inductor",
+    "compile_mode": "default",
+    "mps_prefer_metal": false,
+    "mps_fast_math": false,
+    "benchmark_max_relative_loss_drift": 0.05
+  },
   "training": {
+    "prefetch_batches": 0,
     "episodes": 10000,
     "minimum_environment_steps": 5000000,
     "validation_episodes": 200,
@@ -160,6 +170,8 @@
       "training.terminal_sequence_fraction"
     ],
     "frozen_paths": [
+      "runtime",
+      "training.prefetch_batches",
       "assets",
       "tickers",
       "deployment_tickers",

@@ -97,6 +97,27 @@ CPU; batched network updates, recurrent inference, target-network updates, and
 checkpoint resume are MPS-compatible. An explicitly requested unavailable
 accelerator fails immediately; only `auto` may fall back to the next device.
 
+Runtime acceleration is evidence-gated rather than assumed. The JSON `runtime`
+section controls mixed precision, Metal matmul, and optional `torch.compile`;
+C51 projection and loss math remain FP32. Compare the exact four matched arms
+before changing a training recipe:
+
+```bash
+propevolve benchmark-runtime \
+  --config config/historical_mask_expansion_regime_curriculum_v8.json \
+  --warmup-updates 5 \
+  --measured-updates 20 \
+  --output runs/runtime-benchmark.json
+```
+
+The benchmark runs eager FP32, FP16 autocast, FP16 plus Metal matmul, and FP16
+plus `torch.compile` in separate processes. This ensures the Metal environment
+switch is applied before MPS initializes. Compilation falls back to eager
+execution if graph lowering is unsupported. Training runtime settings stay
+frozen during a reasoning campaign. An arm is eligible only when its final
+matched-update loss stays within the JSON-declared relative drift tolerance;
+a compile arm that fell back to eager is reported but is not eligible.
+
 The experiment JSON is the complete serialized recipe. Cache dimensions,
 challenge economics, risk and reward behavior, action size, C51 support,
 optimizer, target synchronization, replay, exploration, temporal splits, and

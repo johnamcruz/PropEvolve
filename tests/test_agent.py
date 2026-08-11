@@ -50,6 +50,74 @@ def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
     assert resolve_device("auto").type == "cpu"
 
 
+def test_compilation_failure_falls_back_to_eager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("compiler unavailable")
+
+    monkeypatch.setattr(torch, "compile", unavailable)
+    agent = _agent(
+        4,
+        compile_model=True,
+        compile_backend="inductor",
+        compile_mode="default",
+    )
+
+    assert agent.compile_status == "fallback_eager"
+    assert "compiler unavailable" in agent.compile_error
+
+
+def test_lazy_compilation_failure_retries_the_update_eagerly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def compile_lazily(*args, **kwargs):
+        def fail_when_called(*call_args, **call_kwargs):
+            raise RuntimeError("lowering failed")
+
+        return fail_when_called
+
+    monkeypatch.setattr(torch, "compile", compile_lazily)
+    agent = _agent(4, compile_model=True)
+
+    selected, _, _ = agent.select_action(
+        np.zeros(4, np.float32),
+        hidden=None,
+        valid_actions=(Action.WAIT,),
+        epsilon=0.0,
+    )
+
+    assert selected == Action.WAIT
+    assert agent.compile_status == "fallback_eager"
+    assert "lowering failed" in agent.compile_error
+
+
+def test_fp16_runtime_rejects_cpu_instead_of_silently_changing_precision() -> None:
+    with pytest.raises(ValueError, match="mixed precision"):
+        _agent(4, mixed_precision="fp16")
+
+
+def test_mps_runtime_flags_are_applied_before_training(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.delenv("PYTORCH_MPS_PREFER_METAL", raising=False)
+    monkeypatch.delenv("PYTORCH_MPS_FAST_MATH", raising=False)
+
+    agent = _agent(
+        4,
+        device="mps",
+        mps_prefer_metal=True,
+        mps_fast_math=False,
+    )
+
+    assert agent.device.type == "mps"
+    assert agent.runtime_environment == {
+        "PYTORCH_MPS_PREFER_METAL": "1",
+        "PYTORCH_MPS_FAST_MATH": "0",
+    }
+
+
 def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
     agent = _agent(4, seed=3)
     with torch.no_grad():

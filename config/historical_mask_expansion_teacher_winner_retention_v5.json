@@ -107,7 +107,17 @@
     "target_sync_updates": 250,
     "device": "mps"
   },
+  "runtime": {
+    "mixed_precision": "off",
+    "compile_model": false,
+    "compile_backend": "inductor",
+    "compile_mode": "default",
+    "mps_prefer_metal": false,
+    "mps_fast_math": false,
+    "benchmark_max_relative_loss_drift": 0.05
+  },
   "training": {
+    "prefetch_batches": 0,
     "episodes": 10000,
     "minimum_environment_steps": 1000000,
     "validation_episodes": 200,
@@ -166,6 +176,8 @@
       "challenge.ratchet_lock_floor_r"
     ],
     "frozen_paths": [
+      "runtime",
+      "training.prefetch_batches",
       "assets",
       "cache",
       "cache_root",

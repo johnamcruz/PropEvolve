@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -11,6 +12,7 @@ import torch
 from torch import nn
 
 from .decision import Action
+from .config import configure_runtime_environment
 from .replay import Transition
 
 
@@ -70,7 +72,13 @@ class RecurrentC51Network(nn.Module):
         observations: torch.Tensor,
         hidden: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.recurrent(self.input(observations), hidden)
+        encoded = self.input(observations)
+        recurrent_dtype = self.recurrent.weight_ih_l0.dtype
+        if encoded.dtype != recurrent_dtype:
+            encoded = encoded.to(recurrent_dtype)
+        if hidden is not None and hidden.dtype != recurrent_dtype:
+            hidden = hidden.to(recurrent_dtype)
+        return self.recurrent(encoded, hidden)
 
     def distribution_logits(self, recurrent: torch.Tensor) -> torch.Tensor:
         return self.output(recurrent).view(
@@ -108,6 +116,12 @@ class RecurrentC51Agent:
         teacher_loss_weight: float = 0.0,
         teacher_channel_loss_weights: Sequence[float] | None = None,
         teacher_entry_search_loss_weight: float = 0.0,
+        mixed_precision: str = "off",
+        compile_model: bool = False,
+        compile_backend: str = "inductor",
+        compile_mode: str = "default",
+        mps_prefer_metal: bool = False,
+        mps_fast_math: bool = False,
     ) -> None:
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
@@ -137,10 +151,26 @@ class RecurrentC51Agent:
             or (teacher_channels and not any(teacher_channel_loss_weights))
         ):
             raise ValueError("teacher channel loss weights are invalid")
+        if mixed_precision not in {"off", "fp16"}:
+            raise ValueError("mixed precision must be off or fp16")
         torch.manual_seed(seed)
         self.seed = int(seed)
         self._rng = np.random.default_rng(seed)
         self.device = resolve_device(device)
+        if mixed_precision == "fp16" and self.device.type not in {"mps", "cuda"}:
+            raise ValueError("fp16 mixed precision requires MPS or CUDA")
+        self.mixed_precision = mixed_precision
+        self.compile_model = bool(compile_model)
+        self.compile_backend = str(compile_backend)
+        self.compile_mode = str(compile_mode)
+        self.mps_prefer_metal = bool(mps_prefer_metal)
+        self.mps_fast_math = bool(mps_fast_math)
+        self.runtime_environment: dict[str, str] = {}
+        if self.device.type == "mps":
+            self.runtime_environment = configure_runtime_environment({
+                "mps_prefer_metal": self.mps_prefer_metal,
+                "mps_fast_math": self.mps_fast_math,
+            })
         self.observation_dim = int(observation_dim)
         self.hidden_dim = int(hidden_dim)
         self.atoms = int(atoms)
@@ -166,7 +196,60 @@ class RecurrentC51Agent:
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
+        self.scaler = torch.amp.GradScaler(
+            self.device.type,
+            enabled=self.mixed_precision == "fp16",
+        )
+        self.compile_status = "disabled"
+        self.compile_error = ""
+        self._configure_execution()
         self._updates = 0
+
+    def _configure_execution(self) -> None:
+        """Build optional compiled callables without changing module state keys."""
+        self._online_recurrent = self.online.recurrent_features
+        self._online_forward = self.online.forward
+        self._target_forward = self.target.forward
+        if not self.compile_model:
+            return
+        try:
+            self._online_recurrent = torch.compile(
+                self.online.recurrent_features,
+                backend=self.compile_backend,
+                mode=self.compile_mode,
+            )
+            self._online_forward = torch.compile(
+                self.online.forward,
+                backend=self.compile_backend,
+                mode=self.compile_mode,
+            )
+            self._target_forward = torch.compile(
+                self.target.forward,
+                backend=self.compile_backend,
+                mode=self.compile_mode,
+            )
+            self.compile_status = "compiled"
+        except Exception as error:  # torch.compile availability varies by platform.
+            self.compile_status = "fallback_eager"
+            self.compile_error = f"{type(error).__name__}: {error}"
+
+    def _autocast(self):
+        if self.mixed_precision == "off":
+            return nullcontext()
+        return torch.autocast(device_type=self.device.type, dtype=torch.float16)
+
+    def _call_with_compile_fallback(self, compiled, eager, *args):
+        if self.compile_status != "compiled":
+            return eager(*args)
+        try:
+            return compiled(*args)
+        except Exception as error:  # Lazy graph lowering can fail on MPS.
+            self.compile_status = "fallback_eager"
+            self.compile_error = f"{type(error).__name__}: {error}"
+            self._online_recurrent = self.online.recurrent_features
+            self._online_forward = self.online.forward
+            self._target_forward = self.target.forward
+            return eager(*args)
 
     def select_action(
         self,
@@ -183,15 +266,21 @@ class RecurrentC51Agent:
             selected = valid_actions[int(self._rng.integers(len(valid_actions)))]
             with torch.no_grad():
                 value = torch.as_tensor(observation, device=self.device).view(1, 1, -1)
-                _, next_hidden = self.online(value, hidden)
+                with self._autocast():
+                    _, next_hidden = self._call_with_compile_fallback(
+                        self._online_forward, self.online.forward, value, hidden
+                    )
             values = np.full(len(Action), np.nan) if return_action_values else None
             return selected, next_hidden.detach(), values
         with torch.no_grad():
             value = torch.as_tensor(
                 observation, dtype=torch.float32, device=self.device
             ).view(1, 1, -1)
-            logits, next_hidden = self.online(value, hidden)
-            q_values = (logits.softmax(-1) * self.support).sum(-1)[0, 0]
+            with self._autocast():
+                logits, next_hidden = self._call_with_compile_fallback(
+                    self._online_forward, self.online.forward, value, hidden
+                )
+            q_values = (logits.float().softmax(-1) * self.support).sum(-1)[0, 0]
             valid = torch.zeros(len(Action), dtype=torch.bool, device=self.device)
             valid[[int(action) for action in valid_actions]] = True
             q_values = q_values.masked_fill(~valid, -torch.inf)
@@ -239,19 +328,36 @@ class RecurrentC51Agent:
             device=self.device,
         )
 
-        recurrent, _ = self.online.recurrent_features(observations)
-        logits = self.online.distribution_logits(recurrent)
+        with self._autocast():
+            recurrent, _ = self._call_with_compile_fallback(
+                self._online_recurrent,
+                self.online.recurrent_features,
+                observations,
+            )
+            logits = self.online.distribution_logits(recurrent)
+        logits = logits.float()
         chosen_logits = logits.gather(
             2,
             actions[..., None, None].expand(-1, -1, 1, self.atoms),
         ).squeeze(2)
         with torch.no_grad():
-            online_next, _ = self.online(next_observations)
-            online_q = (online_next.softmax(-1) * self.support).sum(-1)
+            with self._autocast():
+                online_next, _ = self._call_with_compile_fallback(
+                    self._online_forward,
+                    self.online.forward,
+                    next_observations,
+                    None,
+                )
+                target_next, _ = self._call_with_compile_fallback(
+                    self._target_forward,
+                    self.target.forward,
+                    next_observations,
+                    None,
+                )
+            online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
-            target_next, _ = self.target(next_observations)
-            target_distribution = target_next.softmax(-1).gather(
+            target_distribution = target_next.float().softmax(-1).gather(
                 2,
                 next_actions[..., None, None].expand(-1, -1, 1, self.atoms),
             ).squeeze(2)
@@ -260,8 +366,8 @@ class RecurrentC51Agent:
             )
         rl_loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
         loss = rl_loss
-        teacher_loss_value = 0.0
-        entry_search_loss_value = 0.0
+        teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         if self.teacher_channels:
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
@@ -277,15 +383,17 @@ class RecurrentC51Agent:
                         if target.shape != (self.teacher_channels,):
                             raise ValueError("teacher target width drifted")
                         teacher_targets[batch_index, time_index] = target
+            teacher_rows_numpy = np.isfinite(teacher_targets).all(axis=-1)
             teacher_targets_tensor = torch.as_tensor(
                 teacher_targets, dtype=torch.float32, device=self.device
             )
-            teacher_rows = torch.isfinite(teacher_targets_tensor).all(dim=-1)
-            if teacher_rows.any():
+            teacher_rows = torch.as_tensor(teacher_rows_numpy, device=self.device)
+            if teacher_rows_numpy.any():
                 assert self.online.teacher_output is not None
-                teacher_logits = self.online.teacher_output(recurrent)
+                with self._autocast():
+                    teacher_logits = self.online.teacher_output(recurrent)
                 teacher_losses = nn.functional.binary_cross_entropy_with_logits(
-                    teacher_logits[teacher_rows],
+                    teacher_logits.float()[teacher_rows],
                     teacher_targets_tensor[teacher_rows],
                     reduction="none",
                 )
@@ -295,24 +403,25 @@ class RecurrentC51Agent:
                     device=self.device,
                 )
                 teacher_loss = (teacher_losses * channel_weights).sum(dim=-1).mean()
-                teacher_loss_value = float(teacher_loss.detach().cpu())
                 loss = loss + teacher_loss
                 if self.teacher_entry_search_loss_weight:
-                    valid_masks = torch.as_tensor(
+                    valid_masks_numpy = np.asarray(
                         [[
                             [action in item.valid_actions for action in Action]
                             for item in sequence
                         ] for sequence in sequences],
-                        dtype=torch.bool,
-                        device=self.device,
+                        dtype=np.bool_,
                     )
-                    entry_rows = (
-                        teacher_rows
-                        & valid_masks[..., int(Action.WAIT)]
-                        & valid_masks[..., int(Action.ENTER_LONG_1)]
-                        & valid_masks[..., int(Action.ENTER_SHORT_1)]
+                    entry_rows_numpy = (
+                        teacher_rows_numpy
+                        & valid_masks_numpy[..., int(Action.WAIT)]
+                        & valid_masks_numpy[..., int(Action.ENTER_LONG_1)]
+                        & valid_masks_numpy[..., int(Action.ENTER_SHORT_1)]
                     )
-                    if entry_rows.any():
+                    if entry_rows_numpy.any():
+                        entry_rows = torch.as_tensor(
+                            entry_rows_numpy, device=self.device
+                        )
                         q_values = (logits.softmax(-1) * self.support).sum(-1)
                         long_target = (
                             teacher_targets_tensor[..., 0]
@@ -338,23 +447,25 @@ class RecurrentC51Agent:
                                 short_advantage[entry_rows], short_target[entry_rows]
                             )
                         )
-                        entry_search_loss_value = float(
-                            entry_search_loss.detach().cpu()
-                        )
                         loss = loss + (
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
         self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
         nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=self.gradient_clip)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         self._updates += 1
         if self._updates % self.target_sync_updates == 0:
             self.target.load_state_dict(self.online.state_dict())
-        total_loss = float(loss.detach().cpu())
+        metrics = torch.stack((rl_loss, teacher_loss, entry_search_loss, loss))
+        rl_loss_value, teacher_loss_value, entry_search_loss_value, total_loss = (
+            float(value) for value in metrics.detach().float().cpu().tolist()
+        )
         self.last_train_metrics = {
-            "rl_loss": float(rl_loss.detach().cpu()),
+            "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
             "total_loss": total_loss,
@@ -388,6 +499,11 @@ class RecurrentC51Agent:
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
+        self.scaler = torch.amp.GradScaler(
+            self.device.type,
+            enabled=self.mixed_precision == "fp16",
+        )
+        self._configure_execution()
 
     def _project_distribution(
         self,
@@ -419,6 +535,7 @@ class RecurrentC51Agent:
             "online": self.online.state_dict(),
             "target": self.target.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scaler": self.scaler.state_dict(),
             "updates": self._updates,
             "rng_state": self._rng.bit_generator.state,
             "support": self.support.cpu(),
@@ -440,6 +557,12 @@ class RecurrentC51Agent:
                 "teacher_entry_search_loss_weight": (
                     self.teacher_entry_search_loss_weight
                 ),
+                "mixed_precision": self.mixed_precision,
+                "compile_model": self.compile_model,
+                "compile_backend": self.compile_backend,
+                "compile_mode": self.compile_mode,
+                "mps_prefer_metal": self.mps_prefer_metal,
+                "mps_fast_math": self.mps_fast_math,
             },
         }, path)
         return path
@@ -495,10 +618,18 @@ class RecurrentC51Agent:
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")
         config = dict(payload["config"])
+        config.setdefault("mixed_precision", "off")
+        config.setdefault("compile_model", False)
+        config.setdefault("compile_backend", "inductor")
+        config.setdefault("compile_mode", "default")
+        config.setdefault("mps_prefer_metal", False)
+        config.setdefault("mps_fast_math", False)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])
         agent.optimizer.load_state_dict(payload["optimizer"])
+        if "scaler" in payload:
+            agent.scaler.load_state_dict(payload["scaler"])
         agent._updates = int(payload["updates"])
         if "rng_state" in payload:
             agent._rng.bit_generator.state = payload["rng_state"]

@@ -5,7 +5,73 @@ from pathlib import Path
 
 import pytest
 
-from propevolve.config import load_experiment_config
+from propevolve.config import agent_runtime_settings, load_experiment_config
+
+
+def test_runtime_performance_contract_is_explicit_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_curriculum_v8.json"
+    ).read_text())
+    payload["runtime"] = {
+        "mixed_precision": "fp16",
+        "compile_model": True,
+        "compile_backend": "inductor",
+        "compile_mode": "default",
+        "mps_prefer_metal": True,
+        "mps_fast_math": False,
+        "benchmark_max_relative_loss_drift": 0.05,
+    }
+    payload["training"]["prefetch_batches"] = 1
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["runtime"]["mixed_precision"] == "fp16"
+    assert config["runtime"]["mps_prefer_metal"] is True
+    assert config["training"]["prefetch_batches"] == 1
+    assert set(agent_runtime_settings(config["runtime"])) == {
+        "mixed_precision",
+        "compile_model",
+        "compile_backend",
+        "compile_mode",
+        "mps_prefer_metal",
+        "mps_fast_math",
+    }
+
+    payload["runtime"]["mixed_precision"] = "fp8"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="mixed precision"):
+        load_experiment_config(path)
+
+    payload["runtime"]["mixed_precision"] = "fp16"
+    payload["training"]["prefetch_batches"] = 3
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="prefetch"):
+        load_experiment_config(path)
+
+
+def test_legacy_schema_v1_recipe_keeps_eager_fp32_runtime(tmp_path: Path) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload.pop("runtime")
+    payload["training"].pop("prefetch_batches")
+    path = tmp_path / "legacy-v1.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["runtime"] == {
+        "mixed_precision": "off",
+        "compile_model": False,
+        "compile_backend": "inductor",
+        "compile_mode": "default",
+        "mps_prefer_metal": False,
+        "mps_fast_math": False,
+        "benchmark_max_relative_loss_drift": 0.05,
+    }
+    assert config["training"]["prefetch_batches"] == 0
 
 
 def test_ratchet_experiment_recipe_is_complete_and_frozen() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -16,6 +18,11 @@ import numpy as np
 
 from .assets import AssetContract
 from .cache import load_market_series
+from .config import (
+    DEFAULT_RUNTIME,
+    agent_runtime_settings,
+    configure_runtime_environment,
+)
 from .decision import Action
 from .environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
 from .evolution import (
@@ -309,6 +316,7 @@ class HistoricalCandidateRunner:
         parent_candidate_ids: tuple[str, ...],
         hypothesis: str,
     ):
+        configure_runtime_environment(config.get("runtime", DEFAULT_RUNTIME))
         from .agent import RecurrentC51Agent
 
         root = Path(config["_root"])
@@ -383,6 +391,9 @@ class HistoricalCandidateRunner:
         )
         observation_dim = next(iter(train_markets.values())).embeddings.shape[1] + 12
         agent_settings = dict(config["agent"])
+        agent_settings.update(
+            agent_runtime_settings(config.get("runtime", DEFAULT_RUNTIME))
+        )
         if teacher_targets is not None:
             agent_settings.update(
                 teacher_channels=len(teacher_targets.channels),
@@ -472,6 +483,7 @@ class HistoricalCandidateRunner:
             warmup_episodes=int(training_config["warmup_episodes"]),
             updates_per_episode=int(training_config["updates_per_episode"]),
             batch_sequences=int(training_config["batch_sequences"]),
+            prefetch_batches=int(training_config.get("prefetch_batches", 0)),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
             epsilon_start=float(training_config["epsilon_start"]),
             epsilon_end=float(training_config["epsilon_end"]),
@@ -1017,6 +1029,7 @@ def train_agent(
     management_epsilon_end: float | None = None,
     episode_tickers: tuple[str, ...] | None,
     ticker_seed: int,
+    prefetch_batches: int = 0,
     resume: TrainingProgress | None = None,
     checkpoint_every_episodes: int = 0,
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
@@ -1026,6 +1039,8 @@ def train_agent(
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
+    if isinstance(prefetch_batches, bool) or not 0 <= prefetch_batches <= 2:
+        raise ValueError("replay prefetch must be between zero and two")
     management_epsilon_start = (
         epsilon_start
         if management_epsilon_start is None
@@ -1163,8 +1178,8 @@ def train_agent(
         episode_teacher_losses = []
         episode_entry_search_losses = []
         if len(replay) >= warmup_episodes:
-            for _ in range(updates_per_episode):
-                episode_losses.append(agent.train_batch(replay.sample(batch_sequences)))
+            def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
+                episode_losses.append(agent.train_batch(batch))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
                     episode_rl_losses.append(float(train_metrics["rl_loss"]))
@@ -1176,6 +1191,23 @@ def train_agent(
                     episode_entry_search_losses.append(
                         float(train_metrics["entry_search_loss"])
                     )
+
+            if prefetch_batches:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    pending: deque[Future] = deque()
+                    for _ in range(min(prefetch_batches, updates_per_episode)):
+                        pending.append(executor.submit(replay.sample, batch_sequences))
+                    for update_index in range(updates_per_episode):
+                        batch = pending.popleft().result()
+                        remaining = updates_per_episode - len(pending) - update_index - 1
+                        if remaining > 0:
+                            pending.append(
+                                executor.submit(replay.sample, batch_sequences)
+                            )
+                        train_replay_batch(batch)
+            else:
+                for _ in range(updates_per_episode):
+                    train_replay_batch(replay.sample(batch_sequences))
         progress = TrainingProgress(
             completed_episodes=episode_index + 1,
             environment_steps=progress.environment_steps + episode_steps,

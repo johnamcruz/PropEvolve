@@ -266,6 +266,14 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "target_sync_updates": 2,
             "device": "cpu",
         },
+        "runtime": {
+            "mixed_precision": "off",
+            "compile_model": False,
+            "compile_backend": "inductor",
+            "compile_mode": "default",
+            "mps_prefer_metal": False,
+            "mps_fast_math": False,
+        },
         "training": {
             "episodes": 2,
             "minimum_environment_steps": 2,
@@ -282,6 +290,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "epsilon_end": 0.0,
             "seed": 7,
             "checkpoint_every_episodes": 1,
+            "prefetch_batches": 0,
         },
     }
 
@@ -347,6 +356,7 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         epsilon_end=0.02,
         episode_tickers=None,
         ticker_seed=1,
+        prefetch_batches=1,
         episode_diagnostic_callback=diagnostics.append,
     )
 
