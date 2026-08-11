@@ -185,6 +185,67 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert not torch.equal(before, agent.online.output.weight.detach())
 
 
+def test_soft_target_update_moves_gradually_after_every_learner_update() -> None:
+    agent = _agent(
+        2,
+        seed=5,
+        target_update_mode="soft",
+        target_soft_tau=0.25,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([i, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.1 if i < 3 else 1.0,
+            next_observation=np.array([i + 1, 0], np.float32),
+            terminated=i == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        )
+        for i in range(4)
+    )
+    target_before = agent.target.output.weight.detach().clone()
+
+    agent.train_batch((sequence, sequence))
+
+    online_after = agent.online.output.weight.detach()
+    target_after = agent.target.output.weight.detach()
+    torch.testing.assert_close(
+        target_after,
+        target_before.lerp(online_after, 0.25),
+    )
+    assert not torch.equal(target_after, online_after)
+
+
+def test_hard_target_update_preserves_existing_interval_contract() -> None:
+    agent = _agent(
+        2,
+        seed=5,
+        target_sync_updates=1,
+        target_update_mode="hard",
+        target_soft_tau=1.0,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([i, 0], np.float32),
+            action=Action.WAIT,
+            reward=0.1 if i < 3 else 1.0,
+            next_observation=np.array([i + 1, 0], np.float32),
+            terminated=i == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        )
+        for i in range(4)
+    )
+
+    agent.train_batch((sequence, sequence))
+
+    torch.testing.assert_close(
+        agent.target.output.weight.detach(),
+        agent.online.output.weight.detach(),
+    )
+
+
 def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     tmp_path: Path,
 ) -> None:

@@ -489,6 +489,71 @@ def test_target_sync_challenger_changes_only_the_diagnosed_learning_boundary() -
     ]
 
 
+def test_config_accepts_explicit_soft_target_update(tmp_path: Path) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["agent"]["target_update_mode"] = "soft"
+    payload["agent"]["target_soft_tau"] = 0.005
+    path = tmp_path / "soft-target.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["agent"]["target_update_mode"] == "soft"
+    assert config["agent"]["target_soft_tau"] == 0.005
+
+
+@pytest.mark.parametrize(
+    ("mode", "tau"),
+    (("periodic", 0.005), ("soft", 0.0), ("soft", 1.1)),
+)
+def test_config_rejects_invalid_target_update_contract(
+    tmp_path: Path,
+    mode: str,
+    tau: float,
+) -> None:
+    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload["agent"]["target_update_mode"] = mode
+    payload["agent"]["target_soft_tau"] = tau
+    path = tmp_path / "invalid-target-update.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="target update"):
+        load_experiment_config(path)
+
+
+def test_soft_target_challenger_changes_only_target_update_mechanism() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_sync_v8b.json"
+    )
+    challenger = load_experiment_config(
+        "config/historical_mask_expansion_regime_trend_profile_soft_target_v8c.json"
+    )
+
+    for section in (
+        "cache",
+        "cache_root",
+        "teachers",
+        "observation",
+        "challenge",
+        "temporal",
+        "runtime",
+        "sealed_confirmation",
+        "training",
+    ):
+        assert challenger[section] == baseline[section]
+    assert challenger["agent"] == {
+        **baseline["agent"],
+        "target_update_mode": "soft",
+        "target_soft_tau": 0.005,
+    }
+    assert challenger["campaign"]["budget_stages"] == baseline["campaign"][
+        "budget_stages"
+    ]
+    assert challenger["campaign"]["selection_requirements"] == baseline[
+        "campaign"
+    ]["selection_requirements"]
+
+
 def test_expansion_entry_recipe_freezes_teacher_free_2026_confirmation() -> None:
     config = load_experiment_config(
         "config/historical_mask_expansion_entry_search_curriculum_v7.json"

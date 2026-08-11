@@ -110,6 +110,8 @@ class RecurrentC51Agent:
         weight_decay: float,
         gradient_clip: float,
         target_sync_updates: int,
+        target_update_mode: str = "hard",
+        target_soft_tau: float = 1.0,
         device: str,
         seed: int,
         teacher_channels: int = 0,
@@ -129,6 +131,13 @@ class RecurrentC51Agent:
             raise ValueError("optimizer settings are invalid")
         if target_sync_updates < 1:
             raise ValueError("target_sync_updates must be positive")
+        if (
+            target_update_mode not in {"hard", "soft"}
+            or isinstance(target_soft_tau, bool)
+            or not 0 < float(target_soft_tau) <= 1
+            or (target_update_mode == "hard" and float(target_soft_tau) != 1.0)
+        ):
+            raise ValueError("target update contract is invalid")
         if (
             teacher_channels < 0
             or teacher_loss_weight < 0
@@ -179,6 +188,8 @@ class RecurrentC51Agent:
         self.value_min = float(value_min)
         self.value_max = float(value_max)
         self.target_sync_updates = int(target_sync_updates)
+        self.target_update_mode = str(target_update_mode)
+        self.target_soft_tau = float(target_soft_tau)
         self.weight_decay = float(weight_decay)
         self.gradient_clip = float(gradient_clip)
         self.teacher_channels = int(teacher_channels)
@@ -204,6 +215,22 @@ class RecurrentC51Agent:
         self.compile_error = ""
         self._configure_execution()
         self._updates = 0
+
+    @torch.no_grad()
+    def _update_target_network(self) -> None:
+        """Apply the recipe-declared stable target-network update."""
+        if self.target_update_mode == "hard":
+            if self._updates % self.target_sync_updates == 0:
+                self.target.load_state_dict(self.online.state_dict())
+            return
+        for target_parameter, online_parameter in zip(
+            self.target.parameters(), self.online.parameters(), strict=True
+        ):
+            target_parameter.lerp_(online_parameter, self.target_soft_tau)
+        for target_buffer, online_buffer in zip(
+            self.target.buffers(), self.online.buffers(), strict=True
+        ):
+            target_buffer.copy_(online_buffer)
 
     def _configure_execution(self) -> None:
         """Build optional compiled callables without changing module state keys."""
@@ -469,8 +496,7 @@ class RecurrentC51Agent:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self._updates += 1
-        if self._updates % self.target_sync_updates == 0:
-            self.target.load_state_dict(self.online.state_dict())
+        self._update_target_network()
         metrics = torch.stack((rl_loss, teacher_loss, entry_search_loss, loss))
         rl_loss_value, teacher_loss_value, entry_search_loss_value, total_loss = (
             float(value) for value in metrics.detach().float().cpu().tolist()
@@ -562,6 +588,8 @@ class RecurrentC51Agent:
                 "weight_decay": self.weight_decay,
                 "gradient_clip": self.gradient_clip,
                 "target_sync_updates": self.target_sync_updates,
+                "target_update_mode": self.target_update_mode,
+                "target_soft_tau": self.target_soft_tau,
                 "seed": self.seed,
                 "teacher_channels": self.teacher_channels,
                 "teacher_loss_weight": self.teacher_loss_weight,
@@ -636,6 +664,8 @@ class RecurrentC51Agent:
         config.setdefault("compile_mode", "default")
         config.setdefault("mps_prefer_metal", False)
         config.setdefault("mps_fast_math", False)
+        config.setdefault("target_update_mode", "hard")
+        config.setdefault("target_soft_tau", 1.0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

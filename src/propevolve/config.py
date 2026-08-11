@@ -130,6 +130,12 @@ def load_experiment_config(path: str | Path) -> dict:
     payload.setdefault("runtime", dict(DEFAULT_RUNTIME))
     if isinstance(payload.get("training"), dict):
         payload["training"].setdefault("prefetch_batches", 0)
+    if isinstance(payload.get("agent"), dict):
+        # Schema-v1 recipes predate gradual target-network updates. Preserve
+        # their exact hard-sync behavior while allowing new recipes to declare
+        # the safer update contract explicitly.
+        payload["agent"].setdefault("target_update_mode", "hard")
+        payload["agent"].setdefault("target_soft_tau", 1.0)
     _require_recipe_fields(payload)
     try:
         from .observation import TradeManagementObservationSpec
@@ -202,6 +208,17 @@ def load_experiment_config(path: str | Path) -> dict:
     agent = payload["agent"]
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
+    if (
+        agent["target_update_mode"] not in {"hard", "soft"}
+        or isinstance(agent["target_soft_tau"], bool)
+        or not isinstance(agent["target_soft_tau"], (int, float))
+        or not 0 < float(agent["target_soft_tau"]) <= 1
+        or (
+            agent["target_update_mode"] == "hard"
+            and float(agent["target_soft_tau"]) != 1.0
+        )
+    ):
+        raise ValueError("agent target update contract is invalid")
     runtime = payload["runtime"]
     if runtime["mixed_precision"] not in {"off", "fp16"}:
         raise ValueError("runtime mixed precision must be off or fp16")
