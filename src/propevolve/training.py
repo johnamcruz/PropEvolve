@@ -967,6 +967,28 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "mean_training_loss": weighted("mean_training_loss", update_weights),
         "mean_rl_loss": weighted("mean_rl_loss", update_weights),
         "mean_teacher_loss": weighted("mean_teacher_loss", update_weights),
+        "mean_gradient_norm": weighted("mean_gradient_norm", update_weights),
+        "sampled_management_row_fraction": weighted(
+            "mean_sampled_management_row_fraction", update_weights
+        ),
+        "sampled_hold_reward": weighted(
+            "mean_sampled_hold_reward", update_weights
+        ),
+        "sampled_close_reward": weighted(
+            "mean_sampled_close_reward", update_weights
+        ),
+        "sampled_hold_td_loss": weighted(
+            "mean_sampled_hold_td_loss", update_weights
+        ),
+        "sampled_close_td_loss": weighted(
+            "mean_sampled_close_td_loss", update_weights
+        ),
+        "management_hold_minus_close_q": weighted(
+            "mean_management_hold_minus_close_q", update_weights
+        ),
+        "sampled_management_close_fraction": weighted(
+            "mean_sampled_management_close_fraction", update_weights
+        ),
         "teacher_scored_entries": int(sum(teacher_weights)),
         "selected_side_attempt_probability_mean": weighted(
             "selected_side_attempt_probability_mean", teacher_weights
@@ -1389,6 +1411,19 @@ def train_agent(
         episode_rl_losses = []
         episode_teacher_losses = []
         episode_entry_search_losses = []
+        learner_diagnostics: dict[str, list[float]] = {
+            key: []
+            for key in (
+                "gradient_norm",
+                "sampled_management_row_fraction",
+                "sampled_hold_reward",
+                "sampled_close_reward",
+                "sampled_hold_td_loss",
+                "sampled_close_td_loss",
+                "management_hold_minus_close_q",
+                "sampled_management_close_fraction",
+            )
+        }
         if len(replay) >= warmup_episodes:
             def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
                 episode_losses.append(agent.train_batch(
@@ -1406,6 +1441,9 @@ def train_agent(
                     episode_entry_search_losses.append(
                         float(train_metrics["entry_search_loss"])
                     )
+                for key in learner_diagnostics:
+                    if key in train_metrics:
+                        learner_diagnostics[key].append(float(train_metrics[key]))
 
             if prefetch_batches:
                 with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1658,6 +1696,12 @@ def train_agent(
                     float(np.mean(episode_entry_search_losses))
                     if episode_entry_search_losses else None
                 ),
+                **{
+                    f"mean_{key}": (
+                        float(np.mean(values)) if values else None
+                    )
+                    for key, values in learner_diagnostics.items()
+                },
                 "cumulative_passes": progress.passes,
                 "cumulative_blows": progress.blows,
                 "cumulative_timeouts": progress.timeouts,

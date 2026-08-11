@@ -185,6 +185,68 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert not torch.equal(before, agent.online.output.weight.detach())
 
 
+def test_recurrent_double_dqn_targets_preserve_the_current_state_history() -> None:
+    """The next-state target must be the one-step shift of one causal GRU trace."""
+    agent = _agent(2, seed=41, learning_rate=1e-12)
+    sequence = tuple(
+        Transition(
+            observation=np.array([float(index), float(index % 2)], np.float32),
+            action=Action.HOLD,
+            reward=0.05 * index,
+            next_observation=np.array(
+                [float(index + 1), float((index + 1) % 2)], np.float32
+            ),
+            terminated=index == 3,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+        )
+        for index in range(4)
+    )
+    observations = torch.as_tensor(
+        np.stack([sequence[0].observation, *(item.next_observation for item in sequence)])
+    ).view(1, 5, 2)
+    actions = torch.full((1, 4), int(Action.HOLD), dtype=torch.long)
+    rewards = torch.as_tensor([[item.reward for item in sequence]])
+    terminated = torch.as_tensor([[item.terminated for item in sequence]])
+
+    with torch.no_grad():
+        online_logits, _ = agent.online(observations)
+        target_logits, _ = agent.target(observations)
+        current_logits = online_logits[:, :-1]
+        online_next = online_logits[:, 1:]
+        target_next = target_logits[:, 1:]
+        online_q = (online_next.softmax(-1) * agent.support).sum(-1)
+        valid = torch.zeros((1, 4, len(Action)), dtype=torch.bool)
+        valid[..., int(Action.HOLD)] = True
+        valid[..., int(Action.CLOSE)] = True
+        next_actions = online_q.masked_fill(~valid, -torch.inf).argmax(-1)
+        target_distribution = target_next.softmax(-1).gather(
+            2,
+            next_actions[..., None, None].expand(-1, -1, 1, agent.atoms),
+        ).squeeze(2)
+        projected = agent._project_distribution(
+            target_distribution,
+            rewards,
+            terminated,
+        )
+        chosen = current_logits.gather(
+            2,
+            actions[..., None, None].expand(-1, -1, 1, agent.atoms),
+        ).squeeze(2)
+        expected_loss = -(
+            projected * chosen.log_softmax(-1)
+        ).sum(-1).mean().item()
+
+    agent.train_batch((sequence,))
+
+    assert agent.last_train_metrics["rl_loss"] == pytest.approx(
+        expected_loss, rel=1e-6, abs=1e-6
+    )
+    assert agent.last_train_metrics["sampled_management_row_fraction"] == 1.0
+    assert agent.last_train_metrics["sampled_management_close_fraction"] == 0.0
+    assert np.isfinite(agent.last_train_metrics["management_hold_minus_close_q"])
+
+
 def test_soft_target_update_moves_gradually_after_every_learner_update() -> None:
     agent = _agent(
         2,

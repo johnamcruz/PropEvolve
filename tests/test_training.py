@@ -37,6 +37,19 @@ class Agent:
         self.updates += 1
         self.teacher_weight_scales = getattr(self, "teacher_weight_scales", [])
         self.teacher_weight_scales.append(teacher_weight_scale)
+        self.last_train_metrics = {
+            "rl_loss": 0.4,
+            "teacher_loss": 0.1,
+            "entry_search_loss": 0.2,
+            "gradient_norm": 1.25,
+            "sampled_management_row_fraction": 0.75,
+            "sampled_hold_reward": 0.03,
+            "sampled_close_reward": -0.02,
+            "sampled_hold_td_loss": 2.1,
+            "sampled_close_td_loss": 2.4,
+            "management_hold_minus_close_q": 0.15,
+            "sampled_management_close_fraction": 0.2,
+        }
         return 0.5
 
 
@@ -353,6 +366,16 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert summary["overall"]["episodes"] == len(diagnostics)
     assert summary["by_ticker"]["NQ"]["episodes"] == len(diagnostics)
     assert summary["by_outcome"]["timeout"]["episodes"] == len(diagnostics)
+    assert set(summary["overall"]) >= {
+        "mean_gradient_norm",
+        "sampled_management_row_fraction",
+        "sampled_hold_reward",
+        "sampled_close_reward",
+        "sampled_hold_td_loss",
+        "sampled_close_td_loss",
+        "management_hold_minus_close_q",
+        "sampled_management_close_fraction",
+    }
     assert evaluation.candidate_id == candidate.candidate_id
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
     assert set(evaluation.metrics) >= {
@@ -419,6 +442,14 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["teacher_guidance_dropout_probability"] == 0.0
     assert diagnostics[-1]["updates"] == 1
     assert diagnostics[-1]["mean_training_loss"] == 0.5
+    assert diagnostics[-1]["mean_gradient_norm"] == 1.25
+    assert diagnostics[-1]["mean_sampled_management_row_fraction"] == 0.75
+    assert diagnostics[-1]["mean_sampled_hold_reward"] == 0.03
+    assert diagnostics[-1]["mean_sampled_close_reward"] == -0.02
+    assert diagnostics[-1]["mean_sampled_hold_td_loss"] == 2.1
+    assert diagnostics[-1]["mean_sampled_close_td_loss"] == 2.4
+    assert diagnostics[-1]["mean_management_hold_minus_close_q"] == 0.15
+    assert diagnostics[-1]["mean_sampled_management_close_fraction"] == 0.2
     assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
     assert diagnostics[-1]["cumulative_blow_rate"] == 0.0
     assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0

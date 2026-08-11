@@ -365,33 +365,46 @@ class RecurrentC51Agent:
             dtype=torch.bool,
             device=self.device,
         )
+        valid_masks = torch.as_tensor(
+            [[
+                [action in item.valid_actions for action in Action]
+                for item in sequence
+            ] for sequence in sequences],
+            dtype=torch.bool,
+            device=self.device,
+        )
+        # Process one contiguous causal trace so Q(s_t) and Q(s_{t+1}) use
+        # exactly the same recurrent history. Independently resetting the GRU
+        # on the shifted next-observation sequence changes the state definition
+        # and corrupts recurrent TD targets.
+        causal_observations = torch.cat(
+            (observations[:, :1], next_observations), dim=1
+        )
 
         with self._autocast():
-            recurrent, _ = self._call_with_compile_fallback(
+            causal_recurrent, _ = self._call_with_compile_fallback(
                 self._online_recurrent,
                 self.online.recurrent_features,
-                observations,
+                causal_observations,
             )
+            recurrent = causal_recurrent[:, :-1]
             logits = self.online.distribution_logits(recurrent)
+            online_next = self.online.distribution_logits(causal_recurrent[:, 1:])
         logits = logits.float()
+        online_next = online_next.float()
         chosen_logits = logits.gather(
             2,
             actions[..., None, None].expand(-1, -1, 1, self.atoms),
         ).squeeze(2)
         with torch.no_grad():
             with self._autocast():
-                online_next, _ = self._call_with_compile_fallback(
-                    self._online_forward,
-                    self.online.forward,
-                    next_observations,
-                    None,
-                )
-                target_next, _ = self._call_with_compile_fallback(
+                target_causal, _ = self._call_with_compile_fallback(
                     self._target_forward,
                     self.target.forward,
-                    next_observations,
+                    causal_observations,
                     None,
                 )
+                target_next = target_causal[:, 1:]
             online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
@@ -402,7 +415,8 @@ class RecurrentC51Agent:
             projected = self._project_distribution(
                 target_distribution, rewards, terminated
             )
-        rl_loss = -(projected * chosen_logits.log_softmax(-1)).sum(-1).mean()
+        td_losses = -(projected * chosen_logits.log_softmax(-1)).sum(-1)
+        rl_loss = td_losses.mean()
         loss = rl_loss
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
@@ -443,32 +457,22 @@ class RecurrentC51Agent:
                 teacher_loss = (teacher_losses * channel_weights).sum(dim=-1).mean()
                 loss = loss + teacher_weight_scale * teacher_loss
                 if self.teacher_entry_search_loss_weight:
-                    valid_masks_numpy = np.asarray(
-                        [[
-                            [action in item.valid_actions for action in Action]
-                            for item in sequence
-                        ] for sequence in sequences],
-                        dtype=np.bool_,
+                    entry_rows = (
+                        teacher_rows
+                        & valid_masks[..., int(Action.WAIT)]
+                        & valid_masks[..., int(Action.ENTER_LONG_1)]
+                        & valid_masks[..., int(Action.ENTER_SHORT_1)]
                     )
-                    entry_rows_numpy = (
-                        teacher_rows_numpy
-                        & valid_masks_numpy[..., int(Action.WAIT)]
-                        & valid_masks_numpy[..., int(Action.ENTER_LONG_1)]
-                        & valid_masks_numpy[..., int(Action.ENTER_SHORT_1)]
-                    )
-                    if entry_rows_numpy.any():
-                        entry_rows = torch.as_tensor(
-                            entry_rows_numpy, device=self.device
-                        )
+                    if teacher_rows_numpy.any():
                         q_values = (logits.softmax(-1) * self.support).sum(-1)
                         long_target = (
                             teacher_targets_tensor[..., 0]
                             * teacher_targets_tensor[..., 1]
-                        ).clamp(0.0, 1.0)
+                        ).nan_to_num(0.0).clamp(0.0, 1.0)
                         short_target = (
                             teacher_targets_tensor[..., 2]
                             * teacher_targets_tensor[..., 3]
-                        ).clamp(0.0, 1.0)
+                        ).nan_to_num(0.0).clamp(0.0, 1.0)
                         long_advantage = (
                             q_values[..., int(Action.ENTER_LONG_1)]
                             - q_values[..., int(Action.WAIT)]
@@ -477,13 +481,27 @@ class RecurrentC51Agent:
                             q_values[..., int(Action.ENTER_SHORT_1)]
                             - q_values[..., int(Action.WAIT)]
                         )
+                        entry_weights = entry_rows.to(q_values.dtype)
+                        entry_count = entry_weights.sum().clamp_min(1.0)
                         entry_search_loss = 0.5 * (
-                            nn.functional.binary_cross_entropy_with_logits(
-                                long_advantage[entry_rows], long_target[entry_rows]
-                            )
-                            + nn.functional.binary_cross_entropy_with_logits(
-                                short_advantage[entry_rows], short_target[entry_rows]
-                            )
+                            (
+                                nn.functional.binary_cross_entropy_with_logits(
+                                    long_advantage,
+                                    long_target,
+                                    reduction="none",
+                                )
+                                * entry_weights
+                            ).sum()
+                            / entry_count
+                            + (
+                                nn.functional.binary_cross_entropy_with_logits(
+                                    short_advantage,
+                                    short_target,
+                                    reduction="none",
+                                )
+                                * entry_weights
+                            ).sum()
+                            / entry_count
                         )
                         loss = loss + teacher_weight_scale * (
                             self.teacher_entry_search_loss_weight
@@ -492,14 +510,60 @@ class RecurrentC51Agent:
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        nn.utils.clip_grad_norm_(self.online.parameters(), max_norm=self.gradient_clip)
+        gradient_norm = nn.utils.clip_grad_norm_(
+            self.online.parameters(), max_norm=self.gradient_clip
+        )
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self._updates += 1
         self._update_target_network()
-        metrics = torch.stack((rl_loss, teacher_loss, entry_search_loss, loss))
-        rl_loss_value, teacher_loss_value, entry_search_loss_value, total_loss = (
-            float(value) for value in metrics.detach().float().cpu().tolist()
+        q_values = (logits.softmax(-1) * self.support).sum(-1)
+        management_rows = (
+            valid_masks[..., int(Action.HOLD)]
+            & valid_masks[..., int(Action.CLOSE)]
+            & (valid_masks.sum(-1) == 2)
+        )
+        hold_rows = actions == int(Action.HOLD)
+        close_rows = actions == int(Action.CLOSE)
+
+        def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            weights = mask.to(values.dtype)
+            return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+        diagnostic_values = torch.stack((
+            rl_loss,
+            teacher_loss,
+            entry_search_loss,
+            loss,
+            gradient_norm.float(),
+            management_rows.float().mean(),
+            masked_mean(rewards, hold_rows),
+            masked_mean(rewards, close_rows),
+            masked_mean(td_losses, hold_rows),
+            masked_mean(td_losses, close_rows),
+            masked_mean(
+                q_values[..., int(Action.HOLD)]
+                - q_values[..., int(Action.CLOSE)],
+                management_rows,
+            ),
+            masked_mean(close_rows.float(), management_rows),
+        ))
+        (
+            rl_loss_value,
+            teacher_loss_value,
+            entry_search_loss_value,
+            total_loss,
+            gradient_norm_value,
+            management_row_fraction,
+            sampled_hold_reward,
+            sampled_close_reward,
+            sampled_hold_td_loss,
+            sampled_close_td_loss,
+            management_hold_minus_close_q,
+            sampled_management_close_fraction,
+        ) = (
+            float(value)
+            for value in diagnostic_values.detach().float().cpu().tolist()
         )
         self.last_train_metrics = {
             "rl_loss": rl_loss_value,
@@ -507,6 +571,16 @@ class RecurrentC51Agent:
             "entry_search_loss": entry_search_loss_value,
             "teacher_weight_scale": teacher_weight_scale,
             "total_loss": total_loss,
+            "gradient_norm": gradient_norm_value,
+            "sampled_management_row_fraction": management_row_fraction,
+            "sampled_hold_reward": sampled_hold_reward,
+            "sampled_close_reward": sampled_close_reward,
+            "sampled_hold_td_loss": sampled_hold_td_loss,
+            "sampled_close_td_loss": sampled_close_td_loss,
+            "management_hold_minus_close_q": management_hold_minus_close_q,
+            "sampled_management_close_fraction": (
+                sampled_management_close_fraction
+            ),
         }
         return total_loss
 
