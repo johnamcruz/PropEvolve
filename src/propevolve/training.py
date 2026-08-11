@@ -424,9 +424,11 @@ class HistoricalCandidateRunner:
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
+        retained_policy_path = output / "retained-pass-policy.pt"
         diagnostics_path = output / "training-diagnostics.jsonl"
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
         resume = None
+        replay_state = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
                 recovery_path, device=agent_settings["device"]
@@ -435,6 +437,9 @@ class HistoricalCandidateRunner:
                 raise ValueError("training recovery identity drifted")
             resume = TrainingProgress(**manifest["progress"])
             train_environment.restore_rng_state(manifest["environment_rng_state"])
+            replay_state = manifest.get("replay_state")
+            if not manifest.get("replay_restored", False) or replay_state is None:
+                raise ValueError("training recovery is missing replay state")
             agent = loaded
         else:
             if diagnostics_path.exists():
@@ -488,6 +493,8 @@ class HistoricalCandidateRunner:
             ),
             seed=seed,
         )
+        if replay_state is not None:
+            replay.load_state_dict(replay_state)
         training = train_agent(
             agent,
             train_environment,
@@ -525,6 +532,13 @@ class HistoricalCandidateRunner:
                 resume_identity=resume_identity,
                 progress=progress,
                 environment_rng_state=train_environment.rng_state(),
+                replay_state=replay.state_dict(),
+            ),
+            retention_checkpoint_callback=lambda evidence: _save_retained_policy(
+                agent,
+                retained_policy_path,
+                resume_identity=resume_identity,
+                evidence=evidence,
             ),
             teacher_lookup=(
                 teacher_targets.target if teacher_targets is not None else None
@@ -590,6 +604,16 @@ class HistoricalCandidateRunner:
             diagnostics_path,
             output / "training-diagnostic-summary.json",
         )
+        retained_policy_restored = False
+        if training.short_circuited and retained_policy_path.is_file():
+            retained_agent, retention_manifest = RecurrentC51Agent.load(
+                retained_policy_path,
+                device=agent_settings["device"],
+            )
+            if retention_manifest.get("resume_identity") != resume_identity:
+                raise ValueError("retained pass policy identity drifted")
+            agent = retained_agent
+            retained_policy_restored = True
         agent.discard_teacher()
         validation = None
         if not training.short_circuited:
@@ -647,6 +671,7 @@ class HistoricalCandidateRunner:
                 }
                 for spec in teacher_specs
             ],
+            "retained_pass_policy_restored": retained_policy_restored,
         }
         archive_output = _resolve(
             root, str(config.get("_archive_output", config["output"]))
@@ -696,6 +721,9 @@ class HistoricalCandidateRunner:
                 ),
                 "near_blow_timeout_rate": training.near_blow_timeout_rate,
                 "short_circuited": float(training.short_circuited),
+                "retained_pass_policy_restored": float(
+                    retained_policy_restored
+                ),
             }
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
@@ -819,6 +847,7 @@ def _save_training_recovery(
     resume_identity: str,
     progress: TrainingProgress,
     environment_rng_state: dict,
+    replay_state: dict[str, object],
 ) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     agent.save(
@@ -827,7 +856,27 @@ def _save_training_recovery(
             "resume_identity": resume_identity,
             "progress": asdict(progress),
             "environment_rng_state": environment_rng_state,
-            "replay_restored": False,
+            "replay_state": replay_state,
+            "replay_restored": True,
+        },
+    )
+    os.replace(temporary, path)
+
+
+def _save_retained_policy(
+    agent: RecurrentC51Agent,
+    path: Path,
+    *,
+    resume_identity: str,
+    evidence: dict[str, object],
+) -> None:
+    """Atomically preserve the pre-update policy that demonstrated a pass."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    agent.save(
+        temporary,
+        manifest={
+            "resume_identity": resume_identity,
+            "retention_evidence": dict(evidence),
         },
     )
     os.replace(temporary, path)
@@ -1186,6 +1235,7 @@ def train_agent(
     resume: TrainingProgress | None = None,
     checkpoint_every_episodes: int = 0,
     checkpoint_callback: Callable[[TrainingProgress], None] | None = None,
+    retention_checkpoint_callback: Callable[[dict[str, object]], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
     teacher_channels: tuple[str, ...] | None = None,
     teacher_loss_end_scale: float = 1.0,
@@ -1399,6 +1449,16 @@ def train_agent(
         if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
         terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
+        if outcome == "pass" and retention_checkpoint_callback is not None:
+            # Preserve the exact policy that produced the pass before replay
+            # updates can alter it. This is a rollback anchor, not promotion
+            # evidence; chronological teacher-free selection remains required.
+            retention_checkpoint_callback({
+                "episode": episode_index + 1,
+                "ticker": str(terminal_info["ticker"]),
+                "outcome": outcome,
+                "terminal_pnl": terminal_pnl,
+            })
         near_blow_timeout = bool(
             outcome == "timeout"
             and near_blow_loss_threshold is not None
@@ -1569,11 +1629,11 @@ def train_agent(
             recent_average_hold_bars=recent_hold_bars,
             recent_voluntary_close_rates=recent_close_rates,
         )
+        reasons = []
         if (
             short_circuit_minimum_environment_steps is not None
             and progress.environment_steps >= short_circuit_minimum_environment_steps
         ):
-            reasons = []
             if progress.passes < short_circuit_minimum_passes:
                 reasons.append(
                     f"passes {progress.passes} < {short_circuit_minimum_passes}"
@@ -1584,39 +1644,40 @@ def train_agent(
                     f"blow rate {blow_rate:.6f} > "
                     f"{short_circuit_maximum_blow_rate:.6f}"
                 )
+        if (
+            collapse_window_episodes
+            and len(progress.recent_outcomes) == collapse_window_episodes
+        ):
+            recent_passes = sum(
+                recent_outcome == "pass"
+                for recent_outcome in progress.recent_outcomes
+            )
+            prior_passes = progress.passes - recent_passes
+            recent_hold = float(np.mean(progress.recent_average_hold_bars))
+            recent_close_rate = float(
+                np.mean(progress.recent_voluntary_close_rates)
+            )
             if (
-                collapse_window_episodes
-                and len(progress.recent_outcomes) == collapse_window_episodes
+                prior_passes >= collapse_minimum_prior_passes
+                and recent_passes <= collapse_maximum_recent_passes
+                and recent_hold <= collapse_maximum_average_hold_bars
+                and recent_close_rate >= collapse_minimum_voluntary_close_rate
             ):
-                recent_passes = sum(
-                    outcome == "pass" for outcome in progress.recent_outcomes
+                reasons.append(
+                    "policy collapse: "
+                    f"prior passes {prior_passes}; "
+                    f"recent passes {recent_passes}/"
+                    f"{collapse_window_episodes}; "
+                    f"recent average hold {recent_hold:.6f} <= "
+                    f"{collapse_maximum_average_hold_bars:.6f}; "
+                    f"recent voluntary-close rate {recent_close_rate:.6f} >= "
+                    f"{collapse_minimum_voluntary_close_rate:.6f}"
                 )
-                prior_passes = progress.passes - recent_passes
-                recent_hold = float(np.mean(progress.recent_average_hold_bars))
-                recent_close_rate = float(
-                    np.mean(progress.recent_voluntary_close_rates)
-                )
-                if (
-                    prior_passes >= collapse_minimum_prior_passes
-                    and recent_passes <= collapse_maximum_recent_passes
-                    and recent_hold <= collapse_maximum_average_hold_bars
-                    and recent_close_rate >= collapse_minimum_voluntary_close_rate
-                ):
-                    reasons.append(
-                        "policy collapse: "
-                        f"prior passes {prior_passes}; "
-                        f"recent passes {recent_passes}/"
-                        f"{collapse_window_episodes}; "
-                        f"recent average hold {recent_hold:.6f} <= "
-                        f"{collapse_maximum_average_hold_bars:.6f}; "
-                        f"recent voluntary-close rate {recent_close_rate:.6f} >= "
-                        f"{collapse_minimum_voluntary_close_rate:.6f}"
-                    )
-            if reasons:
-                progress = replace(
-                    progress,
-                    short_circuit_reason="; ".join(reasons),
-                )
+        if reasons:
+            progress = replace(
+                progress,
+                short_circuit_reason="; ".join(reasons),
+            )
         cumulative_average_balance = (
             progress.terminal_pnl_sum / progress.terminal_pnl_count
         )

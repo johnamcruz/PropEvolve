@@ -198,3 +198,43 @@ def test_replay_eviction_preserves_rare_terminal_outcomes() -> None:
     retained = replay.sample_episodes(20)
 
     assert "pass" in {episode.outcome for episode in retained}
+
+
+def test_replay_checkpoint_round_trip_preserves_memory_and_sampling_state() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        capacity_transitions=24,
+        sequence_length=3,
+        terminal_sequence_fraction=0.25,
+        safety_sequence_fraction=0.25,
+        entry_opportunity_sequence_fraction=0.25,
+        seed=37,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    replay.add(_episode("ES", "timeout", "short", 100))
+    replay.add(_episode("GC", "blow", "long", 200))
+    state = replay.state_dict()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=4,
+        capacity_transitions=24,
+        sequence_length=3,
+        terminal_sequence_fraction=0.25,
+        safety_sequence_fraction=0.25,
+        entry_opportunity_sequence_fraction=0.25,
+        seed=999,
+    )
+
+    restored.load_state_dict(state)
+
+    assert len(restored) == len(replay)
+    assert restored.transition_count == replay.transition_count
+    expected = replay.sample(8)
+    actual = restored.sample(8)
+    for expected_sequence, actual_sequence in zip(expected, actual, strict=True):
+        assert [item.action for item in actual_sequence] == [
+            item.action for item in expected_sequence
+        ]
+        np.testing.assert_array_equal(
+            [item.observation for item in actual_sequence],
+            [item.observation for item in expected_sequence],
+        )

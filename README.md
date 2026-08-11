@@ -468,6 +468,26 @@ memory, exploration state, and the temporary teacher head are deliberately
 reset at each stage so the next lesson is learned from fresh experience without
 discarding the policy's acquired representation and behavior.
 
+RL progress is measured in environment steps rather than epochs because
+episode lengths differ. Each 1M, 2M, or 5M stage is one declared evidence
+window: training diagnostics detect collapse inside the window, and the policy
+is evaluated without teachers on the chronological 2025 selection period only
+after the window closes. Training episodes can preserve rollback anchors, but
+they cannot select or promote a model. The 2026 period remains sealed.
+
+Checkpoint roles are intentionally separate:
+
+- `training-recovery.pt` atomically saves the exact latest restart state,
+  including policy and target networks, optimizer, mixed-precision scaler,
+  progress, environment RNG, complete bounded replay, and replay sampler RNG;
+- `retained-pass-policy.pt` preserves a pre-update policy that demonstrated a
+  training pass so a detected collapse can roll back without claiming OOS
+  generalization;
+- every completed candidate and its teacher-free evaluation receipt is stored
+  immutably in the campaign archive, and a selected candidate may warm-start a
+  later fine-tuning stage while temporary teacher heads and optimization state
+  are rebuilt from that stage's recipe.
+
 When a revisable stage misses a gate, the authenticated diagnostic report is
 sent to the configured reasoning proposer. It may change exactly one bounded,
 allowlisted recipe revision relevant to that stage and rerun it. It cannot

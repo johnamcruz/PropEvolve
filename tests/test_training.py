@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 import propevolve.training as training_module
 from propevolve.cache import build_embedding_cache
@@ -354,6 +355,15 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
 
     assert candidate.model_path.is_file()
     assert evaluation.path.is_file()
+    recovery = torch.load(
+        tmp_path / "run" / "training-recovery.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    replay_state = recovery["manifest"]["replay_state"]
+    assert recovery["manifest"]["replay_restored"] is True
+    assert len(replay_state["episodes"]) == 2
+    assert replay_state["contract"]["sequence_length"] == 1
     diagnostic_path = tmp_path / "run" / "training-diagnostics.jsonl"
     assert diagnostic_path.is_file()
     diagnostics = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
@@ -682,7 +692,7 @@ def test_training_short_circuits_a_close_churn_collapse_after_prior_passes() -> 
         epsilon_end=0.01,
         episode_tickers=None,
         ticker_seed=1,
-        short_circuit_minimum_environment_steps=3,
+        short_circuit_minimum_environment_steps=10,
         short_circuit_minimum_passes=1,
         short_circuit_maximum_blow_rate=0.1,
         collapse_window_episodes=2,
@@ -699,6 +709,42 @@ def test_training_short_circuits_a_close_churn_collapse_after_prior_passes() -> 
         "recent average hold 1.500000 <= 4.000000; "
         "recent voluntary-close rate 0.900000 >= 0.800000"
     )
+
+
+def test_training_preserves_a_pass_policy_before_any_following_updates() -> None:
+    agent = Agent()
+    retained_at_updates = []
+
+    train_agent(
+        agent,
+        Environment(),
+        episodes=1,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=2,
+            sequence_length=2,
+            seed=2,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.1,
+        epsilon_end=0.01,
+        episode_tickers=None,
+        ticker_seed=2,
+        retention_checkpoint_callback=lambda evidence: retained_at_updates.append(
+            (agent.updates, evidence)
+        ),
+    )
+
+    assert retained_at_updates == [(0, {
+        "episode": 1,
+        "ticker": "NQ",
+        "outcome": "pass",
+        "terminal_pnl": 6_000.0,
+    })]
+    assert agent.updates == 1
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:

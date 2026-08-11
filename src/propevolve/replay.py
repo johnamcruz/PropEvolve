@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 import random
+from typing import Mapping
 
 import numpy as np
 
@@ -208,6 +209,145 @@ class BalancedSequenceReplay:
     @property
     def transition_count(self) -> int:
         return self._transition_count
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the complete resumable replay state, including sampler RNG."""
+        return {
+            "schema_version": 1,
+            "contract": {
+                "capacity_episodes": self.capacity,
+                "capacity_transitions": self.capacity_transitions,
+                "sequence_length": self.sequence_length,
+                "terminal_sequence_fraction": self.terminal_sequence_fraction,
+                "safety_sequence_fraction": self.safety_sequence_fraction,
+                "entry_opportunity_sequence_fraction": (
+                    self.entry_opportunity_sequence_fraction
+                ),
+            },
+            "random_state": self._random.getstate(),
+            "episodes": [
+                {
+                    field: getattr(episode, field)
+                    for field in _StoredEpisode.__dataclass_fields__
+                }
+                for episode in self._episodes.values()
+            ],
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        """Restore replay exactly and fail closed if its sampling contract drifted."""
+        if state.get("schema_version") != 1:
+            raise ValueError("replay checkpoint schema is unsupported")
+        expected_contract = {
+            "capacity_episodes": self.capacity,
+            "capacity_transitions": self.capacity_transitions,
+            "sequence_length": self.sequence_length,
+            "terminal_sequence_fraction": self.terminal_sequence_fraction,
+            "safety_sequence_fraction": self.safety_sequence_fraction,
+            "entry_opportunity_sequence_fraction": (
+                self.entry_opportunity_sequence_fraction
+            ),
+        }
+        if state.get("contract") != expected_contract:
+            raise ValueError("replay checkpoint contract drifted")
+        payloads = state.get("episodes")
+        if not isinstance(payloads, list):
+            raise ValueError("replay checkpoint episodes are invalid")
+        restored: OrderedDict[str, _StoredEpisode] = OrderedDict()
+        transition_count = 0
+        action_count = len(Action)
+        for payload in payloads:
+            if not isinstance(payload, Mapping):
+                raise ValueError("replay checkpoint episode is invalid")
+            try:
+                observations = np.asarray(payload["observations"], dtype=np.float32)
+                actions = np.asarray(payload["actions"], dtype=np.int8)
+                rewards = np.asarray(payload["rewards"], dtype=np.float32)
+                terminated = np.asarray(payload["terminated"], dtype=np.bool_)
+                valid_masks = np.asarray(payload["valid_masks"], dtype=np.bool_)
+                next_valid_masks = np.asarray(
+                    payload["next_valid_masks"], dtype=np.bool_
+                )
+                safety_priorities = np.asarray(
+                    payload["safety_priorities"], dtype=np.float32
+                )
+                entry_priorities = np.asarray(
+                    payload["entry_opportunity_priorities"], dtype=np.float32
+                )
+                raw_teacher_targets = payload["teacher_targets"]
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("replay checkpoint episode is malformed") from error
+            count = int(actions.size)
+            teacher_targets = (
+                None
+                if raw_teacher_targets is None
+                else np.asarray(raw_teacher_targets, dtype=np.float32)
+            )
+            if (
+                count < self.sequence_length
+                or actions.shape != (count,)
+                or rewards.shape != (count,)
+                or terminated.shape != (count,)
+                or observations.ndim != 2
+                or observations.shape[0] != count + 1
+                or valid_masks.shape != (count, action_count)
+                or next_valid_masks.shape != (count, action_count)
+                or safety_priorities.shape != (count,)
+                or entry_priorities.shape != (count,)
+                or (teacher_targets is not None and teacher_targets.shape[0] != count)
+                or not np.isfinite(observations).all()
+                or not np.isfinite(rewards).all()
+                or not np.isfinite(safety_priorities).all()
+                or not np.isfinite(entry_priorities).all()
+                or (safety_priorities < 0).any()
+                or (entry_priorities < 0).any()
+                or (actions < 0).any()
+                or (actions >= action_count).any()
+                or not valid_masks.any(axis=1).all()
+                or not next_valid_masks.any(axis=1).all()
+            ):
+                raise ValueError("replay checkpoint episode arrays are invalid")
+            if teacher_targets is not None:
+                if teacher_targets.ndim != 2 or teacher_targets.shape[1] < 1:
+                    raise ValueError("replay checkpoint teacher targets are invalid")
+                valid_teacher_rows = np.isfinite(teacher_targets).all(axis=1)
+                missing_teacher_rows = np.isnan(teacher_targets).all(axis=1)
+                if not np.logical_or(valid_teacher_rows, missing_teacher_rows).all():
+                    raise ValueError("replay checkpoint teacher targets are invalid")
+            episode_id = str(payload.get("episode_id", ""))
+            if not episode_id or episode_id in restored:
+                raise ValueError("replay checkpoint episode identity is invalid")
+            episode = _StoredEpisode(
+                episode_id=episode_id,
+                ticker=str(payload.get("ticker", "")),
+                outcome=str(payload.get("outcome", "")),
+                primary_side=str(payload.get("primary_side", "")),
+                ended_at_ns=int(payload.get("ended_at_ns", 0)),
+                observations=observations,
+                actions=actions,
+                rewards=rewards,
+                terminated=terminated,
+                valid_masks=valid_masks,
+                next_valid_masks=next_valid_masks,
+                teacher_targets=teacher_targets,
+                safety_priorities=safety_priorities,
+                entry_opportunity_priorities=entry_priorities,
+            )
+            if not episode.ticker or not episode.outcome or not episode.primary_side:
+                raise ValueError("replay checkpoint episode metadata is invalid")
+            restored[episode_id] = episode
+            transition_count += count
+        if len(restored) > self.capacity or (
+            self.capacity_transitions is not None
+            and transition_count > self.capacity_transitions
+        ):
+            raise ValueError("replay checkpoint exceeds its declared capacity")
+        try:
+            self._random.setstate(state["random_state"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("replay checkpoint RNG state is invalid") from error
+        self._episodes = restored
+        self._transition_count = transition_count
 
     def add(self, episode: Episode) -> None:
         if len(episode.transitions) < self.sequence_length:
