@@ -110,6 +110,7 @@ class RecurrentC51Agent:
         weight_decay: float,
         gradient_clip: float,
         target_sync_updates: int,
+        n_step_return: int = 1,
         target_update_mode: str = "hard",
         target_soft_tau: float = 1.0,
         device: str,
@@ -127,6 +128,8 @@ class RecurrentC51Agent:
     ) -> None:
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
+        if isinstance(n_step_return, bool) or int(n_step_return) < 1:
+            raise ValueError("n-step return must be a positive integer")
         if learning_rate <= 0 or weight_decay < 0 or gradient_clip <= 0:
             raise ValueError("optimizer settings are invalid")
         if target_sync_updates < 1:
@@ -184,6 +187,7 @@ class RecurrentC51Agent:
         self.hidden_dim = int(hidden_dim)
         self.atoms = int(atoms)
         self.gamma = float(gamma)
+        self.n_step_return = int(n_step_return)
         self.learning_rate = float(learning_rate)
         self.value_min = float(value_min)
         self.value_max = float(value_max)
@@ -332,6 +336,10 @@ class RecurrentC51Agent:
         lengths = {len(sequence) for sequence in sequences}
         if len(lengths) != 1 or next(iter(lengths)) < 1:
             raise ValueError("training sequences must have one positive length")
+        sequence_length = next(iter(lengths))
+        if sequence_length < self.n_step_return:
+            raise ValueError("training sequence is shorter than the n-step return")
+        training_steps = sequence_length - self.n_step_return + 1
         observations = torch.as_tensor(
             np.stack([[item.observation for item in sequence] for sequence in sequences]),
             dtype=torch.float32,
@@ -342,22 +350,22 @@ class RecurrentC51Agent:
             dtype=torch.float32,
             device=self.device,
         )
-        actions = torch.as_tensor(
+        all_actions = torch.as_tensor(
             [[int(item.action) for item in sequence] for sequence in sequences],
             dtype=torch.long,
             device=self.device,
         )
-        rewards = torch.as_tensor(
+        all_rewards = torch.as_tensor(
             [[item.reward for item in sequence] for sequence in sequences],
             dtype=torch.float32,
             device=self.device,
         )
-        terminated = torch.as_tensor(
+        all_terminated = torch.as_tensor(
             [[item.terminated for item in sequence] for sequence in sequences],
             dtype=torch.bool,
             device=self.device,
         )
-        next_masks = torch.as_tensor(
+        all_next_masks = torch.as_tensor(
             [[
                 [action in item.next_valid_actions for action in Action]
                 for item in sequence
@@ -381,6 +389,25 @@ class RecurrentC51Agent:
             (observations[:, :1], next_observations), dim=1
         )
 
+        actions = all_actions[:, :training_steps]
+        immediate_rewards = all_rewards[:, :training_steps]
+        n_step_rewards = torch.zeros_like(immediate_rewards)
+        bootstrap_alive = torch.ones_like(immediate_rewards, dtype=torch.bool)
+        discount = 1.0
+        for offset in range(self.n_step_return):
+            reward_slice = all_rewards[:, offset:offset + training_steps]
+            terminated_slice = all_terminated[:, offset:offset + training_steps]
+            n_step_rewards = n_step_rewards + (
+                discount * bootstrap_alive.to(all_rewards.dtype) * reward_slice
+            )
+            bootstrap_alive = bootstrap_alive & ~terminated_slice
+            discount *= self.gamma
+        terminated = ~bootstrap_alive
+        next_masks = all_next_masks[
+            :,
+            self.n_step_return - 1:self.n_step_return - 1 + training_steps,
+        ]
+
         with self._autocast():
             causal_recurrent, _ = self._call_with_compile_fallback(
                 self._online_recurrent,
@@ -388,8 +415,14 @@ class RecurrentC51Agent:
                 causal_observations,
             )
             recurrent = causal_recurrent[:, :-1]
-            logits = self.online.distribution_logits(recurrent)
-            online_next = self.online.distribution_logits(causal_recurrent[:, 1:])
+            all_logits = self.online.distribution_logits(recurrent)
+            logits = all_logits[:, :training_steps]
+            online_next = self.online.distribution_logits(
+                causal_recurrent[
+                    :,
+                    self.n_step_return:self.n_step_return + training_steps,
+                ]
+            )
         logits = logits.float()
         online_next = online_next.float()
         chosen_logits = logits.gather(
@@ -404,7 +437,10 @@ class RecurrentC51Agent:
                     causal_observations,
                     None,
                 )
-                target_next = target_causal[:, 1:]
+                target_next = target_causal[
+                    :,
+                    self.n_step_return:self.n_step_return + training_steps,
+                ]
             online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
@@ -413,7 +449,10 @@ class RecurrentC51Agent:
                 next_actions[..., None, None].expand(-1, -1, 1, self.atoms),
             ).squeeze(2)
             projected = self._project_distribution(
-                target_distribution, rewards, terminated
+                target_distribution,
+                n_step_rewards,
+                terminated,
+                bootstrap_discount=self.gamma**self.n_step_return,
             )
         td_losses = -(projected * chosen_logits.log_softmax(-1)).sum(-1)
         rl_loss = td_losses.mean()
@@ -464,7 +503,7 @@ class RecurrentC51Agent:
                         & valid_masks[..., int(Action.ENTER_SHORT_1)]
                     )
                     if teacher_rows_numpy.any():
-                        q_values = (logits.softmax(-1) * self.support).sum(-1)
+                        q_values = (all_logits.float().softmax(-1) * self.support).sum(-1)
                         long_target = (
                             teacher_targets_tensor[..., 0]
                             * teacher_targets_tensor[..., 1]
@@ -518,10 +557,11 @@ class RecurrentC51Agent:
         self._updates += 1
         self._update_target_network()
         q_values = (logits.softmax(-1) * self.support).sum(-1)
+        rl_valid_masks = valid_masks[:, :training_steps]
         management_rows = (
-            valid_masks[..., int(Action.HOLD)]
-            & valid_masks[..., int(Action.CLOSE)]
-            & (valid_masks.sum(-1) == 2)
+            rl_valid_masks[..., int(Action.HOLD)]
+            & rl_valid_masks[..., int(Action.CLOSE)]
+            & (rl_valid_masks.sum(-1) == 2)
         )
         hold_rows = actions == int(Action.HOLD)
         close_rows = actions == int(Action.CLOSE)
@@ -537,8 +577,10 @@ class RecurrentC51Agent:
             loss,
             gradient_norm.float(),
             management_rows.float().mean(),
-            masked_mean(rewards, hold_rows),
-            masked_mean(rewards, close_rows),
+            masked_mean(immediate_rewards, hold_rows),
+            masked_mean(immediate_rewards, close_rows),
+            masked_mean(n_step_rewards, hold_rows),
+            masked_mean(n_step_rewards, close_rows),
             masked_mean(td_losses, hold_rows),
             masked_mean(td_losses, close_rows),
             masked_mean(
@@ -557,6 +599,8 @@ class RecurrentC51Agent:
             management_row_fraction,
             sampled_hold_reward,
             sampled_close_reward,
+            sampled_hold_n_step_return,
+            sampled_close_n_step_return,
             sampled_hold_td_loss,
             sampled_close_td_loss,
             management_hold_minus_close_q,
@@ -575,12 +619,15 @@ class RecurrentC51Agent:
             "sampled_management_row_fraction": management_row_fraction,
             "sampled_hold_reward": sampled_hold_reward,
             "sampled_close_reward": sampled_close_reward,
+            "sampled_hold_n_step_return": sampled_hold_n_step_return,
+            "sampled_close_n_step_return": sampled_close_n_step_return,
             "sampled_hold_td_loss": sampled_hold_td_loss,
             "sampled_close_td_loss": sampled_close_td_loss,
             "management_hold_minus_close_q": management_hold_minus_close_q,
             "sampled_management_close_fraction": (
                 sampled_management_close_fraction
             ),
+            "n_step_return": float(self.n_step_return),
         }
         return total_loss
 
@@ -622,10 +669,17 @@ class RecurrentC51Agent:
         next_distribution: torch.Tensor,
         rewards: torch.Tensor,
         terminated: torch.Tensor,
+        *,
+        bootstrap_discount: float | None = None,
     ) -> torch.Tensor:
         delta = (self.value_max - self.value_min) / (self.atoms - 1)
+        discount = (
+            self.gamma
+            if bootstrap_discount is None
+            else float(bootstrap_discount)
+        )
         target_support = rewards[..., None] + (
-            self.gamma * (~terminated).float()[..., None] * self.support
+            discount * (~terminated).float()[..., None] * self.support
         )
         target_support.clamp_(self.value_min, self.value_max)
         positions = (target_support - self.value_min) / delta
@@ -658,6 +712,7 @@ class RecurrentC51Agent:
                 "value_min": self.value_min,
                 "value_max": self.value_max,
                 "gamma": self.gamma,
+                "n_step_return": self.n_step_return,
                 "learning_rate": self.learning_rate,
                 "weight_decay": self.weight_decay,
                 "gradient_clip": self.gradient_clip,
@@ -740,6 +795,7 @@ class RecurrentC51Agent:
         config.setdefault("mps_fast_math", False)
         config.setdefault("target_update_mode", "hard")
         config.setdefault("target_soft_tau", 1.0)
+        config.setdefault("n_step_return", 1)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

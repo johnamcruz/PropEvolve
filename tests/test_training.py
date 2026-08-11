@@ -45,6 +45,8 @@ class Agent:
             "sampled_management_row_fraction": 0.75,
             "sampled_hold_reward": 0.03,
             "sampled_close_reward": -0.02,
+            "sampled_hold_n_step_return": 0.12,
+            "sampled_close_n_step_return": -0.08,
             "sampled_hold_td_loss": 2.1,
             "sampled_close_td_loss": 2.4,
             "management_hold_minus_close_q": 0.15,
@@ -371,6 +373,8 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "sampled_management_row_fraction",
         "sampled_hold_reward",
         "sampled_close_reward",
+        "sampled_hold_n_step_return",
+        "sampled_close_n_step_return",
         "sampled_hold_td_loss",
         "sampled_close_td_loss",
         "management_hold_minus_close_q",
@@ -446,6 +450,8 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["mean_sampled_management_row_fraction"] == 0.75
     assert diagnostics[-1]["mean_sampled_hold_reward"] == 0.03
     assert diagnostics[-1]["mean_sampled_close_reward"] == -0.02
+    assert diagnostics[-1]["mean_sampled_hold_n_step_return"] == 0.12
+    assert diagnostics[-1]["mean_sampled_close_n_step_return"] == -0.08
     assert diagnostics[-1]["mean_sampled_hold_td_loss"] == 2.1
     assert diagnostics[-1]["mean_sampled_close_td_loss"] == 2.4
     assert diagnostics[-1]["mean_management_hold_minus_close_q"] == 0.15

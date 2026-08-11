@@ -977,6 +977,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "sampled_close_reward": weighted(
             "mean_sampled_close_reward", update_weights
         ),
+        "sampled_hold_n_step_return": weighted(
+            "mean_sampled_hold_n_step_return", update_weights
+        ),
+        "sampled_close_n_step_return": weighted(
+            "mean_sampled_close_n_step_return", update_weights
+        ),
         "sampled_hold_td_loss": weighted(
             "mean_sampled_hold_td_loss", update_weights
         ),
@@ -1418,6 +1424,8 @@ def train_agent(
                 "sampled_management_row_fraction",
                 "sampled_hold_reward",
                 "sampled_close_reward",
+                "sampled_hold_n_step_return",
+                "sampled_close_n_step_return",
                 "sampled_hold_td_loss",
                 "sampled_close_td_loss",
                 "management_hold_minus_close_q",

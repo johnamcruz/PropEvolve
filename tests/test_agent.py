@@ -247,6 +247,79 @@ def test_recurrent_double_dqn_targets_preserve_the_current_state_history() -> No
     assert np.isfinite(agent.last_train_metrics["management_hold_minus_close_q"])
 
 
+def test_recurrent_double_dqn_propagates_configured_multi_step_returns() -> None:
+    agent = _agent(2, seed=43, learning_rate=1e-12, n_step_return=3)
+    sequence = tuple(
+        Transition(
+            observation=np.array([float(index), float(index % 2)], np.float32),
+            action=Action.HOLD,
+            reward=reward,
+            next_observation=np.array(
+                [float(index + 1), float((index + 1) % 2)], np.float32
+            ),
+            terminated=index == 3,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+        )
+        for index, reward in enumerate((0.1, 0.2, 0.4, 0.8))
+    )
+    observations = torch.as_tensor(
+        np.stack([sequence[0].observation, *(item.next_observation for item in sequence)])
+    ).view(1, 5, 2)
+    rewards = torch.as_tensor([[item.reward for item in sequence]])
+    gamma = agent.gamma
+    returns = torch.stack((
+        rewards[:, 0] + gamma * rewards[:, 1] + gamma**2 * rewards[:, 2],
+        rewards[:, 1] + gamma * rewards[:, 2] + gamma**2 * rewards[:, 3],
+    ), dim=1)
+    terminated = torch.tensor([[False, True]])
+
+    with torch.no_grad():
+        online_logits, _ = agent.online(observations)
+        target_logits, _ = agent.target(observations)
+        current_logits = online_logits[:, :2]
+        online_next = online_logits[:, 3:]
+        target_next = target_logits[:, 3:]
+        online_q = (online_next.softmax(-1) * agent.support).sum(-1)
+        valid = torch.zeros((1, 2, len(Action)), dtype=torch.bool)
+        valid[..., int(Action.HOLD)] = True
+        valid[..., int(Action.CLOSE)] = True
+        next_actions = online_q.masked_fill(~valid, -torch.inf).argmax(-1)
+        next_distribution = target_next.softmax(-1).gather(
+            2,
+            next_actions[..., None, None].expand(-1, -1, 1, agent.atoms),
+        ).squeeze(2)
+        delta = (agent.value_max - agent.value_min) / (agent.atoms - 1)
+        target_support = returns[..., None] + (
+            gamma**3 * (~terminated).float()[..., None] * agent.support
+        )
+        target_support.clamp_(agent.value_min, agent.value_max)
+        positions = (target_support - agent.value_min) / delta
+        lower = positions.floor().long()
+        upper = positions.ceil().long()
+        projected = torch.zeros_like(next_distribution)
+        projected.scatter_add_(
+            -1, lower, next_distribution * (upper.float() - positions)
+        )
+        projected.scatter_add_(
+            -1, upper, next_distribution * (positions - lower.float())
+        )
+        projected.scatter_add_(
+            -1, lower, next_distribution * (lower == upper).float()
+        )
+        chosen = current_logits[:, :, int(Action.HOLD)]
+        expected_loss = -(
+            projected * chosen.log_softmax(-1)
+        ).sum(-1).mean().item()
+
+    agent.train_batch((sequence,))
+
+    assert agent.last_train_metrics["rl_loss"] == pytest.approx(
+        expected_loss, rel=1e-6, abs=1e-6
+    )
+    assert agent.last_train_metrics["n_step_return"] == 3.0
+
+
 def test_soft_target_update_moves_gradually_after_every_learner_update() -> None:
     agent = _agent(
         2,

@@ -206,6 +206,7 @@ def load_experiment_config(path: str | Path) -> dict:
     if not str(cache["encoder_identity_sha256"]).strip():
         raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
+    agent.setdefault("n_step_return", 1)
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     if (
@@ -258,6 +259,12 @@ def load_experiment_config(path: str | Path) -> dict:
         < int(training["sequence_length"])
     ):
         raise ValueError("training replay transition capacity is invalid")
+    if (
+        isinstance(agent["n_step_return"], bool)
+        or not isinstance(agent["n_step_return"], int)
+        or not 1 <= int(agent["n_step_return"]) <= int(training["sequence_length"])
+    ):
+        raise ValueError("agent n-step return must fit the replay sequence")
     if not 0 <= float(training["epsilon_end"]) <= float(training["epsilon_start"]) <= 1:
         raise ValueError("training epsilon schedule is invalid")
     if not (

@@ -53,6 +53,26 @@ def test_runtime_performance_contract_is_explicit_and_fail_closed(
         load_experiment_config(path)
 
 
+def test_n_step_return_is_explicit_and_must_fit_replay_sequence(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_curriculum_v8.json"
+    ).read_text())
+    payload["agent"]["n_step_return"] = 8
+    path = tmp_path / "n-step.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["agent"]["n_step_return"] == 8
+
+    payload["agent"]["n_step_return"] = payload["training"]["sequence_length"] + 1
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="n-step return"):
+        load_experiment_config(path)
+
+
 def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:
     source = Path("config/historical_mask_expansion_regime_curriculum_v8.json")
     payload = json.loads(source.read_text())
