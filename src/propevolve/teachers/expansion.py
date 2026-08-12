@@ -22,6 +22,11 @@ from .base import BaseTeacher
 
 
 TEACHER_CACHE_SCHEMA = "propevolve_expansion_teacher_cache_v1"
+ENTRY_CENTER_RECEIPT_SCHEMA = "propevolve_expansion_entry_center_receipt_v1"
+ENTRY_CENTER_FORMULA = (
+    "pooled_available_float64_mean("
+    "attempt_probability*clean_retained_given_attempt_probability)"
+)
 CHANNELS = (
     "long_attempt_probability",
     "long_clean_retained_given_attempt_probability",
@@ -396,6 +401,124 @@ class ExpansionTeacherTargets:
         if not bool(self.availability[ticker][row]):
             return None
         return np.asarray(self.probabilities[ticker][row], dtype=np.float32)
+
+
+def verify_expansion_entry_center_receipt(
+    spec: dict,
+    *,
+    root: Path,
+    expected_tickers: tuple[str, ...],
+) -> tuple[float, float]:
+    """Authenticate and recompute fit-only pooled Expansion entry centers."""
+    root = Path(root).resolve(strict=True)
+    receipt_path = (root / str(spec["entry_search_center_receipt"])).resolve(
+        strict=True
+    )
+    if not receipt_path.is_relative_to(root):
+        raise ValueError("Expansion entry-center receipt must be repository-local")
+    if _sha256(receipt_path) != spec["entry_search_center_receipt_sha256"]:
+        raise ValueError("Expansion entry-center receipt identity drifted")
+    receipt = json.loads(receipt_path.read_text())
+    required_receipt_fields = {
+        "schema",
+        "formula",
+        "training_start_inclusive",
+        "training_end_exclusive",
+        "tickers",
+        "channels",
+        "pooled_available_rows",
+        "long_center",
+        "short_center",
+        "sources",
+    }
+    source_fields = {
+        "ticker",
+        "manifest_sha256",
+        "probabilities_sha256",
+        "availability_sha256",
+        "timestamps_sha256",
+        "rows",
+        "available_rows",
+        "first_timestamp",
+        "last_timestamp",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != required_receipt_fields
+        or receipt.get("schema") != ENTRY_CENTER_RECEIPT_SCHEMA
+        or receipt.get("formula") != ENTRY_CENTER_FORMULA
+        or tuple(receipt.get("tickers", ())) != expected_tickers
+        or tuple(receipt.get("channels", ())) != CHANNELS
+        or not isinstance(receipt.get("sources"), list)
+        or len(receipt["sources"]) != len(expected_tickers)
+        or any(
+            not isinstance(source, dict) or set(source) != source_fields
+            for source in receipt["sources"]
+        )
+    ):
+        raise ValueError("Expansion entry-center receipt contract drifted")
+    start = _utc_boundary(str(receipt["training_start_inclusive"]))
+    end = _utc_boundary(str(receipt["training_end_exclusive"]))
+    if start >= end:
+        raise ValueError("Expansion entry-center receipt period drifted")
+
+    cache_root_value = Path(str(spec["cache_root"]))
+    cache_root = (
+        cache_root_value.resolve(strict=True)
+        if cache_root_value.is_absolute()
+        else (root / cache_root_value).resolve(strict=True)
+    )
+    long_sum = np.float64(0.0)
+    short_sum = np.float64(0.0)
+    pooled_rows = 0
+    for ticker, source in zip(expected_tickers, receipt["sources"], strict=True):
+        if source["ticker"] != ticker:
+            raise ValueError("Expansion entry-center source ordering drifted")
+        ticker_root = cache_root / ticker
+        manifest_path = ticker_root / "manifest.json"
+        cache = ExpansionTeacherCache.load(ticker_root)
+        manifest = cache.manifest
+        if (
+            _sha256(manifest_path) != source["manifest_sha256"]
+            or any(
+                manifest.get(f"{name}_sha256") != source[f"{name}_sha256"]
+                for name in ("probabilities", "availability", "timestamps")
+            )
+        ):
+            raise ValueError("Expansion entry-center source identity drifted")
+        available_rows = int(np.count_nonzero(cache.availability))
+        if (
+            int(source["rows"]) != len(cache.timestamps)
+            or int(source["rows"]) != int(manifest["rows"])
+            or int(source["available_rows"]) != available_rows
+        ):
+            raise ValueError("Expansion entry-center source rows drifted")
+        if (
+            manifest.get("training_end_exclusive")
+            != receipt["training_end_exclusive"]
+            or cache.timestamps[0] < start
+            or cache.timestamps[-1] >= end
+            or source["first_timestamp"] != str(cache.timestamps[0])
+            or source["last_timestamp"] != str(cache.timestamps[-1])
+        ):
+            raise ValueError("Expansion entry-center source period drifted")
+        selected = np.asarray(cache.probabilities[cache.availability], dtype=np.float64)
+        long_sum += np.sum(selected[:, 0] * selected[:, 1], dtype=np.float64)
+        short_sum += np.sum(selected[:, 2] * selected[:, 3], dtype=np.float64)
+        pooled_rows += available_rows
+    if pooled_rows < 1 or pooled_rows != int(receipt["pooled_available_rows"]):
+        raise ValueError("Expansion entry-center pooled rows drifted")
+    recomputed = (float(long_sum / pooled_rows), float(short_sum / pooled_rows))
+    receipt_centers = (float(receipt["long_center"]), float(receipt["short_center"]))
+    configured_centers = (
+        float(spec["entry_search_long_center"]),
+        float(spec["entry_search_short_center"]),
+    )
+    if not np.allclose(recomputed, receipt_centers, rtol=0.0, atol=1e-12):
+        raise ValueError("Expansion entry-center receipt statistics drifted")
+    if not np.allclose(configured_centers, receipt_centers, rtol=0.0, atol=1e-12):
+        raise ValueError("Expansion entry-center configured centers drifted")
+    return receipt_centers
 
 
 def _flush_scores(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -110,6 +111,70 @@ def test_v8e_recipe_really_uses_the_declared_eight_step_return() -> None:
         "maximum_average_hold_bars": 4.0,
         "minimum_voluntary_close_rate": 0.8,
     }
+
+
+def test_validation_no_trade_patience_is_json_configured_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_trend_profile_n_step_td_v8e.json"
+    ).read_text())
+    payload["training"]["validation_no_trade_patience_episodes"] = 5
+    path = tmp_path / "validation-patience.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+    assert config["training"]["validation_no_trade_patience_episodes"] == 5
+
+    for invalid in (True, -1, payload["training"]["validation_episodes"] + 1):
+        payload["training"]["validation_no_trade_patience_episodes"] = invalid
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ValueError, match="validation no-trade patience"):
+            load_experiment_config(path)
+
+
+def test_v8f_centers_entry_distillation_on_authenticated_training_scores() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_centered_entry_v8f.json"
+    )
+    expansion = config["teachers"][0]
+
+    assert expansion["entry_search_objective"] == "centered_log_odds"
+    assert expansion["entry_search_long_center"] == pytest.approx(
+        0.10249102659218842
+    )
+    assert expansion["entry_search_short_center"] == pytest.approx(
+        0.10399580328775007
+    )
+    receipt = Path(expansion["entry_search_center_receipt"])
+    assert receipt == Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    assert expansion["entry_search_center_receipt_sha256"] == hashlib.sha256(
+        receipt.read_bytes()
+    ).hexdigest()
+    assert config["challenge"]["per_trade_risk_dollars"] == 300
+    assert config["evolution"]["revision_bounds"][
+        "challenge.per_trade_risk_dollars"
+    ] == {"minimum": 300, "maximum": 500}
+    assert config["training"]["teacher_loss_end_scale"] == 0.0
+    assert config["training"]["teacher_guidance_dropout_end"] == 1.0
+    assert config["training"]["teacher_autonomy_start_fraction"] == 0.8
+    assert config["training"]["validation_no_trade_patience_episodes"] == 5
+
+
+def test_centered_entry_distillation_rejects_unauthenticated_centers(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_centered_entry_v8f.json"
+    ).read_text())
+    payload["teachers"][0]["entry_search_center_receipt_sha256"] = ""
+    path = tmp_path / "bad-center.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="Expansion entry-search contract"):
+        load_experiment_config(path)
 
 
 def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:

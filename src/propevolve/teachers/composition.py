@@ -68,6 +68,49 @@ class CombinedTeacherTargets:
         return np.concatenate(values).astype(np.float32, copy=False)
 
 
+def agent_teacher_settings(specs: tuple[dict, ...]) -> dict[str, object]:
+    """Project validated JSON teacher recipes onto agent constructor settings."""
+    if not specs:
+        return {}
+    settings: dict[str, object] = {
+        "teacher_channels": sum(len(item["channels"]) for item in specs),
+        "teacher_loss_weight": sum(float(item["loss_weight"]) for item in specs),
+        "teacher_channel_loss_weights": tuple(
+            float(item["loss_weight"]) / len(item["channels"])
+            for item in specs
+            for _ in item["channels"]
+        ),
+    }
+    expansion = next(
+        (item for item in specs if item["kind"] == "expansion"), None
+    )
+    if expansion is None:
+        settings["teacher_entry_search_loss_weight"] = 0.0
+        return settings
+    settings.update({
+        "teacher_entry_search_loss_weight": float(
+            expansion["entry_search_loss_weight"]
+        ),
+        "teacher_entry_search_objective": str(
+            expansion["entry_search_objective"]
+        ),
+        "teacher_entry_search_centers": (
+            float(expansion["entry_search_long_center"]),
+            float(expansion["entry_search_short_center"]),
+        ),
+        "teacher_entry_search_probability_epsilon": float(
+            expansion["entry_search_probability_epsilon"]
+        ),
+        "teacher_entry_search_teacher_temperature": float(
+            expansion["entry_search_teacher_temperature"]
+        ),
+        "teacher_entry_search_q_temperature": float(
+            expansion["entry_search_q_temperature"]
+        ),
+    })
+    return settings
+
+
 def load_teacher_targets(
     specs: tuple[dict, ...],
     *,
@@ -78,7 +121,17 @@ def load_teacher_targets(
     for spec in specs:
         kind = str(spec["kind"])
         if kind == "expansion":
-            from .expansion import ExpansionTeacherTargets
+            from .expansion import (
+                ExpansionTeacherTargets,
+                verify_expansion_entry_center_receipt,
+            )
+
+            if spec["entry_search_objective"] == "centered_log_odds":
+                verify_expansion_entry_center_receipt(
+                    spec,
+                    root=root,
+                    expected_tickers=tuple(markets),
+                )
 
             targets = ExpansionTeacherTargets.load(root / spec["cache_root"], markets)
         elif kind == "regime":
@@ -102,6 +155,7 @@ def load_teacher_targets(
 
 
 __all__ = [
+    "agent_teacher_settings",
     "CombinedTeacherTargets",
     "TeacherTargetSource",
     "load_teacher_targets",

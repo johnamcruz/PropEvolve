@@ -34,6 +34,7 @@ from .evolution import (
 )
 from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
+from .teachers import agent_teacher_settings
 
 if TYPE_CHECKING:
     from .agent import RecurrentC51Agent
@@ -134,6 +135,10 @@ class TrainingResult:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    flat_decision_count: int = 0
+    greedy_entry_count: int = 0
+    best_entry_advantage_sum: float = 0.0
+    entry_advantage_probe_count: int = 0
     short_circuited: bool = False
     short_circuit_reason: str | None = None
 
@@ -197,6 +202,20 @@ class TrainingResult:
         return (
             self.near_blow_timeout_count / self.timeouts
             if self.timeouts else 0.0
+        )
+
+    @property
+    def greedy_entry_rate(self) -> float:
+        return (
+            self.greedy_entry_count / self.flat_decision_count
+            if self.flat_decision_count else 0.0
+        )
+
+    @property
+    def mean_best_entry_advantage(self) -> float:
+        return (
+            self.best_entry_advantage_sum / self.entry_advantage_probe_count
+            if self.entry_advantage_probe_count else 0.0
         )
 
     def outcome(self, name: str) -> OutcomeStatistics:
@@ -412,16 +431,7 @@ class HistoricalCandidateRunner:
             agent_runtime_settings(config.get("runtime", DEFAULT_RUNTIME))
         )
         if teacher_targets is not None:
-            agent_settings.update(
-                teacher_channels=len(teacher_targets.channels),
-                teacher_loss_weight=sum(
-                    float(spec["loss_weight"]) for spec in teacher_specs
-                ),
-                teacher_channel_loss_weights=teacher_targets.channel_loss_weights,
-                teacher_entry_search_loss_weight=(
-                    teacher_targets.entry_search_loss_weight
-                ),
-            )
+            agent_settings.update(agent_teacher_settings(teacher_specs))
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
@@ -509,6 +519,9 @@ class HistoricalCandidateRunner:
             batch_sequences=int(training_config["batch_sequences"]),
             prefetch_batches=int(training_config.get("prefetch_batches", 0)),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
+            greedy_diagnostic_interval_steps=int(
+                training_config.get("greedy_diagnostic_interval_steps", 256)
+            ),
             epsilon_start=float(training_config["epsilon_start"]),
             epsilon_end=float(training_config["epsilon_end"]),
             management_epsilon_start=float(
@@ -555,6 +568,9 @@ class HistoricalCandidateRunner:
             ),
             teacher_guidance_dropout_end=float(
                 training_config.get("teacher_guidance_dropout_end", 0.0)
+            ),
+            teacher_autonomy_start_fraction=float(
+                training_config.get("teacher_autonomy_start_fraction", 1.0)
             ),
             short_circuit_minimum_environment_steps=(
                 int(training_config["short_circuit"]["minimum_environment_steps"])
@@ -627,6 +643,14 @@ class HistoricalCandidateRunner:
                 near_blow_loss_threshold=near_blow_loss_threshold,
                 stop_on_first_blow=bool(
                     config.get("_validation_stop_on_blow", False)
+                ),
+                no_trade_patience_episodes=int(
+                    training_config.get(
+                        "validation_no_trade_patience_episodes", 0
+                    )
+                ),
+                greedy_diagnostic_interval_steps=int(
+                    training_config.get("greedy_diagnostic_interval_steps", 256)
                 ),
             )
         config_bytes = Path(config["_path"]).read_bytes()
@@ -749,6 +773,16 @@ class HistoricalCandidateRunner:
                 ),
                 "mean_reward": validation.mean_reward,
                 "environment_steps": float(validation.environment_steps),
+                "trade_count": float(validation.trade_count),
+                "flat_decision_count": float(validation.flat_decision_count),
+                "greedy_entry_count": float(validation.greedy_entry_count),
+                "entry_advantage_probe_count": float(
+                    validation.entry_advantage_probe_count
+                ),
+                "greedy_entry_rate": validation.greedy_entry_rate,
+                "mean_best_entry_advantage": (
+                    validation.mean_best_entry_advantage
+                ),
                 "trade_win_rate": validation.trade_win_rate,
                 "average_win_r": validation.average_win_r,
                 "expectancy_r": validation.expectancy_r,
@@ -796,11 +830,19 @@ class HistoricalCandidateRunner:
                 EvaluationStage(
                     "selection",
                     selection_metrics,
-                    gates=(EvaluationGate("pass_minus_blow", ">", 0.0),),
+                    gates=_selection_evaluation_gates(),
                 ),
             ),
         )
         return candidate, cascade.evaluate(candidate.candidate_id)
+
+
+def _selection_evaluation_gates() -> tuple[EvaluationGate, ...]:
+    """Reject incomplete selection even when its partial economics look positive."""
+    return (
+        EvaluationGate("short_circuited", "==", 0.0),
+        EvaluationGate("pass_minus_blow", ">", 0.0),
+    )
 
 
 def _training_resume_identity(
@@ -1251,6 +1293,7 @@ def train_agent(
     updates_per_episode: int,
     batch_sequences: int,
     recurrent_horizon: int,
+    greedy_diagnostic_interval_steps: int = 256,
     epsilon_start: float,
     epsilon_end: float,
     management_epsilon_start: float | None = None,
@@ -1267,6 +1310,7 @@ def train_agent(
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
+    teacher_autonomy_start_fraction: float = 1.0,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     near_blow_loss_threshold: float | None = None,
     short_circuit_minimum_environment_steps: int | None = None,
@@ -1280,6 +1324,11 @@ def train_agent(
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
+    if (
+        isinstance(greedy_diagnostic_interval_steps, bool)
+        or greedy_diagnostic_interval_steps < 1
+    ):
+        raise ValueError("greedy diagnostic interval must be positive")
     if isinstance(prefetch_batches, bool) or not 0 <= prefetch_batches <= 2:
         raise ValueError("replay prefetch must be between zero and two")
     management_epsilon_start = (
@@ -1341,6 +1390,8 @@ def train_agent(
         <= 1
     ):
         raise ValueError("teacher guidance dropout schedule is invalid")
+    if not 0 < teacher_autonomy_start_fraction <= 1:
+        raise ValueError("teacher autonomy start fraction is invalid")
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -1370,6 +1421,9 @@ def train_agent(
         hidden = None
         transitions = []
         action_counts = {action: 0 for action in Action}
+        greedy_flat_action_counts = {action: 0 for action in Action}
+        greedy_flat_probe_count = 0
+        greedy_flat_entry_advantages: list[float] = []
         selected_entry_teacher_targets: list[tuple[float, float]] = []
         selected_teacher_targets: list[np.ndarray] = []
         total_reward = 0.0
@@ -1379,6 +1433,9 @@ def train_agent(
         step_progress = min(
             1.0, progress.environment_steps / minimum_environment_steps
         )
+        teacher_schedule_progress = min(
+            1.0, step_progress / teacher_autonomy_start_fraction
+        )
         epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
         management_epsilon = (
             management_epsilon_start
@@ -1386,15 +1443,8 @@ def train_agent(
         )
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0
-        ) * step_progress
-        teacher_guidance_dropout_probability = (
-            teacher_guidance_dropout_start
-            + (
-                teacher_guidance_dropout_end
-                - teacher_guidance_dropout_start
-            )
-            * step_progress
-        )
+        ) * teacher_schedule_progress
+        teacher_guidance_dropout_probability = teacher_guidance_dropout_start
         terminal_info = reset_info
         step_index = 0
         while True:
@@ -1405,28 +1455,66 @@ def train_agent(
                 if set(valid) == {Action.HOLD, Action.CLOSE}
                 else epsilon
             )
-            action, hidden, _ = agent.select_action(
+            flat_actions = {
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }
+            diagnostic_probe = (
+                flat_actions.issubset(valid)
+                and (progress.environment_steps + step_index)
+                % greedy_diagnostic_interval_steps == 0
+            )
+            action, hidden, action_values = agent.select_action(
                 observation,
                 hidden=hidden,
                 valid_actions=valid,
                 epsilon=action_epsilon,
+                return_action_values=diagnostic_probe,
             )
             action_counts[Action(action)] += 1
+            if diagnostic_probe:
+                assert action_values is not None
+                values = np.asarray(action_values, dtype=np.float64)
+                greedy_action = max(valid, key=lambda item: values[int(item)])
+                greedy_flat_action_counts[Action(greedy_action)] += 1
+                greedy_flat_probe_count += 1
+                greedy_flat_entry_advantages.append(
+                    max(
+                        values[int(Action.ENTER_LONG_1)],
+                        values[int(Action.ENTER_SHORT_1)],
+                    ) - values[int(Action.WAIT)]
+                )
             next_observation, reward, terminated, _, info = environment.step(action)
             next_valid = tuple(info["valid_actions"])
-            teacher_target = (
-                teacher_lookup(episode_ticker, decision_index)
-                if teacher_lookup is not None
-                else None
+            decision_progress = min(
+                1.0,
+                (progress.environment_steps + step_index)
+                / minimum_environment_steps,
             )
-            if teacher_target is not None and not _teacher_guidance_is_visible(
+            decision_teacher_progress = min(
+                1.0, decision_progress / teacher_autonomy_start_fraction
+            )
+            teacher_guidance_dropout_probability = (
+                teacher_guidance_dropout_start
+                + (
+                    teacher_guidance_dropout_end
+                    - teacher_guidance_dropout_start
+                )
+                * decision_teacher_progress
+            )
+            teacher_visible = _teacher_guidance_is_visible(
                 seed=ticker_seed,
                 episode_index=episode_index,
                 ticker=episode_ticker,
                 decision_index=decision_index,
                 dropout_probability=teacher_guidance_dropout_probability,
-            ):
-                teacher_target = None
+            )
+            teacher_target = (
+                teacher_lookup(episode_ticker, decision_index)
+                if teacher_lookup is not None and teacher_visible
+                else None
+            )
             entry_opportunity_priority = 0.0
             if teacher_target is not None:
                 entry_opportunity_priority = max(
@@ -1480,6 +1568,17 @@ def train_agent(
             episode_steps = step_index
             if terminated:
                 break
+        update_progress = min(
+            1.0,
+            (progress.environment_steps + episode_steps)
+            / minimum_environment_steps,
+        )
+        teacher_schedule_progress = min(
+            1.0, update_progress / teacher_autonomy_start_fraction
+        )
+        teacher_weight_scale = 1.0 + (
+            teacher_loss_end_scale - 1.0
+        ) * teacher_schedule_progress
         outcome = str(terminal_info["outcome"])
         if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
@@ -1788,6 +1887,7 @@ def train_agent(
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
                 "teacher_weight_scale": teacher_weight_scale,
+                "teacher_schedule_progress": teacher_schedule_progress,
                 "teacher_guidance_dropout_probability": (
                     teacher_guidance_dropout_probability
                 ),
@@ -1826,6 +1926,22 @@ def train_agent(
                 "action_counts": {
                     action.name: action_counts[action] for action in Action
                 },
+                "greedy_flat_action_counts": {
+                    action.name: greedy_flat_action_counts[action]
+                    for action in Action
+                },
+                "greedy_flat_entry_rate": (
+                    (
+                        greedy_flat_action_counts[Action.ENTER_LONG_1]
+                        + greedy_flat_action_counts[Action.ENTER_SHORT_1]
+                    ) / greedy_flat_probe_count
+                    if greedy_flat_probe_count else 0.0
+                ),
+                "greedy_flat_probe_count": greedy_flat_probe_count,
+                "mean_greedy_best_entry_advantage": (
+                    float(np.mean(greedy_flat_entry_advantages))
+                    if greedy_flat_entry_advantages else None
+                ),
                 "teacher_scored_entries": len(selected_entry_teacher_targets),
                 "selected_side_attempt_probability_mean": (
                     float(np.mean([value[0] for value in selected_entry_teacher_targets]))
@@ -1927,9 +2043,22 @@ def evaluate_agent(
     recurrent_horizon: int,
     near_blow_loss_threshold: float | None = None,
     stop_on_first_blow: bool = False,
+    no_trade_patience_episodes: int = 0,
+    greedy_diagnostic_interval_steps: int = 256,
 ) -> TrainingResult:
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
+    if (
+        isinstance(no_trade_patience_episodes, bool)
+        or not isinstance(no_trade_patience_episodes, int)
+        or not 0 <= no_trade_patience_episodes <= episodes
+    ):
+        raise ValueError("validation no-trade patience is invalid")
+    if (
+        isinstance(greedy_diagnostic_interval_steps, bool)
+        or greedy_diagnostic_interval_steps < 1
+    ):
+        raise ValueError("greedy diagnostic interval must be positive")
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []
     terminal_pnls = []
@@ -1943,6 +2072,11 @@ def evaluate_agent(
     two_r_capture_sum = 0.0
     near_blow_timeout_count = 0
     environment_steps = 0
+    flat_decision_count = greedy_entry_count = 0
+    entry_advantage_probe_count = 0
+    best_entry_advantage_sum = 0.0
+    consecutive_zero_trade_episodes = 0
+    validation_short_circuit_reason = None
     by_outcome = {
         outcome: {
             "episodes": 0,
@@ -1973,9 +2107,36 @@ def evaluate_agent(
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
-            action, hidden, _ = agent.select_action(
-                observation, hidden=hidden, valid_actions=valid, epsilon=0.0
+            flat_actions = {
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }
+            is_flat_decision = flat_actions.issubset(valid)
+            diagnostic_probe = (
+                is_flat_decision
+                and environment_steps % greedy_diagnostic_interval_steps == 0
             )
+            action, hidden, action_values = agent.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=valid,
+                epsilon=0.0,
+                return_action_values=diagnostic_probe,
+            )
+            if is_flat_decision:
+                flat_decision_count += 1
+                greedy_entry_count += int(
+                    action in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                )
+            if diagnostic_probe:
+                assert action_values is not None
+                values = np.asarray(action_values, dtype=np.float64)
+                best_entry_advantage_sum += max(
+                    values[int(Action.ENTER_LONG_1)],
+                    values[int(Action.ENTER_SHORT_1)],
+                ) - values[int(Action.WAIT)]
+                entry_advantage_probe_count += 1
             observation, reward, terminated, _, info = environment.step(action)
             valid = tuple(info["valid_actions"])
             total += reward
@@ -2067,9 +2228,29 @@ def evaluate_agent(
         )
         evaluated_episodes = episode_index + 1
         if stop_on_first_blow and outcome == "blow":
+            validation_short_circuit_reason = "zero_blow_gate"
             print(
                 "[validation] SHORT_CIRCUIT reason=zero_blow_gate "
                 f"episode={evaluated_episodes}/{episodes}",
+                flush=True,
+            )
+            break
+        consecutive_zero_trade_episodes = (
+            consecutive_zero_trade_episodes + 1
+            if episode_trades == 0 else 0
+        )
+        if (
+            no_trade_patience_episodes
+            and consecutive_zero_trade_episodes >= no_trade_patience_episodes
+        ):
+            validation_short_circuit_reason = (
+                "universal_wait: "
+                f"{no_trade_patience_episodes} consecutive zero-trade episodes"
+            )
+            print(
+                "[validation] SHORT_CIRCUIT reason=universal_wait "
+                f"episodes={no_trade_patience_episodes} "
+                f"evaluated={evaluated_episodes}/{episodes}",
                 flush=True,
             )
             break
@@ -2102,6 +2283,12 @@ def evaluate_agent(
         two_r_capture_sum=two_r_capture_sum,
         two_r_round_trip_count=two_r_round_trip_count,
         near_blow_timeout_count=near_blow_timeout_count,
+        flat_decision_count=flat_decision_count,
+        greedy_entry_count=greedy_entry_count,
+        best_entry_advantage_sum=best_entry_advantage_sum,
+        entry_advantage_probe_count=entry_advantage_probe_count,
+        short_circuited=validation_short_circuit_reason is not None,
+        short_circuit_reason=validation_short_circuit_reason,
     )
     episode_display = (
         str(episodes)
@@ -2114,7 +2301,9 @@ def evaluate_agent(
         f"near_blow_timeout={result.near_blow_timeout_count} "
         f"({result.near_blow_timeout_rate:.1%}) "
         f"WR={result.trade_win_rate:.1%} winR={result.average_win_r:+.3f}R "
-        f"mean_pnl={result.mean_terminal_pnl:+.2f}",
+        f"mean_pnl={result.mean_terminal_pnl:+.2f} "
+        f"greedy_entry={result.greedy_entry_rate:.1%} "
+        f"entry_adv={result.mean_best_entry_advantage:+.4f}",
         flush=True,
     )
     return result

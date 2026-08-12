@@ -20,11 +20,29 @@ from propevolve.training import (
     HistoricalCandidateRunner,
     TrainingResult,
     TrainingProgress,
+    _selection_evaluation_gates,
     assert_temporal_role,
     evaluate_agent,
     prop_safety_objective,
     train_agent,
 )
+
+
+def test_incomplete_selection_cannot_pass_on_earlier_successes() -> None:
+    # This represents one early pass followed by five universal-WAIT episodes.
+    # Its partial pass-minus-blow result is positive, but evaluation is incomplete.
+    metrics = {
+        "pass_minus_blow": 1.0 / 6.0,
+        "short_circuited": 1.0,
+    }
+
+    assert not all(
+        gate.passes(metrics) for gate in _selection_evaluation_gates()
+    )
+    assert all(
+        gate.passes({"pass_minus_blow": 0.1, "short_circuited": 0.0})
+        for gate in _selection_evaluation_gates()
+    )
 
 
 class Agent:
@@ -35,7 +53,15 @@ class Agent:
     def retain_policy(self) -> None:
         self.retention_calls += 1
 
-    def select_action(self, observation, *, hidden, valid_actions, epsilon):
+    def select_action(
+        self,
+        observation,
+        *,
+        hidden,
+        valid_actions,
+        epsilon,
+        return_action_values=False,
+    ):
         return Action.WAIT, None, np.zeros(len(Action), np.float32)
 
     def train_batch(self, sequences, *, teacher_weight_scale=1.0):
@@ -525,20 +551,131 @@ def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    assert all(target is not None for target in observed_targets[:4])
-    assert [target is not None for target in observed_targets[4:]] == [
-        True, False, True, False
+    assert [target is not None for target in observed_targets] == [
+        True, True, True, False, True, False, True, False
     ]
-    assert diagnostics[0]["teacher_weight_scale"] == 1.0
-    assert diagnostics[1]["teacher_weight_scale"] == pytest.approx(0.6)
-    assert diagnostics[0]["teacher_guidance_dropout_probability"] == 0.0
-    assert diagnostics[1]["teacher_guidance_dropout_probability"] == 0.5
-    assert agent.teacher_weight_scales == [1.0, pytest.approx(0.6)]
+    assert diagnostics[0]["teacher_weight_scale"] == pytest.approx(0.6)
+    assert diagnostics[1]["teacher_weight_scale"] == pytest.approx(0.2)
+    assert diagnostics[0]["teacher_guidance_dropout_probability"] == 0.375
+    assert diagnostics[1]["teacher_guidance_dropout_probability"] == 0.875
+    assert agent.teacher_weight_scales == [pytest.approx(0.6), pytest.approx(0.2)]
+
+
+def test_teacher_curriculum_has_a_declared_final_autonomy_tail() -> None:
+    agent = Agent()
+    diagnostics = []
+    observed_targets = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            observed_targets.extend(
+                transition.teacher_target for transition in episode.transitions
+            )
+            super().add(episode)
+
+    train_agent(
+        agent,
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=CapturingReplay(capacity_episodes=10, sequence_length=2, seed=1),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=19,
+        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=1.0,
+        teacher_autonomy_start_fraction=0.5,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert [target is not None for target in observed_targets] == [
+        True, False, True, False, False, False, False, False
+    ]
+    assert diagnostics[1]["teacher_weight_scale"] == 0.0
+    assert diagnostics[1]["teacher_guidance_dropout_probability"] == 1.0
+    assert diagnostics[1]["teacher_schedule_progress"] == 1.0
+    assert agent.teacher_weight_scales == [0.0, 0.0]
+
+
+def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
+    class LongEpisodeEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 0,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 10
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.WAIT,),
+                "ticker": "NQ",
+                "fill_index": self.index,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    observed = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            observed.extend(
+                transition.teacher_target for transition in episode.transitions
+            )
+            super().add(episode)
+
+    train_agent(
+        Agent(),
+        LongEpisodeEnvironment(),
+        episodes=1,
+        minimum_environment_steps=10,
+        replay=CapturingReplay(capacity_episodes=2, sequence_length=2, seed=3),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=4,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=1.0,
+        teacher_autonomy_start_fraction=0.8,
+    )
+
+    assert observed[8:] == [None, None]
 
 
 def test_teacher_diagnostics_preserve_named_source_channels() -> None:
     class EnteringAgent(Agent):
-        def select_action(self, observation, *, hidden, valid_actions, epsilon):
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
             return Action.ENTER_LONG_1, None, np.zeros(len(Action), np.float32)
 
     diagnostics = []
@@ -794,7 +931,15 @@ def test_training_uses_lower_exploration_for_position_management() -> None:
             super().__init__()
             self.epsilons = []
 
-        def select_action(self, observation, *, hidden, valid_actions, epsilon):
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
             self.epsilons.append((valid_actions, epsilon))
             return valid_actions[0], None, None
 
@@ -1157,6 +1302,90 @@ def test_evaluation_short_circuits_after_first_blow_when_zero_blow_is_required(
     output = capsys.readouterr().out
     assert "SHORT_CIRCUIT reason=zero_blow_gate" in output
     assert "COMPLETE episodes=1/200" in output
+
+
+def test_evaluation_short_circuits_a_universal_wait_policy(capsys) -> None:
+    class ZeroTradeEnvironment:
+        def __init__(self) -> None:
+            self.reset_count = 0
+
+        def reset(self):
+            self.reset_count += 1
+            return np.array([0.0], np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            }
+
+        def step(self, action):
+            assert action == Action.WAIT
+            return np.array([0.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": "timeout",
+                "ticker": "NQ",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    environment = ZeroTradeEnvironment()
+    result = evaluate_agent(
+        Agent(),
+        environment,
+        episodes=200,
+        recurrent_horizon=2,
+        no_trade_patience_episodes=5,
+    )
+
+    assert result.episodes == 5
+    assert result.short_circuited is True
+    assert result.short_circuit_reason == (
+        "universal_wait: 5 consecutive zero-trade episodes"
+    )
+    assert result.trade_count == 0
+    assert environment.reset_count == 5
+    output = capsys.readouterr().out
+    assert output.count("SHORT_CIRCUIT reason=universal_wait") == 1
+    assert "COMPLETE episodes=5/200" in output
+
+
+def test_validation_no_trade_patience_resets_after_a_traded_episode() -> None:
+    class SparseTradeEnvironment:
+        def __init__(self) -> None:
+            self.episode = -1
+
+        def reset(self):
+            self.episode += 1
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,)
+            }
+
+        def step(self, action):
+            traded = self.episode in {2, 5}
+            return np.array([0.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": "timeout",
+                "ticker": "NQ",
+                "trade_count": int(traded),
+                "win_count": int(traded),
+                "winning_r_sum": float(traded),
+                "equity_pnl": 0.0,
+            }
+
+    result = evaluate_agent(
+        Agent(),
+        SparseTradeEnvironment(),
+        episodes=6,
+        recurrent_horizon=2,
+        no_trade_patience_episodes=3,
+    )
+
+    assert result.episodes == 6
+    assert result.short_circuited is False
+    assert result.trade_count == 2
 
 
 def test_one_shared_agent_trains_on_balanced_single_market_episodes() -> None:

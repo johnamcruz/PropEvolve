@@ -255,6 +255,8 @@ def load_experiment_config(path: str | Path) -> dict:
     training.setdefault("entry_opportunity_sequence_fraction", 0.0)
     training.setdefault("management_epsilon_start", training["epsilon_start"])
     training.setdefault("management_epsilon_end", training["epsilon_end"])
+    training.setdefault("validation_no_trade_patience_episodes", 0)
+    training.setdefault("greedy_diagnostic_interval_steps", 256)
     if (
         isinstance(training["prefetch_batches"], bool)
         or not isinstance(training["prefetch_batches"], int)
@@ -308,6 +310,22 @@ def load_experiment_config(path: str | Path) -> dict:
         or int(training["checkpoint_every_episodes"]) < 1
     ):
         raise ValueError("training checkpoint interval must be positive")
+    if (
+        isinstance(training["validation_no_trade_patience_episodes"], bool)
+        or not isinstance(
+            training["validation_no_trade_patience_episodes"], int
+        )
+        or not 0
+        <= training["validation_no_trade_patience_episodes"]
+        <= int(training["validation_episodes"])
+    ):
+        raise ValueError("validation no-trade patience is invalid")
+    if (
+        isinstance(training["greedy_diagnostic_interval_steps"], bool)
+        or not isinstance(training["greedy_diagnostic_interval_steps"], int)
+        or training["greedy_diagnostic_interval_steps"] < 1
+    ):
+        raise ValueError("greedy diagnostic interval is invalid")
     short_circuit = training.get("short_circuit")
     if short_circuit is not None:
         required_short_circuit = {
@@ -395,11 +413,38 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError("training-only teacher contract is invalid")
             item.setdefault("entry_search_loss_weight", 0.0)
             kind = item.get("kind")
+            if kind == "expansion":
+                item.setdefault("entry_search_objective", "raw_probability")
+                item.setdefault("entry_search_long_center", 0.5)
+                item.setdefault("entry_search_short_center", 0.5)
+                item.setdefault("entry_search_probability_epsilon", 1e-6)
+                item.setdefault("entry_search_teacher_temperature", 1.0)
+                item.setdefault("entry_search_q_temperature", 1.0)
+                item.setdefault("entry_search_center_receipt", "")
+                item.setdefault("entry_search_center_receipt_sha256", "")
+            required_fields = {
+                "kind", "cache_root", "channels", "loss_weight",
+                "entry_search_loss_weight",
+            }
+            if kind == "expansion":
+                required_fields.update({
+                    "entry_search_objective",
+                    "entry_search_long_center",
+                    "entry_search_short_center",
+                    "entry_search_probability_epsilon",
+                    "entry_search_teacher_temperature",
+                    "entry_search_q_temperature",
+                    "entry_search_center_receipt",
+                    "entry_search_center_receipt_sha256",
+                })
+            epsilon = float(item.get("entry_search_probability_epsilon", 1e-6))
+            centered = item.get("entry_search_objective") == "centered_log_odds"
+            center_receipt = str(item.get("entry_search_center_receipt", ""))
+            center_receipt_sha256 = str(
+                item.get("entry_search_center_receipt_sha256", "")
+            )
             if (
-                set(item) != {
-                    "kind", "cache_root", "channels", "loss_weight",
-                    "entry_search_loss_weight",
-                }
+                set(item) != required_fields
                 or kind not in expected_channels
                 or tuple(item.get("channels", ())) != expected_channels[kind]
                 or float(item.get("loss_weight", 0.0)) <= 0
@@ -409,11 +454,43 @@ def load_experiment_config(path: str | Path) -> dict:
             ):
                 label = str(kind).title()
                 raise ValueError(f"training-only {label} teacher contract is invalid")
+            if kind == "expansion" and (
+                item["entry_search_objective"] not in {
+                    "raw_probability", "centered_log_odds"
+                }
+                or not 0 < epsilon < 0.5
+                or any(
+                    not epsilon < float(item[field]) < 1.0 - epsilon
+                    for field in (
+                        "entry_search_long_center",
+                        "entry_search_short_center",
+                    )
+                )
+                or float(item["entry_search_teacher_temperature"]) <= 0
+                or float(item["entry_search_q_temperature"]) <= 0
+                or (
+                    centered
+                    and (
+                        float(item["entry_search_loss_weight"]) <= 0
+                        or not center_receipt
+                        or len(center_receipt_sha256) != 64
+                        or any(
+                            character not in "0123456789abcdef"
+                            for character in center_receipt_sha256
+                        )
+                    )
+                )
+                or (not centered and (center_receipt or center_receipt_sha256))
+            ):
+                raise ValueError(
+                    "training-only Expansion entry-search contract is invalid"
+                )
             if float(item["entry_search_loss_weight"]) > 0 and index != 0:
                 raise ValueError("entry-guiding Expansion teacher must be first")
         training.setdefault("teacher_loss_end_scale", 1.0)
         training.setdefault("teacher_guidance_dropout_start", 0.0)
         training.setdefault("teacher_guidance_dropout_end", 0.0)
+        training.setdefault("teacher_autonomy_start_fraction", 1.0)
         if (
             isinstance(training["teacher_loss_end_scale"], bool)
             or not 0 <= float(training["teacher_loss_end_scale"]) <= 1
@@ -427,6 +504,11 @@ def load_experiment_config(path: str | Path) -> dict:
         dropout_end = float(training["teacher_guidance_dropout_end"])
         if not 0 <= dropout_start <= dropout_end <= 1:
             raise ValueError("teacher guidance dropout schedule is invalid")
+        if (
+            isinstance(training["teacher_autonomy_start_fraction"], bool)
+            or not 0 < float(training["teacher_autonomy_start_fraction"]) <= 1
+        ):
+            raise ValueError("teacher autonomy start fraction is invalid")
         payload["teachers"] = tuple(teachers)
     temporal = payload.get("temporal") or {}
     ordered = [

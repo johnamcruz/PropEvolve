@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 import torch
 
-from propevolve.agent import RecurrentC51Agent, RecurrentC51Network, resolve_device
+from propevolve.agent import (
+    RecurrentC51Agent,
+    RecurrentC51Network,
+    centered_entry_search_target,
+    resolve_device,
+)
 from propevolve.decision import Action
 from propevolve.replay import Transition
 
@@ -675,7 +680,7 @@ def test_hidden_teacher_guidance_cannot_change_the_rl_update() -> None:
     plain.train_batch((sequence, sequence))
     taught.train_batch((sequence, sequence), teacher_weight_scale=0.0)
 
-    assert taught.last_train_metrics["teacher_loss"] > 0
+    assert taught.last_train_metrics["teacher_loss"] == 0.0
     for key, value in plain.online.state_dict().items():
         if not key.startswith("teacher_output."):
             torch.testing.assert_close(value, taught.online.state_dict()[key])
@@ -765,7 +770,180 @@ def test_expansion_teacher_softly_guides_entry_values_without_training_managemen
     assert agent.last_train_metrics["entry_search_loss"] == 0.0
 
 
-def test_teacher_curriculum_scales_every_auxiliary_loss_without_hiding_diagnostics() -> None:
+def test_centered_entry_search_target_uses_training_base_rate_not_half() -> None:
+    probabilities = torch.tensor([0.05, 0.10, 0.35], dtype=torch.float32)
+    targets = centered_entry_search_target(
+        probabilities,
+        center=0.10,
+        probability_epsilon=1e-6,
+        teacher_temperature=1.0,
+    )
+
+    assert targets[0] < 0.5
+    assert targets[1] == pytest.approx(0.5)
+    assert targets[2] > 0.5
+    assert torch.all(targets[1:] > targets[:-1])
+
+    neutral_advantage = torch.tensor(0.0, requires_grad=True)
+    high_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        neutral_advantage, targets[2]
+    )
+    high_loss.backward()
+    assert neutral_advantage.grad is not None
+    assert neutral_advantage.grad.item() < 0.0
+
+
+def test_centered_entry_search_rejects_invalid_contract() -> None:
+    with pytest.raises(ValueError, match="entry-search probability contract"):
+        centered_entry_search_target(
+            torch.tensor([0.2]),
+            center=0.0,
+            probability_epsilon=1e-6,
+            teacher_temperature=1.0,
+        )
+
+
+def test_centered_entry_distillation_produces_teacher_free_greedy_entry() -> None:
+    agent = _agent(
+        2,
+        seed=43,
+        learning_rate=0.05,
+        weight_decay=0.0,
+        teacher_channels=4,
+        teacher_loss_weight=1e-6,
+        teacher_entry_search_loss_weight=10.0,
+        teacher_entry_search_objective="centered_log_odds",
+        teacher_entry_search_centers=(0.10, 0.10),
+    )
+    with torch.no_grad():
+        for parameter in agent.online.parameters():
+            parameter.zero_()
+        for parameter in agent.target.parameters():
+            parameter.zero_()
+    sequence = tuple(
+        Transition(
+            observation=np.zeros(2, np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.zeros(2, np.float32),
+            terminated=index == 3,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(
+                () if index == 3 else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            ),
+            teacher_target=np.array([0.7, 0.7, 0.05, 0.05], np.float32),
+        )
+        for index in range(4)
+    )
+
+    for _ in range(20):
+        agent.train_batch((sequence, sequence))
+    agent.discard_teacher()
+    action, _, values = agent.select_action(
+        np.zeros(2, np.float32),
+        hidden=None,
+        valid_actions=(
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        ),
+        epsilon=0.0,
+        return_action_values=True,
+    )
+
+    assert action == Action.ENTER_LONG_1
+    assert values is not None
+    assert values[int(Action.ENTER_LONG_1)] > values[int(Action.WAIT)]
+    assert values[int(Action.ENTER_SHORT_1)] < values[int(Action.WAIT)]
+
+
+def test_exploration_still_reports_greedy_action_values_for_diagnostics() -> None:
+    agent = _agent(2, seed=47)
+    action, _, values = agent.select_action(
+        np.zeros(2, np.float32),
+        hidden=None,
+        valid_actions=(
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        ),
+        epsilon=1.0,
+        return_action_values=True,
+    )
+
+    assert action in {
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    }
+    assert values is not None
+    assert np.isfinite(values[[
+        int(Action.WAIT),
+        int(Action.ENTER_LONG_1),
+        int(Action.ENTER_SHORT_1),
+    ]]).all()
+
+
+def test_discard_teacher_and_checkpoint_round_trip_preserve_policy(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        3,
+        seed=41,
+        teacher_channels=4,
+        teacher_loss_weight=0.2,
+        teacher_entry_search_loss_weight=0.3,
+        teacher_entry_search_objective="centered_log_odds",
+        teacher_entry_search_centers=(0.10, 0.11),
+    )
+    observations = tuple(
+        np.array([index / 10.0, 0.25, -0.5], np.float32)
+        for index in range(6)
+    )
+
+    def trace(current: RecurrentC51Agent):
+        hidden = None
+        rows = []
+        for observation in observations:
+            action, hidden, values = current.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=(
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                epsilon=0.0,
+                return_action_values=True,
+            )
+            rows.append((action, values.copy(), hidden.detach().clone()))
+        return rows
+
+    before = trace(agent)
+    agent.discard_teacher()
+    after = trace(agent)
+    checkpoint = agent.save(tmp_path / "teacher-free.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    after_round_trip = trace(restored)
+
+    for expected, actual, restored_actual in zip(
+        before, after, after_round_trip, strict=True
+    ):
+        for observed in (actual, restored_actual):
+            assert observed[0] == expected[0]
+            np.testing.assert_array_equal(observed[1], expected[1])
+            torch.testing.assert_close(observed[2], expected[2], rtol=0, atol=0)
+
+
+def test_zero_teacher_scale_skips_all_auxiliary_teacher_work() -> None:
     full = _agent(
         2,
         seed=37,
@@ -799,8 +977,8 @@ def test_teacher_curriculum_scales_every_auxiliary_loss_without_hiding_diagnosti
     full.train_batch((sequence, sequence), teacher_weight_scale=1.0)
     autonomous.train_batch((sequence, sequence), teacher_weight_scale=0.0)
 
-    assert autonomous.last_train_metrics["teacher_loss"] > 0
-    assert autonomous.last_train_metrics["entry_search_loss"] > 0
+    assert autonomous.last_train_metrics["teacher_loss"] == 0.0
+    assert autonomous.last_train_metrics["entry_search_loss"] == 0.0
     assert autonomous.last_train_metrics["teacher_weight_scale"] == 0.0
     assert autonomous.last_train_metrics["total_loss"] == pytest.approx(
         autonomous.last_train_metrics["rl_loss"]

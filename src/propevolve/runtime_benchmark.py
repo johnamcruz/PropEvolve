@@ -91,6 +91,7 @@ def run_arm(
     """Measure one arm in the current isolated process."""
     from .agent import RecurrentC51Agent
     from .config import agent_runtime_settings, load_experiment_config
+    from .teachers import agent_teacher_settings
 
     config = load_experiment_config(config_path)
     agent_settings = dict(config["agent"])
@@ -104,18 +105,7 @@ def run_arm(
     teachers = tuple(config.get("teachers") or ())
     teacher_channels = sum(len(item["channels"]) for item in teachers)
     if teacher_channels:
-        agent_settings.update(
-            teacher_channels=teacher_channels,
-            teacher_loss_weight=sum(float(item["loss_weight"]) for item in teachers),
-            teacher_channel_loss_weights=tuple(
-                float(item["loss_weight"]) / len(item["channels"])
-                for item in teachers
-                for _ in item["channels"]
-            ),
-            teacher_entry_search_loss_weight=float(
-                teachers[0].get("entry_search_loss_weight", 0.0)
-            ),
-        )
+        agent_settings.update(agent_teacher_settings(teachers))
     agent = RecurrentC51Agent(
         observation_dim,
         seed=int(config["training"]["seed"]),

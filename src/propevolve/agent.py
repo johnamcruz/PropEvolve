@@ -37,6 +37,30 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def centered_entry_search_target(
+    probabilities: torch.Tensor,
+    *,
+    center: float,
+    probability_epsilon: float,
+    teacher_temperature: float,
+) -> torch.Tensor:
+    """Center a soft opportunity score on its authenticated fit-only base rate."""
+    if (
+        not 0 < probability_epsilon < 0.5
+        or not probability_epsilon < center < 1.0 - probability_epsilon
+        or teacher_temperature <= 0
+    ):
+        raise ValueError("entry-search probability contract is invalid")
+    bounded = probabilities.clamp(probability_epsilon, 1.0 - probability_epsilon)
+    center_tensor = torch.as_tensor(
+        center, dtype=bounded.dtype, device=bounded.device
+    )
+    centered_log_odds = (
+        torch.logit(bounded) - torch.logit(center_tensor)
+    ) / teacher_temperature
+    return torch.sigmoid(centered_log_odds)
+
+
 class RecurrentC51Network(nn.Module):
     """Compact market/account encoder with recurrent C51 action values."""
 
@@ -120,6 +144,11 @@ class RecurrentC51Agent:
         teacher_loss_weight: float = 0.0,
         teacher_channel_loss_weights: Sequence[float] | None = None,
         teacher_entry_search_loss_weight: float = 0.0,
+        teacher_entry_search_objective: str = "raw_probability",
+        teacher_entry_search_centers: Sequence[float] = (0.5, 0.5),
+        teacher_entry_search_probability_epsilon: float = 1e-6,
+        teacher_entry_search_teacher_temperature: float = 1.0,
+        teacher_entry_search_q_temperature: float = 1.0,
         policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
@@ -154,6 +183,26 @@ class RecurrentC51Agent:
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
             raise ValueError("teacher channels and loss weight must be enabled together")
+        teacher_entry_search_centers = tuple(
+            float(value) for value in teacher_entry_search_centers
+        )
+        if (
+            teacher_entry_search_objective not in {
+                "raw_probability",
+                "centered_log_odds",
+            }
+            or len(teacher_entry_search_centers) != 2
+            or not 0 < teacher_entry_search_probability_epsilon < 0.5
+            or any(
+                not teacher_entry_search_probability_epsilon
+                < value
+                < 1.0 - teacher_entry_search_probability_epsilon
+                for value in teacher_entry_search_centers
+            )
+            or teacher_entry_search_teacher_temperature <= 0
+            or teacher_entry_search_q_temperature <= 0
+        ):
+            raise ValueError("teacher entry-search contract is invalid")
         if teacher_channel_loss_weights is None:
             teacher_channel_loss_weights = (
                 (float(teacher_loss_weight) / int(teacher_channels),) * int(teacher_channels)
@@ -207,6 +256,19 @@ class RecurrentC51Agent:
         self.teacher_channel_loss_weights = teacher_channel_loss_weights
         self.teacher_entry_search_loss_weight = float(
             teacher_entry_search_loss_weight
+        )
+        self.teacher_entry_search_objective = str(
+            teacher_entry_search_objective
+        )
+        self.teacher_entry_search_centers = teacher_entry_search_centers
+        self.teacher_entry_search_probability_epsilon = float(
+            teacher_entry_search_probability_epsilon
+        )
+        self.teacher_entry_search_teacher_temperature = float(
+            teacher_entry_search_teacher_temperature
+        )
+        self.teacher_entry_search_q_temperature = float(
+            teacher_entry_search_q_temperature
         )
         self.policy_retention_loss_weight = float(policy_retention_loss_weight)
         self.retention_anchor: RecurrentC51Network | None = None
@@ -349,16 +411,21 @@ class RecurrentC51Agent:
     ) -> tuple[Action, torch.Tensor, np.ndarray | None]:
         if not valid_actions:
             raise ValueError("at least one action must be valid")
-        if self._rng.random() < epsilon:
-            selected = valid_actions[int(self._rng.integers(len(valid_actions)))]
+        explore = self._rng.random() < epsilon
+        selected = (
+            valid_actions[int(self._rng.integers(len(valid_actions)))]
+            if explore else None
+        )
+        if explore and not return_action_values:
             with torch.no_grad():
-                value = torch.as_tensor(observation, device=self.device).view(1, 1, -1)
+                value = torch.as_tensor(
+                    observation, dtype=torch.float32, device=self.device
+                ).view(1, 1, -1)
                 with self._autocast():
                     _, next_hidden = self._call_with_compile_fallback(
                         self._online_forward, self.online.forward, value, hidden
                     )
-            values = np.full(len(Action), np.nan) if return_action_values else None
-            return selected, next_hidden.detach(), values
+            return selected, next_hidden.detach(), None
         with torch.no_grad():
             value = torch.as_tensor(
                 observation, dtype=torch.float32, device=self.device
@@ -371,7 +438,8 @@ class RecurrentC51Agent:
             valid = torch.zeros(len(Action), dtype=torch.bool, device=self.device)
             valid[[int(action) for action in valid_actions]] = True
             q_values = q_values.masked_fill(~valid, -torch.inf)
-            selected = Action(int(q_values.argmax().item()))
+            if selected is None:
+                selected = Action(int(q_values.argmax().item()))
         values = q_values.cpu().numpy() if return_action_values else None
         return selected, next_hidden.detach(), values
 
@@ -576,7 +644,10 @@ class RecurrentC51Agent:
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
-        if self.teacher_channels:
+        # A zero curriculum scale is the explicit autonomy boundary.  Do not
+        # even read replayed teacher targets or execute the discarded-use
+        # auxiliary head once that boundary has been reached.
+        if self.teacher_channels and teacher_weight_scale > 0.0:
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
                 np.nan,
@@ -628,7 +699,7 @@ class RecurrentC51Agent:
                             :, self.recurrent_burn_in:, int(Action.ENTER_SHORT_1)
                         ]
                     )
-                    if bool(teacher_rows.any().item()):
+                    if bool(entry_rows.any().item()):
                         q_values = (all_logits.float().softmax(-1) * self.support).sum(-1)
                         long_target = (
                             teacher_targets_tensor[..., 0]
@@ -638,14 +709,35 @@ class RecurrentC51Agent:
                             teacher_targets_tensor[..., 2]
                             * teacher_targets_tensor[..., 3]
                         ).nan_to_num(0.0).clamp(0.0, 1.0)
+                        if self.teacher_entry_search_objective == "centered_log_odds":
+                            long_target = centered_entry_search_target(
+                                long_target,
+                                center=self.teacher_entry_search_centers[0],
+                                probability_epsilon=(
+                                    self.teacher_entry_search_probability_epsilon
+                                ),
+                                teacher_temperature=(
+                                    self.teacher_entry_search_teacher_temperature
+                                ),
+                            )
+                            short_target = centered_entry_search_target(
+                                short_target,
+                                center=self.teacher_entry_search_centers[1],
+                                probability_epsilon=(
+                                    self.teacher_entry_search_probability_epsilon
+                                ),
+                                teacher_temperature=(
+                                    self.teacher_entry_search_teacher_temperature
+                                ),
+                            )
                         long_advantage = (
                             q_values[..., int(Action.ENTER_LONG_1)]
                             - q_values[..., int(Action.WAIT)]
-                        )
+                        ) / self.teacher_entry_search_q_temperature
                         short_advantage = (
                             q_values[..., int(Action.ENTER_SHORT_1)]
                             - q_values[..., int(Action.WAIT)]
-                        )
+                        ) / self.teacher_entry_search_q_temperature
                         entry_weights = entry_rows.to(q_values.dtype)
                         entry_count = entry_weights.sum().clamp_min(1.0)
                         entry_search_loss = 0.5 * (
@@ -868,6 +960,8 @@ class RecurrentC51Agent:
         self.teacher_loss_weight = 0.0
         self.teacher_channel_loss_weights = ()
         self.teacher_entry_search_loss_weight = 0.0
+        self.teacher_entry_search_objective = "raw_probability"
+        self.teacher_entry_search_centers = (0.5, 0.5)
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
@@ -939,6 +1033,19 @@ class RecurrentC51Agent:
                 "teacher_channel_loss_weights": self.teacher_channel_loss_weights,
                 "teacher_entry_search_loss_weight": (
                     self.teacher_entry_search_loss_weight
+                ),
+                "teacher_entry_search_objective": (
+                    self.teacher_entry_search_objective
+                ),
+                "teacher_entry_search_centers": self.teacher_entry_search_centers,
+                "teacher_entry_search_probability_epsilon": (
+                    self.teacher_entry_search_probability_epsilon
+                ),
+                "teacher_entry_search_teacher_temperature": (
+                    self.teacher_entry_search_teacher_temperature
+                ),
+                "teacher_entry_search_q_temperature": (
+                    self.teacher_entry_search_q_temperature
                 ),
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
@@ -1018,6 +1125,11 @@ class RecurrentC51Agent:
         config.setdefault("n_step_return", 1)
         config.setdefault("recurrent_burn_in", 0)
         config.setdefault("policy_retention_loss_weight", 0.0)
+        config.setdefault("teacher_entry_search_objective", "raw_probability")
+        config.setdefault("teacher_entry_search_centers", (0.5, 0.5))
+        config.setdefault("teacher_entry_search_probability_epsilon", 1e-6)
+        config.setdefault("teacher_entry_search_teacher_temperature", 1.0)
+        config.setdefault("teacher_entry_search_q_temperature", 1.0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

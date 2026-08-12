@@ -1,0 +1,127 @@
+{
+  "channels": [
+    "long_attempt_probability",
+    "long_clean_retained_given_attempt_probability",
+    "short_attempt_probability",
+    "short_clean_retained_given_attempt_probability"
+  ],
+  "formula": "pooled_available_float64_mean(attempt_probability*clean_retained_given_attempt_probability)",
+  "long_center": 0.10249102659218842,
+  "pooled_available_rows": 3857062,
+  "schema": "propevolve_expansion_entry_center_receipt_v1",
+  "short_center": 0.10399580328775007,
+  "sources": [
+    {
+      "availability_sha256": "652b4370e9c179f8600a4c9b7af4f2c25d6f0f0ac3f369f99b2351ab16a3ecab",
+      "available_rows": 435636,
+      "first_timestamp": "2021-04-26T10:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "2bcaf9cf48ad9eea5170f992f9169b2ed98b5a9cb0b2d7fa912e8e98c7fa896e",
+      "probabilities_sha256": "2a74836205cf574be327d55d64ddadcb62ca96d3daac62eb33ae1aaa1b7f8210",
+      "rows": 435685,
+      "ticker": "NQ",
+      "timestamps_sha256": "6008ae68c2ade8ff56075f5b006dcc7ba2a758be2be08b39f4ff0522a25cf290"
+    },
+    {
+      "availability_sha256": "6bca37d10e7dba2e0ce5a44bf9d7f3fb6ac0f3b7af91a0330c24cae2c6e60b82",
+      "available_rows": 434687,
+      "first_timestamp": "2021-04-28T12:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "965d594bf849f6973f3292448dad244d3025368c1d1ba37beff2654db4ada1d3",
+      "probabilities_sha256": "7044524e5d68569a68966babb9ff7243b40d3aa36150984647afff27f3ed9727",
+      "rows": 434736,
+      "ticker": "ES",
+      "timestamps_sha256": "2a7059b273082c0ab61bed74685b1ba39599696e4756b66942b9f3746e229a8a"
+    },
+    {
+      "availability_sha256": "4e902e2eb9a8ef8917d7ae04a32bb4b70405da62206b87d914a9bd0e49d87012",
+      "available_rows": 435433,
+      "first_timestamp": "2021-04-28T12:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "86d3481fcb922391d7e4a63299baca121593ec155248b6cc1254ea3c485c0032",
+      "probabilities_sha256": "dd860c0eb3fa4968189c846e207b56f1488e162081d4d3c1d9299847806b8dc9",
+      "rows": 435482,
+      "ticker": "GC",
+      "timestamps_sha256": "e47b0d4495948a572067b7eed352339a0f40128c2c5d986e87c3fb853722ba80"
+    },
+    {
+      "availability_sha256": "4db85d339b27461cfcc084f6ff1b31fc58f21501c8273046f126a462942f6520",
+      "available_rows": 433757,
+      "first_timestamp": "2021-04-28T13:06:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "71215dd35427b2cf8d2b1db02ef925929c64b5cffcfac1ac18d01a5a1512c44b",
+      "probabilities_sha256": "e228b2d46561bb675ed76648cb2d1f92d1b427857590ab525629d30f55733408",
+      "rows": 433806,
+      "ticker": "RTY",
+      "timestamps_sha256": "1035996ff6a19527799c280cf60550fc8c05665158e9cac6c4b8d1e05917487c"
+    },
+    {
+      "availability_sha256": "da29e83715419a2ca9cdee077d40729399762f14f677f1a46acf8e41a5605a75",
+      "available_rows": 434647,
+      "first_timestamp": "2021-04-28T12:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "e12c80ce0358aa5703dc7f85bda4d494afae67915bf7baad14b7deccec97ed3d",
+      "probabilities_sha256": "7d9520c612f0ab79c2b559a2612c2ca6fa37ae2607756c9cb501decb76199a8c",
+      "rows": 434696,
+      "ticker": "YM",
+      "timestamps_sha256": "164905efc54739d6374254893989a357df212110c2ddba48c58d5d0935b856b8"
+    },
+    {
+      "availability_sha256": "215ccd596cd55e43d795d0932841d2979c4e8c544a083c8f9e01c15eb9bd73ac",
+      "available_rows": 410812,
+      "first_timestamp": "2021-07-12T14:09:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "d84105dad307401ceeb3835ef444e8b131b2e45011e1077763184d566459f598",
+      "probabilities_sha256": "da4aedeac60644b9dbad80911c8d6d2f61279fcac05665b3093945df14760a6e",
+      "rows": 410861,
+      "ticker": "CL",
+      "timestamps_sha256": "9aa334e28dcb99532ea8e8436e2f0d829459ac942262985f175865d08e552c3b"
+    },
+    {
+      "availability_sha256": "67a0e74d6317dc75cfa7ebbb50ff087f13f2043337775e7225efc925b8a09125",
+      "available_rows": 413131,
+      "first_timestamp": "2021-04-28T14:00:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "2cda866a56be4c49351f84db13f3c9d5b2460394bfa050e6ae8a43df7a7efdc1",
+      "probabilities_sha256": "a4aa8e3629a8e181b1b96210626dea5a523a018e57861e172041b19c3b55a1bb",
+      "rows": 413180,
+      "ticker": "SI",
+      "timestamps_sha256": "89d726396d9d5f1ebdd46b96644c8c71a9ad5c40a3d1b72699f48affe0a6d9c0"
+    },
+    {
+      "availability_sha256": "d049050722777770e3a65664a19a810cfad586300076513bf4fce4d417fa5f4c",
+      "available_rows": 426954,
+      "first_timestamp": "2021-05-03T13:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "64ddce2166e13d6718ce5fcf908529741392bbf8f37dbfff5f1ed9d443ad1194",
+      "probabilities_sha256": "77248dee44602dc75ad44f744c847c82c81e042e1f4f9b99847e9d2dbb9761e8",
+      "rows": 427003,
+      "ticker": "ZB",
+      "timestamps_sha256": "d04332e864d4c07238afd0278527f012e4e62ade7d23b4a3fe4a875dc5007d0c"
+    },
+    {
+      "availability_sha256": "36841a531d7e83db7fadd9b83eef52f85952c24e1026bdb16731addeec013b44",
+      "available_rows": 432005,
+      "first_timestamp": "2021-05-03T12:48:00.000000000",
+      "last_timestamp": "2024-12-31T22:00:00.000000000",
+      "manifest_sha256": "c16016a229c42f2f5500e1c2f7018d503613ddedb640039c9e9489cbe600a0bb",
+      "probabilities_sha256": "19c7c95c9807c295c187932793f5429d4a804e4f87f7572535b96491c4a5755c",
+      "rows": 432054,
+      "ticker": "ZN",
+      "timestamps_sha256": "547f8be4f2a4a26063a0725a3761eb025ac97ca0420e18128885c15c8b9dee27"
+    }
+  ],
+  "tickers": [
+    "NQ",
+    "ES",
+    "GC",
+    "RTY",
+    "YM",
+    "CL",
+    "SI",
+    "ZB",
+    "ZN"
+  ],
+  "training_end_exclusive": "2025-01-01",
+  "training_start_inclusive": "2021-01-01"
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,12 +10,15 @@ import numpy as np
 import pytest
 
 from propevolve.teachers.base import BaseTeacher
+from propevolve.teachers.composition import load_teacher_targets
 from propevolve.teachers.expansion import (
+    CHANNELS,
     ExpansionTeacher,
     ExpansionTeacherCache,
     ExpansionTeacherTargets,
     build_expansion_teacher_cache,
     load_builder_config,
+    verify_expansion_entry_center_receipt,
 )
 
 
@@ -191,3 +195,161 @@ def test_promoted_builder_config_is_bounded_to_training_data() -> None:
     assert config["batch_sizes"] == (1024, 512, 256)
     assert config["training_end_exclusive"] == "2025-01-01"
     assert config["sealed_start"] == "2026-01-01"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _entry_center_fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
+    tickers = ("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN")
+    cache_root = tmp_path / "teacher"
+    sources = []
+    probabilities = np.array(
+        [[0.2, 0.5, 0.4, 0.5], [0.6, 0.5, 0.2, 0.5]],
+        dtype=np.float32,
+    )
+    availability = np.array([True, True], dtype=np.bool_)
+    timestamps = np.array(
+        ["2021-01-04T14:30", "2024-12-31T22:00"], dtype="datetime64[ns]"
+    )
+    for ticker in tickers:
+        destination = cache_root / ticker
+        destination.mkdir(parents=True)
+        np.save(destination / "probabilities.npy", probabilities)
+        np.save(destination / "availability.npy", availability)
+        np.save(destination / "timestamps.npy", timestamps)
+        manifest = {
+            "schema": "propevolve_expansion_teacher_cache_v1",
+            "channels": [
+                "long_attempt_probability",
+                "long_clean_retained_given_attempt_probability",
+                "short_attempt_probability",
+                "short_clean_retained_given_attempt_probability",
+            ],
+            "rows": 2,
+            "training_end_exclusive": "2025-01-01",
+            "selection_rows_included": False,
+            "sealed_rows_included": False,
+            "probabilities_sha256": _sha256(destination / "probabilities.npy"),
+            "availability_sha256": _sha256(destination / "availability.npy"),
+            "timestamps_sha256": _sha256(destination / "timestamps.npy"),
+        }
+        manifest_path = destination / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+        sources.append({
+            "ticker": ticker,
+            "manifest_sha256": _sha256(manifest_path),
+            "probabilities_sha256": manifest["probabilities_sha256"],
+            "availability_sha256": manifest["availability_sha256"],
+            "timestamps_sha256": manifest["timestamps_sha256"],
+            "rows": 2,
+            "available_rows": 2,
+            "first_timestamp": "2021-01-04T14:30:00.000000000",
+            "last_timestamp": "2024-12-31T22:00:00.000000000",
+        })
+    receipt = {
+        "schema": "propevolve_expansion_entry_center_receipt_v1",
+        "formula": (
+            "pooled_available_float64_mean("
+            "attempt_probability*clean_retained_given_attempt_probability)"
+        ),
+        "training_start_inclusive": "2021-01-01",
+        "training_end_exclusive": "2025-01-01",
+        "tickers": list(tickers),
+        "channels": list(manifest["channels"]),
+        "pooled_available_rows": 18,
+        "long_center": 0.20000000670552254,
+        "short_center": 0.15000000223517418,
+        "sources": sources,
+    }
+    receipt_path = tmp_path / "entry-centers.json"
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
+    spec = {
+        "cache_root": str(cache_root.relative_to(tmp_path)),
+        "entry_search_long_center": receipt["long_center"],
+        "entry_search_short_center": receipt["short_center"],
+        "entry_search_center_receipt": str(receipt_path.relative_to(tmp_path)),
+        "entry_search_center_receipt_sha256": _sha256(receipt_path),
+    }
+    return cache_root, receipt_path, spec
+
+
+def test_entry_centers_are_verified_against_authenticated_cache_rows(
+    tmp_path: Path,
+) -> None:
+    _, _, spec = _entry_center_fixture(tmp_path)
+
+    centers = verify_expansion_entry_center_receipt(
+        spec, root=tmp_path,
+        expected_tickers=("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"),
+    )
+
+    assert centers == pytest.approx((0.20000000670552254, 0.15000000223517418))
+
+
+def test_composed_teacher_load_verifies_entry_center_receipt_before_use(
+    tmp_path: Path,
+) -> None:
+    cache_root, _, spec = _entry_center_fixture(tmp_path)
+    spec.update({
+        "kind": "expansion",
+        "channels": CHANNELS,
+        "loss_weight": 0.2,
+        "entry_search_loss_weight": 0.3,
+        "entry_search_objective": "centered_log_odds",
+    })
+    markets = {
+        ticker: SimpleNamespace(
+            timestamps=np.load(cache_root / ticker / "timestamps.npy")
+        )
+        for ticker in ("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN")
+    }
+
+    targets = load_teacher_targets((spec,), root=tmp_path, markets=markets)
+
+    assert targets.target("NQ", 0) is not None
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("receipt_bytes", "receipt identity drifted"),
+        ("formula", "receipt contract"),
+        ("center", "configured centers"),
+        ("manifest", "source identity drifted"),
+        ("array", "cache probabilities identity drifted"),
+        ("rows", "source rows drifted"),
+        ("period", "source period drifted"),
+    ],
+)
+def test_entry_center_receipt_fails_closed_on_tamper(
+    tmp_path: Path, tamper: str, message: str,
+) -> None:
+    cache_root, receipt_path, spec = _entry_center_fixture(tmp_path)
+    receipt = json.loads(receipt_path.read_text())
+    if tamper == "receipt_bytes":
+        receipt_path.write_text(receipt_path.read_text() + " ")
+    elif tamper == "formula":
+        receipt["formula"] = "different"
+    elif tamper == "center":
+        spec["entry_search_long_center"] += 0.01
+    elif tamper == "manifest":
+        receipt["sources"][0]["manifest_sha256"] = "0" * 64
+    elif tamper == "array":
+        values = np.load(cache_root / "NQ/probabilities.npy")
+        values[0, 0] += np.float32(0.01)
+        np.save(cache_root / "NQ/probabilities.npy", values)
+    elif tamper == "rows":
+        receipt["sources"][0]["available_rows"] = 1
+    elif tamper == "period":
+        receipt["training_end_exclusive"] = "2024-01-01"
+    if tamper != "receipt_bytes":
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
+        spec["entry_search_center_receipt_sha256"] = _sha256(receipt_path)
+
+    with pytest.raises(ValueError, match=message):
+        verify_expansion_entry_center_receipt(
+            spec, root=tmp_path,
+            expected_tickers=("NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"),
+        )
