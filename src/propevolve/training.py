@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Mapping
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -392,6 +393,20 @@ class HistoricalCandidateRunner:
                 root=root,
                 markets=train_markets,
             )
+        entry_supervision_spec = config.get("entry_supervision")
+        entry_action_targets = None
+        if entry_supervision_spec is not None:
+            from .entry_supervision import build_entry_action_targets
+
+            # Economic future truth is built only for the authenticated training
+            # slice.  It is never built for, or available to, validation.
+            entry_action_targets = build_entry_action_targets(
+                train_markets,
+                entry_supervision_spec,
+                point_values=config["point_values"],
+                round_trip_fees=config["round_trip_fees"],
+                training_end_exclusive=temporal["train_end"],
+            )
         challenge = ChallengeSpec(**config["challenge"])
         observation_spec = TradeManagementObservationSpec.from_config(
             config.get("observation")
@@ -432,6 +447,10 @@ class HistoricalCandidateRunner:
         )
         if teacher_targets is not None:
             agent_settings.update(agent_teacher_settings(teacher_specs))
+        if entry_supervision_spec is not None:
+            agent_settings["entry_action_loss_weight"] = float(
+                entry_supervision_spec["loss_weight"]
+            )
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
@@ -559,6 +578,11 @@ class HistoricalCandidateRunner:
             ),
             teacher_channels=(
                 teacher_targets.channels if teacher_targets is not None else None
+            ),
+            entry_action_lookup=(
+                entry_action_targets.target
+                if entry_action_targets is not None
+                else None
             ),
             teacher_loss_end_scale=float(
                 training_config.get("teacher_loss_end_scale", 1.0)
@@ -697,6 +721,16 @@ class HistoricalCandidateRunner:
                 }
                 for spec in teacher_specs
             ],
+            "entry_supervision": (
+                None
+                if entry_action_targets is None
+                else {
+                    "training_only": True,
+                    "manifest": _plain_contract_value(
+                        entry_action_targets.manifest
+                    ),
+                }
+            ),
             "retained_pass_policy_restored": retained_policy_restored,
         }
         archive_output = _resolve(
@@ -881,6 +915,8 @@ def _training_resume_identity(
             )
     for module in (Path(__file__), Path(__file__).with_name("agent.py"), Path(__file__).with_name("replay.py"), Path(__file__).with_name("environment.py")):
         digest.update(module.read_bytes())
+    if config.get("entry_supervision") is not None:
+        digest.update(Path(__file__).with_name("entry_supervision.py").read_bytes())
     return digest.hexdigest()
 
 
@@ -1072,6 +1108,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "mean_training_loss": weighted("mean_training_loss", update_weights),
         "mean_rl_loss": weighted("mean_rl_loss", update_weights),
         "mean_teacher_loss": weighted("mean_teacher_loss", update_weights),
+        "mean_entry_action_loss": weighted(
+            "mean_entry_action_loss", update_weights
+        ),
+        "mean_entry_action_supervised_rows": weighted(
+            "mean_entry_action_supervised_rows", update_weights
+        ),
         "mean_gradient_norm": weighted("mean_gradient_norm", update_weights),
         "sampled_management_row_fraction": weighted(
             "mean_sampled_management_row_fraction", update_weights
@@ -1151,6 +1193,17 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
             )
             for action in Action
         },
+        "entry_action_target_counts": {
+            action.name: sum(
+                int(row.get("entry_action_target_counts", {}).get(action.name, 0))
+                for row in rows
+            )
+            for action in (
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            )
+        },
     }
     timeouts = int(result["timeouts"])
     result["near_blow_timeout_rate"] = (
@@ -1206,6 +1259,22 @@ def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else root / path
+
+
+def _plain_contract_value(value):
+    """Convert immutable runtime receipts into JSON/pickle-safe containers."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_contract_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_plain_contract_value(item) for item in value]
+    if isinstance(value, list):
+        return [_plain_contract_value(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def load_markets(
@@ -1307,6 +1376,7 @@ def train_agent(
     retention_checkpoint_callback: Callable[[dict[str, object]], None] | None = None,
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
     teacher_channels: tuple[str, ...] | None = None,
+    entry_action_lookup: Callable[[str, int], Action | None] | None = None,
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
@@ -1426,6 +1496,11 @@ def train_agent(
         greedy_flat_entry_advantages: list[float] = []
         selected_entry_teacher_targets: list[tuple[float, float]] = []
         selected_teacher_targets: list[np.ndarray] = []
+        entry_action_target_counts = {
+            Action.WAIT: 0,
+            Action.ENTER_LONG_1: 0,
+            Action.ENTER_SHORT_1: 0,
+        }
         total_reward = 0.0
         # Decay exploration against actual market interaction, not the
         # emergency episode ceiling. Early pass/blow episodes vary greatly in
@@ -1515,12 +1590,32 @@ def train_agent(
                 if teacher_lookup is not None and teacher_visible
                 else None
             )
+            entry_action_target = (
+                entry_action_lookup(episode_ticker, decision_index)
+                if (
+                    entry_action_lookup is not None
+                    and teacher_visible
+                    and teacher_weight_scale > 0.0
+                    and flat_actions.issubset(valid)
+                )
+                else None
+            )
+            if entry_action_target is not None:
+                entry_action_target = Action(entry_action_target)
+                if entry_action_target not in entry_action_target_counts:
+                    raise ValueError("entry action target is not a flat action")
+                entry_action_target_counts[entry_action_target] += 1
             entry_opportunity_priority = 0.0
             if teacher_target is not None:
                 entry_opportunity_priority = max(
                     float(teacher_target[0]) * float(teacher_target[1]),
                     float(teacher_target[2]) * float(teacher_target[3]),
                 )
+            if entry_action_target in {
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }:
+                entry_opportunity_priority = max(entry_opportunity_priority, 1.0)
             if teacher_target is not None and action in {
                 Action.ENTER_LONG_1, Action.ENTER_SHORT_1
             }:
@@ -1555,6 +1650,7 @@ def train_agent(
                     and (step_index + 1) % recurrent_horizon == 0
                 ),
                 teacher_target=teacher_target,
+                entry_action_target=entry_action_target,
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
                 ),
@@ -1614,6 +1710,8 @@ def train_agent(
         episode_rl_losses = []
         episode_teacher_losses = []
         episode_entry_search_losses = []
+        episode_entry_action_losses = []
+        episode_entry_action_rows = []
         learner_diagnostics: dict[str, list[float]] = {
             key: []
             for key in (
@@ -1638,6 +1736,7 @@ def train_agent(
                 episode_losses.append(agent.train_batch(
                     batch,
                     teacher_weight_scale=teacher_weight_scale,
+                    entry_action_weight_scale=teacher_weight_scale,
                 ))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
@@ -1649,6 +1748,14 @@ def train_agent(
                 if "entry_search_loss" in train_metrics:
                     episode_entry_search_losses.append(
                         float(train_metrics["entry_search_loss"])
+                    )
+                if "entry_action_loss" in train_metrics:
+                    episode_entry_action_losses.append(
+                        float(train_metrics["entry_action_loss"])
+                    )
+                if "entry_action_supervised_rows" in train_metrics:
+                    episode_entry_action_rows.append(
+                        float(train_metrics["entry_action_supervised_rows"])
                     )
                 for key in learner_diagnostics:
                     if key in train_metrics:
@@ -1887,6 +1994,7 @@ def train_agent(
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
                 "teacher_weight_scale": teacher_weight_scale,
+                "entry_action_weight_scale": teacher_weight_scale,
                 "teacher_schedule_progress": teacher_schedule_progress,
                 "teacher_guidance_dropout_probability": (
                     teacher_guidance_dropout_probability
@@ -1911,6 +2019,18 @@ def train_agent(
                     float(np.mean(episode_entry_search_losses))
                     if episode_entry_search_losses else None
                 ),
+                "mean_entry_action_loss": (
+                    float(np.mean(episode_entry_action_losses))
+                    if episode_entry_action_losses else None
+                ),
+                "mean_entry_action_supervised_rows": (
+                    float(np.mean(episode_entry_action_rows))
+                    if episode_entry_action_rows else None
+                ),
+                "entry_action_target_counts": {
+                    action.name: entry_action_target_counts[action]
+                    for action in entry_action_target_counts
+                },
                 **{
                     f"mean_{key}": (
                         float(np.mean(values)) if values else None

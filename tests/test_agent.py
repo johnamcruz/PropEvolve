@@ -865,6 +865,259 @@ def test_centered_entry_distillation_produces_teacher_free_greedy_entry() -> Non
     assert values[int(Action.ENTER_SHORT_1)] < values[int(Action.WAIT)]
 
 
+@pytest.mark.parametrize("entry_age", range(1, 6))
+@pytest.mark.parametrize(
+    "entry_action",
+    (Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+)
+def test_post_launch_entry_action_targets_teach_exact_teacher_free_entry_timing(
+    tmp_path: Path,
+    entry_age: int,
+    entry_action: Action,
+) -> None:
+    agent = _agent(
+        5,
+        seed=53 + entry_age + int(entry_action),
+        hidden_dim=16,
+        learning_rate=0.03,
+        weight_decay=0.0,
+        entry_action_loss_weight=20.0,
+    )
+    observations = tuple(np.eye(5, dtype=np.float32))
+    sequence = tuple(
+        Transition(
+            observation=observations[age - 1],
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=(
+                observations[age]
+                if age < 5
+                else np.zeros(5, np.float32)
+            ),
+            terminated=age == 5,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(
+                ()
+                if age == 5
+                else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            ),
+            # Only decisions through the chosen executable age are labels.
+            # Later decisions are unavailable/censored, never negative WAITs.
+            entry_action_target=(
+                entry_action if age == entry_age else Action.WAIT
+                if age <= entry_age
+                else None
+            ),
+        )
+        for age in range(1, 6)
+    )
+
+    for _ in range(80):
+        agent.train_batch((sequence, sequence))
+
+    assert tuple(item.entry_action_target for item in sequence) == tuple(
+        Action.WAIT if age < entry_age else entry_action
+        if age == entry_age else None
+        for age in range(1, 6)
+    )
+    assert agent.last_train_metrics["entry_action_supervised_rows"] == 2 * entry_age
+    expected = tuple(
+        Action.WAIT if age < entry_age else entry_action
+        for age in range(1, entry_age + 1)
+    )
+
+    def greedy_trace(current: RecurrentC51Agent) -> tuple[Action, ...]:
+        hidden = None
+        actions = []
+        for observation in observations[:entry_age]:
+            action, hidden, _ = current.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=(
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                epsilon=0.0,
+            )
+            actions.append(action)
+        return tuple(actions)
+
+    assert greedy_trace(agent) == expected
+    agent.discard_teacher()
+    assert agent.entry_action_loss_weight == 0.0
+    assert greedy_trace(agent) == expected
+    checkpoint = agent.save(tmp_path / "post-launch-action.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    assert greedy_trace(restored) == expected
+
+
+def test_post_launch_entry_action_targets_have_no_effect_at_zero_auxiliary_scale() -> None:
+    plain = _agent(5, seed=67)
+    taught = _agent(
+        5,
+        seed=67,
+        entry_action_loss_weight=1.0,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.eye(5, dtype=np.float32)[age - 1],
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=(
+                np.eye(5, dtype=np.float32)[age]
+                if age < 5
+                else np.zeros(5, np.float32)
+            ),
+            terminated=age == 5,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(
+                ()
+                if age == 5
+                else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            ),
+            entry_action_target=Action.ENTER_LONG_1,
+        )
+        for age in range(1, 6)
+    )
+
+    plain.train_batch((sequence, sequence))
+    taught.train_batch((sequence, sequence), entry_action_weight_scale=0.0)
+
+    assert taught.last_train_metrics["entry_action_loss"] == 0.0
+    assert taught.last_train_metrics["entry_action_supervised_rows"] == 0.0
+    assert taught.last_train_metrics["total_loss"] == pytest.approx(
+        taught.last_train_metrics["rl_loss"]
+    )
+    for key, value in plain.online.state_dict().items():
+        torch.testing.assert_close(value, taught.online.state_dict()[key])
+
+
+def test_soft_regime_context_and_entry_actions_co_train_without_inference_dependency(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        7,
+        seed=71,
+        hidden_dim=24,
+        learning_rate=0.03,
+        weight_decay=0.0,
+        teacher_channels=2,
+        teacher_loss_weight=0.5,
+        entry_action_loss_weight=20.0,
+    )
+    ages = np.eye(5, dtype=np.float32)
+
+    def context(age: int, *, trending: bool) -> np.ndarray:
+        regime = np.array([1.0, 0.0] if trending else [0.0, 1.0], np.float32)
+        return np.concatenate((ages[age - 1], regime))
+
+    def sequence(*, trending: bool) -> tuple[Transition, ...]:
+        semantic_target = np.array(
+            [0.9, 0.1] if trending else [0.1, 0.9], np.float32
+        )
+        return tuple(
+            Transition(
+                observation=context(age, trending=trending),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=(
+                    context(age + 1, trending=trending)
+                    if age < 5
+                    else np.zeros(7, np.float32)
+                ),
+                terminated=age == 5,
+                valid_actions=(
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                next_valid_actions=(
+                    ()
+                    if age == 5
+                    else (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                ),
+                teacher_target=semantic_target,
+                entry_action_target=(
+                    Action.WAIT
+                    if age < 3
+                    else (Action.ENTER_LONG_1 if trending else Action.WAIT)
+                    if age == 3
+                    else None
+                ),
+            )
+            for age in range(1, 6)
+        )
+
+    trend = sequence(trending=True)
+    chop = sequence(trending=False)
+    np.testing.assert_array_equal(trend[2].observation[:5], chop[2].observation[:5])
+    assert trend[2].entry_action_target == Action.ENTER_LONG_1
+    assert chop[2].entry_action_target == Action.WAIT
+
+    for _ in range(100):
+        agent.train_batch((trend, chop))
+
+    assert agent.last_train_metrics["teacher_loss"] > 0.0
+    assert agent.last_train_metrics["entry_action_loss"] > 0.0
+    assert agent.last_train_metrics["entry_action_supervised_rows"] == 6.0
+
+    def greedy_trace(
+        current: RecurrentC51Agent, *, trending: bool
+    ) -> tuple[Action, ...]:
+        hidden = None
+        actions = []
+        for age in range(1, 4):
+            action, hidden, _ = current.select_action(
+                context(age, trending=trending),
+                hidden=hidden,
+                valid_actions=(
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                epsilon=0.0,
+            )
+            actions.append(action)
+        return tuple(actions)
+
+    expected_trend = (Action.WAIT, Action.WAIT, Action.ENTER_LONG_1)
+    expected_chop = (Action.WAIT, Action.WAIT, Action.WAIT)
+    assert greedy_trace(agent, trending=True) == expected_trend
+    assert greedy_trace(agent, trending=False) == expected_chop
+
+    agent.discard_teacher()
+    assert agent.teacher_channels == 0
+    assert agent.entry_action_loss_weight == 0.0
+    assert greedy_trace(agent, trending=True) == expected_trend
+    assert greedy_trace(agent, trending=False) == expected_chop
+
+    checkpoint = agent.save(tmp_path / "regime-confluence.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    assert greedy_trace(restored, trending=True) == expected_trend
+    assert greedy_trace(restored, trending=False) == expected_chop
+
+
 def test_exploration_still_reports_greedy_action_values_for_diagnostics() -> None:
     agent = _agent(2, seed=47)
     action, _, values = agent.select_action(

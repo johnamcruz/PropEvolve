@@ -25,6 +25,7 @@ class Transition:
     next_recurrent_reset: bool = False
     competence_anchor: bool = False
     teacher_target: np.ndarray | None = None
+    entry_action_target: Action | None = None
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
 
@@ -59,6 +60,7 @@ class _StoredEpisode:
     recurrent_resets: np.ndarray
     next_recurrent_resets: np.ndarray
     teacher_targets: np.ndarray | None
+    entry_action_targets: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
 
@@ -108,6 +110,24 @@ class _StoredEpisode:
                     if target.size != width or not np.isfinite(target).all():
                         raise ValueError("replay teacher target is invalid")
                     teacher_targets[index] = target
+        entry_action_targets = np.full(len(transitions), -1, dtype=np.int8)
+        flat_actions = {
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
+        for index, item in enumerate(transitions):
+            if item.entry_action_target is None:
+                continue
+            try:
+                target = Action(item.entry_action_target)
+            except (TypeError, ValueError) as error:
+                raise ValueError("replay entry target is invalid") from error
+            if target not in flat_actions or not flat_actions.issubset(
+                item.valid_actions
+            ):
+                raise ValueError("replay entry target is invalid")
+            entry_action_targets[index] = int(target)
         return cls(
             episode_id=episode.episode_id,
             ticker=episode.ticker,
@@ -133,6 +153,7 @@ class _StoredEpisode:
                 [item.next_recurrent_reset for item in transitions], np.bool_
             ),
             teacher_targets=teacher_targets,
+            entry_action_targets=entry_action_targets,
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
             ),
@@ -166,6 +187,11 @@ class _StoredEpisode:
                     if self.teacher_targets is None
                     or not np.isfinite(self.teacher_targets[index]).all()
                     else self.teacher_targets[index]
+                ),
+                entry_action_target=(
+                    None
+                    if self.entry_action_targets[index] < 0
+                    else Action(int(self.entry_action_targets[index]))
                 ),
                 safety_priority=float(self.safety_priorities[index]),
                 entry_opportunity_priority=float(
@@ -227,7 +253,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -250,7 +276,7 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 2:
+        if state.get("schema_version") != 3:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -295,6 +321,7 @@ class BalancedSequenceReplay:
                     payload["entry_opportunity_priorities"], dtype=np.float32
                 )
                 raw_teacher_targets = payload["teacher_targets"]
+                raw_entry_action_targets = payload["entry_action_targets"]
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("replay checkpoint episode is malformed") from error
             count = int(actions.size)
@@ -303,6 +330,7 @@ class BalancedSequenceReplay:
                 if raw_teacher_targets is None
                 else np.asarray(raw_teacher_targets, dtype=np.float32)
             )
+            entry_action_targets = np.asarray(raw_entry_action_targets, dtype=np.int8)
             if (
                 count < self.sequence_length
                 or actions.shape != (count,)
@@ -314,6 +342,7 @@ class BalancedSequenceReplay:
                 or next_valid_masks.shape != (count, action_count)
                 or recurrent_resets.shape != (count,)
                 or next_recurrent_resets.shape != (count,)
+                or entry_action_targets.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
@@ -325,6 +354,12 @@ class BalancedSequenceReplay:
                 or (entry_priorities < 0).any()
                 or (actions < 0).any()
                 or (actions >= action_count).any()
+                or (entry_action_targets < -1).any()
+                or (entry_action_targets > int(Action.ENTER_SHORT_1)).any()
+                or not valid_masks[
+                    entry_action_targets >= 0,
+                    :int(Action.ENTER_SHORT_1) + 1,
+                ].all()
                 or not valid_masks.any(axis=1).all()
                 or not np.array_equal(
                     next_valid_masks.any(axis=1),
@@ -360,6 +395,7 @@ class BalancedSequenceReplay:
                 recurrent_resets=recurrent_resets,
                 next_recurrent_resets=next_recurrent_resets,
                 teacher_targets=teacher_targets,
+                entry_action_targets=entry_action_targets,
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
             )

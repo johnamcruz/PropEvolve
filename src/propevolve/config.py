@@ -120,6 +120,86 @@ def _require_recipe_fields(payload: dict) -> None:
             raise ValueError(f"{section} recipe is missing fields {missing}")
 
 
+def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
+    """Validate the fully frozen, training-only post-launch action contract."""
+    specification = payload.get("entry_supervision")
+    if specification is None:
+        return
+    required = {
+        "schema",
+        "training_only",
+        "decision_count",
+        "fill_offsets",
+        "execution",
+        "risk_dollars",
+        "launch",
+        "continuation",
+        "target_r",
+        "stop_r",
+        "horizon_bars",
+        "collision",
+        "loss_weight",
+    }
+    phase_fields = {"favorable_r", "adverse_r", "horizon_bars"}
+    if (
+        not isinstance(specification, dict)
+        or set(specification) != required
+        or specification.get("schema") != "post_launch_entry_v1"
+        or specification.get("training_only") is not True
+        or specification.get("execution") != "next_bar_open"
+        or specification.get("collision") != "stop_first"
+        or isinstance(specification.get("decision_count"), bool)
+        or specification.get("decision_count") != 5
+        or specification.get("fill_offsets") != [1, 2, 3, 4, 5]
+    ):
+        raise ValueError("entry supervision contract is invalid")
+    for phase in ("launch", "continuation"):
+        values = specification.get(phase)
+        if (
+            not isinstance(values, dict)
+            or set(values) != phase_fields
+            or any(isinstance(values[field], bool) for field in phase_fields)
+            or float(values["favorable_r"]) != 0.5
+            or float(values["adverse_r"]) != 0.25
+            or int(values["horizon_bars"]) != 3
+            or float(values["horizon_bars"]) != 3.0
+        ):
+            raise ValueError("entry supervision phase contract is invalid")
+    numeric = {
+        field: specification[field]
+        for field in (
+            "risk_dollars",
+            "target_r",
+            "stop_r",
+            "horizon_bars",
+            "loss_weight",
+        )
+    }
+    if (
+        any(isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in numeric.values())
+        or float(numeric["risk_dollars"]) != 300.0
+        or float(numeric["risk_dollars"])
+        != float(challenge.get("per_trade_risk_dollars", -1.0))
+        or float(numeric["target_r"]) != 2.0
+        or float(numeric["stop_r"]) != 1.0
+        or int(numeric["horizon_bars"]) != 150
+        or float(numeric["horizon_bars"]) != 150.0
+        or float(numeric["loss_weight"]) <= 0.0
+    ):
+        raise ValueError("entry supervision economics are invalid")
+    training = payload.get("training")
+    if (
+        not isinstance(training, dict)
+        or float(training.get("teacher_loss_end_scale", -1.0)) != 0.0
+        or float(training.get("teacher_guidance_dropout_end", -1.0)) != 1.0
+        or float(training.get("teacher_autonomy_start_fraction", -1.0)) != 0.8
+    ):
+        raise ValueError(
+            "entry supervision requires a final twenty-percent autonomy tail"
+        )
+
+
 def load_experiment_config(path: str | Path) -> dict:
     path = Path(path)
     payload = json.loads(path.read_text())
@@ -200,6 +280,7 @@ def load_experiment_config(path: str | Path) -> dict:
         <= float(challenge["ratchet_giveback_r"])
     ):
         raise ValueError("trade risk and ratchet fields are invalid")
+    _validate_entry_supervision(payload, challenge)
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
         raise ValueError("cache format must be native or ffm_frozen_representation_v2")
@@ -599,6 +680,8 @@ def load_experiment_config(path: str | Path) -> dict:
         for locked in frozen
     ):
         raise ValueError("evolution allowlist overlaps the frozen contract")
+    if payload.get("entry_supervision") is not None and "entry_supervision" not in frozen:
+        raise ValueError("entry supervision must be frozen for the campaign")
     revision_bounds = evolution.get("revision_bounds") or {}
     if not isinstance(revision_bounds, dict):
         raise ValueError("evolution revision bounds must be an object")

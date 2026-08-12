@@ -553,6 +553,61 @@ def test_ratchet_lock_floor_protects_two_r_at_activation() -> None:
     assert activation["protective_stop_price"] == 120.0
 
 
+def test_ratchet_leaves_upside_uncapped_through_a_twelve_r_trend() -> None:
+    timestamps = (
+        np.datetime64("2024-01-02T23:00")
+        + np.arange(6) * np.timedelta64(3, "m")
+    )
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=timestamps,
+        open=np.array([100.0, 100.0, 130.0, 180.0, 220.0, 215.0], np.float32),
+        high=np.array([101.0, 130.0, 180.0, 220.0, 225.0, 216.0], np.float32),
+        low=np.array([99.0, 99.0, 129.0, 179.0, 219.0, 214.0], np.float32),
+        close=np.array([100.0, 130.0, 180.0, 220.0, 224.0, 215.0], np.float32),
+        embeddings=np.zeros((6, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(
+            profit_target=100_000.0,
+            per_trade_risk_dollars=200.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+            ratchet_lock_floor_r=2.0,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, at_three_r = env.step(Action.ENTER_LONG_1)
+    assert not terminated
+    assert at_three_r["ratchet_active"] is True
+    assert at_three_r["protective_stop_price"] == 125.0
+
+    _, _, terminated, _, at_eight_r = env.step(Action.HOLD)
+    assert not terminated
+    assert at_eight_r["trade_count"] == 0
+    assert at_eight_r["protective_stop_price"] == 175.0
+
+    _, _, terminated, _, at_twelve_r = env.step(Action.HOLD)
+    assert not terminated
+    assert at_twelve_r["trade_count"] == 0
+    assert at_twelve_r["protective_stop_price"] == 215.0
+
+    _, _, terminated, _, above_twelve_r = env.step(Action.HOLD)
+    assert not terminated
+    assert above_twelve_r["trade_count"] == 0
+    assert above_twelve_r["protective_stop_price"] == 220.0
+
+    _, _, terminated, _, stopped = env.step(Action.HOLD)
+    assert terminated
+    assert stopped["exit_reason"] == "ratchet_stop"
+    assert stopped["avg_win_r"] == pytest.approx(11.5)
+
+
 def test_short_ratchet_uses_an_independent_downside_path() -> None:
     timestamps = np.datetime64("2024-01-02T23:00") + np.arange(5) * np.timedelta64(3, "m")
     market = MarketSeries(

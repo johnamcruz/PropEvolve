@@ -150,6 +150,57 @@ def test_replay_anchors_declared_fraction_at_expansion_entry_opportunity() -> No
     assert sequence[-1].entry_opportunity_priority == pytest.approx(0.95)
 
 
+def test_replay_entry_anchor_keeps_wait_wait_enter_context() -> None:
+    episode = _episode("NQ", "timeout", "long", 0)
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    targets = (
+        None,
+        Action.WAIT,
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        None,
+        None,
+    )
+    prioritized = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "valid_actions": flat_actions,
+                "next_valid_actions": () if item.terminated else flat_actions,
+                "entry_action_target": target,
+                "entry_opportunity_priority": float(
+                    target in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                ),
+            })
+            for item, target in zip(episode.transitions, targets, strict=True)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=3,
+        entry_opportunity_sequence_fraction=1.0,
+        seed=37,
+    )
+    replay.add(prioritized)
+
+    sequence = replay.sample(1)[0]
+
+    assert tuple(item.entry_action_target for item in sequence) == (
+        Action.WAIT,
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+    )
+
+
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,
@@ -196,6 +247,68 @@ def test_replay_preserves_optional_training_only_teacher_targets() -> None:
 
     assert all(item.teacher_target is not None for item in sampled)
     np.testing.assert_allclose(sampled[0].teacher_target, [0.8, 0.7, 0.2, 0.1])
+
+
+def test_replay_preserves_explicit_entry_action_targets_and_censoring() -> None:
+    episode = _episode("NQ", "pass", "long", 0)
+    targets = (
+        Action.WAIT,
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        None,
+        None,
+        None,
+    )
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    taught = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "valid_actions": flat_actions,
+                "next_valid_actions": () if item.terminated else flat_actions,
+                "entry_action_target": target,
+            })
+            for item, target in zip(episode.transitions, targets, strict=True)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=23,
+    )
+
+    replay.add(taught)
+    sampled = replay.sample(1)[0]
+
+    assert tuple(item.entry_action_target for item in sampled) == targets
+
+
+def test_replay_rejects_legacy_checkpoint_without_entry_action_contract() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=29,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    state = replay.state_dict()
+    state["schema_version"] = 2
+
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=29,
+    )
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        restored.load_state_dict(state)
 
 
 def test_replay_eviction_preserves_rare_terminal_outcomes() -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -133,42 +132,107 @@ def test_validation_no_trade_patience_is_json_configured_and_fail_closed(
             load_experiment_config(path)
 
 
-def test_v8f_centers_entry_distillation_on_authenticated_training_scores() -> None:
+def test_v8_uses_exact_post_launch_actions_for_entry_guidance() -> None:
     config = load_experiment_config(
-        "config/historical_mask_expansion_regime_centered_entry_v8f.json"
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
     )
     expansion = config["teachers"][0]
 
-    assert expansion["entry_search_objective"] == "centered_log_odds"
-    assert expansion["entry_search_long_center"] == pytest.approx(
-        0.10249102659218842
-    )
-    assert expansion["entry_search_short_center"] == pytest.approx(
-        0.10399580328775007
-    )
-    receipt = Path(expansion["entry_search_center_receipt"])
-    assert receipt == Path(
-        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
-    )
-    assert expansion["entry_search_center_receipt_sha256"] == hashlib.sha256(
-        receipt.read_bytes()
-    ).hexdigest()
+    assert expansion["entry_search_loss_weight"] == 0.0
+    assert expansion["entry_search_objective"] == "raw_probability"
+    assert expansion["entry_search_long_center"] == 0.5
+    assert expansion["entry_search_short_center"] == 0.5
+    assert expansion["entry_search_center_receipt"] == ""
+    assert expansion["entry_search_center_receipt_sha256"] == ""
     assert config["challenge"]["per_trade_risk_dollars"] == 300
-    assert config["evolution"]["revision_bounds"][
-        "challenge.per_trade_risk_dollars"
-    ] == {"minimum": 300, "maximum": 500}
+    assert "challenge.per_trade_risk_dollars" in config["evolution"]["frozen_paths"]
+    assert "challenge.per_trade_risk_dollars" not in config["evolution"]["allowed_revision_paths"]
+    assert "challenge.per_trade_risk_dollars" not in config["evolution"]["revision_bounds"]
+    assert all(
+        "challenge.per_trade_risk_dollars" not in stage["revision_paths"]
+        for stage in config["campaign"]["budget_stages"]
+    )
     assert config["training"]["teacher_loss_end_scale"] == 0.0
     assert config["training"]["teacher_guidance_dropout_end"] == 1.0
     assert config["training"]["teacher_autonomy_start_fraction"] == 0.8
     assert config["training"]["validation_no_trade_patience_episodes"] == 5
+    assert config["entry_supervision"] == {
+        "schema": "post_launch_entry_v1",
+        "training_only": True,
+        "decision_count": 5,
+        "fill_offsets": [1, 2, 3, 4, 5],
+        "execution": "next_bar_open",
+        "risk_dollars": 300,
+        "launch": {
+            "favorable_r": 0.5,
+            "adverse_r": 0.25,
+            "horizon_bars": 3,
+        },
+        "continuation": {
+            "favorable_r": 0.5,
+            "adverse_r": 0.25,
+            "horizon_bars": 3,
+        },
+        "target_r": 2.0,
+        "stop_r": 1.0,
+        "horizon_bars": 150,
+        "collision": "stop_first",
+        "loss_weight": 0.3,
+    }
+    assert "entry_supervision" in config["evolution"]["frozen_paths"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (lambda value: value.update({"training_only": False}), "contract"),
+        (lambda value: value.update({"fill_offsets": [0, 1, 2, 3, 4]}), "contract"),
+        (lambda value: value.update({"execution": "same_bar_close"}), "contract"),
+        (lambda value: value.update({"risk_dollars": 500}), "economics"),
+        (lambda value: value.update({"target_r": 3.0}), "economics"),
+        (lambda value: value.update({"collision": "target_first"}), "contract"),
+        (lambda value: value.update({"loss_weight": 0.0}), "economics"),
+    ),
+)
+def test_entry_supervision_contract_fails_closed(
+    tmp_path: Path,
+    mutate,
+    match: str,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    ).read_text())
+    mutate(payload["entry_supervision"])
+    path = tmp_path / "invalid-entry-supervision.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=f"entry supervision {match}"):
+        load_experiment_config(path)
+
+
+def test_entry_supervision_must_remain_campaign_frozen(tmp_path: Path) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    ).read_text())
+    payload["evolution"]["frozen_paths"].remove("entry_supervision")
+    path = tmp_path / "unfrozen-entry-supervision.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="entry supervision must be frozen"):
+        load_experiment_config(path)
 
 
 def test_centered_entry_distillation_rejects_unauthenticated_centers(
     tmp_path: Path,
 ) -> None:
     payload = json.loads(Path(
-        "config/historical_mask_expansion_regime_centered_entry_v8f.json"
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
     ).read_text())
+    payload["teachers"][0]["entry_search_loss_weight"] = 0.3
+    payload["teachers"][0]["entry_search_objective"] = "centered_log_odds"
+    payload["teachers"][0]["entry_search_long_center"] = 0.1
+    payload["teachers"][0]["entry_search_short_center"] = 0.1
+    payload["teachers"][0]["entry_search_center_receipt"] = "receipt.json"
     payload["teachers"][0]["entry_search_center_receipt_sha256"] = ""
     path = tmp_path / "bad-center.json"
     path.write_text(json.dumps(payload))

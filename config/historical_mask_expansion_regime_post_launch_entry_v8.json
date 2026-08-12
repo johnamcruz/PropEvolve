@@ -44,15 +44,15 @@
         "short_clean_retained_given_attempt_probability"
       ],
       "loss_weight": 0.2,
-      "entry_search_loss_weight": 0.3,
-      "entry_search_objective": "centered_log_odds",
-      "entry_search_long_center": 0.10249102659218842,
-      "entry_search_short_center": 0.10399580328775007,
+      "entry_search_loss_weight": 0.0,
+      "entry_search_objective": "raw_probability",
+      "entry_search_long_center": 0.5,
+      "entry_search_short_center": 0.5,
       "entry_search_probability_epsilon": 1e-06,
       "entry_search_teacher_temperature": 1.0,
       "entry_search_q_temperature": 1.0,
-      "entry_search_center_receipt": "config/receipts/expansion_entry_centers_9market_pre2025_v1.json",
-      "entry_search_center_receipt_sha256": "fe53640956e74413ad3316e8783dc09dfafb82f6559009b24ed58f24adc959ba"
+      "entry_search_center_receipt": "",
+      "entry_search_center_receipt_sha256": ""
     },
     {
       "kind": "regime",
@@ -81,6 +81,29 @@
       "entry_search_loss_weight": 0.0
     }
   ],
+  "entry_supervision": {
+    "schema": "post_launch_entry_v1",
+    "training_only": true,
+    "decision_count": 5,
+    "fill_offsets": [1, 2, 3, 4, 5],
+    "execution": "next_bar_open",
+    "risk_dollars": 300,
+    "launch": {
+      "favorable_r": 0.5,
+      "adverse_r": 0.25,
+      "horizon_bars": 3
+    },
+    "continuation": {
+      "favorable_r": 0.5,
+      "adverse_r": 0.25,
+      "horizon_bars": 3
+    },
+    "target_r": 2.0,
+    "stop_r": 1.0,
+    "horizon_bars": 150,
+    "collision": "stop_first",
+    "loss_weight": 0.3
+  },
   "observation": {
     "management_state": "entry_risk_v1",
     "include_unrealized_r": true,
@@ -233,7 +256,7 @@
     "entry_opportunity_sequence_fraction": 0.25
   },
   "evolution": {
-    "hypothesis": "Centering the training-only Expansion entry target on authenticated pre-2025 long and short base rates will teach above-normal opportunities to outrank WAIT, while a final teacher-free autonomy tail preserves deployable greedy entry competence under a declared 300-dollar Stage-1 stop-risk recipe.",
+    "hypothesis": "Direct training-only supervision over exactly five next-open decision points after a retrospectively confirmed fresh Expansion launch will teach the permanent policy when to WAIT, ENTER_LONG_1, or ENTER_SHORT_1; soft Expansion and Regime semantics provide confluence while the final teacher-free autonomy tail must retain deployable greedy entry competence under a frozen 300-dollar risk contract.",
     "parent_candidate_ids": [],
     "allowed_revision_paths": [
       "agent.learning_rate",
@@ -241,7 +264,6 @@
       "agent.gradient_clip",
       "agent.target_update_mode",
       "agent.target_soft_tau",
-      "challenge.per_trade_risk_dollars",
       "challenge.ratchet_activation_r",
       "challenge.ratchet_giveback_r",
       "training.episodes",
@@ -281,12 +303,14 @@
       "challenge.max_loss",
       "challenge.max_position_size",
       "challenge.profit_target",
+      "challenge.per_trade_risk_dollars",
       "challenge.reward_scale",
       "challenge.trailing_mll_lock",
       "deployment_tickers",
       "point_values",
       "round_trip_fees",
       "teachers",
+      "entry_supervision",
       "sealed_confirmation",
       "temporal",
       "tickers",
@@ -306,10 +330,6 @@
       ,"training.greedy_diagnostic_interval_steps"
     ],
     "revision_bounds": {
-      "challenge.per_trade_risk_dollars": {
-        "minimum": 300,
-        "maximum": 500
-      },
       "challenge.ratchet_activation_r": {
         "minimum": 1.5,
         "maximum": 3
@@ -381,7 +401,7 @@
     }
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_regime_centered_entry_v8f/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_regime_post_launch_entry_v8/ml-loop-state",
     "max_revisions_per_stage": 24,
     "budget_stages": [
       {
@@ -395,7 +415,6 @@
         },
         "revision_paths": [
           "agent.learning_rate",
-          "challenge.per_trade_risk_dollars",
           "challenge.minimum_mll_headroom",
           "challenge.mll_proximity_penalty_coefficient",
           "challenge.terminal_blow_reward",
@@ -498,7 +517,6 @@
           "challenge.lead_giveback_penalty_coefficient",
           "challenge.terminal_pass_reward",
           "challenge.terminal_pass_speed_reward_per_day",
-          "challenge.per_trade_risk_dollars",
           "training.management_epsilon_start",
           "training.management_epsilon_end"
         ],
@@ -607,8 +625,8 @@
       }
     ],
     "finalization": {
-      "registry_root": "runs/historical_mask_expansion_regime_centered_entry_v8f/registry",
-      "export_root": "runs/historical_mask_expansion_regime_centered_entry_v8f/export",
+      "registry_root": "runs/historical_mask_expansion_regime_post_launch_entry_v8/registry",
+      "export_root": "runs/historical_mask_expansion_regime_post_launch_entry_v8/export",
       "minimum_seed_count": 8,
       "ranking": [
         {
@@ -703,5 +721,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_regime_centered_entry_v8f"
+  "output": "runs/historical_mask_expansion_regime_post_launch_entry_v8"
 }

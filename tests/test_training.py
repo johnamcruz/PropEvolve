@@ -21,11 +21,26 @@ from propevolve.training import (
     TrainingResult,
     TrainingProgress,
     _selection_evaluation_gates,
+    _plain_contract_value,
     assert_temporal_role,
     evaluate_agent,
     prop_safety_objective,
     train_agent,
 )
+
+
+def test_immutable_entry_manifest_becomes_archive_safe_plain_data() -> None:
+    from types import MappingProxyType
+
+    value = MappingProxyType({
+        "contract": MappingProxyType({"offsets": (1, 2, 3, 4, 5)}),
+        "count": np.int64(7),
+    })
+
+    plain = _plain_contract_value(value)
+
+    assert plain == {"contract": {"offsets": [1, 2, 3, 4, 5]}, "count": 7}
+    json.dumps(plain)
 
 
 def test_incomplete_selection_cannot_pass_on_earlier_successes() -> None:
@@ -64,10 +79,20 @@ class Agent:
     ):
         return Action.WAIT, None, np.zeros(len(Action), np.float32)
 
-    def train_batch(self, sequences, *, teacher_weight_scale=1.0):
+    def train_batch(
+        self,
+        sequences,
+        *,
+        teacher_weight_scale=1.0,
+        entry_action_weight_scale=1.0,
+    ):
         self.updates += 1
         self.teacher_weight_scales = getattr(self, "teacher_weight_scales", [])
         self.teacher_weight_scales.append(teacher_weight_scale)
+        self.entry_action_weight_scales = getattr(
+            self, "entry_action_weight_scales", []
+        )
+        self.entry_action_weight_scales.append(entry_action_weight_scale)
         self.last_train_metrics = {
             "rl_loss": 0.4,
             "teacher_loss": 0.1,
@@ -663,6 +688,172 @@ def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
     )
 
     assert observed[8:] == [None, None]
+
+
+def test_entry_action_supervision_is_separate_and_shares_autonomy_boundary() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class LongFlatEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 10
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else flat_actions,
+                "ticker": "NQ",
+                "fill_index": self.index,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    observed: list[tuple[np.ndarray | None, Action | None]] = []
+    diagnostics = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            observed.extend(
+                (transition.teacher_target, transition.entry_action_target)
+                for transition in episode.transitions
+            )
+            super().add(episode)
+
+    train_agent(
+        Agent(),
+        LongFlatEnvironment(),
+        episodes=1,
+        minimum_environment_steps=10,
+        replay=CapturingReplay(capacity_episodes=2, sequence_length=2, seed=3),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=4,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
+        teacher_channels=("a", "b", "c", "d"),
+        entry_action_lookup=lambda ticker, index: Action.ENTER_LONG_1,
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=1.0,
+        teacher_autonomy_start_fraction=0.8,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    # The soft semantic teacher and sparse economic action target remain
+    # independent fields, but share one deterministic visibility curriculum.
+    assert any(
+        semantic is not None and action == Action.ENTER_LONG_1
+        for semantic, action in observed[:8]
+    )
+    assert all(
+        (semantic is None) == (action is None)
+        for semantic, action in observed
+    )
+    assert observed[8:] == [(None, None), (None, None)]
+    assert diagnostics[0]["entry_action_target_counts"]["ENTER_LONG_1"] > 0
+    assert diagnostics[0]["entry_action_target_counts"]["WAIT"] == 0
+
+
+def test_entry_action_lookup_is_not_used_after_exploration_enters() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class EnterThenManageEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 3
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.HOLD, Action.CLOSE),
+                "ticker": "NQ",
+                "fill_index": self.index,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "long",
+                "trade_count": 1,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    class EnteringAgent(Agent):
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
+            action = (
+                Action.ENTER_LONG_1
+                if Action.ENTER_LONG_1 in valid_actions
+                else Action.HOLD
+            )
+            values = (
+                np.zeros(len(Action), np.float32)
+                if return_action_values
+                else None
+            )
+            return action, None, values
+
+    looked_up = []
+
+    def lookup(ticker, row):
+        looked_up.append(row)
+        return Action.ENTER_LONG_1
+
+    train_agent(
+        EnteringAgent(),
+        EnterThenManageEnvironment(),
+        episodes=1,
+        minimum_environment_steps=3,
+        replay=BalancedSequenceReplay(capacity_episodes=2, sequence_length=1, seed=3),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=3,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        entry_action_lookup=lookup,
+    )
+
+    assert looked_up == [0]
 
 
 def test_teacher_diagnostics_preserve_named_source_channels() -> None:

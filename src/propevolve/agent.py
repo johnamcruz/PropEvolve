@@ -149,6 +149,7 @@ class RecurrentC51Agent:
         teacher_entry_search_probability_epsilon: float = 1e-6,
         teacher_entry_search_teacher_temperature: float = 1.0,
         teacher_entry_search_q_temperature: float = 1.0,
+        entry_action_loss_weight: float = 0.0,
         policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
@@ -178,6 +179,7 @@ class RecurrentC51Agent:
             teacher_channels < 0
             or teacher_loss_weight < 0
             or teacher_entry_search_loss_weight < 0
+            or entry_action_loss_weight < 0
             or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
@@ -270,6 +272,7 @@ class RecurrentC51Agent:
         self.teacher_entry_search_q_temperature = float(
             teacher_entry_search_q_temperature
         )
+        self.entry_action_loss_weight = float(entry_action_loss_weight)
         self.policy_retention_loss_weight = float(policy_retention_loss_weight)
         self.retention_anchor: RecurrentC51Network | None = None
         self.last_train_metrics: dict[str, float] = {}
@@ -448,15 +451,24 @@ class RecurrentC51Agent:
         sequences: Sequence[Sequence[Transition]],
         *,
         teacher_weight_scale: float = 1.0,
+        entry_action_weight_scale: float = 1.0,
     ) -> float:
         if not sequences:
             raise ValueError("training batch cannot be empty")
         teacher_weight_scale = float(teacher_weight_scale)
+        entry_action_weight_scale = float(entry_action_weight_scale)
         if (
             not np.isfinite(teacher_weight_scale)
             or not 0 <= teacher_weight_scale <= 1
         ):
             raise ValueError("teacher weight scale must be between zero and one")
+        if (
+            not np.isfinite(entry_action_weight_scale)
+            or not 0 <= entry_action_weight_scale <= 1
+        ):
+            raise ValueError(
+                "entry timing weight scale must be between zero and one"
+            )
         lengths = {len(sequence) for sequence in sequences}
         if len(lengths) != 1 or next(iter(lengths)) < 1:
             raise ValueError("training sequences must have one positive length")
@@ -641,6 +653,10 @@ class RecurrentC51Agent:
         loss = rl_loss
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_action_supervised_rows = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
@@ -764,6 +780,80 @@ class RecurrentC51Agent:
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
+        if self.entry_action_loss_weight and entry_action_weight_scale > 0.0:
+            entry_action_targets = np.full(
+                observations.shape[:2], -1, dtype=np.int64
+            )
+            for batch_index, sequence in enumerate(sequences):
+                for time_index, transition in enumerate(sequence):
+                    if transition.entry_action_target is not None:
+                        try:
+                            target = Action(transition.entry_action_target)
+                        except (TypeError, ValueError) as error:
+                            raise ValueError("entry timing target is invalid") from error
+                        if target not in {
+                            Action.WAIT,
+                            Action.ENTER_LONG_1,
+                            Action.ENTER_SHORT_1,
+                        }:
+                            raise ValueError("entry timing target is invalid")
+                        entry_action_targets[batch_index, time_index] = int(target)
+            timing_targets = torch.as_tensor(
+                entry_action_targets[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                ],
+                dtype=torch.long,
+                device=self.device,
+            )
+            flat_rows = (
+                valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.WAIT),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_LONG_1),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_SHORT_1),
+                ]
+            )
+            timing_rows = timing_targets >= 0
+            if bool((timing_rows & ~flat_rows).any().item()):
+                raise ValueError("entry timing target requires a flat decision")
+            if bool(timing_rows.any().item()):
+                q_values = (all_logits.float().softmax(-1) * self.support).sum(-1)
+                entry_q = torch.stack(
+                    tuple(
+                        q_values[:, :training_steps, int(action)]
+                        for action in (
+                            Action.WAIT,
+                            Action.ENTER_LONG_1,
+                            Action.ENTER_SHORT_1,
+                        )
+                    ),
+                    dim=-1,
+                )
+                entry_action_loss = nn.functional.cross_entropy(
+                    entry_q[timing_rows], timing_targets[timing_rows]
+                )
+                entry_action_supervised_rows = timing_rows.sum().to(
+                    dtype=torch.float32
+                )
+                loss = loss + (
+                    entry_action_weight_scale
+                    * self.entry_action_loss_weight
+                    * entry_action_loss
+                )
         management_valid_rows = (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
             & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
@@ -842,6 +932,8 @@ class RecurrentC51Agent:
             rl_loss,
             teacher_loss,
             entry_search_loss,
+            entry_action_loss,
+            entry_action_supervised_rows,
             policy_retention_loss,
             loss,
             gradient_norm.float(),
@@ -878,6 +970,8 @@ class RecurrentC51Agent:
             rl_loss_value,
             teacher_loss_value,
             entry_search_loss_value,
+            entry_action_loss_value,
+            entry_action_supervised_rows_value,
             policy_retention_loss_value,
             total_loss,
             gradient_norm_value,
@@ -900,8 +994,11 @@ class RecurrentC51Agent:
             "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
+            "entry_action_loss": entry_action_loss_value,
+            "entry_action_supervised_rows": entry_action_supervised_rows_value,
             "policy_retention_loss": policy_retention_loss_value,
             "teacher_weight_scale": teacher_weight_scale,
+            "entry_action_weight_scale": entry_action_weight_scale,
             "total_loss": total_loss,
             "gradient_norm": gradient_norm_value,
             "sampled_management_row_fraction": management_row_fraction,
@@ -938,6 +1035,7 @@ class RecurrentC51Agent:
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
+        self.entry_action_loss_weight = 0.0
         if not self.teacher_channels:
             return
         online = RecurrentC51Network(
@@ -1047,6 +1145,7 @@ class RecurrentC51Agent:
                 "teacher_entry_search_q_temperature": (
                     self.teacher_entry_search_q_temperature
                 ),
+                "entry_action_loss_weight": self.entry_action_loss_weight,
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
@@ -1130,6 +1229,7 @@ class RecurrentC51Agent:
         config.setdefault("teacher_entry_search_probability_epsilon", 1e-6)
         config.setdefault("teacher_entry_search_teacher_temperature", 1.0)
         config.setdefault("teacher_entry_search_q_temperature", 1.0)
+        config.setdefault("entry_action_loss_weight", 0.0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])
