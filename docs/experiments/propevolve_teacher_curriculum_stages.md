@@ -3,17 +3,17 @@
 ## Status and purpose
 
 This document freezes the intended curriculum after the balanced post-launch
-Entry v8b result. It is a research plan, not an assertion that every stage is
-implemented or validated. The active v8b recipe remains unchanged until its
-200-episode selection receipt is complete.
+Entry v8b result. Stage 1 is now an immutable archived parent; later stages are
+research plans until their own teacher-free evaluation receipts pass.
 
 The curriculum builds one teacher-free policy incrementally:
 
 ```text
 Stage 1: Expansion Entry foundation
-    -> Stage 2: Regime-aware chop abstention
+    -> Stage 2A: Regime-aware chop abstention
+    -> Stage 2B: Regime-aware deficit recovery
     -> Stage 3: Long/Short Trend confluence
-    -> Stage 4: challenge completion and timeout recovery
+    -> Stage 4: challenge completion and pass conversion
     -> Stage 5: 5M multi-seed confirmation
     -> Stage 6: sealed 2026 confirmation and handoff
 ```
@@ -69,15 +69,17 @@ then manage the position to preserve asymmetric winners.
 
 ### Current evidence
 
-The v8b candidate eliminated universal WAIT and traded autonomously in
-teacher-free chronological selection. At the frozen episode-188 snapshot it
-had 45 passes, zero blowouts, and 143 timeouts. Episode 188 passed with 28
-trades, a 32.1% win rate, 4.342R average winners, and +$6,022.36 terminal PnL.
-Training also recorded a 6.420R realized CL Short winner from 7.061R MFE.
+The archived v8b candidate eliminated universal WAIT and traded autonomously
+in teacher-free chronological 2025 NQ selection. Its completed 200-episode
+receipt recorded 46 passes, zero blowouts, and 154 timeouts: 23.0% pass rate,
+33.4% trade win rate, 1.952R average winners, 0.736 two-R MFE capture, and
++$19.03 mean terminal PnL. Its first failed boundary was 98 near-blow timeouts,
+or 63.6% of all timeouts.
 
-These observations support the mechanism but do not replace the completed
-200-episode receipt. Stage 1 becomes the baseline only after its exact final
-candidate and evaluation are archived.
+The exact selected candidate, evaluation, and model identities are the Stage 2
+warm-start contract. The checked-in v8b template is not a substitute for that
+selected recipe because the selected child also carries its revised large-win
+and management-exploration settings.
 
 ### Preserve
 
@@ -87,15 +89,22 @@ candidate and evaluation are archived.
 - Current winner-retention and ratchet behavior.
 - Exact selected checkpoint as the rollback parent.
 
-## Stage 2 - Regime-aware chop abstention
+## Stage 2 - Regime-aware safety and deficit recovery
 
-### Hypothesis
+Stage 2 has two ordered sub-stages. Stage 2A must demonstrate safer Entry
+selection before Stage 2B teaches recovery near the loss floor. They must not
+be bundled into one run because avoidance and recovery are different causal
+learning problems.
+
+### Stage 2A - Chop abstention
+
+#### Hypothesis
 
 Temporary soft Regime supervision can teach the policy to WAIT when chop risk
 is high, reducing weak entries and near-blow timeouts without suppressing the
 Expansion entries and large winners learned in Stage 1.
 
-### One allowed learning change
+#### One allowed learning change
 
 Add an explicit training-only Regime-to-action auxiliary objective that
 increases WAIT preference smoothly with causal chop probability. Supportive
@@ -106,36 +115,109 @@ The exact objective, coefficient, schedule, and pre-2025 teacher lineage must
 be frozen in a new JSON recipe and covered by deterministic Long, Short, WAIT,
 teacher-hiding, and teacher-removal tests before compute.
 
-### Matched comparison
+#### Matched comparison
 
 Warm-start from the immutable Stage 1 candidate. Freeze all data, labels,
-splits, risk, fees, Entry supervision, agent architecture, replay, winner
-management, and evaluation code. Change only the declared Regime-abstention
-learning mechanism and fresh experiment identity.
+splits, risk, fees, Entry supervision, agent architecture, optimizer settings,
+winner management, and ordinary evaluation economics. The Stage 2 code
+revision adds the declared Regime-abstention mechanism plus generic masked
+short-episode replay support required by the later recovery stage; both are
+content-addressed and tested so they are inert on ordinary Stage 1 traces.
+Change only the activated Regime objective and fresh experiment identity in
+Stage 2A. Treat the archived Stage 1 result as the competence floor, not as a
+claim that it was evaluated by byte-identical source code.
 
-### Required diagnostics
+#### Required diagnostics
 
-- entry rate by Regime chop-probability bucket;
-- Long/Short/WAIT recall and precision on training-only labeled diagnostics;
-- pass versus timeout Regime attribution;
+- authenticated pre-2025 positive-Entry rows stratified by dominant-chop versus
+  non-chop context and low versus safe MLL headroom;
+- mean soft-WAIT target and supervised-row count within each of those
+  training-only strata;
 - near-blow timeout rate;
 - trade count, win rate, average winner R, expectancy, MFE capture, and pass
   rate;
 - teacher-free greedy entry rate after the autonomous tail.
 
-### Advance gate
+#### Advance gate
 
 - zero teacher-free selection blowouts;
 - no universal-WAIT or all-ENTER collapse;
 - lower near-blow timeout rate than Stage 1;
 - pass rate, expectancy, average winner R, and 2R MFE capture do not regress
   against Stage 1 beyond a predeclared tolerance;
-- entry frequency decreases monotonically as chop probability rises on the
-  diagnostic slice;
+- dominant-chop and low-headroom positive-Entry rows receive stronger soft-WAIT
+  pressure than their matched non-chop and safe-headroom training rows;
 - all teachers are absent from the serialized candidate and evaluator.
 
 Failure preserves Stage 1 unchanged and revises only the first failed Regime
 learning boundary.
+
+### Stage 2B - Deficit recovery
+
+#### Hypothesis
+
+After the policy learns to avoid weak chop entries, a bounded one-shot recovery
+curriculum can teach it to recover from exactly -$2,700 without increasing
+ordinary-selection blowouts. Recovery should come from one selective Expansion
+entry under learned Regime context, not from higher trade frequency or relaxed
+risk limits.
+
+#### One allowed learning change
+
+Warm-start from the selected Stage 2A candidate and mix ordinary full-challenge
+episodes with an authenticated, complete -$2,700 recovery snapshot. That
+snapshot is flat with realized and equity PnL both -$2,700, peak equity $0, MLL
+floor -$3,000, session PnL -$2,700, no passmark lock, and exactly $300 of MLL
+headroom. It carries one challenge-lifetime Entry permit. WAIT does not consume
+the permit, but the first Long or Short Entry does.
+
+The recovery episode terminates when that first trade closes. Crossing to
+-$2,500 restores the ordinary $500 Entry headroom and is `recovery_success`.
+Closing below -$2,500 without touching the MLL floor is
+`survived_not_recovered`. A full fee-inclusive -1R stop reaches -$3,000 and is a
+blowout. If the agent never finds a valid opportunity, it may WAIT until the
+ordinary challenge horizon and receives `wait_timeout` rather than artificial
+credit for inactivity.
+
+Position size remains one, risk remains $300 including fees, and the ordinary
+$500 minimum-headroom guard remains unchanged. The permit is a recovery-only
+training and stress-evaluation seam; it does not lower the ordinary guard or
+create a second trade. The initial matched experiment uses this single exact
+start rather than a ladder of starting balances so its evidence is attributable.
+
+#### Matched comparison
+
+Freeze the Stage 2A Regime objective and every Stage 1 Entry and management
+contract. Change only the deterministic mixture of ordinary and -$2,700
+recovery episodes under a fresh experiment identity. Evaluate both the
+ordinary chronological 2025 NQ challenge distribution and a separately
+declared teacher-free -$2,700 recovery stress set. Neither path may touch 2026.
+
+#### Required diagnostics
+
+- recovery-success, survived-not-recovered, wait-timeout, and blow rates from
+  exactly -$2,700;
+- mean terminal PnL and mean WAIT decisions before the one permitted Entry;
+- recovery Entry count and one-Entry contract violations;
+- training-only low-headroom selectivity targets and Long/Short action balance;
+- ordinary zero-balance challenge performance to detect curriculum regression.
+
+#### Advance gate
+
+- zero blowouts on ordinary teacher-free chronological selection;
+- zero one-Entry contract violations;
+- recovery-stress blow rate does not worsen against the Stage 2A parent;
+- recovery-success rate or mean terminal PnL improves against Stage 2A;
+- the policy actually uses the recovery Entry permit on some episodes;
+- near-blow timeout rate decreases without an increase in trade frequency being
+  the sole mechanism; specifically, the child greedy-entry rate may exceed its
+  selected parent by at most two percentage points;
+- Stage 2A chop abstention, Stage 1 pass rate, and winner R do not materially
+  regress;
+- no risk, MLL, position-size, or execution guard is relaxed.
+
+Failure preserves Stage 2A unchanged. If the policy learns reckless loss-floor
+gambling, the recovery curriculum is falsified even when some episodes pass.
 
 ## Stage 3 - Long/Short Trend confluence
 
@@ -178,20 +260,20 @@ identity.
 Failure preserves Stage 2 unchanged. Do not compensate by loosening safety or
 adding another teacher in the same experiment.
 
-## Stage 4 - Challenge completion and timeout recovery
+## Stage 4 - Challenge completion and pass conversion
 
 ### Hypothesis
 
-After Entry, Regime, direction, and winner retention are competent, a bounded
-recovery curriculum can convert safe timeouts into passes without teaching
-reckless risk near the loss floor.
+After Entry, Regime safety, deficit recovery, direction, and winner retention
+are competent, a bounded completion curriculum can convert safe positive or
+near-target timeouts into faster passes.
 
 ### Allowed focus
 
 - warm-start the selected Stage 3 candidate;
 - use a two-million-step confirmation budget;
-- improve terminal credit, lead-giveback behavior, and recovery-state replay
-  only through declared JSON revisions;
+- improve terminal credit, lead-giveback behavior, and pass-speed credit only
+  through declared JSON revisions;
 - preserve one-contract sizing, $300 initial risk, teacher-free deployment,
   and zero-blow selection.
 
@@ -205,8 +287,9 @@ reckless risk near the loss floor.
 - improvement is stable across chronological slices rather than concentrated
   in one episode block.
 
-Failure returns to the selected Stage 3 parent. Recovery shaping must not create
-WAIT collapse, excessive trading, or loss-floor gambling.
+Failure returns to the selected Stage 3 parent. Completion shaping must not
+create WAIT collapse, excessive trading, compressed winner R, or loss-floor
+gambling.
 
 ## Stage 5 - Five-million-step multi-seed confirmation
 
@@ -262,10 +345,9 @@ evidence and integration parity authorize a separate production handoff.
 
 ## Campaign implementation note
 
-The current v8b JSON campaign still contains the older generic sequence
-`safety_foundation_1m -> winner_retention_1m -> challenge_completion_2m ->
-confirmation_5m_multiseed`. It does not yet encode Stage 2 Regime abstention or
-Stage 3 Trend confluence described here. Implement them in a fresh recipe only
-after the Stage 1 receipt is complete. Do not modify or resume v8b under the new
-curriculum contract.
-
+The v8b JSON and archive remain unchanged. The fresh
+`historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json` recipe
+authenticates the selected v8b candidate as its external parent and executes
+only `regime_selectivity_1m -> deficit_recovery_1m`. It has fresh output and
+campaign-state roots, no finalization stage, and no sealed evaluation step.
+Stage 3 and later work require a new recipe after Stage 2 evidence is accepted.

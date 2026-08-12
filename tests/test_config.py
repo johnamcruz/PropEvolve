@@ -1,11 +1,121 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
-from propevolve.config import agent_runtime_settings, load_experiment_config
+from propevolve.config import (
+    REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
+    agent_runtime_settings,
+    load_experiment_config,
+)
+from propevolve.balance_aware_regime_selectivity import (
+    ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
+    FORMULA as REGIME_SELECTIVITY_FORMULA,
+    SCHEMA as REGIME_SELECTIVITY_SCHEMA,
+    TARGET_SOURCE as REGIME_SELECTIVITY_TARGET_SOURCE,
+)
+
+
+def _stage2a_config(tmp_path: Path) -> Path:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json"
+    ).read_text())
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt = receipt_source.read_bytes()
+    receipt_path = tmp_path / "config" / "receipts" / "centers.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt)
+    receipt_payload = json.loads(receipt)
+    payload["regime_selectivity"] = {
+        "schema": REGIME_SELECTIVITY_SCHEMA,
+        "training_only": True,
+        "target_source": REGIME_SELECTIVITY_TARGET_SOURCE,
+        "action_order": list(REGIME_SELECTIVITY_ACTION_ORDER),
+        "formula": REGIME_SELECTIVITY_FORMULA,
+        "loss_weight": 0.3,
+        "expansion_center_receipt": "config/receipts/centers.json",
+        "expansion_center_receipt_sha256": hashlib.sha256(receipt).hexdigest(),
+        "expansion_long_center": receipt_payload["long_center"],
+        "expansion_short_center": receipt_payload["short_center"],
+        "probability_epsilon": 1e-6,
+        "headroom_pressure": 1.0,
+        "dominant_chop_pressure": 2.0,
+        "q_temperature": 1.0,
+    }
+    payload["evolution"]["frozen_paths"].extend(
+        REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS
+    )
+    path = tmp_path / "config" / "stage2a.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_stage2a_regime_selectivity_is_authenticated_and_frozen(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+
+    config = load_experiment_config(path)
+
+    assert config["regime_selectivity"]["expansion_long_center"] == pytest.approx(
+        0.10249102659218842
+    )
+    assert config["regime_selectivity"]["expansion_short_center"] == pytest.approx(
+        0.10399580328775007
+    )
+    assert set(REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS) <= set(
+        config["evolution"]["frozen_paths"]
+    )
+
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"]["expansion_long_center"] = 0.5
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="receipt contract drifted"):
+        load_experiment_config(path)
+
+
+def test_stage2a_requires_every_selectivity_identity_field_to_be_frozen(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["evolution"]["frozen_paths"].remove(
+        "regime_selectivity.expansion_center_receipt_sha256"
+    )
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="identity must be frozen"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "loss_weight",
+        "expansion_long_center",
+        "expansion_short_center",
+        "probability_epsilon",
+        "headroom_pressure",
+        "dominant_chop_pressure",
+        "q_temperature",
+    ),
+)
+def test_stage2a_rejects_nonfinite_selectivity_settings(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"][field] = float("nan")
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="selectivity contract is invalid"):
+        load_experiment_config(path)
 
 
 def test_runtime_performance_contract_is_explicit_and_fail_closed(
@@ -1062,3 +1172,96 @@ def test_staged_budget_recipe_screens_confirms_then_freezes_eight_final_seeds() 
         {"metric": "selection.trade_win_rate", "operator": ">=", "value": 0.4},
         {"metric": "selection.average_win_r", "operator": ">=", "value": 2.0},
     ]
+
+
+def test_stage2_recovery_recipe_authenticates_one_shot_account_contract(
+    tmp_path: Path,
+) -> None:
+    source = Path(
+        "config/historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json"
+    )
+    config = load_experiment_config(source)
+
+    assert config["challenge"]["minimum_mll_headroom"] == 500
+    assert config["challenge"]["per_trade_risk_dollars"] == 300
+    assert config["agent"]["learning_rate"] == 0.0001
+    assert "agent.learning_rate" in config["evolution"]["frozen_paths"]
+    assert "agent.learning_rate" not in config["evolution"][
+        "allowed_revision_paths"
+    ]
+    assert "agent.learning_rate" not in config["evolution"]["revision_bounds"]
+    assert all(
+        "agent.learning_rate" not in stage["revision_paths"]
+        and "agent.learning_rate" not in stage.get("curriculum_override", {})
+        for stage in config["campaign"]["budget_stages"]
+    )
+    assert config["campaign"]["budget_stages"][1][
+        "parent_retention_requirements"
+    ] == [{
+        "metric": "selection.greedy_entry_rate",
+        "maximum_regression": 0.02,
+    }]
+    assert config["recovery_curriculum"] == {
+        "episode_fraction": 0.0,
+        "schedule_seed": 271828,
+        "stress_evaluation_episodes": 200,
+        "start_state": {
+            "realized_pnl": -2700,
+            "equity_pnl": -2700,
+            "peak_equity_pnl": 0,
+            "mll_floor_pnl": -3000,
+            "passmark_locked": False,
+            "position_side": 0,
+            "position_size": 0,
+            "session_pnl": -2700,
+            "trading_days_elapsed": 1,
+        },
+        "entry_permit": {
+            "remaining_entries": 1,
+            "exception_headroom": 300,
+            "success_pnl": -2500,
+        },
+    }
+
+    payload = json.loads(source.read_text())
+    payload["recovery_curriculum"]["entry_permit"]["remaining_entries"] = 2
+    path = tmp_path / "stage2-invalid.json"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="start contract drifted"):
+        load_experiment_config(path)
+
+
+def test_stage2_recovery_stress_baseline_is_frozen_while_fraction_may_revise(
+    tmp_path: Path,
+) -> None:
+    source = Path(
+        "config/historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json"
+    )
+    payload = json.loads(source.read_text())
+    assert "recovery_curriculum.stress_evaluation_episodes" in payload[
+        "evolution"
+    ]["frozen_paths"]
+    assert "recovery_curriculum.stress_evaluation_episodes" not in payload[
+        "evolution"
+    ]["allowed_revision_paths"]
+    assert payload["recovery_curriculum"]["episode_fraction"] == 0.0
+    assert payload["recovery_curriculum"]["stress_evaluation_episodes"] == 200
+
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt = receipt_source.read_bytes()
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt)
+    payload["recovery_curriculum"]["stress_evaluation_episodes"] = 0
+    path = tmp_path / "config" / "stage2-no-baseline.json"
+    path.write_text(json.dumps(payload))
+    config = load_experiment_config(path)
+    assert config["recovery_curriculum"]["episode_fraction"] == 0.0
+    assert config["recovery_curriculum"]["stress_evaluation_episodes"] == 0
+
+    payload["recovery_curriculum"]["episode_fraction"] = 0.25
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="requires a frozen stress evaluation"):
+        load_experiment_config(path)

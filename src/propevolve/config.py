@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import date
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -24,6 +26,28 @@ AGENT_RUNTIME_FIELDS = (
     "compile_mode",
     "mps_prefer_metal",
     "mps_fast_math",
+)
+
+REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
+    "regime_selectivity.schema",
+    "regime_selectivity.training_only",
+    "regime_selectivity.target_source",
+    "regime_selectivity.action_order",
+    "regime_selectivity.formula",
+    "regime_selectivity.expansion_center_receipt",
+    "regime_selectivity.expansion_center_receipt_sha256",
+    "regime_selectivity.expansion_long_center",
+    "regime_selectivity.expansion_short_center",
+    "regime_selectivity.probability_epsilon",
+)
+RECOVERY_CURRICULUM_FROZEN_PATHS = (
+    "recovery_curriculum.schedule_seed",
+    "recovery_curriculum.stress_evaluation_episodes",
+    "recovery_curriculum.start_state",
+    "recovery_curriculum.entry_permit",
+)
+RECOVERY_CURRICULUM_REVISION_PATHS = (
+    "recovery_curriculum.episode_fraction",
 )
 
 
@@ -214,6 +238,231 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         )
 
 
+def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
+    """Authenticate the optional one-shot Stage-2 recovery contract."""
+    curriculum = payload.get("recovery_curriculum")
+    if curriculum is None:
+        return
+    required = {
+        "episode_fraction",
+        "schedule_seed",
+        "stress_evaluation_episodes",
+        "start_state",
+        "entry_permit",
+    }
+    start_fields = {
+        "realized_pnl",
+        "equity_pnl",
+        "peak_equity_pnl",
+        "mll_floor_pnl",
+        "passmark_locked",
+        "position_side",
+        "position_size",
+        "session_pnl",
+        "trading_days_elapsed",
+    }
+    permit_fields = {
+        "remaining_entries",
+        "exception_headroom",
+        "success_pnl",
+    }
+    if not isinstance(curriculum, dict) or set(curriculum) != required:
+        raise ValueError("recovery curriculum contract is invalid")
+    start = curriculum["start_state"]
+    permit = curriculum["entry_permit"]
+    if (
+        not isinstance(start, dict)
+        or set(start) != start_fields
+        or not isinstance(permit, dict)
+        or set(permit) != permit_fields
+    ):
+        raise ValueError("recovery curriculum contract is invalid")
+    integer_values = (
+        curriculum["schedule_seed"],
+        curriculum["stress_evaluation_episodes"],
+        start["position_side"],
+        start["position_size"],
+        start["trading_days_elapsed"],
+        permit["remaining_entries"],
+    )
+    numeric_values = (
+        curriculum["episode_fraction"],
+        start["realized_pnl"],
+        start["equity_pnl"],
+        start["peak_equity_pnl"],
+        start["mll_floor_pnl"],
+        start["session_pnl"],
+        permit["exception_headroom"],
+        permit["success_pnl"],
+    )
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in integer_values
+        )
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in numeric_values
+        )
+        or not isinstance(start["passmark_locked"], bool)
+    ):
+        raise ValueError("recovery curriculum scalar types are invalid")
+    fraction = float(curriculum["episode_fraction"])
+    stress_episodes = int(curriculum["stress_evaluation_episodes"])
+    if not 0.0 <= fraction <= 0.5 or not 0 <= stress_episodes <= 200:
+        raise ValueError("recovery curriculum budget is invalid")
+    if fraction > 0.0 and stress_episodes == 0:
+        raise ValueError(
+            "recovery training requires a frozen stress evaluation"
+        )
+    exact_start = {
+        "realized_pnl": -2_700.0,
+        "equity_pnl": -2_700.0,
+        "peak_equity_pnl": 0.0,
+        "mll_floor_pnl": -3_000.0,
+        "passmark_locked": False,
+        "position_side": 0,
+        "position_size": 0,
+        "session_pnl": -2_700.0,
+        "trading_days_elapsed": 1,
+    }
+    exact_permit = {
+        "remaining_entries": 1,
+        "exception_headroom": 300.0,
+        "success_pnl": -2_500.0,
+    }
+    if any(
+        isinstance(expected, float)
+        and not math.isclose(float(start[field]), expected)
+        or not isinstance(expected, float)
+        and start[field] != expected
+        for field, expected in exact_start.items()
+    ) or any(
+        isinstance(expected, float)
+        and not math.isclose(float(permit[field]), expected)
+        or not isinstance(expected, float)
+        and permit[field] != expected
+        for field, expected in exact_permit.items()
+    ):
+        raise ValueError("Stage-2 recovery start contract drifted")
+    if (
+        not math.isclose(float(challenge["max_loss"]), 3_000.0)
+        or not math.isclose(float(challenge["minimum_mll_headroom"]), 500.0)
+        or not math.isclose(
+            float(challenge.get("per_trade_risk_dollars", math.nan)), 300.0
+        )
+    ):
+        raise ValueError("Stage-2 recovery challenge economics drifted")
+
+
+def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
+    """Authenticate the optional Stage 2A training-only selectivity contract."""
+    specification = payload.get("regime_selectivity")
+    if specification is None:
+        return
+    from .balance_aware_regime_selectivity import (
+        ACTION_ORDER,
+        FORMULA,
+        SCHEMA,
+        TARGET_SOURCE,
+    )
+    from .teachers.expansion import (
+        CHANNELS as EXPANSION_CHANNELS,
+        ENTRY_CENTER_FORMULA,
+        ENTRY_CENTER_RECEIPT_SCHEMA,
+    )
+
+    required = {
+        "schema",
+        "training_only",
+        "target_source",
+        "action_order",
+        "formula",
+        "loss_weight",
+        "expansion_center_receipt",
+        "expansion_center_receipt_sha256",
+        "expansion_long_center",
+        "expansion_short_center",
+        "probability_epsilon",
+        "headroom_pressure",
+        "dominant_chop_pressure",
+        "q_temperature",
+    }
+    teachers = tuple(payload.get("teachers") or ())
+    numeric = tuple(
+        specification.get(field)
+        for field in (
+            "loss_weight",
+            "expansion_long_center",
+            "expansion_short_center",
+            "probability_epsilon",
+            "headroom_pressure",
+            "dominant_chop_pressure",
+            "q_temperature",
+        )
+    ) if isinstance(specification, dict) else ()
+    if (
+        not isinstance(specification, dict)
+        or set(specification) != required
+        or specification.get("schema") != SCHEMA
+        or specification.get("training_only") is not True
+        or specification.get("target_source") != TARGET_SOURCE
+        or tuple(specification.get("action_order", ())) != ACTION_ORDER
+        or specification.get("formula") != FORMULA
+        or payload.get("entry_supervision") is None
+        or len(teachers) < 2
+        or teachers[0].get("kind") != "expansion"
+        or not any(teacher.get("kind") == "regime" for teacher in teachers)
+        or tuple(teachers[0].get("channels", ())) != EXPANSION_CHANNELS
+        or len(numeric) != 7
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in numeric
+        )
+        or any(not math.isfinite(float(value)) for value in numeric)
+        or float(specification["loss_weight"]) <= 0.0
+        or not 0.0 < float(specification["probability_epsilon"]) < 0.5
+        or any(
+            not float(specification["probability_epsilon"])
+            < float(specification[field])
+            < 1.0 - float(specification["probability_epsilon"])
+            for field in ("expansion_long_center", "expansion_short_center")
+        )
+        or float(specification["headroom_pressure"]) < 0.0
+        or float(specification["dominant_chop_pressure"]) < 0.0
+        or float(specification["q_temperature"]) <= 0.0
+    ):
+        raise ValueError("balance-aware Regime selectivity contract is invalid")
+    root = (
+        config_path.parent.parent.resolve()
+        if config_path.parent.name == "config"
+        else config_path.parent.resolve()
+    )
+    receipt_path = (
+        root / str(specification["expansion_center_receipt"])
+    ).resolve(strict=True)
+    if not receipt_path.is_relative_to(root):
+        raise ValueError("Regime selectivity receipt must be repository-local")
+    digest = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    if digest != specification["expansion_center_receipt_sha256"]:
+        raise ValueError("Regime selectivity receipt identity drifted")
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt.get("schema") != ENTRY_CENTER_RECEIPT_SCHEMA
+        or receipt.get("formula") != ENTRY_CENTER_FORMULA
+        or tuple(receipt.get("tickers", ())) != tuple(payload.get("tickers", ()))
+        or tuple(receipt.get("channels", ())) != EXPANSION_CHANNELS
+        or receipt.get("training_end_exclusive") != payload["temporal"]["train_end"]
+        or float(receipt.get("long_center", -1.0))
+        != float(specification["expansion_long_center"])
+        or float(receipt.get("short_center", -1.0))
+        != float(specification["expansion_short_center"])
+    ):
+        raise ValueError("Regime selectivity receipt contract drifted")
+
+
 def load_experiment_config(path: str | Path) -> dict:
     path = Path(path)
     payload = json.loads(path.read_text())
@@ -295,6 +544,7 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("trade risk and ratchet fields are invalid")
     _validate_entry_supervision(payload, challenge)
+    _validate_recovery_curriculum(payload, challenge)
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
         raise ValueError("cache format must be native or ffm_frozen_representation_v2")
@@ -605,6 +855,7 @@ def load_experiment_config(path: str | Path) -> dict:
         ):
             raise ValueError("teacher autonomy start fraction is invalid")
         payload["teachers"] = tuple(teachers)
+    _validate_regime_selectivity(payload, config_path=path)
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),
@@ -696,6 +947,24 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("evolution allowlist overlaps the frozen contract")
     if payload.get("entry_supervision") is not None and "entry_supervision" not in frozen:
         raise ValueError("entry supervision must be frozen for the campaign")
+    if payload.get("regime_selectivity") is not None and not all(
+        path in frozen for path in REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS
+    ):
+        raise ValueError(
+            "Regime selectivity identity must be frozen for the campaign"
+        )
+    if payload.get("recovery_curriculum") is not None:
+        if not all(path in frozen for path in RECOVERY_CURRICULUM_FROZEN_PATHS):
+            raise ValueError(
+                "recovery curriculum account identity must be frozen"
+            )
+        recovery_allowed = {
+            path for path in allowed if path.startswith("recovery_curriculum.")
+        }
+        if recovery_allowed != set(RECOVERY_CURRICULUM_REVISION_PATHS):
+            raise ValueError(
+                "recovery curriculum revision surface is invalid"
+            )
     revision_bounds = evolution.get("revision_bounds") or {}
     if not isinstance(revision_bounds, dict):
         raise ValueError("evolution revision bounds must be an object")
@@ -720,6 +989,32 @@ def load_experiment_config(path: str | Path) -> dict:
     evolution["parent_candidate_ids"] = tuple(
         str(value) for value in evolution.get("parent_candidate_ids", ())
     )
+    base_parent = evolution.get("base_parent")
+    if base_parent is not None:
+        required_parent_fields = {
+            "archive_root", "candidate_id", "evaluation_id", "model_sha256"
+        }
+        if (
+            not isinstance(base_parent, dict)
+            or set(base_parent) != required_parent_fields
+            or any(
+                not str(base_parent[field]).strip()
+                for field in required_parent_fields
+            )
+        ):
+            raise ValueError("external base parent contract is invalid")
+        parent_ids = evolution["parent_candidate_ids"]
+        if len(parent_ids) != 1:
+            raise ValueError(
+                "external base parent requires exactly one parent candidate"
+            )
+        if parent_ids[0] != str(base_parent["candidate_id"]):
+            raise ValueError(
+                "external base parent disagrees with parent candidate identity"
+            )
+        evolution["base_parent"] = {
+            field: str(base_parent[field]) for field in required_parent_fields
+        }
     payload["evolution"] = evolution
     campaign = payload.get("campaign") or {}
     if not str(campaign.get("state_root", "")).strip():
@@ -779,7 +1074,8 @@ def load_experiment_config(path: str | Path) -> dict:
         optional_stage_fields = {
             "seed", "seeds", "max_parallel", "allow_revisions",
             "parent_improvement_requirements", "warm_start_parent",
-            "curriculum_override", "revision_paths",
+            "parent_improvement_any_requirements", "curriculum_override",
+            "parent_retention_requirements", "revision_paths",
         }
         if (
             not isinstance(stage, dict)
@@ -889,10 +1185,69 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError(
                     "campaign parent-improvement requirement is invalid"
                 )
+        parent_any_requirements = stage.get(
+            "parent_improvement_any_requirements", []
+        )
+        if not isinstance(parent_any_requirements, list) or (
+            parent_any_requirements and len(parent_any_requirements) < 2
+        ):
+            raise ValueError(
+                "campaign any-parent-improvement requirements must contain "
+                "at least two alternatives"
+            )
+        for requirement in parent_any_requirements:
+            if (
+                not isinstance(requirement, dict)
+                or set(requirement) != {"metric", "direction", "minimum_delta"}
+                or requirement.get("direction") not in {"maximize", "minimize"}
+                or not str(requirement.get("metric", "")).strip()
+                or isinstance(requirement.get("minimum_delta"), bool)
+                or not isinstance(requirement.get("minimum_delta"), (int, float))
+                or float(requirement["minimum_delta"]) < 0
+            ):
+                raise ValueError(
+                    "campaign any-parent-improvement requirement is invalid"
+                )
+        parent_retention_requirements = stage.get(
+            "parent_retention_requirements", []
+        )
+        if not isinstance(parent_retention_requirements, list):
+            raise ValueError(
+                "campaign parent-retention requirements must be a list"
+            )
+        for requirement in parent_retention_requirements:
+            if (
+                not isinstance(requirement, dict)
+                or set(requirement) != {"metric", "maximum_regression"}
+                or not str(requirement.get("metric", "")).strip()
+                or isinstance(requirement.get("maximum_regression"), bool)
+                or not isinstance(
+                    requirement.get("maximum_regression"), (int, float)
+                )
+                or not math.isfinite(float(requirement["maximum_regression"]))
+                or float(requirement["maximum_regression"]) < 0
+            ):
+                raise ValueError(
+                    "campaign parent-retention requirement is invalid"
+                )
         names.append(name)
         budgets.append(budget)
     if len(set(names)) != len(names) or budgets != sorted(budgets):
         raise ValueError("campaign budget stages must have unique names and increasing budgets")
+    if (
+        base_parent is None
+        and evolution["parent_candidate_ids"]
+        and bool(budget_stages[0].get("warm_start_parent", False))
+    ):
+        raise ValueError(
+            "first-stage external warm start requires a base parent contract"
+        )
+    if base_parent is not None and not bool(
+        budget_stages[0].get("warm_start_parent", False)
+    ):
+        raise ValueError(
+            "external base parent requires first-stage warm start"
+        )
     campaign["budget_stages"] = tuple(budget_stages)
     finalization = campaign.get("finalization")
     if finalization is not None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import nullcontext
+import math
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -11,9 +12,29 @@ import numpy as np
 import torch
 from torch import nn
 
+from .balance_aware_regime_selectivity import BalanceAwareRegimeSelectivity
 from .decision import Action
 from .config import configure_runtime_environment
 from .replay import Transition
+
+
+_REGIME_SELECTIVITY_STRATA = (
+    "positive_long_short",
+    "positive_long",
+    "positive_short",
+    "dominant_chop",
+    "nonchop",
+    "low_headroom_le_0_25",
+    "safe_headroom_ge_0_75",
+)
+_REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
+    "rows",
+    "target_wait_probability_sum",
+    "model_wait_probability_sum",
+    "greedy_wait_rows",
+    "declared_side_probability_sum",
+    "greedy_entry_rows",
+)
 
 
 def resolve_device(device: str) -> torch.device:
@@ -52,11 +73,8 @@ def centered_entry_search_target(
     ):
         raise ValueError("entry-search probability contract is invalid")
     bounded = probabilities.clamp(probability_epsilon, 1.0 - probability_epsilon)
-    center_tensor = torch.as_tensor(
-        center, dtype=bounded.dtype, device=bounded.device
-    )
     centered_log_odds = (
-        torch.logit(bounded) - torch.logit(center_tensor)
+        torch.logit(bounded) - math.log(center / (1.0 - center))
     ) / teacher_temperature
     return torch.sigmoid(centered_log_odds)
 
@@ -141,6 +159,7 @@ class RecurrentC51Agent:
         device: str,
         seed: int,
         teacher_channels: int = 0,
+        teacher_channel_names: Sequence[str] | None = None,
         teacher_loss_weight: float = 0.0,
         teacher_channel_loss_weights: Sequence[float] | None = None,
         teacher_entry_search_loss_weight: float = 0.0,
@@ -151,6 +170,12 @@ class RecurrentC51Agent:
         teacher_entry_search_q_temperature: float = 1.0,
         entry_action_loss_weight: float = 0.0,
         entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
+        regime_selectivity_loss_weight: float = 0.0,
+        regime_selectivity_expansion_centers: Sequence[float] | None = None,
+        regime_selectivity_probability_epsilon: float = 1e-6,
+        regime_selectivity_headroom_pressure: float = 1.0,
+        regime_selectivity_dominant_chop_pressure: float = 2.0,
+        regime_selectivity_q_temperature: float = 1.0,
         policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
@@ -181,11 +206,18 @@ class RecurrentC51Agent:
             or teacher_loss_weight < 0
             or teacher_entry_search_loss_weight < 0
             or entry_action_loss_weight < 0
+            or not np.isfinite(regime_selectivity_loss_weight)
+            or regime_selectivity_loss_weight < 0
             or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
             raise ValueError("teacher channels and loss weight must be enabled together")
+        teacher_channel_names = tuple(
+            str(value) for value in (teacher_channel_names or ())
+        )
+        if teacher_channel_names and len(teacher_channel_names) != teacher_channels:
+            raise ValueError("teacher channel names do not match channel count")
         teacher_entry_search_centers = tuple(
             float(value) for value in teacher_entry_search_centers
         )
@@ -204,6 +236,8 @@ class RecurrentC51Agent:
             )
             or teacher_entry_search_teacher_temperature <= 0
             or teacher_entry_search_q_temperature <= 0
+            or not np.isfinite(regime_selectivity_q_temperature)
+            or regime_selectivity_q_temperature <= 0
         ):
             raise ValueError("teacher entry-search contract is invalid")
         if teacher_channel_loss_weights is None:
@@ -266,6 +300,7 @@ class RecurrentC51Agent:
         self.weight_decay = float(weight_decay)
         self.gradient_clip = float(gradient_clip)
         self.teacher_channels = int(teacher_channels)
+        self.teacher_channel_names = teacher_channel_names
         self.teacher_loss_weight = float(teacher_loss_weight)
         self.teacher_channel_loss_weights = teacher_channel_loss_weights
         self.teacher_entry_search_loss_weight = float(
@@ -286,15 +321,68 @@ class RecurrentC51Agent:
         )
         self.entry_action_loss_weight = float(entry_action_loss_weight)
         self.entry_action_class_weights = entry_action_class_weights
-        self._entry_action_class_weight_tensor = torch.tensor(
-            entry_action_class_weights,
-            dtype=torch.float32,
-            device=self.device,
+        self.regime_selectivity_loss_weight = float(
+            regime_selectivity_loss_weight
+        )
+        self.regime_selectivity_expansion_centers = (
+            None
+            if regime_selectivity_expansion_centers is None
+            else tuple(float(value) for value in regime_selectivity_expansion_centers)
+        )
+        self.regime_selectivity_probability_epsilon = float(
+            regime_selectivity_probability_epsilon
+        )
+        self.regime_selectivity_headroom_pressure = float(
+            regime_selectivity_headroom_pressure
+        )
+        self.regime_selectivity_dominant_chop_pressure = float(
+            regime_selectivity_dominant_chop_pressure
+        )
+        self.regime_selectivity_q_temperature = float(
+            regime_selectivity_q_temperature
+        )
+        self.regime_selectivity = (
+            BalanceAwareRegimeSelectivity(
+                channel_names=self.teacher_channel_names,
+                expansion_centers=(
+                    self.regime_selectivity_expansion_centers or ()
+                ),
+                probability_epsilon=self.regime_selectivity_probability_epsilon,
+                headroom_pressure=self.regime_selectivity_headroom_pressure,
+                dominant_chop_pressure=(
+                    self.regime_selectivity_dominant_chop_pressure
+                ),
+            )
+            if self.regime_selectivity_loss_weight
+            else None
         )
         self.policy_retention_loss_weight = float(policy_retention_loss_weight)
         self.retention_anchor: RecurrentC51Network | None = None
+        self.retention_anchor_applies_to_all_management_rows = False
         self.last_train_metrics: dict[str, float] = {}
         self.support = torch.linspace(value_min, value_max, atoms, device=self.device)
+        # Immutable training constants stay device-resident across optimizer
+        # updates. Recreating them in train_batch forces allocator work and can
+        # introduce avoidable MPS synchronization points.
+        self._teacher_channel_loss_weights_tensor = torch.tensor(
+            self.teacher_channel_loss_weights,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._entry_action_class_weights_tensor = torch.tensor(
+            self.entry_action_class_weights,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._flat_action_indices = torch.tensor(
+            (
+                int(Action.WAIT),
+                int(Action.ENTER_LONG_1),
+                int(Action.ENTER_SHORT_1),
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
         self.online = RecurrentC51Network(
             observation_dim, len(Action), atoms, hidden_dim, self.teacher_channels
         ).to(self.device)
@@ -552,6 +640,11 @@ class RecurrentC51Agent:
             dtype=torch.bool,
             device=self.device,
         )
+        training_valid = torch.as_tensor(
+            [[item.training_valid for item in sequence] for sequence in sequences],
+            dtype=torch.bool,
+            device=self.device,
+        )
         # Process one contiguous causal trace so Q(s_t) and Q(s_{t+1}) use
         # exactly the same recurrent history. Independently resetting the GRU
         # on the shifted next-observation sequence changes the state definition
@@ -577,10 +670,21 @@ class RecurrentC51Agent:
         immediate_rewards = all_rewards[
             :, learning_start:learning_start + training_steps
         ]
+        learning_valid = training_valid[
+            :, learning_start:learning_start + training_steps
+        ]
+        auxiliary_valid = training_valid[:, learning_start:]
         n_step_rewards = torch.zeros_like(immediate_rewards)
-        bootstrap_alive = torch.ones_like(immediate_rewards, dtype=torch.bool)
+        terminal_targets = torch.zeros_like(immediate_rewards, dtype=torch.bool)
+        complete_n_step = torch.ones_like(immediate_rewards, dtype=torch.bool)
+        target_offsets = torch.ones_like(actions)
+        alive = torch.ones_like(immediate_rewards, dtype=torch.bool)
         discount = 1.0
         for offset in range(self.n_step_return):
+            available = training_valid[
+                :,
+                learning_start + offset:learning_start + offset + training_steps,
+            ]
             reward_slice = all_rewards[
                 :,
                 learning_start + offset:learning_start + offset + training_steps,
@@ -589,17 +693,57 @@ class RecurrentC51Agent:
                 :,
                 learning_start + offset:learning_start + offset + training_steps,
             ]
+            active = alive & available & complete_n_step
             n_step_rewards = n_step_rewards + (
-                discount * bootstrap_alive.to(all_rewards.dtype) * reward_slice
+                discount * active.to(all_rewards.dtype) * reward_slice
             )
-            bootstrap_alive = bootstrap_alive & ~terminated_slice
+            terminal_event = active & terminated_slice
+            terminal_targets = terminal_targets | terminal_event
+            target_offsets = torch.where(
+                terminal_event,
+                torch.full_like(target_offsets, offset + 1),
+                target_offsets,
+            )
+            alive = alive & ~terminal_event
+            complete_n_step = complete_n_step & (available | terminal_targets)
             discount *= self.gamma
-        terminated = ~bootstrap_alive
-        next_masks = all_next_masks[
-            :,
-            learning_start + self.n_step_return - 1:
-            learning_start + self.n_step_return - 1 + training_steps,
-        ]
+        full_horizon = complete_n_step & ~terminal_targets
+        learnable_rows = learning_valid & (terminal_targets | full_horizon)
+        # Replay authenticates sampled sequences before device transfer. Keep
+        # this fail-closed preflight off the accelerator hot path.
+        def authentic_learning_row(
+            sequence: Sequence[Transition], candidate_index: int
+        ) -> bool:
+            if not sequence[candidate_index].training_valid:
+                return False
+            for offset in range(self.n_step_return):
+                transition = sequence[candidate_index + offset]
+                if not transition.training_valid:
+                    return False
+                if transition.terminated:
+                    return True
+            return True
+
+        if not any(
+            authentic_learning_row(sequence, learning_start + time_index)
+            for sequence in sequences
+            for time_index in range(training_steps)
+        ):
+            raise ValueError("training batch has no valid learning rows")
+        target_offsets = torch.where(
+            full_horizon,
+            torch.full_like(target_offsets, self.n_step_return),
+            target_offsets,
+        )
+        candidate_indices = torch.arange(
+            training_steps, dtype=torch.long, device=self.device
+        ).view(1, -1)
+        target_state_indices = candidate_indices + target_offsets
+        target_transition_indices = target_state_indices - 1
+        next_masks = all_next_masks[:, learning_start:].gather(
+            1,
+            target_transition_indices[..., None].expand(-1, -1, len(Action)),
+        )
 
         online_hidden = None
         if self.recurrent_burn_in:
@@ -620,11 +764,12 @@ class RecurrentC51Agent:
             recurrent = causal_recurrent[:, :-1]
             all_logits = self.online.distribution_logits(recurrent)
             logits = all_logits[:, :training_steps]
-            online_next = self.online.distribution_logits(
-                causal_recurrent[
-                    :,
-                    self.n_step_return:self.n_step_return + training_steps,
-                ]
+            online_causal = self.online.distribution_logits(causal_recurrent)
+            online_next = online_causal.gather(
+                1,
+                target_state_indices[..., None, None].expand(
+                    -1, -1, len(Action), self.atoms
+                ),
             )
         logits = logits.float()
         online_next = online_next.float()
@@ -649,10 +794,12 @@ class RecurrentC51Agent:
                     target_hidden,
                 )
                 target_causal = self.target.distribution_logits(target_recurrent)
-                target_next = target_causal[
-                    :,
-                    self.n_step_return:self.n_step_return + training_steps,
-                ]
+                target_next = target_causal.gather(
+                    1,
+                    target_state_indices[..., None, None].expand(
+                        -1, -1, len(Action), self.atoms
+                    ),
+                )
             online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
@@ -663,15 +810,23 @@ class RecurrentC51Agent:
             projected = self._project_distribution(
                 target_distribution,
                 n_step_rewards,
-                terminated,
+                terminal_targets,
                 bootstrap_discount=self.gamma**self.n_step_return,
             )
         td_losses = -(projected * chosen_logits.log_softmax(-1)).sum(-1)
-        rl_loss = td_losses.mean()
+        rl_loss = td_losses[learnable_rows].mean()
         loss = rl_loss
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        regime_selectivity_loss = teacher_loss
+        regime_selectivity_rows = teacher_loss
+        regime_selectivity_target_wait_mean = teacher_loss
+        regime_selectivity_low_headroom_rows = teacher_loss
+        regime_selectivity_low_headroom_wait_mean = teacher_loss
+        regime_selectivity_dominant_chop_rows = teacher_loss
+        regime_selectivity_dominant_chop_wait_mean = teacher_loss
+        regime_selectivity_additive: dict[str, torch.Tensor] = {}
         entry_action_supervised_rows = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
@@ -684,6 +839,79 @@ class RecurrentC51Agent:
         entry_action_correct_counts = torch.zeros(
             3, dtype=torch.float32, device=self.device
         )
+        entry_diagnostics_active = (
+            (
+                self.regime_selectivity is not None
+                and teacher_weight_scale > 0.0
+            )
+            or (
+                self.entry_action_loss_weight > 0.0
+                and entry_action_weight_scale > 0.0
+            )
+        )
+        diagnostic_action_targets: np.ndarray | None = None
+        diagnostic_targets: torch.Tensor | None = None
+        diagnostic_flat_rows: torch.Tensor | None = None
+        diagnostic_target_rows: torch.Tensor | None = None
+        if entry_diagnostics_active:
+            diagnostic_action_targets = np.full(
+                observations.shape[:2], -1, dtype=np.int64
+            )
+            for batch_index, sequence in enumerate(sequences):
+                for time_index, transition in enumerate(sequence):
+                    if transition.entry_action_target is not None:
+                        try:
+                            target = Action(transition.entry_action_target)
+                        except (TypeError, ValueError) as error:
+                            raise ValueError(
+                                "entry timing target is invalid"
+                            ) from error
+                        if target not in {
+                            Action.WAIT,
+                            Action.ENTER_LONG_1,
+                            Action.ENTER_SHORT_1,
+                        }:
+                            raise ValueError("entry timing target is invalid")
+                        diagnostic_action_targets[batch_index, time_index] = int(
+                            target
+                        )
+            diagnostic_targets = torch.as_tensor(
+                diagnostic_action_targets[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                ],
+                dtype=torch.long,
+                device=self.device,
+            )
+            diagnostic_flat_rows = (
+                valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.WAIT),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_LONG_1),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_SHORT_1),
+                ]
+            )
+            diagnostic_target_rows = (
+                (diagnostic_targets >= 0)
+                & diagnostic_flat_rows
+                & learnable_rows
+            )
+            entry_action_target_counts = torch.bincount(
+                diagnostic_targets[diagnostic_target_rows], minlength=3
+            ).to(torch.float32)
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
@@ -712,7 +940,7 @@ class RecurrentC51Agent:
             teacher_rows = torch.as_tensor(
                 teacher_rows_numpy[:, self.recurrent_burn_in:],
                 device=self.device,
-            )
+            ) & auxiliary_valid
             if bool(teacher_rows.any().item()):
                 assert self.online.teacher_output is not None
                 with self._autocast():
@@ -722,12 +950,9 @@ class RecurrentC51Agent:
                     teacher_targets_tensor[teacher_rows],
                     reduction="none",
                 )
-                channel_weights = torch.as_tensor(
-                    self.teacher_channel_loss_weights,
-                    dtype=teacher_losses.dtype,
-                    device=self.device,
-                )
-                teacher_loss = (teacher_losses * channel_weights).sum(dim=-1).mean()
+                teacher_loss = (
+                    teacher_losses * self._teacher_channel_loss_weights_tensor
+                ).sum(dim=-1).mean()
                 loss = loss + teacher_weight_scale * teacher_loss
                 if self.teacher_entry_search_loss_weight:
                     entry_rows = (
@@ -807,33 +1032,185 @@ class RecurrentC51Agent:
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
+                if self.regime_selectivity is not None:
+                    assert diagnostic_targets is not None
+                    headroom = np.full(
+                        observations.shape[:2], np.nan, dtype=np.float32
+                    )
+                    for batch_index, sequence in enumerate(sequences):
+                        for time_index, transition in enumerate(sequence):
+                            value = transition.regime_selectivity_headroom_fraction
+                            if value is not None:
+                                headroom[batch_index, time_index] = float(value)
+                    headroom_tensor = torch.as_tensor(
+                        headroom,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )[:, self.recurrent_burn_in:]
+                    selectivity_action_targets_tensor = diagnostic_targets
+                    selectivity_teacher_targets = teacher_targets_tensor[
+                        :, :training_steps
+                    ]
+                    selectivity_headroom = headroom_tensor[:, :training_steps]
+                    selectivity_rows = (
+                        teacher_rows[:, :training_steps]
+                        & learnable_rows
+                        & torch.isfinite(selectivity_headroom)
+                        & (
+                            (selectivity_action_targets_tensor == int(Action.ENTER_LONG_1))
+                            | (
+                                selectivity_action_targets_tensor
+                                == int(Action.ENTER_SHORT_1)
+                            )
+                        )
+                        & valid_masks[
+                            :,
+                            self.recurrent_burn_in:
+                            self.recurrent_burn_in + training_steps,
+                            int(Action.WAIT),
+                        ]
+                        & valid_masks[
+                            :,
+                            self.recurrent_burn_in:
+                            self.recurrent_burn_in + training_steps,
+                            int(Action.ENTER_LONG_1),
+                        ]
+                        & valid_masks[
+                            :,
+                            self.recurrent_burn_in:
+                            self.recurrent_burn_in + training_steps,
+                            int(Action.ENTER_SHORT_1),
+                        ]
+                    )
+                    selected_teachers = selectivity_teacher_targets[
+                        selectivity_rows
+                    ]
+                    selected_headroom = selectivity_headroom[selectivity_rows]
+                    selected_actions = selectivity_action_targets_tensor[
+                        selectivity_rows
+                    ]
+                    selectivity_targets = (
+                        self.regime_selectivity.target_probabilities(
+                            selected_teachers,
+                            selected_headroom,
+                            selected_actions,
+                        )
+                    )
+                    q_values = (
+                        all_logits[:, :training_steps].float().softmax(-1)
+                        * self.support
+                    ).sum(-1)
+                    flat_q = q_values.index_select(
+                        -1, self._flat_action_indices
+                    )[selectivity_rows]
+                    model_log_probabilities = nn.functional.log_softmax(
+                        flat_q / self.regime_selectivity_q_temperature,
+                        dim=-1,
+                    )
+                    positive_rows = selectivity_rows.sum().to(torch.float32)
+                    regime_selectivity_loss = -(
+                        selectivity_targets * model_log_probabilities
+                    ).sum() / positive_rows.clamp_min(1.0)
+                    loss = loss + teacher_weight_scale * (
+                        self.regime_selectivity_loss_weight
+                        * regime_selectivity_loss
+                    )
+
+                    target_wait = selectivity_targets[:, int(Action.WAIT)]
+                    model_probabilities = model_log_probabilities.exp()
+                    model_wait = model_probabilities[:, int(Action.WAIT)]
+                    declared_side = model_probabilities.gather(
+                        -1, selected_actions[:, None]
+                    ).squeeze(-1)
+                    greedy_actions = model_probabilities.argmax(-1)
+                    greedy_wait = greedy_actions == int(Action.WAIT)
+                    greedy_entry = greedy_actions == selected_actions
+                    names = self.teacher_channel_names
+                    chop = selected_teachers[
+                        :, names.index("structure_chop_probability")
+                    ]
+                    neutral = selected_teachers[
+                        :, names.index("structure_neutral_probability")
+                    ]
+                    trend = selected_teachers[
+                        :, names.index("structure_trend_probability")
+                    ]
+                    dominant_chop = chop > torch.maximum(neutral, trend)
+                    stratum_rows = {
+                        "positive_long_short": torch.ones_like(
+                            selected_actions, dtype=torch.bool
+                        ),
+                        "positive_long": (
+                            selected_actions == int(Action.ENTER_LONG_1)
+                        ),
+                        "positive_short": (
+                            selected_actions == int(Action.ENTER_SHORT_1)
+                        ),
+                        "dominant_chop": dominant_chop,
+                        "nonchop": ~dominant_chop,
+                        "low_headroom_le_0_25": selected_headroom <= 0.25,
+                        "safe_headroom_ge_0_75": selected_headroom >= 0.75,
+                    }
+                    stratum_weights = torch.stack(
+                        tuple(stratum_rows.values()), dim=-1
+                    ).to(torch.float32)
+                    row_diagnostics = torch.stack((
+                        torch.ones_like(target_wait),
+                        target_wait,
+                        model_wait,
+                        greedy_wait.to(torch.float32),
+                        declared_side,
+                        greedy_entry.to(torch.float32),
+                    ), dim=-1)
+                    additive_matrix = stratum_weights.transpose(0, 1).matmul(
+                        row_diagnostics
+                    )
+                    regime_selectivity_additive = {
+                        f"regime_selectivity_{stratum}_{field}": (
+                            additive_matrix[stratum_index, field_index]
+                        )
+                        for stratum_index, stratum in enumerate(stratum_rows)
+                        for field_index, field in enumerate(
+                            _REGIME_SELECTIVITY_ADDITIVE_FIELDS
+                        )
+                    }
+
+                    regime_selectivity_rows = positive_rows
+                    regime_selectivity_target_wait_mean = (
+                        regime_selectivity_additive[
+                            "regime_selectivity_positive_long_short_"
+                            "target_wait_probability_sum"
+                        ]
+                        / positive_rows.clamp_min(1.0)
+                    )
+                    regime_selectivity_low_headroom_rows = (
+                        regime_selectivity_additive[
+                            "regime_selectivity_low_headroom_le_0_25_rows"
+                        ]
+                    )
+                    regime_selectivity_low_headroom_wait_mean = (
+                        regime_selectivity_additive[
+                            "regime_selectivity_low_headroom_le_0_25_"
+                            "target_wait_probability_sum"
+                        ]
+                        / regime_selectivity_low_headroom_rows.clamp_min(1.0)
+                    )
+                    regime_selectivity_dominant_chop_rows = (
+                        regime_selectivity_additive[
+                            "regime_selectivity_dominant_chop_rows"
+                        ]
+                    )
+                    regime_selectivity_dominant_chop_wait_mean = (
+                        regime_selectivity_additive[
+                            "regime_selectivity_dominant_chop_"
+                            "target_wait_probability_sum"
+                        ]
+                        / regime_selectivity_dominant_chop_rows.clamp_min(1.0)
+                    )
         if self.entry_action_loss_weight and entry_action_weight_scale > 0.0:
-            entry_action_targets = np.full(
-                observations.shape[:2], -1, dtype=np.int64
-            )
-            for batch_index, sequence in enumerate(sequences):
-                for time_index, transition in enumerate(sequence):
-                    if transition.entry_action_target is not None:
-                        try:
-                            target = Action(transition.entry_action_target)
-                        except (TypeError, ValueError) as error:
-                            raise ValueError("entry timing target is invalid") from error
-                        if target not in {
-                            Action.WAIT,
-                            Action.ENTER_LONG_1,
-                            Action.ENTER_SHORT_1,
-                        }:
-                            raise ValueError("entry timing target is invalid")
-                        entry_action_targets[batch_index, time_index] = int(target)
-            timing_targets = torch.as_tensor(
-                entry_action_targets[
-                    :,
-                    self.recurrent_burn_in:
-                    self.recurrent_burn_in + training_steps,
-                ],
-                dtype=torch.long,
-                device=self.device,
-            )
+            assert diagnostic_targets is not None
+            assert diagnostic_target_rows is not None
+            timing_targets = diagnostic_targets
             flat_rows = (
                 valid_masks[
                     :,
@@ -854,7 +1231,7 @@ class RecurrentC51Agent:
                     int(Action.ENTER_SHORT_1),
                 ]
             )
-            timing_rows = timing_targets >= 0
+            timing_rows = diagnostic_target_rows
             if bool((timing_rows & ~flat_rows).any().item()):
                 raise ValueError("entry timing target requires a flat decision")
             if bool(timing_rows.any().item()):
@@ -873,7 +1250,7 @@ class RecurrentC51Agent:
                 entry_action_loss = nn.functional.cross_entropy(
                     entry_q[timing_rows],
                     timing_targets[timing_rows],
-                    weight=self._entry_action_class_weight_tensor,
+                    weight=self._entry_action_class_weights_tensor,
                 )
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
@@ -896,15 +1273,17 @@ class RecurrentC51Agent:
                     * self.entry_action_loss_weight
                     * entry_action_loss
                 )
-        management_valid_rows = (
+        management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
             & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
             & (valid_masks[:, self.recurrent_burn_in:].sum(-1) == 2)
         )
-        retention_rows = (
-            competence_anchors[:, self.recurrent_burn_in:]
-            & management_valid_rows
-        )
+        retention_rows = management_valid_rows
+        if not self.retention_anchor_applies_to_all_management_rows:
+            retention_rows = (
+                competence_anchors[:, self.recurrent_burn_in:]
+                & retention_rows
+            )
         if (
             self.retention_anchor is not None
             and self.policy_retention_loss_weight
@@ -958,23 +1337,47 @@ class RecurrentC51Agent:
         rl_valid_masks = valid_masks[
             :, learning_start:learning_start + training_steps
         ]
-        management_rows = (
+        management_rows = learnable_rows & (
             rl_valid_masks[..., int(Action.HOLD)]
             & rl_valid_masks[..., int(Action.CLOSE)]
             & (rl_valid_masks.sum(-1) == 2)
         )
-        hold_rows = actions == int(Action.HOLD)
-        close_rows = actions == int(Action.CLOSE)
+        hold_rows = learnable_rows & (actions == int(Action.HOLD))
+        close_rows = learnable_rows & (actions == int(Action.CLOSE))
 
         def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             weights = mask.to(values.dtype)
             return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+        real_reset_rows = training_valid & torch.as_tensor(
+            recurrent_reset_rows, dtype=torch.bool, device=self.device
+        )
+        valid_row_count = training_valid.sum().to(torch.float32)
+        burn_in_reset_coverage = torch.as_tensor(
+            sum(
+                any(
+                    transition.training_valid and transition.recurrent_reset
+                    for transition in sequence
+                )
+                for sequence in sequences
+            ) / len(sequences),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        terminal_truncated_rows = learnable_rows & terminal_targets
 
         diagnostic_values = torch.stack((
             rl_loss,
             teacher_loss,
             entry_search_loss,
             entry_action_loss,
+            regime_selectivity_loss,
+            regime_selectivity_rows,
+            regime_selectivity_target_wait_mean,
+            regime_selectivity_low_headroom_rows,
+            regime_selectivity_low_headroom_wait_mean,
+            regime_selectivity_dominant_chop_rows,
+            regime_selectivity_dominant_chop_wait_mean,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -982,7 +1385,8 @@ class RecurrentC51Agent:
             policy_retention_loss,
             loss,
             gradient_norm.float(),
-            management_rows.float().mean(),
+            management_rows.sum().to(torch.float32)
+            / learnable_rows.sum().to(torch.float32),
             masked_mean(immediate_rewards, hold_rows),
             masked_mean(immediate_rewards, close_rows),
             masked_mean(n_step_rewards, hold_rows),
@@ -995,27 +1399,25 @@ class RecurrentC51Agent:
                 management_rows,
             ),
             masked_mean(close_rows.float(), management_rows),
-            torch.as_tensor(
-                sum(sum(row) for row in recurrent_reset_rows)
-                / (len(recurrent_reset_rows) * sequence_length),
-                dtype=torch.float32,
-                device=self.device,
-            ),
-            torch.as_tensor(
-                (
-                    sum(any(row) for row in burn_in_reset_rows)
-                    / len(burn_in_reset_rows)
-                    if self.recurrent_burn_in else 1.0
-                ),
-                dtype=torch.float32,
-                device=self.device,
-            ),
+            real_reset_rows.sum().to(torch.float32) / valid_row_count,
+            burn_in_reset_coverage,
+            learnable_rows.sum().to(torch.float32),
+            (~training_valid).sum().to(torch.float32),
+            terminal_truncated_rows.sum().to(torch.float32),
+            *regime_selectivity_additive.values(),
         ))
         (
             rl_loss_value,
             teacher_loss_value,
             entry_search_loss_value,
             entry_action_loss_value,
+            regime_selectivity_loss_value,
+            regime_selectivity_rows_value,
+            regime_selectivity_target_wait_mean_value,
+            regime_selectivity_low_headroom_rows_value,
+            regime_selectivity_low_headroom_wait_mean_value,
+            regime_selectivity_dominant_chop_rows_value,
+            regime_selectivity_dominant_chop_wait_mean_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -1040,15 +1442,76 @@ class RecurrentC51Agent:
             sampled_management_close_fraction,
             sampled_recurrent_reset_fraction,
             sampled_burn_in_reset_coverage,
+            sampled_valid_learning_rows,
+            sampled_padding_rows,
+            sampled_terminal_truncated_rows,
+            *regime_selectivity_additive_values,
         ) = (
             float(value)
             for value in diagnostic_values.detach().float().cpu().tolist()
         )
+        regime_selectivity_metric_values = {
+            f"regime_selectivity_{stratum}_{field}": 0.0
+            for stratum in _REGIME_SELECTIVITY_STRATA
+            for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS
+        }
+        regime_selectivity_metric_values.update(dict(zip(
+            regime_selectivity_additive,
+            regime_selectivity_additive_values,
+            strict=True,
+        )))
+        for stratum in _REGIME_SELECTIVITY_STRATA:
+            prefix = f"regime_selectivity_{stratum}_"
+            rows = regime_selectivity_metric_values[prefix + "rows"]
+            for total_field, derived_field in (
+                (
+                    "target_wait_probability_sum",
+                    "target_wait_probability_mean",
+                ),
+                (
+                    "model_wait_probability_sum",
+                    "model_wait_probability_mean",
+                ),
+                (
+                    "greedy_wait_rows",
+                    "greedy_wait_rate",
+                ),
+                (
+                    "declared_side_probability_sum",
+                    "declared_side_probability_mean",
+                ),
+                (
+                    "greedy_entry_rows",
+                    "greedy_entry_rate",
+                ),
+            ):
+                regime_selectivity_metric_values[prefix + derived_field] = (
+                    regime_selectivity_metric_values[prefix + total_field] / rows
+                    if rows else 0.0
+                )
         self.last_train_metrics = {
             "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
+            "regime_selectivity_loss": regime_selectivity_loss_value,
+            "regime_selectivity_supervised_rows": regime_selectivity_rows_value,
+            "regime_selectivity_target_wait_mean": (
+                regime_selectivity_target_wait_mean_value
+            ),
+            "regime_selectivity_low_headroom_rows": (
+                regime_selectivity_low_headroom_rows_value
+            ),
+            "regime_selectivity_low_headroom_wait_mean": (
+                regime_selectivity_low_headroom_wait_mean_value
+            ),
+            "regime_selectivity_dominant_chop_rows": (
+                regime_selectivity_dominant_chop_rows_value
+            ),
+            "regime_selectivity_dominant_chop_wait_mean": (
+                regime_selectivity_dominant_chop_wait_mean_value
+            ),
+            **regime_selectivity_metric_values,
             "entry_action_supervised_rows": entry_action_supervised_rows_value,
             "entry_action_target_wait_rows": entry_target_wait_rows,
             "entry_action_target_long_rows": entry_target_long_rows,
@@ -1079,26 +1542,66 @@ class RecurrentC51Agent:
                 sampled_recurrent_reset_fraction
             ),
             "sampled_burn_in_reset_coverage": sampled_burn_in_reset_coverage,
+            "sampled_valid_learning_rows": sampled_valid_learning_rows,
+            "sampled_padding_rows": sampled_padding_rows,
+            "sampled_terminal_truncated_rows": sampled_terminal_truncated_rows,
             "sampled_recurrent_reset_pattern_count": float(
-                len(set(recurrent_reset_rows))
+                len({
+                    tuple(
+                        item.recurrent_reset
+                        for item in sequence
+                        if item.training_valid
+                    )
+                    for sequence in sequences
+                })
             ),
             "n_step_return": float(self.n_step_return),
             "recurrent_burn_in": float(self.recurrent_burn_in),
         }
         return total_loss
 
-    def retain_policy(self) -> None:
+    def retain_policy(
+        self,
+        *,
+        apply_to_all_management_rows: bool = False,
+    ) -> None:
         """Freeze a training-only copy of demonstrated pass competence."""
-        self.retention_anchor = copy.deepcopy(self.online).to(self.device).eval()
+        if (
+            self.retention_anchor is not None
+            and self.retention_anchor_applies_to_all_management_rows
+            and not apply_to_all_management_rows
+        ):
+            # A warm-start parent is the immutable Stage-1 competence boundary.
+            # Later pass evidence may be checkpointed independently, but must
+            # never replace or narrow the parent protection scope.
+            return
+        anchor = RecurrentC51Network(
+            self.observation_dim,
+            len(Action),
+            self.atoms,
+            self.hidden_dim,
+        ).to(self.device)
+        anchor.load_state_dict({
+            key: value
+            for key, value in self.online.state_dict().items()
+            if not key.startswith("teacher_output.")
+        })
+        self.retention_anchor = anchor.eval()
         self.retention_anchor.requires_grad_(False)
+        self.retention_anchor_applies_to_all_management_rows = bool(
+            apply_to_all_management_rows
+        )
 
     def discard_retention_anchor(self) -> None:
         """Remove training-only competence state before evaluation or shipping."""
         self.retention_anchor = None
+        self.retention_anchor_applies_to_all_management_rows = False
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
         self.entry_action_loss_weight = 0.0
+        self.regime_selectivity_loss_weight = 0.0
+        self.regime_selectivity = None
         if not self.teacher_channels:
             return
         online = RecurrentC51Network(
@@ -1118,6 +1621,7 @@ class RecurrentC51Agent:
         self.online = online
         self.target = target
         self.teacher_channels = 0
+        self.teacher_channel_names = ()
         self.teacher_loss_weight = 0.0
         self.teacher_channel_loss_weights = ()
         self.teacher_entry_search_loss_weight = 0.0
@@ -1190,6 +1694,7 @@ class RecurrentC51Agent:
                 "target_soft_tau": self.target_soft_tau,
                 "seed": self.seed,
                 "teacher_channels": self.teacher_channels,
+                "teacher_channel_names": self.teacher_channel_names,
                 "teacher_loss_weight": self.teacher_loss_weight,
                 "teacher_channel_loss_weights": self.teacher_channel_loss_weights,
                 "teacher_entry_search_loss_weight": (
@@ -1210,6 +1715,24 @@ class RecurrentC51Agent:
                 ),
                 "entry_action_loss_weight": self.entry_action_loss_weight,
                 "entry_action_class_weights": self.entry_action_class_weights,
+                "regime_selectivity_loss_weight": (
+                    self.regime_selectivity_loss_weight
+                ),
+                "regime_selectivity_expansion_centers": (
+                    self.regime_selectivity_expansion_centers
+                ),
+                "regime_selectivity_probability_epsilon": (
+                    self.regime_selectivity_probability_epsilon
+                ),
+                "regime_selectivity_headroom_pressure": (
+                    self.regime_selectivity_headroom_pressure
+                ),
+                "regime_selectivity_dominant_chop_pressure": (
+                    self.regime_selectivity_dominant_chop_pressure
+                ),
+                "regime_selectivity_q_temperature": (
+                    self.regime_selectivity_q_temperature
+                ),
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
@@ -1222,6 +1745,9 @@ class RecurrentC51Agent:
                 None
                 if self.retention_anchor is None
                 else self.retention_anchor.state_dict()
+            ),
+            "retention_anchor_applies_to_all_management_rows": (
+                self.retention_anchor_applies_to_all_management_rows
             ),
         }, path)
         return path
@@ -1269,6 +1795,7 @@ class RecurrentC51Agent:
 
         load_shared(agent.online, payload["online"])
         load_shared(agent.target, payload["target"])
+        agent.retain_policy(apply_to_all_management_rows=True)
         return agent, dict(payload["manifest"])
 
     @classmethod
@@ -1295,6 +1822,13 @@ class RecurrentC51Agent:
         config.setdefault("teacher_entry_search_q_temperature", 1.0)
         config.setdefault("entry_action_loss_weight", 0.0)
         config.setdefault("entry_action_class_weights", (1.0, 1.0, 1.0))
+        config.setdefault("teacher_channel_names", ())
+        config.setdefault("regime_selectivity_loss_weight", 0.0)
+        config.setdefault("regime_selectivity_expansion_centers", None)
+        config.setdefault("regime_selectivity_probability_epsilon", 1e-6)
+        config.setdefault("regime_selectivity_headroom_pressure", 1.0)
+        config.setdefault("regime_selectivity_dominant_chop_pressure", 2.0)
+        config.setdefault("regime_selectivity_q_temperature", 1.0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])
@@ -1305,7 +1839,14 @@ class RecurrentC51Agent:
         if "rng_state" in payload:
             agent._rng.bit_generator.state = payload["rng_state"]
         if payload.get("retention_anchor") is not None:
-            agent.retain_policy()
+            agent.retain_policy(
+                apply_to_all_management_rows=bool(
+                    payload.get(
+                        "retention_anchor_applies_to_all_management_rows",
+                        False,
+                    )
+                )
+            )
             assert agent.retention_anchor is not None
             agent.retention_anchor.load_state_dict(payload["retention_anchor"])
         return agent, dict(payload["manifest"])

@@ -124,6 +124,75 @@ def _public_config(config: Mapping) -> dict:
     }
 
 
+def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
+    parent_contract = json.loads((candidate.path / "contract.json").read_text())
+    parent_recipe = json.loads((candidate.path / "recipe.json").read_text())
+    expected_contract = {
+        "training_tickers": list(config["tickers"]),
+        "deployment_tickers": list(config["deployment_tickers"]),
+        "training_only_tickers": list(config["training_only_tickers"]),
+        "temporal": dict(config["temporal"]),
+        "sealed_holdout_touched": False,
+    }
+    if any(
+        parent_contract.get(field) != expected
+        for field, expected in expected_contract.items()
+    ):
+        raise ValueError("external parent causal contract drifted")
+    causal_recipe_paths = (
+        "assets",
+        "cache",
+        "cache_root",
+        "tickers",
+        "deployment_tickers",
+        "training_only_tickers",
+        "timeframe_minutes",
+        "temporal",
+        "point_values",
+        "round_trip_fees",
+        "sealed_confirmation",
+        "teachers",
+        "entry_supervision",
+    )
+    def same_json(left: object, right: object) -> bool:
+        return json.dumps(
+            left, sort_keys=True, separators=(",", ":")
+        ) == json.dumps(right, sort_keys=True, separators=(",", ":"))
+
+    for path in causal_recipe_paths:
+        parent_present = path in parent_recipe
+        child_present = path in config
+        if parent_present != child_present or (
+            parent_present and not same_json(parent_recipe[path], config[path])
+        ):
+            raise ValueError(
+                f"external parent causal recipe drifted at {path}"
+            )
+    economic_fields = (
+        "profit_target",
+        "max_loss",
+        "episode_days",
+        "bars_per_day",
+        "max_position_size",
+        "minimum_mll_headroom",
+        "trailing_mll_lock",
+        "per_trade_risk_dollars",
+        "ratchet_activation_r",
+        "ratchet_giveback_r",
+        "ratchet_lock_floor_r",
+    )
+    for field in economic_fields:
+        parent_present = field in parent_recipe["challenge"]
+        child_present = field in config["challenge"]
+        if parent_present != child_present or (
+            parent_present
+            and parent_recipe["challenge"][field] != config["challenge"][field]
+        ):
+            raise ValueError(
+                f"external parent economic contract drifted at challenge.{field}"
+            )
+
+
 def _revision_policy(config: Mapping) -> RevisionPolicy:
     bounds = config["evolution"].get("revision_bounds", {})
     return RevisionPolicy(
@@ -161,19 +230,30 @@ class _CandidateStageAdapter:
                 "reasoning revised fields outside the current curriculum stage: "
                 + ", ".join(sorted(illegal))
             )
-        previous_receipt = next(
+        previous_stage_receipt = next(
             (
                 receipt
                 for receipt in reversed(request.prior_receipts)
-                if receipt.outputs.get("candidate_id") is not None
+                if receipt.stage != request.stage.name
+                and receipt.outputs.get("candidate_id") is not None
             ),
             None,
         )
+        previous_attempt_receipt = next(
+            (
+                receipt
+                for receipt in reversed(request.prior_receipts)
+                if receipt.stage == request.stage.name
+                and receipt.outputs.get("candidate_id") is not None
+            ),
+            None,
+        )
+        selected_parent_receipt = previous_stage_receipt
         inherited_override = (
             {}
-            if previous_receipt is None
+            if selected_parent_receipt is None
             else dict(
-                previous_receipt.outputs.get("effective_config_override", {})
+                selected_parent_receipt.outputs.get("effective_config_override", {})
             )
         )
         combined_override = {
@@ -195,8 +275,8 @@ class _CandidateStageAdapter:
         base_output = str(self._base_config["output"])
         prior = (
             None
-            if previous_receipt is None
-            else previous_receipt.outputs.get("candidate_id")
+            if selected_parent_receipt is None
+            else selected_parent_receipt.outputs.get("candidate_id")
         )
         parents = (
             (str(prior),)
@@ -232,10 +312,18 @@ class _CandidateStageAdapter:
             seed_config["_archive_output"] = base_output
             seed_config["_path"] = self._base_config["_path"]
             seed_config["_root"] = self._base_config["_root"]
-            if prior is not None and bool(
-                request.stage.config.get("warm_start_parent", False)
+            has_warm_start_source = prior is not None or (
+                self._base_config["evolution"].get("base_parent") is not None
+            )
+            if (
+                bool(request.stage.config.get("warm_start_parent", False))
+                and has_warm_start_source
             ):
-                parent = self._archive.load_candidate(str(prior))
+                if len(parents) != 1:
+                    raise ValueError(
+                        "warm-start stage requires exactly one parent candidate"
+                    )
+                parent = self._archive.load_candidate(parents[0])
                 seed_config["_warm_start_model"] = {
                     "candidate_id": parent.candidate_id,
                     "model_path": str(parent.model_path),
@@ -301,6 +389,11 @@ class _CandidateStageAdapter:
             outputs={
                 **result,
                 "parent_candidate_ids": list(parents),
+                "prior_attempt_candidate_id": (
+                    None
+                    if previous_attempt_receipt is None
+                    else previous_attempt_receipt.outputs.get("candidate_id")
+                ),
                 "effective_config_override": combined_override,
             },
         )
@@ -318,6 +411,12 @@ class _EconomicEvidenceGate:
         parent_requirements = request.stage.config.get(
             "parent_improvement_requirements", ()
         )
+        parent_any_requirements = request.stage.config.get(
+            "parent_improvement_any_requirements", ()
+        )
+        parent_retention_requirements = request.stage.config.get(
+            "parent_retention_requirements", ()
+        )
         if outputs.get("seed_results") is not None:
             failures = []
             seed_evidence = []
@@ -327,6 +426,8 @@ class _EconomicEvidenceGate:
                     request.stage.config["selection_requirements"],
                     parent_ids=parent_ids,
                     parent_requirements=parent_requirements,
+                    parent_any_requirements=parent_any_requirements,
+                    parent_retention_requirements=parent_retention_requirements,
                 )
                 seed_evidence.append({"seed": result["seed"], **evidence})
                 failures.extend(
@@ -357,6 +458,8 @@ class _EconomicEvidenceGate:
             request.stage.config["selection_requirements"],
             parent_ids=parent_ids,
             parent_requirements=parent_requirements,
+            parent_any_requirements=parent_any_requirements,
+            parent_retention_requirements=parent_retention_requirements,
         )
         failures = evidence["failures"]
         evaluation_status = evidence["evaluation_status"]
@@ -367,16 +470,18 @@ class _EconomicEvidenceGate:
                     "frozen final recipe failed multi-seed economic confirmation",
                     evidence,
                 )
+            if any(
+                failure.get("metric") == "training.short_circuited"
+                for failure in failures
+            ):
+                reason = "training short circuit reached its declared evidence boundary"
+            elif evidence.get("selection_economics_available") is False:
+                reason = "candidate evaluator failed before economic selection"
+            else:
+                reason = "challenger missed the declared economic selection gate"
             return GateResult(
                 Decision.REVISE,
-                (
-                    "training short circuit reached its declared evidence boundary"
-                    if any(
-                        failure.get("metric") == "training.short_circuited"
-                        for failure in failures
-                    )
-                    else "challenger missed the declared economic selection gate"
-                ),
+                reason,
                 evidence,
             )
         return GateResult(
@@ -392,6 +497,8 @@ class _EconomicEvidenceGate:
         *,
         parent_ids: tuple[str, ...],
         parent_requirements,
+        parent_any_requirements=(),
+        parent_retention_requirements=(),
     ) -> dict:
         candidate = self._archive.load_candidate(str(outputs["candidate_id"]))
         evaluation = self._archive.load_evaluation(str(outputs["evaluation_id"]))
@@ -415,6 +522,37 @@ class _EconomicEvidenceGate:
                     "threshold": 0.0,
                     "actual": 1.0,
                 }],
+                "evaluation_status": evaluation.status,
+            }
+        selection_economics_available = any(
+            stage.get("name") == "selection" for stage in evaluation.stages
+        )
+        if not selection_economics_available:
+            failed_stages = tuple(
+                stage
+                for stage in evaluation.stages
+                if stage.get("status") == "FAIL"
+            )
+            if evaluation.status != "FAIL" or not failed_stages:
+                raise ValueError(
+                    "evaluation ended before selection without a failing "
+                    "evaluator-stage receipt"
+                )
+            return {
+                "candidate_id": candidate.candidate_id,
+                "evaluation_id": evaluation.evaluation_id,
+                "values": {},
+                "available_metrics": dict(evaluation.metrics),
+                "selection_economics_available": False,
+                "parent_improvements": {},
+                "failures": [
+                    {
+                        "metric": f"evaluator_stage.{stage['name']}",
+                        "expected": "PASS",
+                        "actual": "FAIL",
+                    }
+                    for stage in failed_stages
+                ],
                 "evaluation_status": evaluation.status,
             }
         failures = []
@@ -442,7 +580,11 @@ class _EconomicEvidenceGate:
                     "actual": value,
                 })
         parent_values = {}
-        if parent_ids and parent_requirements:
+        if parent_ids and (
+            parent_requirements
+            or parent_any_requirements
+            or parent_retention_requirements
+        ):
             parent_evaluations = []
             for parent_id in parent_ids:
                 parent = self._archive.latest_evaluation(parent_id)
@@ -451,7 +593,7 @@ class _EconomicEvidenceGate:
                         f"parent candidate has no evaluation: {parent_id}"
                     )
                 parent_evaluations.append(parent)
-            for requirement in parent_requirements:
+            def evaluate_parent_requirement(requirement):
                 metric = requirement["metric"]
                 if metric not in evaluation.metrics or any(
                     metric not in parent.metrics for parent in parent_evaluations
@@ -475,12 +617,57 @@ class _EconomicEvidenceGate:
                     "improvement": improvement,
                     "minimum_delta": minimum_delta,
                 }
-                if improvement <= minimum_delta:
+                return improvement > minimum_delta, {
+                    "metric": metric,
+                    "direction": direction,
+                    "parent": baseline,
+                    "minimum_delta": minimum_delta,
+                    "actual": current,
+                }
+
+            for requirement in parent_requirements:
+                passed, failure = evaluate_parent_requirement(requirement)
+                if not passed:
+                    failures.append(failure)
+            if parent_any_requirements:
+                alternatives = [
+                    evaluate_parent_requirement(requirement)
+                    for requirement in parent_any_requirements
+                ]
+                if not any(passed for passed, _ in alternatives):
+                    failures.append({
+                        "metric": "parent_improvement_any",
+                        "alternatives": [
+                            failure for _, failure in alternatives
+                        ],
+                    })
+            for requirement in parent_retention_requirements:
+                metric = requirement["metric"]
+                if metric not in evaluation.metrics or any(
+                    metric not in parent.metrics for parent in parent_evaluations
+                ):
+                    raise ValueError(
+                        f"parent-retention metric is missing: {metric}"
+                    )
+                current = float(evaluation.metrics[metric])
+                baseline = max(
+                    float(parent.metrics[metric])
+                    for parent in parent_evaluations
+                )
+                maximum_regression = float(requirement["maximum_regression"])
+                regression = current - baseline
+                parent_values[f"retain:{metric}"] = {
+                    "current": current,
+                    "parent": baseline,
+                    "regression": regression,
+                    "maximum_regression": maximum_regression,
+                }
+                if regression > maximum_regression:
                     failures.append({
                         "metric": metric,
-                        "direction": direction,
+                        "direction": "retain_upper_bound",
                         "parent": baseline,
-                        "minimum_delta": minimum_delta,
+                        "maximum_regression": maximum_regression,
                         "actual": current,
                     })
         evidence = {
@@ -514,13 +701,16 @@ class _ArchiveReasoningAdapter:
 
     def revise(self, request: ReasoningRequest):
         current = str(request.receipt.outputs["candidate_id"])
+        candidate = self._archive.load_candidate(current)
         elites = self._archive.elites(self._niches)
         inspirations = tuple(dict.fromkeys(
             candidate_id
-            for candidate_id in elites.values()
+            for candidate_id in (
+                *candidate.manifest.get("parent_candidate_ids", ()),
+                *elites.values(),
+            )
             if candidate_id != current
         ))
-        candidate = self._archive.load_candidate(current)
         frozen_contract = json.loads((candidate.path / "contract.json").read_text())
         failures = tuple(
             str(item.get("metric", item))
@@ -590,6 +780,7 @@ class _ArchiveReasoningAdapter:
 
 def _reasoning_prompt(request: ReasoningRequest) -> str:
     packet = request.receipt.outputs.get("reasoning_packet", {})
+    revision_paths = tuple(request.stage.config.get("revision_paths", ()))
     prompt = (
         "Use $ml-diagnose-experiment to identify the first failed learning or "
         "economic boundary, then $ml-design-experiment to propose one smallest "
@@ -643,6 +834,29 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "markets. Choose STOP when the scientific path is falsified and BLOCKED "
         "only for integrity, causality, lineage, or executable-contract faults."
     )
+    prompt += (
+        f" The current stage is {request.stage.name}. Its complete revision "
+        f"allowlist is {json.dumps(revision_paths)}. A REVISE response must use "
+        "only one or more paths from that exact list; do not propose a frozen "
+        "mechanism merely because it appears in the general diagnostic guidance."
+    )
+    if request.stage.name == "regime_selectivity_1m":
+        prompt += (
+            " For this Stage 2A boundary, use the authenticated Regime-selectivity "
+            "strata to compare dominant-chop versus non-chop and low-headroom "
+            "versus safe-headroom WAIT pressure, while preserving nonzero Long "
+            "and Short declared-side response, the Stage 1 entry-timing skill, "
+            "zero selection blows, winner R, and teacher-free greedy activity. "
+            "Teachers are training-only evidence; never propose an inference gate."
+        )
+    elif request.stage.name == "deficit_recovery_1m":
+        prompt += (
+            " For this Stage 2B boundary, compare teacher-free recovery stress "
+            "against the selected Stage 2A parent. Preserve the ordinary $500 "
+            "headroom guard and the frozen one-entry, $300-risk, -$2,700 start "
+            "contract. Diagnose recovery success, mean terminal PnL, WAIT timeout, "
+            "and blow evidence; zero recovery-stress blows remains a hard gate."
+        )
     reflection = request.receipt.outputs.get("gepa_reflection")
     if reflection:
         prompt += (
@@ -715,6 +929,14 @@ def _plan(config: Mapping) -> TrainingPlan:
                 ),
                 "parent_improvement_requirements": list(
                     budget_stage.get("parent_improvement_requirements", ())
+                ),
+                "parent_improvement_any_requirements": list(
+                    budget_stage.get(
+                        "parent_improvement_any_requirements", ()
+                    )
+                ),
+                "parent_retention_requirements": list(
+                    budget_stage.get("parent_retention_requirements", ())
                 ),
                 "warm_start_parent": bool(
                     budget_stage.get("warm_start_parent", False)
@@ -914,6 +1136,15 @@ def run_evolution_campaign(
     output = root / str(config["output"])
     state_root = root / str(config["campaign"]["state_root"])
     archive = CandidateArchive(output / "archive")
+    base_parent = config["evolution"].get("base_parent")
+    if base_parent is not None:
+        parent = archive.register_external_parent(
+            _campaign_path(config, str(base_parent["archive_root"])),
+            candidate_id=str(base_parent["candidate_id"]),
+            evaluation_id=str(base_parent["evaluation_id"]),
+            model_sha256=str(base_parent["model_sha256"]),
+        )
+        _assert_parent_causal_contract(parent, config)
     if candidate_runner is None:
         from .training import HistoricalCandidateRunner
 

@@ -58,6 +58,56 @@ def test_archive_preserves_immutable_parent_and_child_bundles(tmp_path: Path) ->
         archive.load_candidate(parent.candidate_id)
 
 
+def test_external_parent_registration_never_mutates_read_only_source_archive(
+    tmp_path: Path,
+) -> None:
+    source = CandidateArchive(tmp_path / "immutable-source")
+    parent = _candidate(source, tmp_path, "external-parent")
+    evaluation = source.record_evaluation(
+        parent.candidate_id,
+        evaluator_contract={"name": "stage-1-selection-v1"},
+        metrics={"pass_rate": 0.23, "blow_rate": 0.0},
+        stages=({"name": "selection", "status": "PASS"},),
+        status="PASS",
+    )
+    # Stage-1 archives may predate external-parent references. Opening one as a
+    # source must not backfill newer archive directories into it.
+    if source.external_parents_root.exists():
+        source.external_parents_root.rmdir()
+
+    def snapshot(root: Path) -> dict[str, tuple[bool, int, int, bytes | None]]:
+        paths = [root, *sorted(root.rglob("*"))]
+        return {
+            "." if path == root else str(path.relative_to(root)): (
+                path.is_dir(),
+                path.stat().st_mode & 0o777,
+                path.stat().st_mtime_ns,
+                None if path.is_dir() else path.read_bytes(),
+            )
+            for path in paths
+        }
+
+    source_paths = [source.root, *source.root.rglob("*")]
+    for path in source_paths:
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    source_before = snapshot(source.root)
+
+    child = CandidateArchive(tmp_path / "child")
+    try:
+        registered = child.register_external_parent(
+            source.root,
+            candidate_id=parent.candidate_id,
+            evaluation_id=evaluation.evaluation_id,
+            model_sha256=parent.manifest["model_sha256"],
+        )
+        assert registered.candidate_id == parent.candidate_id
+        assert snapshot(source.root) == source_before
+    finally:
+        source.root.chmod(0o755)
+        for path in source_paths[1:]:
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+
 def test_archive_keeps_distinct_elites_for_multiple_objectives(tmp_path: Path) -> None:
     archive = CandidateArchive(tmp_path / "archive")
     safe = _candidate(archive, tmp_path, "safe")

@@ -12,8 +12,9 @@ from propevolve.agent import (
     centered_entry_search_target,
     resolve_device,
 )
+from propevolve.config import configure_runtime_environment
 from propevolve.decision import Action
-from propevolve.replay import Transition
+from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 
 
 def _agent(observation_dim: int, **overrides) -> RecurrentC51Agent:
@@ -105,19 +106,15 @@ def test_fp16_runtime_rejects_cpu_instead_of_silently_changing_precision() -> No
 def test_mps_runtime_flags_are_applied_before_training(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
     monkeypatch.delenv("PYTORCH_MPS_PREFER_METAL", raising=False)
     monkeypatch.delenv("PYTORCH_MPS_FAST_MATH", raising=False)
 
-    agent = _agent(
-        4,
-        device="mps",
-        mps_prefer_metal=True,
-        mps_fast_math=False,
-    )
+    environment = configure_runtime_environment({
+        "mps_prefer_metal": True,
+        "mps_fast_math": False,
+    })
 
-    assert agent.device.type == "mps"
-    assert agent.runtime_environment == {
+    assert environment == {
         "PYTORCH_MPS_PREFER_METAL": "1",
         "PYTORCH_MPS_FAST_MATH": "0",
     }
@@ -537,6 +534,205 @@ def test_checkpoint_round_trip_preserves_recurrent_credit_horizon(
 
     assert restored.n_step_return == 8
     assert restored.recurrent_burn_in == 64
+
+
+def test_padded_two_step_terminal_recovery_has_valid_truncated_learning_rows() -> None:
+    agent = _agent(
+        2,
+        seed=409,
+        n_step_return=8,
+        recurrent_burn_in=64,
+        learning_rate=1e-4,
+    )
+    padding = Transition(
+        observation=np.zeros(2, np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.zeros(2, np.float32),
+        terminated=False,
+        valid_actions=(Action.WAIT,),
+        next_valid_actions=(Action.WAIT,),
+        recurrent_reset=True,
+        training_valid=False,
+    )
+    real = (
+        Transition(
+            observation=np.array([1.0, 0.0], np.float32),
+            action=Action.ENTER_LONG_1,
+            reward=0.0,
+            next_observation=np.array([2.0, 0.0], np.float32),
+            terminated=False,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+            recurrent_reset=True,
+            training_valid=True,
+        ),
+        Transition(
+            observation=np.array([2.0, 0.0], np.float32),
+            action=Action.CLOSE,
+            reward=1.0,
+            next_observation=np.array([3.0, 0.0], np.float32),
+            terminated=True,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(),
+            training_valid=True,
+        ),
+    )
+    sequence = (*((padding,) * 64), *real, *((padding,) * 30))
+
+    loss = agent.train_batch((sequence,))
+
+    assert np.isfinite(loss)
+    assert agent.last_train_metrics["sampled_valid_learning_rows"] == 2.0
+    assert agent.last_train_metrics["sampled_padding_rows"] == 94.0
+    assert agent.last_train_metrics["sampled_terminal_truncated_rows"] == 2.0
+
+
+def test_short_recovery_strata_train_early_entry_and_late_terminal_boundaries() -> None:
+    flat_actions = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    management_actions = (Action.HOLD, Action.CLOSE)
+    transitions = tuple(
+        Transition(
+            observation=np.array([float(index)], np.float32),
+            action=(
+                Action.ENTER_LONG_1 if index == 5
+                else Action.CLOSE if index == 70
+                else Action.WAIT if index < 5
+                else Action.HOLD
+            ),
+            reward=1.0 if index == 70 else 0.0,
+            next_observation=np.array([float(index + 1)], np.float32),
+            terminated=index == 70,
+            valid_actions=flat_actions if index <= 5 else management_actions,
+            next_valid_actions=(
+                () if index == 70
+                else management_actions if index >= 5
+                else flat_actions
+            ),
+            entry_action_target=(
+                Action.ENTER_LONG_1 if index == 5 else None
+            ),
+            entry_opportunity_priority=1.0 if index == 5 else 0.0,
+        )
+        for index in range(71)
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        terminal_sequence_fraction=0.5,
+        entry_opportunity_sequence_fraction=0.5,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=421,
+    )
+    replay.add(Episode(
+        episode_id="NQ-short-recovery",
+        ticker="NQ",
+        outcome="recovery_success",
+        primary_side="long",
+        ended_at_ns=71,
+        transitions=transitions,
+    ))
+    sampled = replay.sample(2)
+    entry_sequence = next(
+        sequence for sequence in sampled
+        if any(
+            index >= 64 and row.entry_action_target == Action.ENTER_LONG_1
+            for index, row in enumerate(sequence)
+        )
+    )
+    terminal_sequence = next(
+        sequence for sequence in sampled if any(row.terminated for row in sequence)
+    )
+    entry_agent = _agent(
+        1,
+        seed=421,
+        n_step_return=8,
+        recurrent_burn_in=64,
+        entry_action_loss_weight=0.2,
+    )
+    terminal_agent = _agent(
+        1,
+        seed=422,
+        n_step_return=8,
+        recurrent_burn_in=64,
+    )
+
+    entry_agent.train_batch((entry_sequence,))
+    terminal_agent.train_batch((terminal_sequence,))
+
+    assert entry_agent.last_train_metrics["entry_action_supervised_rows"] == 1.0
+    assert entry_agent.last_train_metrics["entry_action_target_long_rows"] == 1.0
+    assert terminal_agent.last_train_metrics["sampled_terminal_truncated_rows"] > 0
+
+
+def test_padding_is_excluded_from_auxiliary_and_management_counts() -> None:
+    agent = _agent(
+        2,
+        seed=419,
+        n_step_return=2,
+        recurrent_burn_in=2,
+        teacher_channels=1,
+        teacher_loss_weight=0.2,
+        entry_action_loss_weight=0.2,
+    )
+    invalid = Transition(
+        observation=np.zeros(2, np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.zeros(2, np.float32),
+        terminated=False,
+        valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+        next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+        teacher_target=np.array([0.9], np.float32),
+        entry_action_target=Action.ENTER_LONG_1,
+        training_valid=False,
+    )
+    terminal = Transition(
+        observation=np.ones(2, np.float32),
+        action=Action.WAIT,
+        reward=1.0,
+        next_observation=np.full(2, 2.0, np.float32),
+        terminated=True,
+        valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+        next_valid_actions=(),
+        recurrent_reset=True,
+        training_valid=True,
+    )
+
+    agent.train_batch(((invalid, invalid, terminal, invalid),))
+
+    assert agent.last_train_metrics["sampled_valid_learning_rows"] == 1.0
+    assert agent.last_train_metrics["entry_action_supervised_rows"] == 0.0
+    assert agent.last_train_metrics["teacher_loss"] == 0.0
+    assert agent.last_train_metrics["sampled_management_row_fraction"] == 0.0
+
+
+def test_nonterminal_short_trace_without_complete_n_step_fails_closed() -> None:
+    agent = _agent(2, n_step_return=3, recurrent_burn_in=2)
+    invalid = Transition(
+        observation=np.zeros(2, np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.zeros(2, np.float32),
+        terminated=False,
+        valid_actions=(Action.WAIT,),
+        next_valid_actions=(Action.WAIT,),
+        training_valid=False,
+    )
+    real = Transition(
+        observation=np.ones(2, np.float32),
+        action=Action.WAIT,
+        reward=0.0,
+        next_observation=np.full(2, 2.0, np.float32),
+        terminated=False,
+        valid_actions=(Action.WAIT,),
+        next_valid_actions=(Action.WAIT,),
+        recurrent_reset=True,
+    )
+
+    with pytest.raises(ValueError, match="no valid learning rows"):
+        agent.train_batch(((invalid, invalid, real, invalid, invalid),))
 
 
 def test_checkpoint_round_trip_preserves_training_competence_anchor(
@@ -1476,6 +1672,108 @@ def test_warm_start_preserves_policy_but_resets_training_state_and_teacher(
     assert child.optimizer.state == {}
     assert child.learning_rate == 5e-5
     assert manifest == {"candidate_id": "parent-1"}
+
+
+def test_warm_start_immediately_anchors_parent_policy_without_teacher_head(
+    tmp_path: Path,
+) -> None:
+    parent = _agent(2, seed=17)
+    with torch.no_grad():
+        parent.online.input[1].weight.fill_(0.375)
+    checkpoint = parent.save(
+        tmp_path / "stage-1-parent.pt",
+        manifest={"candidate_id": "immutable-stage-1"},
+    )
+
+    child, _ = RecurrentC51Agent.warm_start(
+        checkpoint,
+        config={
+            "observation_dim": 2,
+            "hidden_dim": 8,
+            "atoms": 11,
+            "value_min": -3.0,
+            "value_max": 3.0,
+            "gamma": 0.997,
+            "learning_rate": 5e-5,
+            "weight_decay": 1e-5,
+            "gradient_clip": 10.0,
+            "target_sync_updates": 250,
+            "device": "cpu",
+            "seed": 29,
+            "teacher_channels": 4,
+            "teacher_loss_weight": 0.2,
+            "policy_retention_loss_weight": 1.0,
+        },
+    )
+
+    assert child.retention_anchor is not None
+    assert child.retention_anchor.teacher_output is None
+    torch.testing.assert_close(
+        child.retention_anchor.input[1].weight,
+        parent.online.input[1].weight,
+    )
+    with torch.no_grad():
+        child.online.output.bias.view(len(Action), child.atoms)[
+            int(Action.HOLD)
+        ].copy_(torch.linspace(-8.0, 8.0, child.atoms))
+    timeout_recovery = tuple(
+        Transition(
+            observation=np.array([index / 4, 1.0], np.float32),
+            action=Action.CLOSE,
+            reward=-0.1,
+            next_observation=np.array([(index + 1) / 4, 1.0], np.float32),
+            terminated=False,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+            competence_anchor=False,
+        )
+        for index in range(4)
+    )
+    child.train_batch((timeout_recovery, timeout_recovery))
+    assert child.last_train_metrics["policy_retention_loss"] > 0.0
+    child.discard_retention_anchor()
+    child.discard_teacher()
+    assert child.retention_anchor is None
+    assert child.teacher_channels == 0
+
+
+def test_later_pass_cannot_overwrite_or_narrow_immutable_parent_anchor(
+    tmp_path: Path,
+) -> None:
+    parent = _agent(2, seed=421)
+    checkpoint = parent.save(tmp_path / "stage-1.pt", manifest={})
+    child, _ = RecurrentC51Agent.warm_start(
+        checkpoint,
+        config={
+            "observation_dim": 2,
+            "hidden_dim": 8,
+            "atoms": 11,
+            "value_min": -3.0,
+            "value_max": 3.0,
+            "gamma": 0.997,
+            "learning_rate": 5e-5,
+            "weight_decay": 1e-5,
+            "gradient_clip": 10.0,
+            "target_sync_updates": 250,
+            "device": "cpu",
+            "seed": 422,
+            "policy_retention_loss_weight": 1.0,
+        },
+    )
+    assert child.retention_anchor is not None
+    expected = {
+        key: value.detach().clone()
+        for key, value in child.retention_anchor.state_dict().items()
+    }
+    with torch.no_grad():
+        child.online.output.bias.add_(100.0)
+
+    child.retain_policy()
+
+    assert child.retention_anchor_applies_to_all_management_rows is True
+    assert child.retention_anchor is not None
+    for key, value in child.retention_anchor.state_dict().items():
+        torch.testing.assert_close(value, expected[key])
 
 
 @pytest.mark.skipif(

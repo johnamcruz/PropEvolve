@@ -74,6 +74,11 @@ def agent_teacher_settings(specs: tuple[dict, ...]) -> dict[str, object]:
         return {}
     settings: dict[str, object] = {
         "teacher_channels": sum(len(item["channels"]) for item in specs),
+        "teacher_channel_names": tuple(
+            str(channel)
+            for item in specs
+            for channel in item["channels"]
+        ),
         "teacher_loss_weight": sum(float(item["loss_weight"]) for item in specs),
         "teacher_channel_loss_weights": tuple(
             float(item["loss_weight"]) / len(item["channels"])

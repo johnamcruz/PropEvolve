@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
-from propevolve.decision import Action
+from propevolve.decision import Action, PositionSide
 from propevolve.environment import (
+    ChallengeStartState,
     ChallengeSpec,
     HistoricalChallengeEnv,
     MarketSeries,
     PropChallengeAccount,
+    RecoveryEntryPermit,
 )
 from propevolve.observation import (
     AccountState,
@@ -47,6 +51,395 @@ def _market(*, low_at_one: float = 100.5) -> MarketSeries:
         close=np.array([100, 102, 103, 104, 105, 106, 107, 108], np.float32),
         embeddings=np.stack((values, values + 10), axis=1),
     )
+
+
+def _recovery_start_state() -> ChallengeStartState:
+    return ChallengeStartState(
+        realized_pnl=-2_700.0,
+        equity_pnl=-2_700.0,
+        peak_equity_pnl=0.0,
+        mll_floor_pnl=-3_000.0,
+        passmark_locked=False,
+        position_side=PositionSide.FLAT,
+        position_size=0,
+        session_pnl=-2_700.0,
+        trading_days_elapsed=1,
+        recovery_entry_permit=RecoveryEntryPermit(
+            remaining_entries=1,
+            exception_headroom=300.0,
+            success_pnl=-2_500.0,
+        ),
+    )
+
+
+def _recovery_market(
+    *,
+    opens: tuple[float, ...],
+    highs: tuple[float, ...] | None = None,
+    lows: tuple[float, ...] | None = None,
+    closes: tuple[float, ...] | None = None,
+) -> MarketSeries:
+    open_values = np.asarray(opens, dtype=np.float32)
+    close_values = np.asarray(closes or opens, dtype=np.float32)
+    high_values = np.asarray(
+        highs or tuple(max(open_, close) for open_, close in zip(opens, close_values)),
+        dtype=np.float32,
+    )
+    low_values = np.asarray(
+        lows or tuple(min(open_, close) for open_, close in zip(opens, close_values)),
+        dtype=np.float32,
+    )
+    length = len(open_values)
+    return MarketSeries(
+        ticker="NQ",
+        timestamps=(
+            np.datetime64("2024-01-02T23:00")
+            + np.arange(length) * np.timedelta64(3, "m")
+        ),
+        open=open_values,
+        high=high_values,
+        low=low_values,
+        close=close_values,
+        embeddings=np.zeros((length, 2), np.float32),
+    )
+
+
+def test_recovery_start_allows_one_entry_and_wait_does_not_consume_it() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+
+    _, reset_info = env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    assert reset_info["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    assert reset_info["realized_pnl"] == -2_700.0
+    assert reset_info["equity_pnl"] == -2_700.0
+    assert reset_info["mll_headroom"] == 300.0
+    assert reset_info["mll_headroom_fraction"] == 0.1
+    assert reset_info["recovery_entry_permit_remaining"] == 1
+
+    _, _, terminated, _, wait_info = env.step(Action.WAIT)
+
+    assert not terminated
+    assert wait_info["recovery_entry_permit_remaining"] == 1
+    assert wait_info["mll_headroom"] == 300.0
+    assert wait_info["mll_headroom_fraction"] == 0.1
+    assert wait_info["recovery_wait_decisions"] == 1
+    assert wait_info["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+
+def test_first_recovery_trade_consumes_permit_and_restores_ordinary_entries() -> None:
+    market = _recovery_market(opens=(100.0, 100.0, 110.0, 110.0, 110.0, 110.0))
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    _, _, terminated, _, entered = env.step(Action.ENTER_LONG_1)
+    _, recovered_reward, terminated, _, recovered = env.step(Action.CLOSE)
+
+    assert terminated
+    assert entered["recovery_entry_permit_remaining"] == 0
+    assert entered["recovery_entry_used"] is True
+    assert recovered["realized_pnl"] == -2_500.0
+    assert recovered["mll_headroom"] == 500.0
+    assert recovered["mll_headroom_fraction"] == pytest.approx(1.0 / 6.0)
+    assert recovered["recovery_success"] is True
+    assert recovered["ordinary_entry_eligible"] is True
+    assert recovered["outcome"] == "recovery_success"
+    assert recovered["valid_actions"] == ()
+    assert recovered_reward == pytest.approx(200.0 / 3_000.0)
+
+
+def test_huge_first_recovery_winner_is_a_pass_and_records_recovery_success() -> None:
+    market = _recovery_market(
+        opens=(100.0, 100.0, 600.0, 600.0, 600.0, 600.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    _, _, entered_terminated, _, _ = env.step(Action.ENTER_LONG_1)
+    _, reward, terminated, _, recovered = env.step(Action.CLOSE)
+
+    assert entered_terminated is False
+    assert terminated is True
+    assert recovered["realized_pnl"] == 7_300.0
+    assert recovered["recovery_trade_closed"] is True
+    assert recovered["recovery_success"] is True
+    assert recovered["outcome"] == "pass"
+    assert reward == pytest.approx(10_000.0 / 3_000.0 + 250.0 / 1_000.0)
+
+
+def test_consumed_recovery_permit_rejects_a_second_exception_entry() -> None:
+    market = _recovery_market(opens=(100.0,) * 6)
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    env.step(Action.ENTER_LONG_1)
+    _, recovery_reward, _, _, closed = env.step(Action.CLOSE)
+
+    assert closed["realized_pnl"] == -2_700.0
+    assert closed["recovery_success"] is False
+    assert closed["ordinary_entry_eligible"] is False
+    assert closed["outcome"] == "survived_not_recovered"
+    assert closed["valid_actions"] == ()
+    assert recovery_reward == pytest.approx(-2.0 / 1_000.0)
+    with pytest.raises(RuntimeError, match="reset the challenge"):
+        env.step(Action.ENTER_LONG_1)
+
+
+def test_recovery_episode_can_wait_until_normal_challenge_timeout() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _recovery_market(opens=(100.0,) * 8)},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    for decision in range(1, 8):
+        _, reward, terminated, _, info = env.step(Action.WAIT)
+        assert info["recovery_wait_decisions"] == decision
+        assert terminated is (decision == 7)
+
+    assert info["outcome"] == "wait_timeout"
+    assert info["recovery_entry_permit_remaining"] == 1
+    assert info["valid_actions"] == ()
+    assert reward == pytest.approx(-2.0 / 1_000.0)
+
+
+def test_recovery_stop_is_fee_inclusive_and_blows_at_the_mll_floor() -> None:
+    market = _recovery_market(
+        opens=(100.0,) * 6,
+        highs=(100.0,) * 6,
+        lows=(100.0, 85.2, 100.0, 100.0, 100.0, 100.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 4.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    _, _, terminated, _, stopped = env.step(Action.ENTER_LONG_1)
+
+    assert terminated
+    assert stopped["outcome"] == "blow"
+    assert stopped["exit_reason"] == "initial_stop"
+    assert stopped["realized_pnl"] == pytest.approx(-3_000.0)
+    assert stopped["fees_paid"] == 4.0
+    assert stopped["recovery_entry_permit_remaining"] == 0
+    assert stopped["recovery_success"] is False
+
+
+def test_recovery_stop_allows_realistic_gap_through_beyond_max_loss() -> None:
+    market = _recovery_market(
+        opens=(100.0, 100.0, 80.0, 80.0, 80.0, 80.0),
+        highs=(100.0, 100.0, 80.0, 80.0, 80.0, 80.0),
+        lows=(100.0, 100.0, 80.0, 80.0, 80.0, 80.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 4.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _recovery_start_state(),
+    })
+
+    _, _, terminated, _, _ = env.step(Action.ENTER_LONG_1)
+    assert not terminated
+    _, _, terminated, _, gapped = env.step(Action.HOLD)
+
+    assert terminated
+    assert gapped["outcome"] == "blow"
+    assert gapped["realized_pnl"] < -3_000.0
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"equity_pnl": -2_699.0}, "flat recovery equity"),
+        ({"peak_equity_pnl": -2_800.0}, "peak equity"),
+        ({"passmark_locked": True}, "passmark lock"),
+        (
+            {"position_side": PositionSide.LONG, "position_size": 1},
+            "start flat",
+        ),
+        ({"trading_days_elapsed": 0}, "positive integer"),
+    ],
+)
+def test_recovery_start_state_rejects_incomplete_account_state(
+    changes: dict,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        replace(_recovery_start_state(), **changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"mll_floor_pnl": -3_100.0}, "MLL floor"),
+        ({"peak_equity_pnl": 100.0}, "peak equity must be zero"),
+        (
+            {
+                "recovery_entry_permit": RecoveryEntryPermit(
+                    remaining_entries=1,
+                    exception_headroom=300.0,
+                    success_pnl=-2_400.0,
+                )
+            },
+            "success PnL must restore exactly",
+        ),
+        (
+            {
+                "realized_pnl": -2_600.0,
+                "equity_pnl": -2_600.0,
+                "recovery_entry_permit": RecoveryEntryPermit(
+                    remaining_entries=1,
+                    exception_headroom=400.0,
+                    success_pnl=-2_500.0,
+                ),
+            },
+            "headroom must equal per-trade risk",
+        ),
+    ],
+)
+def test_environment_rejects_recovery_state_inconsistent_with_challenge(
+    changes: dict,
+    message: str,
+) -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _recovery_market(opens=(100.0,) * 6)},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        env.reset(options={
+            "ticker": "NQ",
+            "start": 0,
+            "challenge_start_state": replace(_recovery_start_state(), **changes),
+        })
+
+
+def test_reset_rejects_unvalidated_recovery_state_mapping() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _recovery_market(opens=(100.0,) * 6)},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(),
+        seed=1,
+    )
+
+    with pytest.raises(TypeError, match="ChallengeStartState"):
+        env.reset(options={
+            "ticker": "NQ",
+            "start": 0,
+            "challenge_start_state": {"realized_pnl": -2_700.0},
+        })
 
 
 def test_authenticated_cache_defers_embedding_finite_check_to_observation() -> None:
@@ -179,6 +572,25 @@ def test_round_trip_fee_is_included_before_declaring_a_pass() -> None:
 
     assert not terminated
     assert info["equity_pnl"] == 10.0
+
+
+def test_reported_mll_headroom_fraction_is_bounded_after_large_profit() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.01},
+        spec=_spec(profit_target=15.0),
+        seed=1,
+    )
+    _, reset_info = env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, info = env.step(Action.ENTER_LONG_1)
+
+    assert reset_info["mll_headroom_fraction"] == 1.0
+    assert terminated
+    assert info["outcome"] == "pass"
+    assert info["mll_headroom"] > env.spec.max_loss
+    assert info["mll_headroom_fraction"] == 1.0
 
 
 def test_flat_account_keeps_mll_proximity_penalty_after_realizing_drawdown() -> None:

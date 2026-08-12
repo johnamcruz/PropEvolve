@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,6 +25,30 @@ class Action(IntEnum):
     CLOSE = 4
 
 
+@dataclass(frozen=True)
+class RecoveryEntryPermit:
+    """One-shot exception to the ordinary flat-account entry guard."""
+
+    remaining_entries: int
+    exception_headroom: float
+    success_pnl: float
+
+    def __post_init__(self) -> None:
+        if self.remaining_entries not in (0, 1):
+            raise ValueError("recovery permit remaining_entries must be 0 or 1")
+        if (
+            not math.isfinite(self.exception_headroom)
+            or self.exception_headroom <= 0
+            or not math.isfinite(self.success_pnl)
+        ):
+            raise ValueError("recovery permit economics must be finite and valid")
+    def permits(self, mll_headroom: float) -> bool:
+        return (
+            self.remaining_entries == 1
+            and math.isclose(mll_headroom, self.exception_headroom)
+        )
+
+
 class ActionMasker:
     """Expose only actions valid for the current position and hard risk state."""
 
@@ -39,7 +65,12 @@ class ActionMasker:
         self.max_loss = float(max_loss)
         self.minimum_mll_headroom = float(minimum_mll_headroom)
 
-    def valid_actions(self, account: "AccountState") -> tuple[Action, ...]:
+    def valid_actions(
+        self,
+        account: "AccountState",
+        *,
+        recovery_entry_permit: RecoveryEntryPermit | None = None,
+    ) -> tuple[Action, ...]:
         if account.position_side == PositionSide.FLAT:
             actions = [Action.WAIT]
             headroom = (
@@ -47,7 +78,13 @@ class ActionMasker:
                 if account.mll_headroom is not None
                 else account.equity_pnl + self.max_loss
             )
-            if headroom >= self.minimum_mll_headroom:
+            if (
+                headroom >= self.minimum_mll_headroom
+                or (
+                    recovery_entry_permit is not None
+                    and recovery_entry_permit.permits(headroom)
+                )
+            ):
                 actions.extend((Action.ENTER_LONG_1, Action.ENTER_SHORT_1))
             return tuple(sorted(actions, key=int))
 

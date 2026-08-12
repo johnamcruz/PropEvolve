@@ -12,24 +12,131 @@ import torch
 
 import propevolve.training as training_module
 from propevolve.cache import build_embedding_cache
-from propevolve.decision import Action
-from propevolve.environment import ChallengeSpec, MarketSeries
+from propevolve.decision import Action, PositionSide, RecoveryEntryPermit
+from propevolve.environment import ChallengeSpec, ChallengeStartState, MarketSeries
 from propevolve.observation import TradeManagementObservationSpec
 from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import (
     HistoricalCandidateRunner,
+    RecoveryCurriculumSettings,
+    RecoveryStressResult,
     TrainingResult,
     TrainingProgress,
     _assert_recovery_entry_balance,
     _entry_action_balance,
     _entry_supervision_frozen_contract,
+    _regime_selectivity_agent_settings,
+    _recovery_curriculum_from_config,
     _selection_evaluation_gates,
     _plain_contract_value,
     assert_temporal_role,
     evaluate_agent,
+    evaluate_recovery_stress,
     prop_safety_objective,
     train_agent,
 )
+
+
+def _recovery_curriculum_settings(*, fraction: float = 0.5) -> RecoveryCurriculumSettings:
+    return RecoveryCurriculumSettings(
+        episode_fraction=fraction,
+        schedule_seed=37,
+        start_state=ChallengeStartState(
+            realized_pnl=-2_700.0,
+            equity_pnl=-2_700.0,
+            peak_equity_pnl=0.0,
+            mll_floor_pnl=-3_000.0,
+            passmark_locked=False,
+            position_side=PositionSide.FLAT,
+            position_size=0,
+            session_pnl=-2_700.0,
+            trading_days_elapsed=1,
+            recovery_entry_permit=RecoveryEntryPermit(
+                remaining_entries=1,
+                exception_headroom=300.0,
+                success_pnl=-2_500.0,
+            ),
+        ),
+    )
+
+
+def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> None:
+    settings, stress_episodes = _recovery_curriculum_from_config({
+        "episode_fraction": 0.25,
+        "schedule_seed": 37,
+        "stress_evaluation_episodes": 200,
+        "start_state": {
+            "realized_pnl": -2_700.0,
+            "equity_pnl": -2_700.0,
+            "peak_equity_pnl": 0.0,
+            "mll_floor_pnl": -3_000.0,
+            "passmark_locked": False,
+            "position_side": 0,
+            "position_size": 0,
+            "session_pnl": -2_700.0,
+            "trading_days_elapsed": 1,
+        },
+        "entry_permit": {
+            "remaining_entries": 1,
+            "exception_headroom": 300.0,
+            "success_pnl": -2_500.0,
+        },
+    })
+
+    assert settings == _recovery_curriculum_settings(fraction=0.25)
+    assert stress_episodes == 200
+
+
+def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
+    with pytest.raises(ValueError, match="fields are invalid"):
+        _recovery_curriculum_from_config({
+            "episode_fraction": 0.25,
+            "schedule_seed": 37,
+        })
+    with pytest.raises(ValueError, match="contract drifted"):
+        _recovery_curriculum_from_config({
+            "episode_fraction": 0.25,
+            "schedule_seed": 37,
+            "start_state": {
+                "realized_pnl": -2_600.0,
+                "equity_pnl": -2_600.0,
+                "peak_equity_pnl": 0.0,
+                "mll_floor_pnl": -3_000.0,
+                "passmark_locked": False,
+                "position_side": 0,
+                "position_size": 0,
+                "session_pnl": -2_600.0,
+                "trading_days_elapsed": 1,
+            },
+            "entry_permit": {
+                "remaining_entries": 1,
+                "exception_headroom": 300.0,
+                "success_pnl": -2_500.0,
+            },
+            "stress_evaluation_episodes": 200,
+        })
+
+
+def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
+    assert _regime_selectivity_agent_settings({
+        "loss_weight": 0.3,
+        "expansion_long_center": 0.10249102659218842,
+        "expansion_short_center": 0.10399580328775007,
+        "probability_epsilon": 1e-6,
+        "headroom_pressure": 1.0,
+        "dominant_chop_pressure": 2.0,
+        "q_temperature": 1.0,
+    }) == {
+        "regime_selectivity_loss_weight": 0.3,
+        "regime_selectivity_expansion_centers": (
+            0.10249102659218842,
+            0.10399580328775007,
+        ),
+        "regime_selectivity_probability_epsilon": 1e-6,
+        "regime_selectivity_headroom_pressure": 1.0,
+        "regime_selectivity_dominant_chop_pressure": 2.0,
+        "regime_selectivity_q_temperature": 1.0,
+    }
 
 
 def test_runner_balance_seam_passes_authenticated_weights_and_archives_receipt() -> None:
@@ -321,7 +428,7 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
             "episode_days": 30,
             "bars_per_day": 480,
             "max_position_size": 1,
-            "minimum_mll_headroom": 250.0,
+            "minimum_mll_headroom": 500.0,
             "trailing_mll_lock": True,
             "terminal_pass_reward": 250.0,
             "terminal_blow_reward": -1500.0,
@@ -435,13 +542,37 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "episode_days": 1,
             "bars_per_day": 2,
             "max_position_size": 1,
-            "minimum_mll_headroom": 250.0,
+            "minimum_mll_headroom": 500.0,
             "trailing_mll_lock": True,
             "terminal_pass_reward": 250.0,
             "terminal_blow_reward": -1500.0,
             "terminal_timeout_reward": -2.0,
             "terminal_pass_speed_reward_per_day": 20.0,
             "reward_scale": 1000.0,
+            "per_trade_risk_dollars": 300.0,
+            "ratchet_activation_r": 2.0,
+            "ratchet_giveback_r": 0.5,
+        },
+        "recovery_curriculum": {
+            "episode_fraction": 0.0,
+            "schedule_seed": 37,
+            "stress_evaluation_episodes": 0,
+            "start_state": {
+                "realized_pnl": -2_700.0,
+                "equity_pnl": -2_700.0,
+                "peak_equity_pnl": 0.0,
+                "mll_floor_pnl": -3_000.0,
+                "passmark_locked": False,
+                "position_side": 0,
+                "position_size": 0,
+                "session_pnl": -2_700.0,
+                "trading_days_elapsed": 1,
+            },
+            "entry_permit": {
+                "remaining_entries": 1,
+                "exception_headroom": 300.0,
+                "success_pnl": -2_500.0,
+            },
         },
         "point_values": {"NQ": 20.0},
         "round_trip_fees": {"NQ": 3.84},
@@ -493,6 +624,26 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
 
     assert candidate.model_path.is_file()
     assert evaluation.path.is_file()
+    contract = json.loads((candidate.path / "contract.json").read_text())
+    assert contract["recovery_curriculum"] == config["recovery_curriculum"]
+    assert contract["training_resume_identity"]
+    assert set(contract["runtime_source_modules_sha256"]) >= {
+        "training.py",
+        "agent.py",
+        "config.py",
+        "decision.py",
+        "replay.py",
+        "environment.py",
+        "observation.py",
+        "evolution.py",
+        "teachers/composition.py",
+        "teachers/expansion.py",
+        "teachers/regime.py",
+    }
+    assert all(
+        len(value) == 64
+        for value in contract["runtime_source_modules_sha256"].values()
+    )
     recovery = torch.load(
         tmp_path / "run" / "training-recovery.pt",
         map_location="cpu",
@@ -640,6 +791,154 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         in capsys.readouterr().out
     )
 
+
+def test_training_deterministically_mixes_complete_recovery_starts_and_keeps_short_traces() -> None:
+    class RecoveryAgent(Agent):
+        recurrent_burn_in = 64
+        n_step_return = 8
+
+    class MixedEnvironment:
+        def __init__(self) -> None:
+            self.recovery_flags: list[bool] = []
+            self.ticker = "NQ"
+
+        def reset(self, *, options=None):
+            options = options or {}
+            recovery = "challenge_start_state" in options
+            self.recovery_flags.append(recovery)
+            if recovery:
+                assert options["challenge_start_state"] == (
+                    _recovery_curriculum_settings().start_state
+                )
+            self.ticker = str(options.get("ticker", "NQ"))
+            return np.zeros(1, np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": self.ticker,
+                "start": 0,
+                "mll_headroom_fraction": 0.1 if recovery else 1.0,
+            }
+
+        def step(self, action):
+            recovery = self.recovery_flags[-1]
+            return np.ones(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": self.ticker,
+                "fill_index": 1,
+                "outcome": "pass",
+                "primary_side": "long" if recovery else "flat",
+                "trade_count": int(recovery),
+                "win_count": int(recovery),
+                "winning_r_sum": float(recovery),
+                "equity_pnl": -2_500.0 if recovery else 6_000.0,
+                "recovery_entry_used": recovery,
+                "recovery_trade_closed": recovery,
+                "recovery_success": recovery,
+                "recovery_wait_decisions": 0,
+                "recovery_entry_permit_remaining": 0,
+            }
+
+    settings = _recovery_curriculum_settings()
+    environment = MixedEnvironment()
+    replay = BalancedSequenceReplay(
+        capacity_episodes=10,
+        sequence_length=96,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=11,
+    )
+    diagnostics: list[dict[str, object]] = []
+
+    result = train_agent(
+        RecoveryAgent(),
+        environment,
+        episodes=4,
+        minimum_environment_steps=4,
+        replay=replay,
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=96,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        recovery_curriculum=settings,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert environment.recovery_flags.count(True) == 2
+    assert result.passes == 4
+    assert result.recovery_episodes == 2
+    assert result.recovery_successes == 2
+    assert result.recovery_success_rate == 1.0
+    assert replay.transition_count == 4
+    assert len(replay) == 4
+    assert Counter(item["episode_kind"] for item in diagnostics) == {
+        "ordinary": 2,
+        "recovery": 2,
+    }
+    assert diagnostics[-1]["cumulative_recovery_episodes"] == 2
+
+
+def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
+    class ScheduleEnvironment:
+        def __init__(self) -> None:
+            self.flags: list[bool] = []
+
+        def reset(self, *, options=None):
+            recovery = bool(options and "challenge_start_state" in options)
+            self.flags.append(recovery)
+            return np.zeros(1, np.float32), {"valid_actions": (Action.WAIT,)}
+
+        def step(self, action):
+            recovery = self.flags[-1]
+            return np.ones(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "outcome": "wait_timeout" if recovery else "timeout",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": -2_700.0 if recovery else 0.0,
+                "recovery_wait_decisions": int(recovery),
+                "recovery_entry_permit_remaining": int(recovery),
+            }
+
+    def run(environment, minimum_steps, *, resume=None, checkpoints=None):
+        return train_agent(
+            Agent(),
+            environment,
+            episodes=4,
+            minimum_environment_steps=minimum_steps,
+            replay=BalancedSequenceReplay(
+                capacity_episodes=8, sequence_length=1, seed=7
+            ),
+            warmup_episodes=99,
+            updates_per_episode=1,
+            batch_sequences=1,
+            recurrent_horizon=1,
+            epsilon_start=0.0,
+            epsilon_end=0.0,
+            episode_tickers=None,
+            ticker_seed=7,
+            recovery_curriculum=_recovery_curriculum_settings(),
+            resume=resume,
+            checkpoint_every_episodes=1 if checkpoints is not None else 0,
+            checkpoint_callback=(checkpoints.append if checkpoints is not None else None),
+        )
+
+    full_environment = ScheduleEnvironment()
+    run(full_environment, 4)
+    partial_environment = ScheduleEnvironment()
+    checkpoints: list[TrainingProgress] = []
+    run(partial_environment, 2, checkpoints=checkpoints)
+    resumed_environment = ScheduleEnvironment()
+    run(resumed_environment, 4, resume=checkpoints[-1])
+
+    assert partial_environment.flags + resumed_environment.flags == (
+        full_environment.flags
+    )
 
 def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
     agent = Agent()
@@ -952,6 +1251,75 @@ def test_entry_action_lookup_is_not_used_after_exploration_enters() -> None:
     )
 
     assert looked_up == [0]
+
+
+def test_regime_selectivity_replay_uses_decision_time_not_post_action_headroom() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class OneDecisionEnvironment:
+        def reset(self):
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+                "mll_headroom_fraction": 0.10,
+            }
+
+        def step(self, action):
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "fill_index": 1,
+                "outcome": "timeout",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+                # This is the state after the selected action and must not label
+                # the preceding decision.
+                "mll_headroom_fraction": 0.90,
+            }
+
+    class SelectivityAgent(Agent):
+        regime_selectivity_loss_weight = 1.0
+
+    captured = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            captured.extend(episode.transitions)
+            super().add(episode)
+
+    train_agent(
+        SelectivityAgent(),
+        OneDecisionEnvironment(),
+        episodes=1,
+        minimum_environment_steps=1,
+        replay=CapturingReplay(
+            capacity_episodes=2,
+            sequence_length=1,
+            seed=3,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lambda ticker, index: np.full(22, 0.1, np.float32),
+        teacher_channels=tuple(f"teacher_{index}" for index in range(22)),
+        entry_action_lookup=lambda ticker, index: Action.WAIT,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].regime_selectivity_headroom_fraction == pytest.approx(0.10)
 
 
 def test_teacher_diagnostics_preserve_named_source_channels() -> None:
@@ -1456,6 +1824,106 @@ def test_evaluation_never_updates_agent() -> None:
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
     assert result.passes == 2
     assert agent.updates == 0
+
+
+def test_teacher_free_recovery_stress_reports_distinct_outcomes_and_one_entry() -> None:
+    class StressEnvironment:
+        def __init__(self) -> None:
+            self.episode = -1
+
+        def reset(self, *, options=None):
+            self.episode += 1
+            assert options["challenge_start_state"] == (
+                _recovery_curriculum_settings().start_state
+            )
+            return np.zeros(1, np.float32), {
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            outcome = (
+                "pass",
+                "survived_not_recovered",
+                "wait_timeout",
+                "blow",
+            )[self.episode]
+            entered = outcome != "wait_timeout"
+            return np.ones(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": outcome,
+                "equity_pnl": {
+                    "pass": 6_000.0,
+                    "survived_not_recovered": -2_650.0,
+                    "wait_timeout": -2_700.0,
+                    "blow": -3_000.0,
+                }[outcome],
+                "recovery_entry_used": entered,
+                "recovery_trade_closed": entered,
+                "recovery_success": outcome == "pass",
+                "recovery_wait_decisions": int(not entered),
+            }
+
+    agent = Agent()
+    result = evaluate_recovery_stress(
+        agent,
+        StressEnvironment(),
+        episodes=4,
+        recurrent_horizon=96,
+        settings=_recovery_curriculum_settings(fraction=1.0),
+    )
+
+    assert isinstance(result, RecoveryStressResult)
+    assert result.recovery_successes == 1
+    assert result.survived_not_recovered == 1
+    assert result.wait_timeouts == 1
+    assert result.blows == 1
+    assert result.recovery_success_rate == 0.25
+    assert result.blow_rate == 0.25
+    assert result.entries_used == 3
+    assert result.one_entry_violations == 0
+    assert agent.updates == 0
+
+
+def test_recovery_stress_integrity_allows_baseline_evidence_but_economic_gate_rejects_blow() -> None:
+    baseline_metrics = {
+        "one_entry_violations": 0.0,
+        "blow_rate": 0.25,
+    }
+
+    assert all(
+        gate.passes(baseline_metrics)
+        for gate in training_module._recovery_stress_integrity_gates()
+    )
+    economic_gate = training_module.EvaluationGate("blow_rate", "==", 0.0)
+    assert economic_gate.passes(baseline_metrics) is False
+
+
+def test_recovery_stress_fails_closed_on_a_second_entry() -> None:
+    class InvalidEnvironment:
+        def __init__(self) -> None:
+            self.step_index = 0
+
+        def reset(self, *, options=None):
+            return np.zeros(1, np.float32), {"valid_actions": (Action.WAIT,)}
+
+        def step(self, action):
+            self.step_index += 1
+            terminated = self.step_index == 2
+            return np.ones(1, np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.WAIT,),
+                "outcome": "recovery_success" if terminated else None,
+                "equity_pnl": -2_500.0,
+                "recovery_entry_used": True,
+            }
+
+    with pytest.raises(ValueError, match="one-entry contract"):
+        evaluate_recovery_stress(
+            Agent(),
+            InvalidEnvironment(),
+            episodes=1,
+            recurrent_horizon=96,
+            settings=_recovery_curriculum_settings(fraction=1.0),
+        )
 
 
 def test_evaluation_reports_pass_and_timeout_economics_separately(capsys) -> None:

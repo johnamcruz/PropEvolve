@@ -1,6 +1,7 @@
 """PropEvolve public package."""
 
-from .decision import Action, ActionMasker, PositionSide
+from .balance_aware_regime_selectivity import BalanceAwareRegimeSelectivity
+from .decision import Action, ActionMasker, PositionSide, RecoveryEntryPermit
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
@@ -15,14 +16,21 @@ from .observation import (
     ObservationAssembler,
     TradeManagementObservationSpec,
 )
-from .environment import PropChallengeAccount
+from .environment import ChallengeStartState, PropChallengeAccount
 from .sealed_confirmation import evaluate_sealed_confirmation
+from .training import (
+    RecoveryCurriculumSettings,
+    RecoveryStressResult,
+    evaluate_recovery_stress,
+)
 
 __all__ = [
     "AccountState",
     "Action",
     "ActionMasker",
+    "BalanceAwareRegimeSelectivity",
     "CandidateArchive",
+    "ChallengeStartState",
     "EvaluationGate",
     "EvaluationStage",
     "EvaluatorCascade",
@@ -32,6 +40,10 @@ __all__ = [
     "TradeManagementObservationSpec",
     "PositionSide",
     "PropChallengeAccount",
+    "RecoveryCurriculumSettings",
+    "RecoveryEntryPermit",
+    "RecoveryStressResult",
     "RevisionPolicy",
+    "evaluate_recovery_stress",
     "evaluate_sealed_confirmation",
 ]

@@ -292,7 +292,52 @@ def test_replay_preserves_explicit_entry_action_targets_and_censoring() -> None:
     assert tuple(item.entry_action_target for item in sampled) == targets
 
 
-def test_replay_rejects_legacy_checkpoint_without_entry_action_contract() -> None:
+def test_replay_preserves_training_only_decision_headroom_for_regime_selectivity() -> None:
+    episode = _episode("NQ", "timeout", "long", 0)
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    taught = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "valid_actions": flat_actions,
+                "next_valid_actions": () if item.terminated else flat_actions,
+                "teacher_target": np.full(22, 0.1, np.float32),
+                "entry_action_target": Action.WAIT,
+                "regime_selectivity_headroom_fraction": 0.1 + index * 0.1,
+            })
+            for index, item in enumerate(episode.transitions)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=23,
+    )
+
+    replay.add(taught)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=23,
+    )
+    restored.load_state_dict(replay.state_dict())
+    sampled = restored.sample(1)[0]
+
+    assert tuple(
+        item.regime_selectivity_headroom_fraction for item in sampled
+    ) == pytest.approx((0.1, 0.2, 0.3, 0.4, 0.5, 0.6))
+
+
+def test_replay_rejects_stale_v3_checkpoint_schema() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=2,
         sequence_length=6,
@@ -300,7 +345,7 @@ def test_replay_rejects_legacy_checkpoint_without_entry_action_contract() -> Non
     )
     replay.add(_episode("NQ", "pass", "long", 0))
     state = replay.state_dict()
-    state["schema_version"] = 2
+    state["schema_version"] = 3
 
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -428,3 +473,182 @@ def test_replay_marks_only_demonstrated_pass_episodes_as_competence() -> None:
     }
 
     assert competence_by_origin == {0: True, 100: False}
+
+
+def test_replay_preserves_short_recovery_trace_with_explicit_invalid_padding() -> None:
+    original = _episode("NQ", "recovery_success", "long", 0)
+    short = Episode(
+        episode_id="NQ-recovery-short",
+        ticker="NQ",
+        outcome="recovery_success",
+        primary_side="long",
+        ended_at_ns=2,
+        transitions=original.transitions[:1] + (
+            Transition(**{
+                **original.transitions[1].__dict__,
+                "terminated": True,
+                "next_valid_actions": (),
+            }),
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=53,
+    )
+
+    replay.add(short)
+    sequence = replay.sample(1)[0]
+
+    assert len(sequence) == 96
+    assert [index for index, row in enumerate(sequence) if row.training_valid] == [64, 65]
+    assert sequence[64].recurrent_reset is True
+    assert sequence[63].next_recurrent_reset is True
+    assert [row.reward for row in sequence if row.training_valid] == [0.0, 1.0]
+    assert sum(row.terminated for row in sequence if row.training_valid) == 1
+    assert all(not row.competence_anchor for row in sequence if not row.training_valid)
+
+
+def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() -> None:
+    original = _episode("NQ", "recovery_success", "long", 0)
+    short = Episode(
+        episode_id="NQ-recovery-short",
+        ticker="NQ",
+        outcome="recovery_success",
+        primary_side="long",
+        ended_at_ns=2,
+        transitions=original.transitions[:2],
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=59,
+    )
+    replay.add(short)
+    state = replay.state_dict()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=999,
+    )
+
+    assert state["schema_version"] == 5
+    restored.load_state_dict(state)
+    expected = replay.sample(1)[0]
+    actual = restored.sample(1)[0]
+    assert [row.training_valid for row in actual] == [
+        row.training_valid for row in expected
+    ]
+    assert [row.action for row in actual] == [row.action for row in expected]
+    np.testing.assert_array_equal(
+        [row.observation for row in actual],
+        [row.observation for row in expected],
+    )
+
+    state["schema_version"] = 4
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        restored.load_state_dict(state)
+
+
+def test_short_recovery_entry_and_terminal_strata_keep_both_boundaries_learnable() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    management_actions = (Action.HOLD, Action.CLOSE)
+    transitions = []
+    for index in range(71):
+        entered = index == 5
+        terminal = index == 70
+        transitions.append(Transition(
+            observation=np.array([float(index)], np.float32),
+            action=(
+                Action.ENTER_LONG_1 if entered
+                else Action.CLOSE if terminal
+                else Action.WAIT if index < 5
+                else Action.HOLD
+            ),
+            reward=1.0 if terminal else 0.0,
+            next_observation=np.array([float(index + 1)], np.float32),
+            terminated=terminal,
+            valid_actions=flat_actions if index <= 5 else management_actions,
+            next_valid_actions=(
+                () if terminal
+                else management_actions if index >= 5
+                else flat_actions
+            ),
+            entry_action_target=Action.ENTER_LONG_1 if entered else None,
+            entry_opportunity_priority=1.0 if entered else 0.0,
+        ))
+    episode = Episode(
+        episode_id="NQ-recovery-71",
+        ticker="NQ",
+        outcome="recovery_success",
+        primary_side="long",
+        ended_at_ns=71,
+        transitions=tuple(transitions),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        terminal_sequence_fraction=0.5,
+        entry_opportunity_sequence_fraction=0.5,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=61,
+    )
+    replay.add(episode)
+
+    sampled = replay.sample(2)
+    entry_sequence = next(
+        sequence
+        for sequence in sampled
+        if any(
+            index >= 64
+            and row.entry_action_target == Action.ENTER_LONG_1
+            for index, row in enumerate(sequence)
+        )
+    )
+    terminal_sequence = next(
+        sequence for sequence in sampled if any(row.terminated for row in sequence)
+    )
+    entry_index = next(
+        index
+        for index, row in enumerate(entry_sequence)
+        if row.entry_action_target == Action.ENTER_LONG_1
+    )
+    terminal_index = next(
+        index for index, row in enumerate(terminal_sequence) if row.terminated
+    )
+
+    assert entry_index == 64
+    learning_indices = range(64, 96 - 8 + 1)
+    assert terminal_index == 88
+    assert entry_index in learning_indices
+    assert terminal_index in learning_indices
+    assert entry_sequence[entry_index].training_valid is True
+    assert terminal_sequence[terminal_index].training_valid is True
+    first_real_index = entry_index - 5
+    assert entry_sequence[first_real_index].recurrent_reset is True
+    assert entry_sequence[first_real_index - 1].next_recurrent_reset is True
+    np.testing.assert_array_equal(
+        entry_sequence[first_real_index - 1].next_observation,
+        entry_sequence[first_real_index].observation,
+    )
+    assert all(
+        not row.terminated
+        for row in entry_sequence
+        if not row.training_valid
+    )
+    assert all(
+        not row.terminated
+        for row in terminal_sequence
+        if not row.training_valid
+    )

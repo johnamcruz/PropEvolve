@@ -14,7 +14,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -25,8 +25,13 @@ from .config import (
     agent_runtime_settings,
     configure_runtime_environment,
 )
-from .decision import Action
-from .environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
+from .decision import Action, PositionSide, RecoveryEntryPermit
+from .environment import (
+    ChallengeSpec,
+    ChallengeStartState,
+    HistoricalChallengeEnv,
+    MarketSeries,
+)
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
@@ -42,6 +47,23 @@ if TYPE_CHECKING:
 
 
 _ENTRY_ACTION_ORDER = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
+_REGIME_SELECTIVITY_STRATA = (
+    "positive_long_short",
+    "positive_long",
+    "positive_short",
+    "dominant_chop",
+    "nonchop",
+    "low_headroom_le_0_25",
+    "safe_headroom_ge_0_75",
+)
+_REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
+    "rows",
+    "target_wait_probability_sum",
+    "model_wait_probability_sum",
+    "greedy_wait_rows",
+    "declared_side_probability_sum",
+    "greedy_entry_rows",
+)
 
 
 def _entry_action_balance(
@@ -88,6 +110,185 @@ def _assert_recovery_entry_balance(
     )
     if agent.entry_action_class_weights != expected:
         raise ValueError("training recovery entry balance drifted")
+
+
+def _regime_selectivity_agent_settings(
+    specification: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Project one validated Stage 2A recipe onto the learner interface."""
+    if specification is None:
+        return {}
+    return {
+        "regime_selectivity_loss_weight": float(specification["loss_weight"]),
+        "regime_selectivity_expansion_centers": (
+            float(specification["expansion_long_center"]),
+            float(specification["expansion_short_center"]),
+        ),
+        "regime_selectivity_probability_epsilon": float(
+            specification["probability_epsilon"]
+        ),
+        "regime_selectivity_headroom_pressure": float(
+            specification["headroom_pressure"]
+        ),
+        "regime_selectivity_dominant_chop_pressure": float(
+            specification["dominant_chop_pressure"]
+        ),
+        "regime_selectivity_q_temperature": float(
+            specification["q_temperature"]
+        ),
+    }
+
+
+def _bounded_regime_selectivity_headroom(value: object) -> float:
+    """Map finite account headroom onto the selectivity pressure domain."""
+    headroom = float(value)
+    if not np.isfinite(headroom) or headroom < 0.0:
+        raise ValueError("decision-time MLL headroom fraction is invalid")
+    return min(headroom, 1.0)
+
+
+def _regime_selectivity_frozen_contract(
+    specification: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Archive the complete validated training-only Stage 2A identity."""
+    if specification is None:
+        return None
+    if specification.get("training_only") is not True:
+        raise ValueError("Regime selectivity must remain training-only")
+    return _plain_contract_value(specification)
+
+
+def _regime_selectivity_episode_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, dict[str, float | int]]:
+    """Reduce optimizer updates by additive row statistics, never mean-of-means."""
+    result: dict[str, dict[str, float | int]] = {}
+    for stratum in _REGIME_SELECTIVITY_STRATA:
+        prefix = f"regime_selectivity_{stratum}_"
+        additive = {
+            field: float(sum(update_metrics.get(prefix + field, ())))
+            for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS
+        }
+        rows = int(round(additive["rows"]))
+        result[stratum] = {
+            "rows": rows,
+            "target_wait_probability_sum": additive[
+                "target_wait_probability_sum"
+            ],
+            "target_wait_probability_mean": (
+                additive["target_wait_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "model_wait_probability_sum": additive[
+                "model_wait_probability_sum"
+            ],
+            "model_wait_probability_mean": (
+                additive["model_wait_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "greedy_wait_rows": int(round(additive["greedy_wait_rows"])),
+            "greedy_wait_rate": (
+                additive["greedy_wait_rows"] / rows if rows else 0.0
+            ),
+            "declared_side_probability_sum": additive[
+                "declared_side_probability_sum"
+            ],
+            "declared_side_probability_mean": (
+                additive["declared_side_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "greedy_entry_rows": int(round(additive["greedy_entry_rows"])),
+            "greedy_entry_rate": (
+                additive["greedy_entry_rows"] / rows if rows else 0.0
+            ),
+        }
+    return result
+
+
+def _regime_selectivity_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float | int]]:
+    """Aggregate episode diagnostics by exact sampled positive-row counts."""
+    update_metrics: dict[str, list[float]] = {
+        f"regime_selectivity_{stratum}_{field}": []
+        for stratum in _REGIME_SELECTIVITY_STRATA
+        for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS
+    }
+    for row in rows:
+        diagnostics = row.get("regime_selectivity")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for stratum in _REGIME_SELECTIVITY_STRATA:
+            values = diagnostics.get(stratum)
+            values = values if isinstance(values, Mapping) else {}
+            for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS:
+                update_metrics[
+                    f"regime_selectivity_{stratum}_{field}"
+                ].append(float(values.get(field, 0.0) or 0.0))
+    return _regime_selectivity_episode_diagnostic(update_metrics)
+
+
+def _regime_selectivity_evaluation_metrics(
+    diagnostics: Mapping[str, Mapping[str, float | int]],
+) -> dict[str, float]:
+    """Expose row evidence and mechanism deltas to campaign selection gates."""
+    metrics = {
+        f"regime_selectivity_{stratum}_{field}": float(
+            diagnostics.get(stratum, {}).get(field, 0.0)
+        )
+        for stratum in _REGIME_SELECTIVITY_STRATA
+        for field in (
+            "rows",
+            "target_wait_probability_mean",
+            "model_wait_probability_mean",
+            "greedy_wait_rate",
+            "declared_side_probability_sum",
+            "declared_side_probability_mean",
+            "greedy_entry_rows",
+            "greedy_entry_rate",
+        )
+    }
+    metrics["regime_selectivity_chop_minus_nonchop_target_wait"] = (
+        metrics[
+            "regime_selectivity_dominant_chop_target_wait_probability_mean"
+        ]
+        - metrics[
+            "regime_selectivity_nonchop_target_wait_probability_mean"
+        ]
+    )
+    metrics["regime_selectivity_low_minus_safe_target_wait"] = (
+        metrics[
+            "regime_selectivity_low_headroom_le_0_25_"
+            "target_wait_probability_mean"
+        ]
+        - metrics[
+            "regime_selectivity_safe_headroom_ge_0_75_"
+            "target_wait_probability_mean"
+        ]
+    )
+    return metrics
+
+
+def _training_evaluation_gates(
+    *, regime_selectivity_active: bool,
+) -> tuple[EvaluationGate, ...]:
+    gates = [EvaluationGate("short_circuited", "==", 0.0)]
+    if regime_selectivity_active:
+        gates.extend(
+            EvaluationGate(metric, ">", 0.0)
+            for metric in (
+                "regime_selectivity_positive_long_rows",
+                "regime_selectivity_positive_short_rows",
+                "regime_selectivity_dominant_chop_rows",
+                "regime_selectivity_nonchop_rows",
+                "regime_selectivity_low_headroom_le_0_25_rows",
+                "regime_selectivity_safe_headroom_ge_0_75_rows",
+                "regime_selectivity_positive_long_declared_side_probability_sum",
+                "regime_selectivity_positive_short_declared_side_probability_sum",
+                "regime_selectivity_chop_minus_nonchop_target_wait",
+                "regime_selectivity_low_minus_safe_target_wait",
+            )
+        )
+    return tuple(gates)
 
 
 @dataclass(frozen=True)
@@ -191,6 +392,18 @@ class TrainingResult:
     entry_advantage_probe_count: int = 0
     short_circuited: bool = False
     short_circuit_reason: str | None = None
+    recovery_episodes: int = 0
+    recovery_successes: int = 0
+    recovery_survived_not_recovered: int = 0
+    recovery_wait_timeouts: int = 0
+    recovery_blows: int = 0
+
+    @property
+    def recovery_success_rate(self) -> float:
+        return (
+            self.recovery_successes / self.recovery_episodes
+            if self.recovery_episodes else 0.0
+        )
 
     @property
     def trade_win_rate(self) -> float:
@@ -275,6 +488,154 @@ class TrainingResult:
         raise KeyError(f"outcome statistics are unavailable for {name}")
 
 
+@dataclass(frozen=True)
+class RecoveryCurriculumSettings:
+    """Frozen Stage-2 schedule and complete one-shot recovery account state."""
+
+    episode_fraction: float
+    schedule_seed: int
+    start_state: ChallengeStartState
+
+    def __post_init__(self) -> None:
+        permit = self.start_state.recovery_entry_permit
+        if (
+            isinstance(self.episode_fraction, bool)
+            or not np.isfinite(self.episode_fraction)
+            or not 0.0 <= self.episode_fraction <= 1.0
+        ):
+            raise ValueError("recovery episode fraction must be between zero and one")
+        if isinstance(self.schedule_seed, bool) or not isinstance(
+            self.schedule_seed, int
+        ):
+            raise ValueError("recovery schedule seed must be an integer")
+        if not (
+            math.isclose(self.start_state.realized_pnl, -2_700.0)
+            and math.isclose(self.start_state.equity_pnl, -2_700.0)
+            and math.isclose(self.start_state.peak_equity_pnl, 0.0)
+            and math.isclose(self.start_state.mll_floor_pnl, -3_000.0)
+            and math.isclose(self.start_state.session_pnl, -2_700.0)
+            and permit.remaining_entries == 1
+            and math.isclose(permit.exception_headroom, 300.0)
+            and math.isclose(permit.success_pnl, -2_500.0)
+        ):
+            raise ValueError("Stage-2 recovery start contract drifted")
+
+
+@dataclass(frozen=True)
+class RecoveryStressResult:
+    episodes: int
+    recovery_successes: int
+    survived_not_recovered: int
+    wait_timeouts: int
+    blows: int
+    mean_terminal_pnl: float
+    mean_wait_decisions: float
+    entries_used: int
+    one_entry_violations: int
+    environment_steps: int
+
+    @property
+    def recovery_success_rate(self) -> float:
+        return self.recovery_successes / self.episodes
+
+    @property
+    def blow_rate(self) -> float:
+        return self.blows / self.episodes
+
+
+def _recovery_curriculum_from_config(
+    value: Mapping[str, object] | None,
+) -> tuple[RecoveryCurriculumSettings | None, int]:
+    if value is None:
+        return None, 0
+    required = {
+        "episode_fraction",
+        "schedule_seed",
+        "start_state",
+        "entry_permit",
+        "stress_evaluation_episodes",
+    }
+    if set(value) != required:
+        raise ValueError("recovery curriculum fields are invalid")
+    start = value["start_state"]
+    if not isinstance(start, Mapping):
+        raise ValueError("recovery curriculum start state is invalid")
+    start_required = {
+        "realized_pnl",
+        "equity_pnl",
+        "peak_equity_pnl",
+        "mll_floor_pnl",
+        "passmark_locked",
+        "position_side",
+        "position_size",
+        "session_pnl",
+        "trading_days_elapsed",
+    }
+    if set(start) != start_required:
+        raise ValueError("recovery curriculum start-state fields are invalid")
+    permit = value["entry_permit"]
+    if not isinstance(permit, Mapping) or set(permit) != {
+        "remaining_entries",
+        "exception_headroom",
+        "success_pnl",
+    }:
+        raise ValueError("recovery curriculum entry permit is invalid")
+    integer_fields = (
+        value["schedule_seed"],
+        start["position_side"],
+        start["position_size"],
+        start["trading_days_elapsed"],
+        permit["remaining_entries"],
+        value["stress_evaluation_episodes"],
+    )
+    numeric_fields = (
+        value["episode_fraction"],
+        start["realized_pnl"],
+        start["equity_pnl"],
+        start["peak_equity_pnl"],
+        start["mll_floor_pnl"],
+        start["session_pnl"],
+        permit["exception_headroom"],
+        permit["success_pnl"],
+    )
+    if (
+        any(
+            isinstance(item, bool) or not isinstance(item, int)
+            for item in integer_fields
+        )
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in numeric_fields
+        )
+        or not isinstance(start["passmark_locked"], bool)
+    ):
+        raise ValueError("recovery curriculum scalar types are invalid")
+    settings = RecoveryCurriculumSettings(
+        episode_fraction=float(value["episode_fraction"]),
+        schedule_seed=int(value["schedule_seed"]),
+        start_state=ChallengeStartState(
+            realized_pnl=float(start["realized_pnl"]),
+            equity_pnl=float(start["equity_pnl"]),
+            peak_equity_pnl=float(start["peak_equity_pnl"]),
+            mll_floor_pnl=float(start["mll_floor_pnl"]),
+            passmark_locked=bool(start["passmark_locked"]),
+            position_side=PositionSide(int(start["position_side"])),
+            position_size=int(start["position_size"]),
+            session_pnl=float(start["session_pnl"]),
+            trading_days_elapsed=int(start["trading_days_elapsed"]),
+            recovery_entry_permit=RecoveryEntryPermit(
+                remaining_entries=int(permit["remaining_entries"]),
+                exception_headroom=float(permit["exception_headroom"]),
+                success_pnl=float(permit["success_pnl"]),
+            ),
+        ),
+    )
+    stress_episodes = int(value["stress_evaluation_episodes"])
+    if stress_episodes < 0:
+        raise ValueError("recovery stress episode budget is invalid")
+    return settings, stress_episodes
+
+
 def _outcome_metric_values(result: TrainingResult) -> dict[str, float]:
     metrics = {}
     for statistics in result.outcome_statistics:
@@ -328,6 +689,11 @@ class TrainingProgress:
     recent_average_hold_bars: tuple[float, ...] = ()
     recent_voluntary_close_rates: tuple[float, ...] = ()
     short_circuit_reason: str | None = None
+    recovery_episodes: int = 0
+    recovery_successes: int = 0
+    recovery_survived_not_recovered: int = 0
+    recovery_wait_timeouts: int = 0
+    recovery_blows: int = 0
 
     def result(self) -> TrainingResult:
         if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
@@ -362,6 +728,13 @@ class TrainingProgress:
             near_blow_timeout_count=self.near_blow_timeout_count,
             short_circuited=self.short_circuit_reason is not None,
             short_circuit_reason=self.short_circuit_reason,
+            recovery_episodes=self.recovery_episodes,
+            recovery_successes=self.recovery_successes,
+            recovery_survived_not_recovered=(
+                self.recovery_survived_not_recovered
+            ),
+            recovery_wait_timeouts=self.recovery_wait_timeouts,
+            recovery_blows=self.recovery_blows,
         )
 
 
@@ -512,6 +885,35 @@ class HistoricalCandidateRunner:
         )
         if teacher_targets is not None:
             agent_settings.update(agent_teacher_settings(teacher_specs))
+        regime_selectivity_spec = config.get("regime_selectivity")
+        if regime_selectivity_spec is not None:
+            from .teachers.expansion import verify_expansion_entry_center_receipt
+
+            expansion_spec = next(
+                item for item in teacher_specs if item["kind"] == "expansion"
+            )
+            verify_expansion_entry_center_receipt(
+                {
+                    **expansion_spec,
+                    "entry_search_center_receipt": regime_selectivity_spec[
+                        "expansion_center_receipt"
+                    ],
+                    "entry_search_center_receipt_sha256": regime_selectivity_spec[
+                        "expansion_center_receipt_sha256"
+                    ],
+                    "entry_search_long_center": regime_selectivity_spec[
+                        "expansion_long_center"
+                    ],
+                    "entry_search_short_center": regime_selectivity_spec[
+                        "expansion_short_center"
+                    ],
+                },
+                root=root,
+                expected_tickers=tuple(config["tickers"]),
+            )
+            agent_settings.update(
+                _regime_selectivity_agent_settings(regime_selectivity_spec)
+            )
         if entry_supervision_spec is not None:
             agent_settings["entry_action_loss_weight"] = float(
                 entry_supervision_spec["loss_weight"]
@@ -576,6 +978,9 @@ class HistoricalCandidateRunner:
                 ):
                     raise ValueError("warm-start causal contract drifted")
         training_config = config["training"]
+        recovery_curriculum, recovery_stress_episodes = (
+            _recovery_curriculum_from_config(config.get("recovery_curriculum"))
+        )
         replay = BalancedSequenceReplay(
             capacity_episodes=int(training_config["replay_capacity_episodes"]),
             capacity_transitions=int(
@@ -591,6 +996,8 @@ class HistoricalCandidateRunner:
             entry_opportunity_sequence_fraction=float(
                 training_config.get("entry_opportunity_sequence_fraction", 0.0)
             ),
+            recurrent_burn_in=int(agent.recurrent_burn_in),
+            n_step_return=int(agent.n_step_return),
             seed=seed,
         )
         if replay_state is not None:
@@ -710,11 +1117,14 @@ class HistoricalCandidateRunner:
                 diagnostics_path, payload
             ),
             near_blow_loss_threshold=near_blow_loss_threshold,
+            recovery_curriculum=recovery_curriculum,
         )
+        diagnostic_summary_path = output / "training-diagnostic-summary.json"
         _write_training_diagnostic_summary(
             diagnostics_path,
-            output / "training-diagnostic-summary.json",
+            diagnostic_summary_path,
         )
+        diagnostic_summary = json.loads(diagnostic_summary_path.read_text())
         retained_policy_restored = False
         if training.short_circuited and retained_policy_path.is_file():
             retained_agent, retention_manifest = RecurrentC51Agent.load(
@@ -728,6 +1138,7 @@ class HistoricalCandidateRunner:
         agent.discard_retention_anchor()
         agent.discard_teacher()
         validation = None
+        recovery_stress = None
         if not training.short_circuited:
             validation = evaluate_agent(
                 agent,
@@ -747,6 +1158,16 @@ class HistoricalCandidateRunner:
                     training_config.get("greedy_diagnostic_interval_steps", 256)
                 ),
             )
+            if recovery_stress_episodes:
+                assert recovery_curriculum is not None
+                recovery_stress = evaluate_recovery_stress(
+                    agent,
+                    validation_environment,
+                    episodes=recovery_stress_episodes,
+                    recurrent_horizon=int(training_config["recurrent_horizon"]),
+                    settings=recovery_curriculum,
+                    episode_tickers=tuple(config["deployment_tickers"]),
+                )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
             "checkpoint_sha256": assets.checkpoint_sha256,
@@ -757,6 +1178,10 @@ class HistoricalCandidateRunner:
                 for ticker in sorted(set(config["tickers"]))
             },
             "experiment_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+            "training_resume_identity": resume_identity,
+            "runtime_source_modules_sha256": (
+                _runtime_source_modules_sha256(config)
+            ),
             "training_tickers": list(config["tickers"]),
             "deployment_tickers": list(config["deployment_tickers"]),
             "training_only_tickers": list(config["training_only_tickers"]),
@@ -794,6 +1219,12 @@ class HistoricalCandidateRunner:
             "entry_supervision": _entry_supervision_frozen_contract(
                 entry_action_targets,
                 entry_action_balance_receipt,
+            ),
+            "regime_selectivity": _regime_selectivity_frozen_contract(
+                regime_selectivity_spec
+            ),
+            "recovery_curriculum": _plain_contract_value(
+                config.get("recovery_curriculum")
             ),
             "retained_pass_policy_restored": retained_policy_restored,
         }
@@ -844,11 +1275,23 @@ class HistoricalCandidateRunner:
                     training.near_blow_timeout_count
                 ),
                 "near_blow_timeout_rate": training.near_blow_timeout_rate,
+                "recovery_episodes": float(training.recovery_episodes),
+                "recovery_successes": float(training.recovery_successes),
+                "recovery_success_rate": training.recovery_success_rate,
+                "recovery_survived_not_recovered": float(
+                    training.recovery_survived_not_recovered
+                ),
+                "recovery_wait_timeouts": float(training.recovery_wait_timeouts),
+                "recovery_blows": float(training.recovery_blows),
                 "short_circuited": float(training.short_circuited),
                 "retained_pass_policy_restored": float(
                     retained_policy_restored
                 ),
             }
+            if regime_selectivity_spec is not None:
+                metrics.update(_regime_selectivity_evaluation_metrics(
+                    diagnostic_summary["overall"]["regime_selectivity"]
+                ))
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
             return metrics
@@ -908,6 +1351,56 @@ class HistoricalCandidateRunner:
             metrics.update(_outcome_metric_values(validation))
             return metrics
 
+        def recovery_stress_metrics(_candidate):
+            assert recovery_stress is not None
+            return {
+                "episodes": float(recovery_stress.episodes),
+                "recovery_successes": float(recovery_stress.recovery_successes),
+                "recovery_success_rate": recovery_stress.recovery_success_rate,
+                "survived_not_recovered": float(
+                    recovery_stress.survived_not_recovered
+                ),
+                "survived_not_recovered_rate": (
+                    recovery_stress.survived_not_recovered
+                    / recovery_stress.episodes
+                ),
+                "wait_timeouts": float(recovery_stress.wait_timeouts),
+                "wait_timeout_rate": (
+                    recovery_stress.wait_timeouts / recovery_stress.episodes
+                ),
+                "blows": float(recovery_stress.blows),
+                "blow_rate": recovery_stress.blow_rate,
+                "mean_terminal_pnl": recovery_stress.mean_terminal_pnl,
+                "mean_wait_decisions": recovery_stress.mean_wait_decisions,
+                "entries_used": float(recovery_stress.entries_used),
+                "one_entry_violations": float(
+                    recovery_stress.one_entry_violations
+                ),
+                "environment_steps": float(recovery_stress.environment_steps),
+            }
+
+        stages = [
+            EvaluationStage(
+                "training",
+                training_metrics,
+                gates=_training_evaluation_gates(
+                    regime_selectivity_active=(
+                        regime_selectivity_spec is not None
+                    )
+                ),
+            ),
+            EvaluationStage(
+                "selection",
+                selection_metrics,
+                gates=_selection_evaluation_gates(),
+            ),
+        ]
+        if recovery_stress is not None:
+            stages.append(EvaluationStage(
+                "recovery_stress",
+                recovery_stress_metrics,
+                gates=_recovery_stress_integrity_gates(),
+            ))
         cascade = EvaluatorCascade(
             archive,
             {
@@ -919,18 +1412,7 @@ class HistoricalCandidateRunner:
                 "sealed_holdout_touched": False,
                 "decision_rule": "selection pass rate must exceed blow rate",
             },
-            (
-                EvaluationStage(
-                    "training",
-                    training_metrics,
-                    gates=(EvaluationGate("short_circuited", "==", 0.0),),
-                ),
-                EvaluationStage(
-                    "selection",
-                    selection_metrics,
-                    gates=_selection_evaluation_gates(),
-                ),
-            ),
+            tuple(stages),
         )
         return candidate, cascade.evaluate(candidate.candidate_id)
 
@@ -941,6 +1423,11 @@ def _selection_evaluation_gates() -> tuple[EvaluationGate, ...]:
         EvaluationGate("short_circuited", "==", 0.0),
         EvaluationGate("pass_minus_blow", ">", 0.0),
     )
+
+
+def _recovery_stress_integrity_gates() -> tuple[EvaluationGate, ...]:
+    """Gate evaluator integrity; campaign requirements own economic acceptance."""
+    return (EvaluationGate("one_entry_violations", "==", 0.0),)
 
 
 def _training_resume_identity(
@@ -977,11 +1464,23 @@ def _training_resume_identity(
                     / "manifest.json"
                 ).read_bytes()
             )
-    for module in (Path(__file__), Path(__file__).with_name("agent.py"), Path(__file__).with_name("replay.py"), Path(__file__).with_name("environment.py")):
-        digest.update(module.read_bytes())
-    if config.get("entry_supervision") is not None:
-        digest.update(Path(__file__).with_name("entry_supervision.py").read_bytes())
+    source_identity = _runtime_source_modules_sha256(config)
+    digest.update(json.dumps(
+        source_identity, sort_keys=True, separators=(",", ":")
+    ).encode())
     return digest.hexdigest()
+
+
+def _runtime_source_modules_sha256(config: Mapping) -> dict[str, str]:
+    """Content-address the complete package source used by a candidate run."""
+    del config  # The whole package is deliberately bound, not a conditional subset.
+    package_root = Path(__file__).parent
+    return {
+        module.relative_to(package_root).as_posix(): hashlib.sha256(
+            module.read_bytes()
+        ).hexdigest()
+        for module in sorted(package_root.rglob("*.py"))
+    }
 
 
 def _save_training_recovery(
@@ -1268,6 +1767,7 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
                 Action.ENTER_SHORT_1,
             )
         },
+        "regime_selectivity": _regime_selectivity_summary(rows),
     }
     timeouts = int(result["timeouts"])
     result["near_blow_timeout_rate"] = (
@@ -1455,9 +1955,15 @@ def train_agent(
     collapse_maximum_recent_passes: int = 0,
     collapse_maximum_average_hold_bars: float = math.inf,
     collapse_minimum_voluntary_close_rate: float = 1.0,
+    recovery_curriculum: RecoveryCurriculumSettings | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
+    if (
+        replay.recurrent_burn_in != int(getattr(agent, "recurrent_burn_in", 0))
+        or replay.n_step_return != int(getattr(agent, "n_step_return", 1))
+    ):
+        raise ValueError("replay recurrent learning contract drifted from the agent")
     if (
         isinstance(greedy_diagnostic_interval_steps, bool)
         or greedy_diagnostic_interval_steps < 1
@@ -1531,6 +2037,10 @@ def train_agent(
         episodes=episodes,
         seed=ticker_seed,
     )
+    recovery_schedule = _recovery_episode_schedule(
+        recovery_curriculum,
+        episodes=episodes,
+    )
     if checkpoint_every_episodes < 0:
         raise ValueError("checkpoint interval cannot be negative")
     if checkpoint_every_episodes and checkpoint_callback is None:
@@ -1543,11 +2053,18 @@ def train_agent(
     if progress.short_circuit_reason is not None:
         return progress.result()
     for episode_index in range(progress.completed_episodes, episodes):
-        if ticker_schedule is None:
+        recovery_episode = recovery_schedule[episode_index]
+        reset_options = {}
+        if ticker_schedule is not None:
+            reset_options["ticker"] = ticker_schedule[episode_index]
+        if recovery_episode:
+            assert recovery_curriculum is not None
+            reset_options["challenge_start_state"] = recovery_curriculum.start_state
+        if not reset_options:
             observation, reset_info = environment.reset()
         else:
             observation, reset_info = environment.reset(
-                options={"ticker": ticker_schedule[episode_index]}
+                options=reset_options
             )
         valid = tuple(reset_info["valid_actions"])
         decision_index = int(reset_info.get("start", 0))
@@ -1565,6 +2082,7 @@ def train_agent(
             Action.ENTER_LONG_1: 0,
             Action.ENTER_SHORT_1: 0,
         }
+        recovery_entries_used = 0
         total_reward = 0.0
         # Decay exploration against actual market interaction, not the
         # emergency episode ceiling. Early pass/blow episodes vary greatly in
@@ -1625,6 +2143,9 @@ def train_agent(
                     ) - values[int(Action.WAIT)]
                 )
             next_observation, reward, terminated, _, info = environment.step(action)
+            recovery_entries_used += int(info.get("recovery_entry_used", False))
+            if recovery_episode and recovery_entries_used > 1:
+                raise ValueError("recovery episode violated its one-entry contract")
             next_valid = tuple(info["valid_actions"])
             decision_progress = min(
                 1.0,
@@ -1664,6 +2185,30 @@ def train_agent(
                 )
                 else None
             )
+            regime_selectivity_headroom_fraction = None
+            if (
+                float(
+                    getattr(agent, "regime_selectivity_loss_weight", 0.0)
+                )
+                > 0.0
+                and teacher_target is not None
+                and entry_action_target is not None
+                and teacher_weight_scale > 0.0
+                and flat_actions.issubset(valid)
+            ):
+                if "mll_headroom_fraction" not in terminal_info:
+                    raise ValueError(
+                        "balance-aware Regime selectivity requires "
+                        "decision-time MLL headroom"
+                    )
+                # Profits can move account headroom above one full MLL budget.
+                # Selectivity pressure is already defined on [0, 1], so retain
+                # the exact zero-risk meaning without rejecting valid episodes.
+                regime_selectivity_headroom_fraction = (
+                    _bounded_regime_selectivity_headroom(
+                        terminal_info["mll_headroom_fraction"]
+                    )
+                )
             if entry_action_target is not None:
                 entry_action_target = Action(entry_action_target)
                 if entry_action_target not in entry_action_target_counts:
@@ -1715,6 +2260,9 @@ def train_agent(
                 ),
                 teacher_target=teacher_target,
                 entry_action_target=entry_action_target,
+                regime_selectivity_headroom_fraction=(
+                    regime_selectivity_headroom_fraction
+                ),
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
                 ),
@@ -1740,8 +2288,27 @@ def train_agent(
             teacher_loss_end_scale - 1.0
         ) * teacher_schedule_progress
         outcome = str(terminal_info["outcome"])
-        if outcome not in {"pass", "blow", "timeout"}:
+        ordinary_outcomes = {"pass", "blow", "timeout"}
+        recovery_outcomes = {
+            "pass",
+            "recovery_success",
+            "survived_not_recovered",
+            "wait_timeout",
+            "blow",
+        }
+        expected_outcomes = recovery_outcomes if recovery_episode else ordinary_outcomes
+        if outcome not in expected_outcomes:
             raise ValueError(f"unknown terminal outcome: {outcome}")
+        recovery_success = bool(
+            recovery_episode
+            and terminal_info.get("recovery_trade_closed", False)
+            and terminal_info.get("recovery_success", False)
+            and outcome in {"pass", "recovery_success"}
+        )
+        if recovery_episode and outcome == "pass" and not recovery_success:
+            raise ValueError(
+                "recovery pass did not close its one permitted successful trade"
+            )
         terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
         if outcome == "pass" and retention_checkpoint_callback is not None:
             # Preserve the exact policy that produced the pass before replay
@@ -1761,15 +2328,14 @@ def train_agent(
             and near_blow_loss_threshold is not None
             and terminal_pnl <= -near_blow_loss_threshold
         )
-        if len(transitions) >= replay.sequence_length:
-            replay.add(Episode(
-                episode_id=f"historical-{episode_index}-{time.time_ns()}",
-                ticker=str(terminal_info["ticker"]),
-                outcome=outcome,
-                primary_side=str(terminal_info["primary_side"]),
-                ended_at_ns=time.time_ns(),
-                transitions=tuple(transitions),
-            ))
+        replay.add(Episode(
+            episode_id=f"historical-{episode_index}-{time.time_ns()}",
+            ticker=str(terminal_info["ticker"]),
+            outcome=outcome,
+            primary_side=str(terminal_info["primary_side"]),
+            ended_at_ns=time.time_ns(),
+            transitions=tuple(transitions),
+        ))
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
@@ -1802,6 +2368,18 @@ def train_agent(
                 "entry_action_correct_wait_rows",
                 "entry_action_correct_long_rows",
                 "entry_action_correct_short_rows",
+                "regime_selectivity_loss",
+                "regime_selectivity_supervised_rows",
+                "regime_selectivity_target_wait_mean",
+                "regime_selectivity_low_headroom_rows",
+                "regime_selectivity_low_headroom_wait_mean",
+                "regime_selectivity_dominant_chop_rows",
+                "regime_selectivity_dominant_chop_wait_mean",
+                *(
+                    f"regime_selectivity_{stratum}_{field}"
+                    for stratum in _REGIME_SELECTIVITY_STRATA
+                    for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS
+                ),
             )
         }
         if len(replay) >= warmup_episodes:
@@ -1851,10 +2429,14 @@ def train_agent(
                 for _ in range(updates_per_episode):
                     train_replay_batch(replay.sample(batch_sequences))
         trade_count = int(terminal_info.get("trade_count", 0))
-        recent_outcomes = ()
-        recent_hold_bars = ()
-        recent_close_rates = ()
-        if collapse_window_episodes:
+        recent_outcomes = progress.recent_outcomes if collapse_window_episodes else ()
+        recent_hold_bars = (
+            progress.recent_average_hold_bars if collapse_window_episodes else ()
+        )
+        recent_close_rates = (
+            progress.recent_voluntary_close_rates if collapse_window_episodes else ()
+        )
+        if collapse_window_episodes and not recovery_episode:
             recent_outcomes = (
                 *tuple(progress.recent_outcomes),
                 outcome,
@@ -1949,6 +2531,25 @@ def train_agent(
             recent_outcomes=recent_outcomes,
             recent_average_hold_bars=recent_hold_bars,
             recent_voluntary_close_rates=recent_close_rates,
+            recovery_episodes=(
+                progress.recovery_episodes + int(recovery_episode)
+            ),
+            recovery_successes=(
+                progress.recovery_successes
+                + int(recovery_success)
+            ),
+            recovery_survived_not_recovered=(
+                progress.recovery_survived_not_recovered
+                + int(recovery_episode and outcome == "survived_not_recovered")
+            ),
+            recovery_wait_timeouts=(
+                progress.recovery_wait_timeouts
+                + int(recovery_episode and outcome == "wait_timeout")
+            ),
+            recovery_blows=(
+                progress.recovery_blows
+                + int(recovery_episode and outcome == "blow")
+            ),
         )
         reasons = []
         if (
@@ -2008,6 +2609,7 @@ def train_agent(
                 "episode": progress.completed_episodes,
                 "ticker": str(terminal_info["ticker"]),
                 "outcome": outcome,
+                "episode_kind": "recovery" if recovery_episode else "ordinary",
                 "reward": total_reward,
                 "environment_steps": progress.environment_steps,
                 "trade_count": int(terminal_info.get("trade_count", 0)),
@@ -2062,6 +2664,20 @@ def train_agent(
                 ),
                 "largest_mfe_trade": terminal_info.get("largest_mfe_trade"),
                 "terminal_pnl": terminal_pnl,
+                "recovery_entry_used": bool(recovery_entries_used),
+                "recovery_entries_used": recovery_entries_used,
+                "recovery_trade_closed": bool(
+                    terminal_info.get("recovery_trade_closed", False)
+                ),
+                "recovery_success": bool(
+                    terminal_info.get("recovery_success", False)
+                ),
+                "recovery_wait_decisions": int(
+                    terminal_info.get("recovery_wait_decisions", 0)
+                ),
+                "recovery_entry_permit_remaining": int(
+                    terminal_info.get("recovery_entry_permit_remaining", 0)
+                ),
                 "near_blow_timeout": near_blow_timeout,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
                 "entry_epsilon": epsilon,
@@ -2146,6 +2762,9 @@ def train_agent(
                         ("ENTER_SHORT_1", "entry_action_prediction_short_rows", "entry_action_correct_short_rows"),
                     )
                 },
+                "regime_selectivity": (
+                    _regime_selectivity_episode_diagnostic(learner_diagnostics)
+                ),
                 **{
                     f"mean_{key}": (
                         float(np.mean(values)) if values else None
@@ -2158,6 +2777,12 @@ def train_agent(
                 "cumulative_pass_rate": progress.passes / progress.completed_episodes,
                 "cumulative_blow_rate": progress.blows / progress.completed_episodes,
                 "cumulative_average_balance": cumulative_average_balance,
+                "cumulative_recovery_episodes": progress.recovery_episodes,
+                "cumulative_recovery_successes": progress.recovery_successes,
+                "cumulative_recovery_success_rate": (
+                    progress.recovery_successes / progress.recovery_episodes
+                    if progress.recovery_episodes else 0.0
+                ),
                 "action_counts": {
                     action.name: action_counts[action] for action in Action
                 },
@@ -2268,6 +2893,26 @@ def _balanced_ticker_schedule(
         random.shuffle(cycle)
         schedule.extend(cycle)
     return tuple(schedule[:episodes])
+
+
+def _recovery_episode_schedule(
+    settings: RecoveryCurriculumSettings | None,
+    *,
+    episodes: int,
+) -> tuple[bool, ...]:
+    """Build one immutable, resume-stable mixed curriculum schedule."""
+    if settings is None or settings.episode_fraction == 0.0:
+        return (False,) * episodes
+    count = min(
+        episodes,
+        int(math.floor(episodes * settings.episode_fraction + 0.5)),
+    )
+    selected = set(
+        np.random.default_rng(settings.schedule_seed)
+        .permutation(episodes)[:count]
+        .tolist()
+    )
+    return tuple(index in selected for index in range(episodes))
 
 
 def evaluate_agent(
@@ -2539,6 +3184,115 @@ def evaluate_agent(
         f"mean_pnl={result.mean_terminal_pnl:+.2f} "
         f"greedy_entry={result.greedy_entry_rate:.1%} "
         f"entry_adv={result.mean_best_entry_advantage:+.4f}",
+        flush=True,
+    )
+    return result
+
+
+def evaluate_recovery_stress(
+    agent: RecurrentC51Agent,
+    environment: HistoricalChallengeEnv,
+    *,
+    episodes: int,
+    recurrent_horizon: int,
+    settings: RecoveryCurriculumSettings,
+    episode_tickers: tuple[str, ...] | None = None,
+) -> RecoveryStressResult:
+    """Run a greedy, teacher-free one-shot recovery stress evaluation."""
+    if episodes < 1 or recurrent_horizon < 1:
+        raise ValueError("recovery stress budget must be positive")
+    ticker_schedule = _balanced_ticker_schedule(
+        episode_tickers,
+        episodes=episodes,
+        seed=settings.schedule_seed,
+    )
+    outcomes = {
+        "recovery_success": 0,
+        "survived_not_recovered": 0,
+        "wait_timeout": 0,
+        "blow": 0,
+    }
+    terminal_pnls: list[float] = []
+    wait_decisions: list[int] = []
+    entries_used = 0
+    environment_steps = 0
+    for episode_index in range(episodes):
+        options: dict[str, object] = {
+            "challenge_start_state": settings.start_state,
+        }
+        if ticker_schedule is not None:
+            options["ticker"] = ticker_schedule[episode_index]
+        observation, info = environment.reset(options=options)
+        valid = tuple(info["valid_actions"])
+        hidden = None
+        episode_entries = 0
+        step_index = 0
+        while True:
+            if step_index and step_index % recurrent_horizon == 0:
+                hidden = None
+            action, hidden, _ = agent.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=valid,
+                epsilon=0.0,
+            )
+            observation, _, terminated, _, info = environment.step(action)
+            valid = tuple(info["valid_actions"])
+            episode_entries += int(info.get("recovery_entry_used", False))
+            if episode_entries > 1:
+                raise ValueError(
+                    "recovery stress violated its challenge-lifetime one-entry contract"
+                )
+            step_index += 1
+            environment_steps += 1
+            if terminated:
+                break
+        outcome = str(info.get("outcome"))
+        normalized_outcome = outcome
+        if outcome == "pass":
+            if not (
+                info.get("recovery_trade_closed", False)
+                and info.get("recovery_success", False)
+                and episode_entries == 1
+            ):
+                raise ValueError(
+                    "recovery stress pass did not close its successful entry"
+                )
+            normalized_outcome = "recovery_success"
+        if normalized_outcome not in outcomes:
+            raise ValueError(f"unknown recovery stress outcome: {outcome}")
+        if (
+            normalized_outcome in {
+                "recovery_success", "survived_not_recovered"
+            }
+            and episode_entries != 1
+        ) or (
+            normalized_outcome == "wait_timeout" and episode_entries != 0
+        ):
+            raise ValueError("recovery stress outcome violates its entry contract")
+        outcomes[normalized_outcome] += 1
+        entries_used += episode_entries
+        terminal_pnls.append(float(info["equity_pnl"]))
+        wait_decisions.append(int(info.get("recovery_wait_decisions", 0)))
+    result = RecoveryStressResult(
+        episodes=episodes,
+        recovery_successes=outcomes["recovery_success"],
+        survived_not_recovered=outcomes["survived_not_recovered"],
+        wait_timeouts=outcomes["wait_timeout"],
+        blows=outcomes["blow"],
+        mean_terminal_pnl=float(np.mean(terminal_pnls)),
+        mean_wait_decisions=float(np.mean(wait_decisions)),
+        entries_used=entries_used,
+        one_entry_violations=0,
+        environment_steps=environment_steps,
+    )
+    print(
+        "[recovery-stress] COMPLETE "
+        f"episodes={episodes} success={result.recovery_successes} "
+        f"survived={result.survived_not_recovered} "
+        f"wait_timeout={result.wait_timeouts} blow={result.blows} "
+        f"success_rate={result.recovery_success_rate:.1%} "
+        f"mean_pnl={result.mean_terminal_pnl:+.2f}",
         flush=True,
     )
     return result

@@ -26,8 +26,10 @@ class Transition:
     competence_anchor: bool = False
     teacher_target: np.ndarray | None = None
     entry_action_target: Action | None = None
+    regime_selectivity_headroom_fraction: float | None = None
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
+    training_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class _StoredEpisode:
     next_recurrent_resets: np.ndarray
     teacher_targets: np.ndarray | None
     entry_action_targets: np.ndarray
+    regime_selectivity_headroom_fractions: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
 
@@ -75,6 +78,8 @@ class _StoredEpisode:
     @classmethod
     def from_episode(cls, episode: Episode) -> "_StoredEpisode":
         transitions = episode.transitions
+        if not transitions or not all(item.training_valid is True for item in transitions):
+            raise ValueError("replay episodes must contain authentic transitions only")
         if any(
             not np.isfinite(item.safety_priority) or item.safety_priority < 0
             for item in transitions
@@ -111,6 +116,9 @@ class _StoredEpisode:
                         raise ValueError("replay teacher target is invalid")
                     teacher_targets[index] = target
         entry_action_targets = np.full(len(transitions), -1, dtype=np.int8)
+        regime_selectivity_headroom_fractions = np.full(
+            len(transitions), np.nan, dtype=np.float32
+        )
         flat_actions = {
             Action.WAIT,
             Action.ENTER_LONG_1,
@@ -128,6 +136,19 @@ class _StoredEpisode:
             ):
                 raise ValueError("replay entry target is invalid")
             entry_action_targets[index] = int(target)
+        for index, item in enumerate(transitions):
+            if item.regime_selectivity_headroom_fraction is None:
+                continue
+            headroom = float(item.regime_selectivity_headroom_fraction)
+            if not np.isfinite(headroom) or not 0.0 <= headroom <= 1.0:
+                raise ValueError("replay Regime-selectivity headroom is invalid")
+            if (
+                item.teacher_target is None
+                or item.entry_action_target is None
+                or not flat_actions.issubset(item.valid_actions)
+            ):
+                raise ValueError("replay Regime-selectivity row is invalid")
+            regime_selectivity_headroom_fractions[index] = headroom
         return cls(
             episode_id=episode.episode_id,
             ticker=episode.ticker,
@@ -154,6 +175,9 @@ class _StoredEpisode:
             ),
             teacher_targets=teacher_targets,
             entry_action_targets=entry_action_targets,
+            regime_selectivity_headroom_fractions=(
+                regime_selectivity_headroom_fractions
+            ),
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
             ),
@@ -181,7 +205,7 @@ class _StoredEpisode:
                 ),
                 recurrent_reset=bool(self.recurrent_resets[index]),
                 next_recurrent_reset=bool(self.next_recurrent_resets[index]),
-                competence_anchor=self.outcome == "pass",
+                competence_anchor=self.outcome in {"pass", "recovery_success"},
                 teacher_target=(
                     None
                     if self.teacher_targets is None
@@ -193,13 +217,105 @@ class _StoredEpisode:
                     if self.entry_action_targets[index] < 0
                     else Action(int(self.entry_action_targets[index]))
                 ),
+                regime_selectivity_headroom_fraction=(
+                    None
+                    if not np.isfinite(
+                        self.regime_selectivity_headroom_fractions[index]
+                    )
+                    else float(
+                        self.regime_selectivity_headroom_fractions[index]
+                    )
+                ),
                 safety_priority=float(self.safety_priorities[index]),
                 entry_opportunity_priority=float(
                     self.entry_opportunity_priorities[index]
                 ),
+                training_valid=True,
             )
             for index in range(start, stop)
         )
+
+    @staticmethod
+    def _padding_transition(
+        observation: np.ndarray,
+        *,
+        next_recurrent_reset: bool = False,
+    ) -> Transition:
+        value = np.zeros_like(observation, dtype=np.float32)
+        next_value = (
+            np.asarray(observation, dtype=np.float32).copy()
+            if next_recurrent_reset
+            else value.copy()
+        )
+        return Transition(
+            observation=value,
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=next_value,
+            terminated=False,
+            valid_actions=(Action.WAIT,),
+            next_valid_actions=(Action.WAIT,),
+            recurrent_reset=True,
+            next_recurrent_reset=next_recurrent_reset,
+            competence_anchor=False,
+            training_valid=False,
+        )
+
+    def padded_sequence(
+        self,
+        *,
+        length: int,
+        recurrent_burn_in: int,
+        n_step_return: int = 1,
+        anchor: str = "terminal",
+    ) -> tuple[Transition, ...]:
+        if self.transition_count >= length:
+            raise ValueError("only short replay episodes may be padded")
+        last_learning_index = length - n_step_return
+        if not recurrent_burn_in <= last_learning_index < length:
+            raise ValueError("padded replay learning contract is invalid")
+        if anchor == "terminal":
+            maximum_real_count = last_learning_index + 1
+            source_start = max(0, self.transition_count - maximum_real_count)
+            source_stop = self.transition_count
+            selected_count = source_stop - source_start
+            real_start = min(
+                recurrent_burn_in,
+                last_learning_index - selected_count + 1,
+            )
+        elif anchor in {"safety", "entry"}:
+            priorities = (
+                self.safety_priorities
+                if anchor == "safety"
+                else self.entry_opportunity_priorities
+            )
+            anchor_index = int(np.argmax(priorities))
+            source_start = max(0, anchor_index - recurrent_burn_in)
+            context_before_anchor = anchor_index - source_start
+            real_start = recurrent_burn_in - context_before_anchor
+            source_stop = min(
+                self.transition_count,
+                source_start + length - real_start,
+            )
+        else:
+            raise ValueError("padded replay anchor is invalid")
+        if real_start < 0 or source_start >= source_stop:
+            raise ValueError("padded replay cannot place its authentic anchor")
+        real = list(self.sequence(source_start, source_stop - source_start))
+        pre = [
+            self._padding_transition(
+                real[0].observation,
+                next_recurrent_reset=index == real_start - 1,
+            )
+            for index in range(real_start)
+        ]
+        real[0] = Transition(**{**real[0].__dict__, "recurrent_reset": True})
+        post_count = length - real_start - len(real)
+        post = [
+            self._padding_transition(real[-1].next_observation)
+            for _ in range(post_count)
+        ]
+        return tuple((*pre, *real, *post))
 
 
 class BalancedSequenceReplay:
@@ -214,6 +330,8 @@ class BalancedSequenceReplay:
         terminal_sequence_fraction: float = 0.0,
         safety_sequence_fraction: float = 0.0,
         entry_opportunity_sequence_fraction: float = 0.0,
+        recurrent_burn_in: int = 0,
+        n_step_return: int = 1,
         seed: int,
     ) -> None:
         if capacity_episodes < 1 or sequence_length < 1:
@@ -234,6 +352,16 @@ class BalancedSequenceReplay:
             None if capacity_transitions is None else int(capacity_transitions)
         )
         self.sequence_length = int(sequence_length)
+        if (
+            isinstance(recurrent_burn_in, bool)
+            or int(recurrent_burn_in) < 0
+            or isinstance(n_step_return, bool)
+            or int(n_step_return) < 1
+            or int(recurrent_burn_in) >= self.sequence_length
+        ):
+            raise ValueError("replay recurrent learning contract is invalid")
+        self.recurrent_burn_in = int(recurrent_burn_in)
+        self.n_step_return = int(n_step_return)
         self.terminal_sequence_fraction = float(terminal_sequence_fraction)
         self.safety_sequence_fraction = float(safety_sequence_fraction)
         self.entry_opportunity_sequence_fraction = float(
@@ -253,11 +381,13 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 3,
+            "schema_version": 5,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
                 "sequence_length": self.sequence_length,
+                "recurrent_burn_in": self.recurrent_burn_in,
+                "n_step_return": self.n_step_return,
                 "terminal_sequence_fraction": self.terminal_sequence_fraction,
                 "safety_sequence_fraction": self.safety_sequence_fraction,
                 "entry_opportunity_sequence_fraction": (
@@ -276,12 +406,14 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 3:
+        if state.get("schema_version") != 5:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
             "capacity_transitions": self.capacity_transitions,
             "sequence_length": self.sequence_length,
+            "recurrent_burn_in": self.recurrent_burn_in,
+            "n_step_return": self.n_step_return,
             "terminal_sequence_fraction": self.terminal_sequence_fraction,
             "safety_sequence_fraction": self.safety_sequence_fraction,
             "entry_opportunity_sequence_fraction": (
@@ -322,6 +454,9 @@ class BalancedSequenceReplay:
                 )
                 raw_teacher_targets = payload["teacher_targets"]
                 raw_entry_action_targets = payload["entry_action_targets"]
+                raw_regime_selectivity_headroom = payload[
+                    "regime_selectivity_headroom_fractions"
+                ]
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("replay checkpoint episode is malformed") from error
             count = int(actions.size)
@@ -331,8 +466,11 @@ class BalancedSequenceReplay:
                 else np.asarray(raw_teacher_targets, dtype=np.float32)
             )
             entry_action_targets = np.asarray(raw_entry_action_targets, dtype=np.int8)
+            regime_selectivity_headroom = np.asarray(
+                raw_regime_selectivity_headroom, dtype=np.float32
+            )
             if (
-                count < self.sequence_length
+                count < 1
                 or actions.shape != (count,)
                 or rewards.shape != (count,)
                 or terminated.shape != (count,)
@@ -343,6 +481,7 @@ class BalancedSequenceReplay:
                 or recurrent_resets.shape != (count,)
                 or next_recurrent_resets.shape != (count,)
                 or entry_action_targets.shape != (count,)
+                or regime_selectivity_headroom.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
@@ -356,6 +495,13 @@ class BalancedSequenceReplay:
                 or (actions >= action_count).any()
                 or (entry_action_targets < -1).any()
                 or (entry_action_targets > int(Action.ENTER_SHORT_1)).any()
+                or not np.logical_or(
+                    np.isnan(regime_selectivity_headroom),
+                    (
+                        (regime_selectivity_headroom >= 0.0)
+                        & (regime_selectivity_headroom <= 1.0)
+                    ),
+                ).all()
                 or not valid_masks[
                     entry_action_targets >= 0,
                     :int(Action.ENTER_SHORT_1) + 1,
@@ -396,6 +542,9 @@ class BalancedSequenceReplay:
                 next_recurrent_resets=next_recurrent_resets,
                 teacher_targets=teacher_targets,
                 entry_action_targets=entry_action_targets,
+                regime_selectivity_headroom_fractions=(
+                    regime_selectivity_headroom
+                ),
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
             )
@@ -416,8 +565,6 @@ class BalancedSequenceReplay:
         self._transition_count = transition_count
 
     def add(self, episode: Episode) -> None:
-        if len(episode.transitions) < self.sequence_length:
-            raise ValueError("episode is shorter than the replay sequence length")
         stored = _StoredEpisode.from_episode(episode)
         replaced = self._episodes.pop(episode.episode_id, None)
         if replaced is not None:
@@ -480,6 +627,25 @@ class BalancedSequenceReplay:
         safety_count = round(count * self.safety_sequence_fraction)
         entry_count = round(count * self.entry_opportunity_sequence_fraction)
         for index, episode in enumerate(self.sample_episodes(count)):
+            if episode.transition_count < self.sequence_length:
+                if index < terminal_count:
+                    anchor = "terminal"
+                elif index < terminal_count + safety_count:
+                    anchor = "safety"
+                elif index < terminal_count + safety_count + entry_count:
+                    anchor = "entry"
+                else:
+                    # Recovery traces always end at a real economic boundary;
+                    # default short samples retain that boundary rather than
+                    # silently burying it beyond the learner's n-step window.
+                    anchor = "terminal"
+                sequences.append(episode.padded_sequence(
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                    anchor=anchor,
+                ))
+                continue
             last_start = episode.transition_count - self.sequence_length
             if index < terminal_count:
                 start = last_start

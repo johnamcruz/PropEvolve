@@ -101,12 +101,81 @@ class CandidateArchive:
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        # Creating the archive handle preserves the long-standing guarantee that
+        # callers may place an input model at ``archive.root``. Subdirectories
+        # are created only by operations that actually write their artifact.
+        self.root.mkdir(parents=True, exist_ok=True)
         self.candidates_root = self.root / "candidates"
         self.evaluations_root = self.root / "evaluations"
         self.reasoning_root = self.root / "reasoning"
-        self.candidates_root.mkdir(parents=True, exist_ok=True)
-        self.evaluations_root.mkdir(parents=True, exist_ok=True)
-        self.reasoning_root.mkdir(parents=True, exist_ok=True)
+        self.external_parents_root = self.root / "external-parents"
+
+    def register_external_parent(
+        self,
+        source_archive_root: str | Path,
+        *,
+        candidate_id: str,
+        evaluation_id: str,
+        model_sha256: str,
+    ) -> CandidateBundle:
+        """Authenticate a passing parent without copying its immutable model."""
+        source_root = Path(source_archive_root).resolve(strict=True)
+        if source_root == self.root.resolve():
+            raise ValueError("external parent archive must differ from child archive")
+        source = CandidateArchive(source_root)
+        candidate = source.load_candidate(str(candidate_id))
+        evaluation = source.load_evaluation(str(evaluation_id))
+        if evaluation.candidate_id != candidate.candidate_id:
+            raise ValueError("external parent evaluation belongs to another candidate")
+        if evaluation.status != "PASS":
+            raise ValueError("external parent requires a PASS evaluation")
+        if candidate.manifest["model_sha256"] != str(model_sha256):
+            raise ValueError("external parent model identity drifted")
+        reference = {
+            "schema": "propevolve_external_parent_reference_v1",
+            "source_archive_root": str(source_root),
+            "candidate_id": candidate.candidate_id,
+            "evaluation_id": evaluation.evaluation_id,
+            "model_sha256": candidate.manifest["model_sha256"],
+            "candidate_manifest_sha256": _file_sha256(
+                candidate.path / "manifest.json"
+            ),
+            "evaluation_sha256": _file_sha256(evaluation.path),
+        }
+        _write_once(
+            self.external_parents_root / f"{candidate.candidate_id}.json",
+            reference,
+        )
+        return self.load_candidate(candidate.candidate_id)
+
+    def _external_parent_reference(self, candidate_id: str) -> dict:
+        path = self.external_parents_root / f"{candidate_id}.json"
+        if not path.is_file():
+            raise ValueError(f"unknown or incomplete candidate: {candidate_id}")
+        reference = json.loads(path.read_text())
+        if (
+            reference.get("schema")
+            != "propevolve_external_parent_reference_v1"
+            or reference.get("candidate_id") != candidate_id
+        ):
+            raise ValueError(f"external parent reference integrity failure: {candidate_id}")
+        return reference
+
+    def _load_external_parent(self, candidate_id: str) -> CandidateBundle:
+        reference = self._external_parent_reference(candidate_id)
+        source = CandidateArchive(reference["source_archive_root"])
+        candidate = source.load_candidate(candidate_id)
+        evaluation = source.load_evaluation(reference["evaluation_id"])
+        if (
+            evaluation.candidate_id != candidate_id
+            or evaluation.status != "PASS"
+            or candidate.manifest["model_sha256"] != reference["model_sha256"]
+            or _file_sha256(candidate.path / "manifest.json")
+            != reference["candidate_manifest_sha256"]
+            or _file_sha256(evaluation.path) != reference["evaluation_sha256"]
+        ):
+            raise ValueError(f"external parent reference drifted: {candidate_id}")
+        return candidate
 
     def register_candidate(
         self,
@@ -136,6 +205,7 @@ class CandidateArchive:
                 raise ValueError("candidate identity collision")
             return candidate
 
+        self.candidates_root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".candidate-", dir=self.candidates_root))
         try:
             shutil.copyfile(model_path, temporary / "model.pt")
@@ -169,7 +239,7 @@ class CandidateArchive:
         path = self.candidates_root / str(candidate_id)
         manifest_path = path / "manifest.json"
         if not manifest_path.is_file() or not (path / "model.pt").is_file():
-            raise ValueError(f"unknown or incomplete candidate: {candidate_id}")
+            return self._load_external_parent(str(candidate_id))
         manifest = json.loads(manifest_path.read_text())
         contract_path = path / "contract.json"
         recipe_path = path / "recipe.json"
@@ -189,6 +259,8 @@ class CandidateArchive:
         return CandidateBundle(str(candidate_id), path, manifest)
 
     def list_candidates(self) -> tuple[CandidateBundle, ...]:
+        if not self.candidates_root.is_dir():
+            return ()
         return tuple(
             self.load_candidate(path.name)
             for path in sorted(self.candidates_root.iterdir())
@@ -233,7 +305,24 @@ class CandidateArchive:
     def load_evaluation(self, evaluation_id: str) -> EvaluationReceipt:
         path = self.evaluations_root / f"{evaluation_id}.json"
         if not path.is_file():
-            raise ValueError(f"unknown evaluation: {evaluation_id}")
+            references = tuple(
+                json.loads(reference.read_text())
+                for reference in self.external_parents_root.glob("*.json")
+            )
+            reference = next(
+                (
+                    item
+                    for item in references
+                    if item.get("evaluation_id") == evaluation_id
+                ),
+                None,
+            )
+            if reference is None:
+                raise ValueError(f"unknown evaluation: {evaluation_id}")
+            self._load_external_parent(str(reference["candidate_id"]))
+            return CandidateArchive(
+                reference["source_archive_root"]
+            ).load_evaluation(evaluation_id)
         payload = json.loads(path.read_text())
         identity = {
             "candidate_id": payload.get("candidate_id"),
@@ -271,7 +360,14 @@ class CandidateArchive:
     def latest_evaluation(self, candidate_id: str) -> EvaluationReceipt | None:
         receipts = self.list_evaluations(candidate_id)
         if not receipts:
-            return None
+            try:
+                reference = self._external_parent_reference(str(candidate_id))
+            except ValueError:
+                return None
+            self._load_external_parent(str(candidate_id))
+            return CandidateArchive(
+                reference["source_archive_root"]
+            ).load_evaluation(str(reference["evaluation_id"]))
         return max(receipts, key=lambda receipt: receipt.path.stat().st_mtime_ns)
 
     def elites(self, niches: Sequence[Niche]) -> dict[str, str]:
@@ -305,12 +401,44 @@ class CandidateArchive:
         champion = self.load_candidate(champion_candidate_id)
 
         def evidence(candidate: CandidateBundle) -> dict:
-            evaluation = self.latest_evaluation(candidate.candidate_id)
+            reference_path = (
+                self.external_parents_root / f"{candidate.candidate_id}.json"
+            )
+            if reference_path.is_file():
+                reference = self._external_parent_reference(candidate.candidate_id)
+                self._load_external_parent(candidate.candidate_id)
+                evaluation = CandidateArchive(
+                    reference["source_archive_root"]
+                ).load_evaluation(reference["evaluation_id"])
+                evaluations = (evaluation,)
+                source = {
+                    "kind": "external",
+                    "reference": reference,
+                    "reference_file_sha256": _file_sha256(reference_path),
+                }
+            else:
+                evaluations = self.list_evaluations(candidate.candidate_id)
+                evaluation = self.latest_evaluation(candidate.candidate_id)
+                source = {
+                    "kind": "local",
+                    "archive_root": str(self.root.resolve()),
+                    "candidate_manifest_sha256": _file_sha256(
+                        candidate.path / "manifest.json"
+                    ),
+                }
             return {
                 "candidate": candidate.manifest,
                 "latest_evaluation": None
                 if evaluation is None
                 else json.loads(evaluation.path.read_text()),
+                "evaluation_history": [
+                    {
+                        "receipt": json.loads(item.path.read_text()),
+                        "file_sha256": _file_sha256(item.path),
+                    }
+                    for item in evaluations
+                ],
+                "source": source,
             }
 
         payload = {
