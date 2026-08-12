@@ -125,6 +125,10 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     specification = payload.get("entry_supervision")
     if specification is None:
         return
+    if isinstance(specification, dict):
+        # Preserve the frozen unweighted v8 negative control while every new
+        # recipe declares its balancing contract explicitly.
+        specification.setdefault("action_class_balance", None)
     required = {
         "schema",
         "training_only",
@@ -139,6 +143,7 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         "horizon_bars",
         "collision",
         "loss_weight",
+        "action_class_balance",
     }
     phase_fields = {"favorable_r", "adverse_r", "horizon_bars"}
     if (
@@ -153,6 +158,15 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         or specification.get("fill_offsets") != [1, 2, 3, 4, 5]
     ):
         raise ValueError("entry supervision contract is invalid")
+    balance = specification["action_class_balance"]
+    if balance is not None and (
+        not isinstance(balance, dict)
+        or set(balance) != {"schema", "action_order"}
+        or balance.get("schema") != "inverse_frequency_v1"
+        or balance.get("action_order")
+        != ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
+    ):
+        raise ValueError("entry supervision class balance contract is invalid")
     for phase in ("launch", "continuation"):
         values = specification.get(phase)
         if (

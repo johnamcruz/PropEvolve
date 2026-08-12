@@ -1009,6 +1009,197 @@ def test_post_launch_entry_action_targets_have_no_effect_at_zero_auxiliary_scale
         torch.testing.assert_close(value, taught.online.state_dict()[key])
 
 
+_FLAT_ENTRY_ACTIONS = (
+    Action.WAIT,
+    Action.ENTER_LONG_1,
+    Action.ENTER_SHORT_1,
+)
+
+
+def _entry_action_sequence(
+    observation: tuple[float, float, float],
+    target: Action,
+) -> tuple[Transition, ...]:
+    return (
+        Transition(
+            observation=np.asarray(observation, dtype=np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.zeros(3, dtype=np.float32),
+            terminated=True,
+            valid_actions=_FLAT_ENTRY_ACTIONS,
+            next_valid_actions=(),
+            entry_action_target=target,
+        ),
+    )
+
+
+def _five_wait_to_one_enter_sequences(
+    entry_action: Action,
+) -> tuple[tuple[Transition, ...], ...]:
+    wait_sequences = tuple(
+        _entry_action_sequence(observation, Action.WAIT)
+        for observation in (
+            (0.0, 0.0, 0.0),
+            (0.0, 0.2, 0.0),
+            (0.0, -0.2, 0.0),
+            (0.0, 0.0, 0.2),
+            (0.0, 0.0, -0.2),
+        )
+    )
+    expansion_observation = (
+        (1.0, 0.0, 0.0)
+        if entry_action == Action.ENTER_LONG_1
+        else (-1.0, 0.0, 0.0)
+    )
+    return (*wait_sequences, _entry_action_sequence(expansion_observation, entry_action))
+
+
+def _flat_greedy_action(
+    agent: RecurrentC51Agent,
+    observation: tuple[float, float, float],
+) -> Action:
+    action, _, _ = agent.select_action(
+        np.asarray(observation, dtype=np.float32),
+        hidden=None,
+        valid_actions=_FLAT_ENTRY_ACTIONS,
+        epsilon=0.0,
+    )
+    return action
+
+
+@pytest.mark.parametrize(
+    "entry_action",
+    (Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
+)
+def test_class_balanced_entry_loss_resists_five_to_one_wait_collapse(
+    tmp_path: Path,
+    entry_action: Action,
+) -> None:
+    sequences = _five_wait_to_one_enter_sequences(entry_action)
+    expansion_observation = (
+        (1.0, 0.0, 0.0)
+        if entry_action == Action.ENTER_LONG_1
+        else (-1.0, 0.0, 0.0)
+    )
+    settings = {
+        "seed": 101 + int(entry_action),
+        "learning_rate": 0.01,
+        "weight_decay": 0.0,
+        "entry_action_loss_weight": 20.0,
+    }
+    unweighted = _agent(3, **settings)
+    for _ in range(15):
+        unweighted.train_batch(sequences)
+
+    # Regression control: the current mean CE learns the 5x majority WAIT
+    # instead of the rare executable Expansion entry on this fixed fixture.
+    assert _flat_greedy_action(unweighted, expansion_observation) == Action.WAIT
+
+    balanced = _agent(
+        3,
+        **settings,
+        # WAIT, ENTER_LONG_1, ENTER_SHORT_1.  A rare entry receives the
+        # inverse-frequency 5x contribution without changing replay rows.
+        entry_action_class_weights=(1.0, 5.0, 5.0),
+    )
+    for _ in range(15):
+        balanced.train_batch(sequences)
+
+    assert _flat_greedy_action(balanced, expansion_observation) == entry_action
+    assert _flat_greedy_action(balanced, (0.0, 0.0, 0.0)) == Action.WAIT
+
+    trace_before_discard = tuple(
+        _flat_greedy_action(balanced, observation)
+        for observation in (expansion_observation, (0.0, 0.0, 0.0))
+    )
+    balanced.discard_teacher()
+    assert balanced.entry_action_loss_weight == 0.0
+    assert tuple(
+        _flat_greedy_action(balanced, observation)
+        for observation in (expansion_observation, (0.0, 0.0, 0.0))
+    ) == trace_before_discard
+
+    checkpoint = balanced.save(
+        tmp_path / f"balanced-{entry_action.name.lower()}.pt",
+        manifest={},
+    )
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    assert restored.entry_action_class_weights == (1.0, 5.0, 5.0)
+    assert tuple(
+        _flat_greedy_action(restored, observation)
+        for observation in (expansion_observation, (0.0, 0.0, 0.0))
+    ) == trace_before_discard
+
+
+def test_class_balanced_entry_loss_has_no_effect_at_zero_auxiliary_scale() -> None:
+    sequences = _five_wait_to_one_enter_sequences(Action.ENTER_LONG_1)
+    plain = _agent(3, seed=211)
+    balanced = _agent(
+        3,
+        seed=211,
+        entry_action_loss_weight=20.0,
+        entry_action_class_weights=(1.0, 5.0, 5.0),
+    )
+
+    plain.train_batch(sequences)
+    balanced.train_batch(sequences, entry_action_weight_scale=0.0)
+
+    assert balanced.last_train_metrics["entry_action_loss"] == 0.0
+    assert balanced.last_train_metrics["entry_action_supervised_rows"] == 0.0
+    assert balanced.last_train_metrics["total_loss"] == pytest.approx(
+        balanced.last_train_metrics["rl_loss"]
+    )
+    for key, value in plain.online.state_dict().items():
+        torch.testing.assert_close(value, balanced.online.state_dict()[key])
+
+
+def test_authenticated_three_class_balance_learns_long_short_and_wait() -> None:
+    sequences = (
+        *_five_wait_to_one_enter_sequences(Action.ENTER_LONG_1)[:-1],
+        _entry_action_sequence((1.0, 0.0, 0.0), Action.ENTER_LONG_1),
+        _entry_action_sequence((-1.0, 0.0, 0.0), Action.ENTER_SHORT_1),
+    )
+    # Exact N/(3*n_c) weights for WAIT=5, LONG=1, SHORT=1.
+    agent = _agent(
+        3,
+        seed=307,
+        learning_rate=0.01,
+        weight_decay=0.0,
+        entry_action_loss_weight=20.0,
+        entry_action_class_weights=(7.0 / 15.0, 7.0 / 3.0, 7.0 / 3.0),
+    )
+
+    for _ in range(50):
+        agent.train_batch(sequences)
+
+    assert _flat_greedy_action(agent, (1.0, 0.0, 0.0)) == Action.ENTER_LONG_1
+    assert _flat_greedy_action(agent, (-1.0, 0.0, 0.0)) == Action.ENTER_SHORT_1
+    for wait_observation in (
+        (0.0, 0.0, 0.0),
+        (0.0, 0.2, 0.0),
+        (0.0, -0.2, 0.0),
+        (0.0, 0.0, 0.2),
+        (0.0, 0.0, -0.2),
+    ):
+        assert _flat_greedy_action(agent, wait_observation) == Action.WAIT
+    assert agent.last_train_metrics["entry_action_target_wait_rows"] == 5.0
+    assert agent.last_train_metrics["entry_action_target_long_rows"] == 1.0
+    assert agent.last_train_metrics["entry_action_target_short_rows"] == 1.0
+    assert agent.last_train_metrics["entry_action_correct_wait_rows"] == 5.0
+    assert agent.last_train_metrics["entry_action_correct_long_rows"] == 1.0
+    assert agent.last_train_metrics["entry_action_correct_short_rows"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "weights",
+    ((1.0, 1.0), (1.0, 0.0, 1.0), (1.0, float("nan"), 1.0)),
+)
+def test_entry_action_class_weights_fail_closed(weights: tuple[float, ...]) -> None:
+    with pytest.raises(ValueError, match="entry action class weights"):
+        _agent(3, entry_action_class_weights=weights)
+
+
 def test_soft_regime_context_and_entry_actions_co_train_without_inference_dependency(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,9 @@ from propevolve.training import (
     HistoricalCandidateRunner,
     TrainingResult,
     TrainingProgress,
+    _assert_recovery_entry_balance,
+    _entry_action_balance,
+    _entry_supervision_frozen_contract,
     _selection_evaluation_gates,
     _plain_contract_value,
     assert_temporal_role,
@@ -27,6 +30,77 @@ from propevolve.training import (
     prop_safety_objective,
     train_agent,
 )
+
+
+def test_runner_balance_seam_passes_authenticated_weights_and_archives_receipt() -> None:
+    class Targets:
+        manifest = {
+            "identity_sha256": "a" * 64,
+            "action_target_counts": {
+                "WAIT": 4,
+                "ENTER_LONG_1": 1,
+                "ENTER_SHORT_1": 1,
+            },
+        }
+
+        @staticmethod
+        def balance_receipt():
+            return {
+                "schema": "propevolve_entry_action_balance_v1",
+                "method": "inverse_frequency_v1",
+                "source_manifest_identity_sha256": "a" * 64,
+                "action_order": (
+                    "WAIT",
+                    "ENTER_LONG_1",
+                    "ENTER_SHORT_1",
+                ),
+                "target_counts": Targets.manifest["action_target_counts"],
+                "class_weights": {
+                    "WAIT": 0.5,
+                    "ENTER_LONG_1": 2.0,
+                    "ENTER_SHORT_1": 2.0,
+                },
+                "identity_sha256": "b" * 64,
+            }
+
+    specification = {
+        "action_class_balance": {
+            "schema": "inverse_frequency_v1",
+            "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+        }
+    }
+    weights, receipt = _entry_action_balance(Targets(), specification)
+    contract = _entry_supervision_frozen_contract(Targets(), receipt)
+
+    assert weights == (0.5, 2.0, 2.0)
+    assert receipt is not None
+    assert contract == {
+        "training_only": True,
+        "manifest": Targets.manifest,
+        "balance_receipt": _plain_contract_value(receipt),
+    }
+
+
+def test_runner_balance_seam_keeps_the_v8_negative_control_unweighted() -> None:
+    weights, receipt = _entry_action_balance(
+        object(), {"action_class_balance": None}
+    )
+
+    assert weights == (1.0, 1.0, 1.0)
+    assert receipt is None
+
+
+def test_recovery_rejects_entry_balance_drift() -> None:
+    class Agent:
+        entry_action_class_weights = (0.5, 2.0, 2.0)
+
+    _assert_recovery_entry_balance(
+        Agent(), {"entry_action_class_weights": (0.5, 2.0, 2.0)}
+    )
+    with pytest.raises(ValueError, match="recovery entry balance drifted"):
+        _assert_recovery_entry_balance(
+            Agent(), {"entry_action_class_weights": (1.0, 1.0, 1.0)}
+        )
 
 
 def test_immutable_entry_manifest_becomes_archive_safe_plain_data() -> None:
@@ -107,6 +181,15 @@ class Agent:
             "sampled_close_td_loss": 2.4,
             "management_hold_minus_close_q": 0.15,
             "sampled_management_close_fraction": 0.2,
+            "entry_action_target_wait_rows": 4.0,
+            "entry_action_target_long_rows": 1.0,
+            "entry_action_target_short_rows": 1.0,
+            "entry_action_prediction_wait_rows": 3.0,
+            "entry_action_prediction_long_rows": 2.0,
+            "entry_action_prediction_short_rows": 1.0,
+            "entry_action_correct_wait_rows": 3.0,
+            "entry_action_correct_long_rows": 1.0,
+            "entry_action_correct_short_rows": 1.0,
         }
         return 0.5
 
@@ -503,6 +586,21 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert result.blows == result.timeouts == 0
     assert len(replay) == 2
     assert agent.updates == 2
+    assert diagnostics[-1]["sampled_entry_action_target_counts"] == {
+        "WAIT": 4,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+    }
+    assert diagnostics[-1]["sampled_entry_action_recall"] == {
+        "WAIT": 0.75,
+        "ENTER_LONG_1": 1.0,
+        "ENTER_SHORT_1": 1.0,
+    }
+    assert diagnostics[-1]["sampled_entry_action_precision"] == {
+        "WAIT": 1.0,
+        "ENTER_LONG_1": 0.5,
+        "ENTER_SHORT_1": 1.0,
+    }
     assert result.mean_loss == 0.5
     assert result.trade_win_rate == 0.5
     assert result.average_win_r == 2.5

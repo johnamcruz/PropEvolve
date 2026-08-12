@@ -150,6 +150,7 @@ class RecurrentC51Agent:
         teacher_entry_search_teacher_temperature: float = 1.0,
         teacher_entry_search_q_temperature: float = 1.0,
         entry_action_loss_weight: float = 0.0,
+        entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
         policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
@@ -219,6 +220,17 @@ class RecurrentC51Agent:
             or (teacher_channels and not any(teacher_channel_loss_weights))
         ):
             raise ValueError("teacher channel loss weights are invalid")
+        entry_action_class_weights = tuple(
+            float(value) for value in entry_action_class_weights
+        )
+        if (
+            len(entry_action_class_weights) != 3
+            or any(
+                not np.isfinite(value) or value <= 0.0
+                for value in entry_action_class_weights
+            )
+        ):
+            raise ValueError("entry action class weights are invalid")
         if mixed_precision not in {"off", "fp16"}:
             raise ValueError("mixed precision must be off or fp16")
         torch.manual_seed(seed)
@@ -273,6 +285,12 @@ class RecurrentC51Agent:
             teacher_entry_search_q_temperature
         )
         self.entry_action_loss_weight = float(entry_action_loss_weight)
+        self.entry_action_class_weights = entry_action_class_weights
+        self._entry_action_class_weight_tensor = torch.tensor(
+            entry_action_class_weights,
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.policy_retention_loss_weight = float(policy_retention_loss_weight)
         self.retention_anchor: RecurrentC51Network | None = None
         self.last_train_metrics: dict[str, float] = {}
@@ -657,6 +675,15 @@ class RecurrentC51Agent:
         entry_action_supervised_rows = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
+        entry_action_target_counts = torch.zeros(
+            3, dtype=torch.float32, device=self.device
+        )
+        entry_action_prediction_counts = torch.zeros(
+            3, dtype=torch.float32, device=self.device
+        )
+        entry_action_correct_counts = torch.zeros(
+            3, dtype=torch.float32, device=self.device
+        )
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
@@ -844,11 +871,26 @@ class RecurrentC51Agent:
                     dim=-1,
                 )
                 entry_action_loss = nn.functional.cross_entropy(
-                    entry_q[timing_rows], timing_targets[timing_rows]
+                    entry_q[timing_rows],
+                    timing_targets[timing_rows],
+                    weight=self._entry_action_class_weight_tensor,
                 )
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
                 )
+                selected_targets = timing_targets[timing_rows]
+                selected_predictions = entry_q[timing_rows].argmax(-1)
+                entry_action_target_counts = torch.bincount(
+                    selected_targets, minlength=3
+                ).to(torch.float32)
+                entry_action_prediction_counts = torch.bincount(
+                    selected_predictions, minlength=3
+                ).to(torch.float32)
+                for class_index in range(3):
+                    entry_action_correct_counts[class_index] = (
+                        (selected_targets == class_index)
+                        & (selected_predictions == class_index)
+                    ).sum()
                 loss = loss + (
                     entry_action_weight_scale
                     * self.entry_action_loss_weight
@@ -934,6 +976,9 @@ class RecurrentC51Agent:
             entry_search_loss,
             entry_action_loss,
             entry_action_supervised_rows,
+            *entry_action_target_counts.unbind(),
+            *entry_action_prediction_counts.unbind(),
+            *entry_action_correct_counts.unbind(),
             policy_retention_loss,
             loss,
             gradient_norm.float(),
@@ -972,6 +1017,15 @@ class RecurrentC51Agent:
             entry_search_loss_value,
             entry_action_loss_value,
             entry_action_supervised_rows_value,
+            entry_target_wait_rows,
+            entry_target_long_rows,
+            entry_target_short_rows,
+            entry_prediction_wait_rows,
+            entry_prediction_long_rows,
+            entry_prediction_short_rows,
+            entry_correct_wait_rows,
+            entry_correct_long_rows,
+            entry_correct_short_rows,
             policy_retention_loss_value,
             total_loss,
             gradient_norm_value,
@@ -996,6 +1050,15 @@ class RecurrentC51Agent:
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
             "entry_action_supervised_rows": entry_action_supervised_rows_value,
+            "entry_action_target_wait_rows": entry_target_wait_rows,
+            "entry_action_target_long_rows": entry_target_long_rows,
+            "entry_action_target_short_rows": entry_target_short_rows,
+            "entry_action_prediction_wait_rows": entry_prediction_wait_rows,
+            "entry_action_prediction_long_rows": entry_prediction_long_rows,
+            "entry_action_prediction_short_rows": entry_prediction_short_rows,
+            "entry_action_correct_wait_rows": entry_correct_wait_rows,
+            "entry_action_correct_long_rows": entry_correct_long_rows,
+            "entry_action_correct_short_rows": entry_correct_short_rows,
             "policy_retention_loss": policy_retention_loss_value,
             "teacher_weight_scale": teacher_weight_scale,
             "entry_action_weight_scale": entry_action_weight_scale,
@@ -1146,6 +1209,7 @@ class RecurrentC51Agent:
                     self.teacher_entry_search_q_temperature
                 ),
                 "entry_action_loss_weight": self.entry_action_loss_weight,
+                "entry_action_class_weights": self.entry_action_class_weights,
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
@@ -1230,6 +1294,7 @@ class RecurrentC51Agent:
         config.setdefault("teacher_entry_search_teacher_temperature", 1.0)
         config.setdefault("teacher_entry_search_q_temperature", 1.0)
         config.setdefault("entry_action_loss_weight", 0.0)
+        config.setdefault("entry_action_class_weights", (1.0, 1.0, 1.0))
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

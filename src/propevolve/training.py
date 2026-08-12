@@ -41,6 +41,55 @@ if TYPE_CHECKING:
     from .agent import RecurrentC51Agent
 
 
+_ENTRY_ACTION_ORDER = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
+
+
+def _entry_action_balance(
+    entry_action_targets,
+    entry_supervision_spec: Mapping[str, object] | None,
+) -> tuple[tuple[float, float, float], Mapping[str, object] | None]:
+    """Resolve one authenticated training-only class-balance contract."""
+
+    if entry_action_targets is None or entry_supervision_spec is None:
+        return (1.0, 1.0, 1.0), None
+    if entry_supervision_spec.get("action_class_balance") is None:
+        return (1.0, 1.0, 1.0), None
+    receipt = entry_action_targets.balance_receipt()
+    weights = receipt["class_weights"]
+    return (
+        tuple(float(weights[action]) for action in _ENTRY_ACTION_ORDER),
+        receipt,
+    )
+
+
+def _entry_supervision_frozen_contract(
+    entry_action_targets,
+    balance_receipt: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Archive target and derived-weight identities together."""
+
+    if entry_action_targets is None:
+        return None
+    return {
+        "training_only": True,
+        "manifest": _plain_contract_value(entry_action_targets.manifest),
+        "balance_receipt": _plain_contract_value(balance_receipt),
+    }
+
+
+def _assert_recovery_entry_balance(
+    agent,
+    agent_settings: Mapping[str, object],
+) -> None:
+    """Fail closed when recovery weights differ from rebuilt target lineage."""
+
+    expected = tuple(
+        agent_settings.get("entry_action_class_weights", (1.0, 1.0, 1.0))
+    )
+    if agent.entry_action_class_weights != expected:
+        raise ValueError("training recovery entry balance drifted")
+
+
 @dataclass(frozen=True)
 class OutcomeStatistics:
     outcome: str
@@ -395,6 +444,7 @@ class HistoricalCandidateRunner:
             )
         entry_supervision_spec = config.get("entry_supervision")
         entry_action_targets = None
+        entry_action_balance_receipt = None
         if entry_supervision_spec is not None:
             from .entry_supervision import build_entry_action_targets
 
@@ -407,6 +457,21 @@ class HistoricalCandidateRunner:
                 round_trip_fees=config["round_trip_fees"],
                 training_end_exclusive=temporal["train_end"],
             )
+            entry_action_class_weights, entry_action_balance_receipt = (
+                _entry_action_balance(
+                    entry_action_targets,
+                    entry_supervision_spec,
+                )
+            )
+            if entry_action_balance_receipt is not None:
+                balance_weights = entry_action_balance_receipt["class_weights"]
+                print(
+                    "[entry-supervision] BALANCE "
+                    f"counts={dict(entry_action_balance_receipt['target_counts'])} "
+                    f"weights={dict(balance_weights)} "
+                    f"identity={entry_action_balance_receipt['identity_sha256']}",
+                    flush=True,
+                )
         challenge = ChallengeSpec(**config["challenge"])
         observation_spec = TradeManagementObservationSpec.from_config(
             config.get("observation")
@@ -451,6 +516,10 @@ class HistoricalCandidateRunner:
             agent_settings["entry_action_loss_weight"] = float(
                 entry_supervision_spec["loss_weight"]
             )
+        if entry_action_balance_receipt is not None:
+            agent_settings["entry_action_class_weights"] = (
+                entry_action_class_weights
+            )
         output = _resolve(root, config["output"])
         output.mkdir(parents=True, exist_ok=True)
         recovery_path = output / "training-recovery.pt"
@@ -470,6 +539,7 @@ class HistoricalCandidateRunner:
             replay_state = manifest.get("replay_state")
             if not manifest.get("replay_restored", False) or replay_state is None:
                 raise ValueError("training recovery is missing replay state")
+            _assert_recovery_entry_balance(loaded, agent_settings)
             agent = loaded
         else:
             if diagnostics_path.exists():
@@ -721,15 +791,9 @@ class HistoricalCandidateRunner:
                 }
                 for spec in teacher_specs
             ],
-            "entry_supervision": (
-                None
-                if entry_action_targets is None
-                else {
-                    "training_only": True,
-                    "manifest": _plain_contract_value(
-                        entry_action_targets.manifest
-                    ),
-                }
+            "entry_supervision": _entry_supervision_frozen_contract(
+                entry_action_targets,
+                entry_action_balance_receipt,
             ),
             "retained_pass_policy_restored": retained_policy_restored,
         }
@@ -1729,6 +1793,15 @@ def train_agent(
                 "sampled_burn_in_reset_coverage",
                 "sampled_recurrent_reset_pattern_count",
                 "policy_retention_loss",
+                "entry_action_target_wait_rows",
+                "entry_action_target_long_rows",
+                "entry_action_target_short_rows",
+                "entry_action_prediction_wait_rows",
+                "entry_action_prediction_long_rows",
+                "entry_action_prediction_short_rows",
+                "entry_action_correct_wait_rows",
+                "entry_action_correct_long_rows",
+                "entry_action_correct_short_rows",
             )
         }
         if len(replay) >= warmup_episodes:
@@ -2030,6 +2103,48 @@ def train_agent(
                 "entry_action_target_counts": {
                     action.name: entry_action_target_counts[action]
                     for action in entry_action_target_counts
+                },
+                "sampled_entry_action_target_counts": {
+                    action: int(round(sum(learner_diagnostics[key])))
+                    for action, key in {
+                        "WAIT": "entry_action_target_wait_rows",
+                        "ENTER_LONG_1": "entry_action_target_long_rows",
+                        "ENTER_SHORT_1": "entry_action_target_short_rows",
+                    }.items()
+                },
+                "sampled_entry_action_prediction_counts": {
+                    action: int(round(sum(learner_diagnostics[key])))
+                    for action, key in {
+                        "WAIT": "entry_action_prediction_wait_rows",
+                        "ENTER_LONG_1": "entry_action_prediction_long_rows",
+                        "ENTER_SHORT_1": "entry_action_prediction_short_rows",
+                    }.items()
+                },
+                "sampled_entry_action_recall": {
+                    action: (
+                        sum(learner_diagnostics[correct_key])
+                        / sum(learner_diagnostics[target_key])
+                        if sum(learner_diagnostics[target_key]) > 0.0
+                        else None
+                    )
+                    for action, target_key, correct_key in (
+                        ("WAIT", "entry_action_target_wait_rows", "entry_action_correct_wait_rows"),
+                        ("ENTER_LONG_1", "entry_action_target_long_rows", "entry_action_correct_long_rows"),
+                        ("ENTER_SHORT_1", "entry_action_target_short_rows", "entry_action_correct_short_rows"),
+                    )
+                },
+                "sampled_entry_action_precision": {
+                    action: (
+                        sum(learner_diagnostics[correct_key])
+                        / sum(learner_diagnostics[prediction_key])
+                        if sum(learner_diagnostics[prediction_key]) > 0.0
+                        else None
+                    )
+                    for action, prediction_key, correct_key in (
+                        ("WAIT", "entry_action_prediction_wait_rows", "entry_action_correct_wait_rows"),
+                        ("ENTER_LONG_1", "entry_action_prediction_long_rows", "entry_action_correct_long_rows"),
+                        ("ENTER_SHORT_1", "entry_action_prediction_short_rows", "entry_action_correct_short_rows"),
+                    )
                 },
                 **{
                     f"mean_{key}": (

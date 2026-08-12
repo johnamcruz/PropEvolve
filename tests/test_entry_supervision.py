@@ -5,6 +5,7 @@ from types import MappingProxyType
 import numpy as np
 import pytest
 
+import propevolve.entry_supervision as entry_supervision_module
 from propevolve.decision import Action
 from propevolve.entry_supervision import (
     build_entry_action_targets,
@@ -145,6 +146,18 @@ def _retimestamp(market: MarketSeries, *, start: str) -> MarketSeries:
     return MarketSeries(
         ticker=market.ticker,
         timestamps=timestamps,
+        open=market.open,
+        high=market.high,
+        low=market.low,
+        close=market.close,
+        embeddings=market.embeddings,
+    )
+
+
+def _reticker(market: MarketSeries, *, ticker: str) -> MarketSeries:
+    return MarketSeries(
+        ticker=ticker,
+        timestamps=market.timestamps,
         open=market.open,
         high=market.high,
         low=market.low,
@@ -325,6 +338,99 @@ def test_economic_builder_uses_next_open_and_fee_inclusive_300_dollar_risk() -> 
         "ENTER_SHORT_1",
     )
     assert targets.manifest["identity_sha256"]
+
+
+def test_manifest_reports_exact_action_target_counts_per_market_and_aggregate() -> None:
+    # One Long winner, one Short winner, and one launch with no executable
+    # economic entry provide a literal 5 WAIT : 1 LONG : 1 SHORT fixture.
+    markets = {
+        "NQ": _market(),
+        "ES": _reticker(_short_market(), ticker="ES"),
+        "YM": _reticker(
+            _market(economic_high=100.0 + 600.0 / 148.0),
+            ticker="YM",
+        ),
+    }
+    targets = build_entry_action_targets(
+        markets,
+        _entry_spec(),
+        point_values={ticker: 148.0 for ticker in markets},
+        round_trip_fees={ticker: 4.0 for ticker in markets},
+        training_end_exclusive="2025-01-01",
+    )
+
+    expected_aggregate = {
+        "WAIT": 5,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+    }
+    assert targets.manifest["action_target_counts"] == expected_aggregate
+    assert targets.manifest["markets"]["NQ"]["action_target_counts"] == {
+        "WAIT": 0,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 0,
+    }
+    assert targets.manifest["markets"]["ES"]["action_target_counts"] == {
+        "WAIT": 0,
+        "ENTER_LONG_1": 0,
+        "ENTER_SHORT_1": 1,
+    }
+    assert targets.manifest["markets"]["YM"]["action_target_counts"] == {
+        "WAIT": 5,
+        "ENTER_LONG_1": 0,
+        "ENTER_SHORT_1": 0,
+    }
+    assert sum(expected_aggregate.values()) == sum(
+        sum(market["action_target_counts"].values())
+        for market in targets.manifest["markets"].values()
+    )
+    receipt = targets.balance_receipt()
+    assert receipt["source_manifest_identity_sha256"] == targets.manifest[
+        "identity_sha256"
+    ]
+    assert receipt["target_counts"] == expected_aggregate
+    assert receipt["class_weights"] == {
+        "WAIT": pytest.approx(7.0 / 15.0),
+        "ENTER_LONG_1": pytest.approx(7.0 / 3.0),
+        "ENTER_SHORT_1": pytest.approx(7.0 / 3.0),
+    }
+    assert len(receipt["identity_sha256"]) == 64
+
+
+def test_inverse_frequency_entry_weights_use_authenticated_action_counts() -> None:
+    counts = {
+        "WAIT": 4,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+    }
+
+    weights = entry_supervision_module.inverse_frequency_entry_action_class_weights(
+        counts
+    )
+
+    # N / (3 * class_count) preserves expected sample weight one while giving
+    # exact inverse-frequency contribution in WAIT/LONG/SHORT order.
+    assert weights == (0.5, 2.0, 2.0)
+
+
+@pytest.mark.parametrize(
+    "zero_action",
+    ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"),
+)
+def test_inverse_frequency_entry_weights_fail_closed_on_a_zero_class(
+    zero_action: str,
+) -> None:
+    counts = {
+        "WAIT": 10,
+        "ENTER_LONG_1": 2,
+        "ENTER_SHORT_1": 2,
+    }
+    counts[zero_action] = 0
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        entry_supervision_module.inverse_frequency_entry_action_class_weights(
+            counts
+        )
 
 
 def test_gross_two_r_without_round_trip_fee_does_not_satisfy_net_two_r() -> None:

@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 
 
 CANDIDATE_COUNT = 5
+ENTRY_ACTION_ORDER = (
+    "WAIT",
+    "ENTER_LONG_1",
+    "ENTER_SHORT_1",
+)
 
 EntryAction = Literal["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
 EntrySide = Literal["long", "short", "ambiguous"]
@@ -105,6 +110,63 @@ class EntryActionTargets:
     def _lookup_target(self, *, ticker: str, row: int) -> np.int8:
         self._validate_row(ticker=ticker, row=row)
         return self._targets[ticker][row]
+
+    def inverse_frequency_class_weights(self) -> tuple[float, float, float]:
+        """Return authenticated equal-mass weights in fixed action order."""
+
+        return inverse_frequency_entry_action_class_weights(
+            self.manifest["action_target_counts"]
+        )
+
+    def balance_receipt(self) -> Mapping[str, object]:
+        """Bind derived class weights to this exact target manifest."""
+
+        counts = self.manifest["action_target_counts"]
+        weights = self.inverse_frequency_class_weights()
+        payload: dict[str, object] = {
+            "schema": "propevolve_entry_action_balance_v1",
+            "method": "inverse_frequency_v1",
+            "source_manifest_identity_sha256": self.manifest["identity_sha256"],
+            "action_order": ENTRY_ACTION_ORDER,
+            "target_counts": {
+                action: int(counts[action]) for action in ENTRY_ACTION_ORDER
+            },
+            "class_weights": {
+                action: weights[index]
+                for index, action in enumerate(ENTRY_ACTION_ORDER)
+            },
+        }
+        payload["identity_sha256"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return _deep_freeze(payload)
+
+
+def inverse_frequency_entry_action_class_weights(
+    action_target_counts: Mapping[str, int],
+) -> tuple[float, float, float]:
+    """Equalize aggregate WAIT/Long/Short mass without arbitrary weights."""
+
+    if not isinstance(action_target_counts, Mapping) or set(
+        action_target_counts
+    ) != set(ENTRY_ACTION_ORDER):
+        raise ValueError("entry action target counts must match the action order")
+    counts: list[int] = []
+    for action in ENTRY_ACTION_ORDER:
+        value = action_target_counts[action]
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                "entry action target counts must be strictly positive integers"
+            )
+        value = int(value)
+        if value <= 0:
+            raise ValueError(
+                "entry action target counts must be strictly positive integers"
+            )
+        counts.append(value)
+    total = sum(counts)
+    classes = len(counts)
+    return tuple(total / (classes * count) for count in counts)
 
 
 def build_post_launch_entry_supervision(
@@ -317,6 +379,13 @@ def build_entry_action_targets(
             flush=True,
         )
 
+    action_target_counts = {
+        action: sum(
+            int(summaries[ticker]["action_target_counts"][action])
+            for ticker in tickers
+        )
+        for action in ENTRY_ACTION_ORDER
+    }
     manifest_payload: dict[str, object] = {
         "schema": contract["schema"],
         "contract": contract,
@@ -328,7 +397,7 @@ def build_entry_action_targets(
             "launch_collision": "adverse_first",
             "continuation_collision": "adverse_first",
             "economic_collision": "stop_first",
-            "action_order": ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"),
+            "action_order": ENTRY_ACTION_ORDER,
             "unavailable_sentinel": -1,
         },
         "storage": {
@@ -338,6 +407,7 @@ def build_entry_action_targets(
         },
         "tickers": tickers,
         "markets": summaries,
+        "action_target_counts": action_target_counts,
     }
     manifest_payload["identity_sha256"] = hashlib.sha256(
         json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -355,11 +425,21 @@ def _validated_contract(
     if not isinstance(spec, Mapping):
         raise TypeError("entry supervision spec must be a mapping")
     keys = set(spec)
-    if keys != _SPEC_KEYS:
+    label_keys = keys - {"action_class_balance"}
+    if label_keys != _SPEC_KEYS or keys - _SPEC_KEYS - {"action_class_balance"}:
         raise ValueError(
             "entry supervision spec keys drifted: "
-            f"missing={sorted(_SPEC_KEYS - keys)} extra={sorted(keys - _SPEC_KEYS)}"
+            f"missing={sorted(_SPEC_KEYS - label_keys)} "
+            f"extra={sorted(keys - _SPEC_KEYS - {'action_class_balance'})}"
         )
+    balance = spec.get("action_class_balance")
+    if balance is not None and (
+        not isinstance(balance, Mapping)
+        or set(balance) != {"schema", "action_order"}
+        or balance.get("schema") != "inverse_frequency_v1"
+        or tuple(balance.get("action_order", ())) != ENTRY_ACTION_ORDER
+    ):
+        raise ValueError("entry supervision class balance contract drifted")
     for name, expected in _FIXED_SPEC.items():
         value = spec[name]
         if name == "fill_offsets":
@@ -754,6 +834,14 @@ def _materialize_market_targets(
                 | (targets == int(Action.ENTER_SHORT_1))
             )),
             "wait_targets": int(np.count_nonzero(targets == int(Action.WAIT))),
+            "action_target_counts": {
+                action.name: int(np.count_nonzero(targets == int(action)))
+                for action in (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            },
         },
     )
 
@@ -825,6 +913,7 @@ def _strict_bool_targets(values: Sequence[bool], *, name: str) -> tuple[bool, ..
 
 __all__ = [
     "CANDIDATE_COUNT",
+    "ENTRY_ACTION_ORDER",
     "CandidateEntryTarget",
     "EntryActionTargets",
     "EntryAction",
@@ -835,4 +924,5 @@ __all__ = [
     "UnavailableReason",
     "build_entry_action_targets",
     "build_post_launch_entry_supervision",
+    "inverse_frequency_entry_action_class_weights",
 ]

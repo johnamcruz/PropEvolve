@@ -133,6 +133,11 @@ def test_validation_no_trade_patience_is_json_configured_and_fail_closed(
 
 
 def test_v8_uses_exact_post_launch_actions_for_entry_guidance() -> None:
+    raw = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    ).read_text())
+    assert "action_class_balance" not in raw["entry_supervision"]
+
     config = load_experiment_config(
         "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
     )
@@ -178,8 +183,84 @@ def test_v8_uses_exact_post_launch_actions_for_entry_guidance() -> None:
         "horizon_bars": 150,
         "collision": "stop_first",
         "loss_weight": 0.3,
+        "action_class_balance": None,
     }
     assert "entry_supervision" in config["evolution"]["frozen_paths"]
+
+
+def test_v8b_is_a_fresh_inverse_frequency_balanced_entry_campaign() -> None:
+    original = load_experiment_config(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    )
+    balanced = load_experiment_config(
+        "config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json"
+    )
+
+    assert original["entry_supervision"]["action_class_balance"] is None
+    assert balanced["entry_supervision"]["action_class_balance"] == {
+        "schema": "inverse_frequency_v1",
+        "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+    }
+    assert balanced["output"] != original["output"]
+    assert balanced["campaign"]["state_root"] != original["campaign"]["state_root"]
+    assert "entry_supervision" in balanced["evolution"]["frozen_paths"]
+    assert all(
+        path != "entry_supervision.action_class_balance"
+        and not path.startswith("entry_supervision.")
+        for path in balanced["evolution"]["allowed_revision_paths"]
+    )
+    assert "entry_supervision.action_class_balance" not in balanced["evolution"][
+        "revision_bounds"
+    ]
+    normalized_original = json.loads(json.dumps(original))
+    normalized_balanced = json.loads(json.dumps(balanced))
+    normalized_balanced["entry_supervision"]["action_class_balance"] = None
+    normalized_balanced["evolution"]["hypothesis"] = normalized_original[
+        "evolution"
+    ]["hypothesis"]
+    normalized_balanced["_path"] = normalized_original["_path"]
+    for path in (
+        ("output",),
+        ("campaign", "state_root"),
+        ("campaign", "finalization", "registry_root"),
+        ("campaign", "finalization", "export_root"),
+    ):
+        left = normalized_original
+        right = normalized_balanced
+        for field in path[:-1]:
+            left = left[field]
+            right = right[field]
+        right[path[-1]] = left[path[-1]]
+    assert normalized_balanced == normalized_original
+
+
+@pytest.mark.parametrize(
+    "balance",
+    (
+        {
+            "schema": "manual_v1",
+            "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+        {
+            "schema": "inverse_frequency_v1",
+            "action_order": ["WAIT", "ENTER_SHORT_1", "ENTER_LONG_1"],
+        },
+        {"schema": "inverse_frequency_v1"},
+    ),
+)
+def test_entry_action_balance_contract_fails_closed(
+    tmp_path: Path,
+    balance: dict,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json"
+    ).read_text())
+    payload["entry_supervision"]["action_class_balance"] = balance
+    path = tmp_path / "invalid-entry-balance.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="class balance contract"):
+        load_experiment_config(path)
 
 
 @pytest.mark.parametrize(
