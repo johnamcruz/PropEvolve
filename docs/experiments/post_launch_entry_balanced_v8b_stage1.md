@@ -101,6 +101,9 @@ or production parity. The 2026 period remains sealed.
 
 ## Retained decisions
 
+The complete intended progression is documented in
+`docs/experiments/propevolve_teacher_curriculum_stages.md`.
+
 1. Preserve this exact candidate and completed evaluation receipt as the Stage
    1 research baseline, even if a later gate requests revision.
 2. Do not change its ratchet or winner-retention mechanics while diagnosing
