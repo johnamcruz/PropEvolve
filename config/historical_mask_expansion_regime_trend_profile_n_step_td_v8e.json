@@ -165,6 +165,7 @@
     "value_max": 3,
     "gamma": 0.997,
     "n_step_return": 8,
+    "policy_retention_loss_weight": 10.0,
     "recurrent_burn_in": 64,
     "learning_rate": 0.0001,
     "weight_decay": 1e-05,
@@ -256,6 +257,7 @@
     ],
     "frozen_paths": [
       "agent.n_step_return",
+      "agent.policy_retention_loss_weight",
       "agent.recurrent_burn_in",
       "runtime",
       "training.prefetch_batches",

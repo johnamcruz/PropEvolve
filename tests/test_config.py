@@ -88,9 +88,13 @@ def test_v8e_recipe_really_uses_the_declared_eight_step_return() -> None:
 
     assert config["agent"]["n_step_return"] == 8
     assert config["agent"]["recurrent_burn_in"] == 64
+    assert config["agent"]["policy_retention_loss_weight"] == 10.0
     assert config["training"]["sequence_length"] == 96
     assert "agent.n_step_return" in config["evolution"]["frozen_paths"]
     assert "agent.recurrent_burn_in" in config["evolution"]["frozen_paths"]
+    assert "agent.policy_retention_loss_weight" in config["evolution"][
+        "frozen_paths"
+    ]
     assert "training.sequence_length" in config["evolution"]["frozen_paths"]
     assert "training.recurrent_horizon" in config["evolution"]["frozen_paths"]
     assert "training.sequence_length" not in config["evolution"][

@@ -208,6 +208,7 @@ def load_experiment_config(path: str | Path) -> dict:
     agent = payload["agent"]
     agent.setdefault("n_step_return", 1)
     agent.setdefault("recurrent_burn_in", 0)
+    agent.setdefault("policy_retention_loss_weight", 0.0)
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     if (
@@ -221,6 +222,12 @@ def load_experiment_config(path: str | Path) -> dict:
         )
     ):
         raise ValueError("agent target update contract is invalid")
+    if (
+        isinstance(agent["policy_retention_loss_weight"], bool)
+        or not isinstance(agent["policy_retention_loss_weight"], (int, float))
+        or float(agent["policy_retention_loss_weight"]) < 0
+    ):
+        raise ValueError("agent policy retention loss weight must be nonnegative")
     runtime = payload["runtime"]
     if runtime["mixed_precision"] not in {"off", "fp16"}:
         raise ValueError("runtime mixed precision must be off or fp16")

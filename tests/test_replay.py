@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 import pytest
 
@@ -53,6 +55,19 @@ def test_replay_balances_outcome_buckets_before_reusing_them() -> None:
     sampled = replay.sample_episodes(2)
 
     assert {episode.outcome for episode in sampled} == {"pass", "blow"}
+
+
+def test_replay_balances_outcomes_across_a_multi_market_population() -> None:
+    """Many timeout tickers must not drown out scarce pass competence."""
+    replay = BalancedSequenceReplay(capacity_episodes=20, sequence_length=2, seed=43)
+    for index, ticker in enumerate(("NQ", "ES", "YM", "RTY", "CL", "GC", "SI", "ZN", "ZB")):
+        replay.add(_episode(ticker, "timeout", "long", index * 10))
+    replay.add(_episode("NQ", "pass", "long", 1000))
+
+    sampled = replay.sample_episodes(10)
+    outcomes = Counter(episode.outcome for episode in sampled)
+
+    assert outcomes == {"pass": 5, "timeout": 5}
 
 
 def test_replay_anchors_declared_fraction_of_sequences_at_terminal_outcomes() -> None:
@@ -238,3 +253,65 @@ def test_replay_checkpoint_round_trip_preserves_memory_and_sampling_state() -> N
             [item.observation for item in actual_sequence],
             [item.observation for item in expected_sequence],
         )
+
+
+def test_replay_round_trip_preserves_behavior_recurrent_reset_lineage() -> None:
+    original = _episode("NQ", "pass", "long", 0)
+    marked = Episode(
+        episode_id=original.episode_id,
+        ticker=original.ticker,
+        outcome=original.outcome,
+        primary_side=original.primary_side,
+        ended_at_ns=original.ended_at_ns,
+        transitions=tuple(
+            Transition(
+                **{
+                    **item.__dict__,
+                    "recurrent_reset": index in {0, 3},
+                    "next_recurrent_reset": index + 1 in {0, 3},
+                }
+            )
+            for index, item in enumerate(original.transitions)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=41,
+    )
+    replay.add(marked)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=99,
+    )
+
+    restored.load_state_dict(replay.state_dict())
+    sampled = restored.sample(1)[0]
+
+    assert [item.recurrent_reset for item in sampled] == [
+        True, False, False, True, False, False
+    ]
+    assert [item.next_recurrent_reset for item in sampled] == [
+        False, False, True, False, False, False
+    ]
+
+
+def test_replay_marks_only_demonstrated_pass_episodes_as_competence() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        seed=47,
+    )
+    replay.add(_episode("NQ", "pass", "long", 0))
+    replay.add(_episode("ES", "timeout", "short", 100))
+
+    sampled = replay.sample(2)
+    competence_by_origin = {
+        int(sequence[0].observation[0]): all(
+            transition.competence_anchor for transition in sequence
+        )
+        for sequence in sampled
+    }
+
+    assert competence_by_origin == {0: True, 100: False}

@@ -615,6 +615,7 @@ class HistoricalCandidateRunner:
                 raise ValueError("retained pass policy identity drifted")
             agent = retained_agent
             retained_policy_restored = True
+        agent.discard_retention_anchor()
         agent.discard_teacher()
         validation = None
         if not training.short_circuited:
@@ -1057,6 +1058,18 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "sampled_management_close_fraction": weighted(
             "mean_sampled_management_close_fraction", update_weights
         ),
+        "sampled_recurrent_reset_fraction": weighted(
+            "mean_sampled_recurrent_reset_fraction", update_weights
+        ),
+        "sampled_burn_in_reset_coverage": weighted(
+            "mean_sampled_burn_in_reset_coverage", update_weights
+        ),
+        "sampled_recurrent_reset_pattern_count": weighted(
+            "mean_sampled_recurrent_reset_pattern_count", update_weights
+        ),
+        "policy_retention_loss": weighted(
+            "mean_policy_retention_loss", update_weights
+        ),
         "teacher_scored_entries": int(sum(teacher_weights)),
         "selected_side_attempt_probability_mean": weighted(
             "selected_side_attempt_probability_mean", teacher_weights
@@ -1446,6 +1459,13 @@ def train_agent(
                 terminated=terminated,
                 valid_actions=valid,
                 next_valid_actions=next_valid,
+                recurrent_reset=(
+                    step_index == 0 or step_index % recurrent_horizon == 0
+                ),
+                next_recurrent_reset=(
+                    not terminated
+                    and (step_index + 1) % recurrent_horizon == 0
+                ),
                 teacher_target=teacher_target,
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
@@ -1468,6 +1488,9 @@ def train_agent(
             # Preserve the exact policy that produced the pass before replay
             # updates can alter it. This is a rollback anchor, not promotion
             # evidence; chronological teacher-free selection remains required.
+            retain_policy = getattr(agent, "retain_policy", None)
+            if retain_policy is not None:
+                retain_policy()
             retention_checkpoint_callback({
                 "episode": episode_index + 1,
                 "ticker": str(terminal_info["ticker"]),
@@ -1505,6 +1528,10 @@ def train_agent(
                 "sampled_close_td_loss",
                 "management_hold_minus_close_q",
                 "sampled_management_close_fraction",
+                "sampled_recurrent_reset_fraction",
+                "sampled_burn_in_reset_coverage",
+                "sampled_recurrent_reset_pattern_count",
+                "policy_retention_loss",
             )
         }
         if len(replay) >= warmup_episodes:

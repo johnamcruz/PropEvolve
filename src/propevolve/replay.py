@@ -21,6 +21,9 @@ class Transition:
     terminated: bool
     valid_actions: tuple[Action, ...]
     next_valid_actions: tuple[Action, ...]
+    recurrent_reset: bool = False
+    next_recurrent_reset: bool = False
+    competence_anchor: bool = False
     teacher_target: np.ndarray | None = None
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
@@ -53,6 +56,8 @@ class _StoredEpisode:
     terminated: np.ndarray
     valid_masks: np.ndarray
     next_valid_masks: np.ndarray
+    recurrent_resets: np.ndarray
+    next_recurrent_resets: np.ndarray
     teacher_targets: np.ndarray | None
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
@@ -121,6 +126,12 @@ class _StoredEpisode:
                 [action in item.next_valid_actions for action in Action]
                 for item in transitions
             ], np.bool_),
+            recurrent_resets=np.asarray(
+                [item.recurrent_reset for item in transitions], np.bool_
+            ),
+            next_recurrent_resets=np.asarray(
+                [item.next_recurrent_reset for item in transitions], np.bool_
+            ),
             teacher_targets=teacher_targets,
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
@@ -147,6 +158,9 @@ class _StoredEpisode:
                     for action in Action
                     if self.next_valid_masks[index, int(action)]
                 ),
+                recurrent_reset=bool(self.recurrent_resets[index]),
+                next_recurrent_reset=bool(self.next_recurrent_resets[index]),
+                competence_anchor=self.outcome == "pass",
                 teacher_target=(
                     None
                     if self.teacher_targets is None
@@ -213,7 +227,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -236,7 +250,7 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 1:
+        if state.get("schema_version") != 2:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -268,6 +282,12 @@ class BalancedSequenceReplay:
                 next_valid_masks = np.asarray(
                     payload["next_valid_masks"], dtype=np.bool_
                 )
+                recurrent_resets = np.asarray(
+                    payload["recurrent_resets"], dtype=np.bool_
+                )
+                next_recurrent_resets = np.asarray(
+                    payload["next_recurrent_resets"], dtype=np.bool_
+                )
                 safety_priorities = np.asarray(
                     payload["safety_priorities"], dtype=np.float32
                 )
@@ -292,6 +312,8 @@ class BalancedSequenceReplay:
                 or observations.shape[0] != count + 1
                 or valid_masks.shape != (count, action_count)
                 or next_valid_masks.shape != (count, action_count)
+                or recurrent_resets.shape != (count,)
+                or next_recurrent_resets.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
@@ -307,6 +329,9 @@ class BalancedSequenceReplay:
                 or not np.array_equal(
                     next_valid_masks.any(axis=1),
                     ~terminated,
+                )
+                or not np.array_equal(
+                    next_recurrent_resets[:-1], recurrent_resets[1:]
                 )
             ):
                 raise ValueError("replay checkpoint episode arrays are invalid")
@@ -332,6 +357,8 @@ class BalancedSequenceReplay:
                 terminated=terminated,
                 valid_masks=valid_masks,
                 next_valid_masks=next_valid_masks,
+                recurrent_resets=recurrent_resets,
+                next_recurrent_resets=next_recurrent_resets,
                 teacher_targets=teacher_targets,
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
@@ -389,11 +416,23 @@ class BalancedSequenceReplay:
         buckets: dict[tuple[str, str, str], list[_StoredEpisode]] = defaultdict(list)
         for episode in self._episodes.values():
             buckets[episode.bucket].append(episode)
-        keys = list(buckets)
-        self._random.shuffle(keys)
+        # Outcome is the competence boundary: scarce passes or blows must not
+        # disappear merely because timeout episodes span more tickers. Balance
+        # outcomes first, then rotate ticker/side buckets within each outcome.
+        keys_by_outcome: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        for key in buckets:
+            keys_by_outcome[key[1]].append(key)
+        outcomes = list(keys_by_outcome)
+        self._random.shuffle(outcomes)
+        for keys in keys_by_outcome.values():
+            self._random.shuffle(keys)
+        cursors = {outcome: 0 for outcome in outcomes}
         selected: list[_StoredEpisode] = []
         while len(selected) < count:
-            for key in keys:
+            for outcome in outcomes:
+                keys = keys_by_outcome[outcome]
+                key = keys[cursors[outcome] % len(keys)]
+                cursors[outcome] += 1
                 selected.append(self._random.choice(buckets[key]))
                 if len(selected) == count:
                     break

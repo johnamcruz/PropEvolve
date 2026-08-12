@@ -120,6 +120,7 @@ class RecurrentC51Agent:
         teacher_loss_weight: float = 0.0,
         teacher_channel_loss_weights: Sequence[float] | None = None,
         teacher_entry_search_loss_weight: float = 0.0,
+        policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
         compile_backend: str = "inductor",
@@ -148,6 +149,7 @@ class RecurrentC51Agent:
             teacher_channels < 0
             or teacher_loss_weight < 0
             or teacher_entry_search_loss_weight < 0
+            or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
@@ -206,6 +208,8 @@ class RecurrentC51Agent:
         self.teacher_entry_search_loss_weight = float(
             teacher_entry_search_loss_weight
         )
+        self.policy_retention_loss_weight = float(policy_retention_loss_weight)
+        self.retention_anchor: RecurrentC51Network | None = None
         self.last_train_metrics: dict[str, float] = {}
         self.support = torch.linspace(value_min, value_max, atoms, device=self.device)
         self.online = RecurrentC51Network(
@@ -272,6 +276,54 @@ class RecurrentC51Agent:
         if self.mixed_precision == "off":
             return nullcontext()
         return torch.autocast(device_type=self.device.type, dtype=torch.float16)
+
+    @staticmethod
+    def _recurrent_features_with_resets(
+        network: RecurrentC51Network,
+        observations: torch.Tensor,
+        reset_rows: Sequence[Sequence[bool]],
+        hidden: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate exact behavior-time GRU state across declared reset points."""
+        if (
+            len(reset_rows) != observations.shape[0]
+            or any(len(row) != observations.shape[1] for row in reset_rows)
+        ):
+            raise ValueError("recurrent reset mask does not match observations")
+        grouped: dict[tuple[int, ...], list[int]] = {}
+        for batch_index, row in enumerate(reset_rows):
+            pattern = tuple(index for index, reset in enumerate(row) if reset)
+            grouped.setdefault(pattern, []).append(batch_index)
+        outputs: list[torch.Tensor] = []
+        final_hidden: list[torch.Tensor] = []
+        order: list[int] = []
+        for pattern, indices in grouped.items():
+            index = torch.as_tensor(indices, dtype=torch.long, device=observations.device)
+            values = observations.index_select(0, index)
+            current_hidden = (
+                None if hidden is None else hidden.index_select(1, index)
+            )
+            pieces: list[torch.Tensor] = []
+            boundaries = sorted({0, *pattern, observations.shape[1]})
+            for start, stop in zip(boundaries, boundaries[1:]):
+                if start in pattern:
+                    current_hidden = None
+                if stop > start:
+                    piece, current_hidden = network.recurrent_features(
+                        values[:, start:stop], current_hidden
+                    )
+                    pieces.append(piece)
+            outputs.append(torch.cat(pieces, dim=1))
+            assert current_hidden is not None
+            final_hidden.append(current_hidden)
+            order.extend(indices)
+        inverse = torch.as_tensor(
+            np.argsort(np.asarray(order)), dtype=torch.long, device=observations.device
+        )
+        return (
+            torch.cat(outputs, dim=0).index_select(0, inverse),
+            torch.cat(final_hidden, dim=1).index_select(1, inverse),
+        )
 
     def _call_with_compile_fallback(self, compiled, eager, *args):
         if self.compile_status != "compiled":
@@ -381,11 +433,24 @@ class RecurrentC51Agent:
             dtype=torch.bool,
             device=self.device,
         )
+        recurrent_reset_rows = tuple(
+            tuple(item.recurrent_reset for item in sequence)
+            for sequence in sequences
+        )
+        next_recurrent_reset_rows = tuple(
+            tuple(item.next_recurrent_reset for item in sequence)
+            for sequence in sequences
+        )
         valid_masks = torch.as_tensor(
             [[
                 [action in item.valid_actions for action in Action]
                 for item in sequence
             ] for sequence in sequences],
+            dtype=torch.bool,
+            device=self.device,
+        )
+        competence_anchors = torch.as_tensor(
+            [[item.competence_anchor for item in sequence] for sequence in sequences],
             dtype=torch.bool,
             device=self.device,
         )
@@ -395,6 +460,18 @@ class RecurrentC51Agent:
         # and corrupts recurrent TD targets.
         causal_observations = torch.cat(
             (observations[:, :1], next_observations), dim=1
+        )
+        causal_reset_rows = tuple(
+            (current[0], *following)
+            for current, following in zip(
+                recurrent_reset_rows, next_recurrent_reset_rows, strict=True
+            )
+        )
+        burn_in_reset_rows = tuple(
+            row[:self.recurrent_burn_in] for row in causal_reset_rows
+        )
+        learning_reset_rows = tuple(
+            row[self.recurrent_burn_in:] for row in causal_reset_rows
         )
 
         learning_start = self.recurrent_burn_in
@@ -429,15 +506,17 @@ class RecurrentC51Agent:
         online_hidden = None
         if self.recurrent_burn_in:
             with torch.no_grad(), self._autocast():
-                _, online_hidden = self.online.recurrent_features(
-                    causal_observations[:, :self.recurrent_burn_in]
+                _, online_hidden = self._recurrent_features_with_resets(
+                    self.online,
+                    causal_observations[:, :self.recurrent_burn_in],
+                    burn_in_reset_rows,
                 )
             online_hidden = online_hidden.detach()
         with self._autocast():
-            causal_recurrent, _ = self._call_with_compile_fallback(
-                self._online_recurrent,
-                self.online.recurrent_features,
+            causal_recurrent, _ = self._recurrent_features_with_resets(
+                self.online,
                 causal_observations[:, self.recurrent_burn_in:],
+                learning_reset_rows,
                 online_hidden,
             )
             recurrent = causal_recurrent[:, :-1]
@@ -459,16 +538,19 @@ class RecurrentC51Agent:
             target_hidden = None
             if self.recurrent_burn_in:
                 with self._autocast():
-                    _, target_hidden = self.target.recurrent_features(
-                        causal_observations[:, :self.recurrent_burn_in]
+                    _, target_hidden = self._recurrent_features_with_resets(
+                        self.target,
+                        causal_observations[:, :self.recurrent_burn_in],
+                        burn_in_reset_rows,
                     )
             with self._autocast():
-                target_causal, _ = self._call_with_compile_fallback(
-                    self._target_forward,
-                    self.target.forward,
+                target_recurrent, _ = self._recurrent_features_with_resets(
+                    self.target,
                     causal_observations[:, self.recurrent_burn_in:],
+                    learning_reset_rows,
                     target_hidden,
                 )
+                target_causal = self.target.distribution_logits(target_recurrent)
                 target_next = target_causal[
                     :,
                     self.n_step_return:self.n_step_return + training_steps,
@@ -491,6 +573,9 @@ class RecurrentC51Agent:
         loss = rl_loss
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        policy_retention_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         if self.teacher_channels:
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
@@ -587,6 +672,54 @@ class RecurrentC51Agent:
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
+        management_valid_rows = (
+            valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
+            & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
+            & (valid_masks[:, self.recurrent_burn_in:].sum(-1) == 2)
+        )
+        retention_rows = (
+            competence_anchors[:, self.recurrent_burn_in:]
+            & management_valid_rows
+        )
+        if (
+            self.retention_anchor is not None
+            and self.policy_retention_loss_weight
+            and bool(retention_rows.any().item())
+        ):
+            with torch.no_grad():
+                anchor_hidden = None
+                if self.recurrent_burn_in:
+                    _, anchor_hidden = self._recurrent_features_with_resets(
+                        self.retention_anchor,
+                        causal_observations[:, :self.recurrent_burn_in],
+                        burn_in_reset_rows,
+                    )
+                anchor_recurrent, _ = self._recurrent_features_with_resets(
+                    self.retention_anchor,
+                    causal_observations[:, self.recurrent_burn_in:],
+                    learning_reset_rows,
+                    anchor_hidden,
+                )
+                anchor_logits = self.retention_anchor.distribution_logits(
+                    anchor_recurrent[:, :-1]
+                ).float()
+                anchor_q = (anchor_logits.softmax(-1) * self.support).sum(-1)
+                anchor_management_q = torch.stack((
+                    anchor_q[..., int(Action.HOLD)],
+                    anchor_q[..., int(Action.CLOSE)],
+                ), dim=-1)
+            current_q = (all_logits.float().softmax(-1) * self.support).sum(-1)
+            current_management_q = torch.stack((
+                current_q[..., int(Action.HOLD)],
+                current_q[..., int(Action.CLOSE)],
+            ), dim=-1)
+            policy_retention_loss = nn.functional.smooth_l1_loss(
+                current_management_q[retention_rows],
+                anchor_management_q[retention_rows],
+            )
+            loss = loss + (
+                self.policy_retention_loss_weight * policy_retention_loss
+            )
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
@@ -617,6 +750,7 @@ class RecurrentC51Agent:
             rl_loss,
             teacher_loss,
             entry_search_loss,
+            policy_retention_loss,
             loss,
             gradient_norm.float(),
             management_rows.float().mean(),
@@ -632,11 +766,27 @@ class RecurrentC51Agent:
                 management_rows,
             ),
             masked_mean(close_rows.float(), management_rows),
+            torch.as_tensor(
+                sum(sum(row) for row in recurrent_reset_rows)
+                / (len(recurrent_reset_rows) * sequence_length),
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            torch.as_tensor(
+                (
+                    sum(any(row) for row in burn_in_reset_rows)
+                    / len(burn_in_reset_rows)
+                    if self.recurrent_burn_in else 1.0
+                ),
+                dtype=torch.float32,
+                device=self.device,
+            ),
         ))
         (
             rl_loss_value,
             teacher_loss_value,
             entry_search_loss_value,
+            policy_retention_loss_value,
             total_loss,
             gradient_norm_value,
             management_row_fraction,
@@ -648,6 +798,8 @@ class RecurrentC51Agent:
             sampled_close_td_loss,
             management_hold_minus_close_q,
             sampled_management_close_fraction,
+            sampled_recurrent_reset_fraction,
+            sampled_burn_in_reset_coverage,
         ) = (
             float(value)
             for value in diagnostic_values.detach().float().cpu().tolist()
@@ -656,6 +808,7 @@ class RecurrentC51Agent:
             "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
+            "policy_retention_loss": policy_retention_loss_value,
             "teacher_weight_scale": teacher_weight_scale,
             "total_loss": total_loss,
             "gradient_norm": gradient_norm_value,
@@ -670,10 +823,26 @@ class RecurrentC51Agent:
             "sampled_management_close_fraction": (
                 sampled_management_close_fraction
             ),
+            "sampled_recurrent_reset_fraction": (
+                sampled_recurrent_reset_fraction
+            ),
+            "sampled_burn_in_reset_coverage": sampled_burn_in_reset_coverage,
+            "sampled_recurrent_reset_pattern_count": float(
+                len(set(recurrent_reset_rows))
+            ),
             "n_step_return": float(self.n_step_return),
             "recurrent_burn_in": float(self.recurrent_burn_in),
         }
         return total_loss
+
+    def retain_policy(self) -> None:
+        """Freeze a training-only copy of demonstrated pass competence."""
+        self.retention_anchor = copy.deepcopy(self.online).to(self.device).eval()
+        self.retention_anchor.requires_grad_(False)
+
+    def discard_retention_anchor(self) -> None:
+        """Remove training-only competence state before evaluation or shipping."""
+        self.retention_anchor = None
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
@@ -771,6 +940,7 @@ class RecurrentC51Agent:
                 "teacher_entry_search_loss_weight": (
                     self.teacher_entry_search_loss_weight
                 ),
+                "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
                 "compile_backend": self.compile_backend,
@@ -778,6 +948,11 @@ class RecurrentC51Agent:
                 "mps_prefer_metal": self.mps_prefer_metal,
                 "mps_fast_math": self.mps_fast_math,
             },
+            "retention_anchor": (
+                None
+                if self.retention_anchor is None
+                else self.retention_anchor.state_dict()
+            ),
         }, path)
         return path
 
@@ -842,6 +1017,7 @@ class RecurrentC51Agent:
         config.setdefault("target_soft_tau", 1.0)
         config.setdefault("n_step_return", 1)
         config.setdefault("recurrent_burn_in", 0)
+        config.setdefault("policy_retention_loss_weight", 0.0)
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])
@@ -851,4 +1027,8 @@ class RecurrentC51Agent:
         agent._updates = int(payload["updates"])
         if "rng_state" in payload:
             agent._rng.bit_generator.state = payload["rng_state"]
+        if payload.get("retention_anchor") is not None:
+            agent.retain_policy()
+            assert agent.retention_anchor is not None
+            agent.retention_anchor.load_state_dict(payload["retention_anchor"])
         return agent, dict(payload["manifest"])

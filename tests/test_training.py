@@ -30,6 +30,10 @@ from propevolve.training import (
 class Agent:
     def __init__(self) -> None:
         self.updates = 0
+        self.retention_calls = 0
+
+    def retain_policy(self) -> None:
+        self.retention_calls += 1
 
     def select_action(self, observation, *, hidden, valid_actions, epsilon):
         return Action.WAIT, None, np.zeros(len(Action), np.float32)
@@ -371,6 +375,9 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
     assert diagnostics[-1]["n_step_return"] == 1
     assert diagnostics[-1]["recurrent_burn_in"] == 0
+    assert diagnostics[-1]["mean_sampled_recurrent_reset_fraction"] is not None
+    assert diagnostics[-1]["mean_sampled_burn_in_reset_coverage"] is not None
+    assert diagnostics[-1]["mean_policy_retention_loss"] == 0.0
     summary_path = tmp_path / "run" / "training-diagnostic-summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["schema"] == "propevolve_training_diagnostic_summary_v1"
@@ -391,6 +398,10 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "sampled_close_td_loss",
         "management_hold_minus_close_q",
         "sampled_management_close_fraction",
+        "sampled_recurrent_reset_fraction",
+        "sampled_burn_in_reset_coverage",
+        "sampled_recurrent_reset_pattern_count",
+        "policy_retention_loss",
     }
     assert evaluation.candidate_id == candidate.candidate_id
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
@@ -746,6 +757,7 @@ def test_training_preserves_a_pass_policy_before_any_following_updates() -> None
         "outcome": "pass",
         "terminal_pnl": 6_000.0,
     })]
+    assert agent.retention_calls == 1
     assert agent.updates == 1
 
 

@@ -383,6 +383,145 @@ def test_eight_step_management_learning_prefers_a_delayed_winner_to_close() -> N
     assert agent.last_train_metrics["sampled_close_n_step_return"] == 0.0
 
 
+def test_recurrent_training_forgets_history_before_a_behavior_reset() -> None:
+    """Learning state must match the hidden-state resets used during behavior."""
+    left = _agent(
+        2,
+        hidden_dim=8,
+        atoms=11,
+        n_step_return=2,
+        recurrent_burn_in=8,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        seed=71,
+    )
+    right = _agent(
+        2,
+        hidden_dim=8,
+        atoms=11,
+        n_step_return=2,
+        recurrent_burn_in=8,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        seed=71,
+    )
+
+    def sequence(prefix: float) -> tuple[Transition, ...]:
+        return tuple(
+            Transition(
+                observation=np.array([
+                    prefix if index < 6 else index / 12,
+                    1.0,
+                ], np.float32),
+                action=Action.HOLD,
+                reward=0.25 if index == 9 else 0.0,
+                next_observation=np.array([
+                    prefix if index + 1 < 6 else (index + 1) / 12,
+                    1.0,
+                ], np.float32),
+                terminated=False,
+                valid_actions=(Action.HOLD, Action.CLOSE),
+                next_valid_actions=(Action.HOLD, Action.CLOSE),
+                recurrent_reset=index in {0, 6},
+                next_recurrent_reset=index + 1 in {0, 6},
+            )
+            for index in range(12)
+        )
+
+    left_loss = left.train_batch((sequence(-100.0),))
+    right_loss = right.train_batch((sequence(100.0),))
+
+    assert left_loss == pytest.approx(right_loss, rel=1e-7, abs=1e-7)
+    for left_parameter, right_parameter in zip(
+        left.online.parameters(), right.online.parameters(), strict=True
+    ):
+        torch.testing.assert_close(left_parameter, right_parameter)
+
+
+def test_pass_competence_anchor_prevents_management_policy_collapse() -> None:
+    """Timeout replay must not erase management behavior that produced a pass."""
+    anchored = _agent(
+        2,
+        hidden_dim=16,
+        atoms=51,
+        value_min=-1.0,
+        value_max=2.0,
+        gamma=0.99,
+        n_step_return=8,
+        recurrent_burn_in=8,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        target_update_mode="soft",
+        target_soft_tau=0.005,
+        policy_retention_loss_weight=10.0,
+        seed=79,
+    )
+    control = _agent(
+        2,
+        hidden_dim=16,
+        atoms=51,
+        value_min=-1.0,
+        value_max=2.0,
+        gamma=0.99,
+        n_step_return=8,
+        recurrent_burn_in=8,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        target_update_mode="soft",
+        target_soft_tau=0.005,
+        policy_retention_loss_weight=0.0,
+        seed=79,
+    )
+
+    def sequence(action: Action, reward: float, *, pass_episode: bool) -> tuple[Transition, ...]:
+        return tuple(
+            Transition(
+                observation=np.array([index / 16, 1.0], np.float32),
+                action=action if index == 8 else Action.HOLD,
+                reward=reward if index == 15 else 0.0,
+                next_observation=np.array([(index + 1) / 16, 1.0], np.float32),
+                terminated=False,
+                valid_actions=(Action.HOLD, Action.CLOSE),
+                next_valid_actions=(Action.HOLD, Action.CLOSE),
+                recurrent_reset=index == 0,
+                competence_anchor=pass_episode,
+            )
+            for index in range(16)
+        )
+
+    passing_hold = sequence(Action.HOLD, 0.20, pass_episode=True)
+    timeout_close = sequence(Action.CLOSE, 0.35, pass_episode=False)
+    for _ in range(200):
+        batch = (passing_hold,) * 4
+        anchored.train_batch(batch)
+        control.train_batch(batch)
+    anchored.retain_policy()
+    for _ in range(120):
+        batch = (passing_hold, timeout_close, timeout_close, timeout_close)
+        anchored.train_batch(batch)
+        control.train_batch(batch)
+
+    def decision(agent: RecurrentC51Agent) -> Action:
+        hidden = None
+        for index in range(8):
+            _, hidden, _ = agent.select_action(
+                np.array([index / 16, 1.0], np.float32),
+                hidden=hidden,
+                valid_actions=(Action.HOLD,),
+                epsilon=0.0,
+            )
+        selected, _, _ = agent.select_action(
+            np.array([0.5, 1.0], np.float32),
+            hidden=hidden,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            epsilon=0.0,
+        )
+        return selected
+
+    assert decision(control) == Action.CLOSE  # Fixture reproduces the collapse.
+    assert decision(anchored) == Action.HOLD
+
+
 def test_checkpoint_round_trip_preserves_recurrent_credit_horizon(
     tmp_path: Path,
 ) -> None:
@@ -393,6 +532,28 @@ def test_checkpoint_round_trip_preserves_recurrent_credit_horizon(
 
     assert restored.n_step_return == 8
     assert restored.recurrent_burn_in == 64
+
+
+def test_checkpoint_round_trip_preserves_training_competence_anchor(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(2, policy_retention_loss_weight=0.75)
+    agent.retain_policy()
+    assert agent.retention_anchor is not None
+    expected = {
+        key: value.detach().clone()
+        for key, value in agent.retention_anchor.state_dict().items()
+    }
+
+    checkpoint = agent.save(tmp_path / "retention-anchor.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert restored.policy_retention_loss_weight == pytest.approx(0.75)
+    assert restored.retention_anchor is not None
+    for key, value in restored.retention_anchor.state_dict().items():
+        torch.testing.assert_close(value, expected[key])
+    restored.discard_retention_anchor()
+    assert restored.retention_anchor is None
 
 
 def test_soft_target_update_moves_gradually_after_every_learner_update() -> None:
@@ -487,6 +648,37 @@ def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     assert not torch.equal(before, agent.online.input[1].weight.detach())
     assert agent.teacher_channels == restored.teacher_channels == 0
     assert agent.online.teacher_output is None
+
+
+def test_hidden_teacher_guidance_cannot_change_the_rl_update() -> None:
+    plain = _agent(2, seed=83)
+    taught = _agent(
+        2,
+        seed=83,
+        teacher_channels=1,
+        teacher_loss_weight=0.2,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([index, 1.0], np.float32),
+            action=Action.HOLD,
+            reward=0.1 if index == 3 else 0.0,
+            next_observation=np.array([index + 1, 1.0], np.float32),
+            terminated=False,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+            teacher_target=np.array([0.9], np.float32),
+        )
+        for index in range(4)
+    )
+
+    plain.train_batch((sequence, sequence))
+    taught.train_batch((sequence, sequence), teacher_weight_scale=0.0)
+
+    assert taught.last_train_metrics["teacher_loss"] > 0
+    for key, value in plain.online.state_dict().items():
+        if not key.startswith("teacher_output."):
+            torch.testing.assert_close(value, taught.online.state_dict()[key])
 
 
 def test_teacher_channel_weights_keep_specialist_losses_independent() -> None:
