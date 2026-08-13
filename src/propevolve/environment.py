@@ -255,7 +255,11 @@ class _Position:
     protective_stop: float | None = None
     peak_favorable_r: float = 0.0
     ratchet_active: bool = False
+    source_decision_index: int = 0
     entry_index: int = 0
+    entry_realized_pnl: float = 0.0
+    entry_mll_floor_pnl: float = 0.0
+    entry_mll_headroom: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -265,6 +269,7 @@ class _ClosedTrade:
     peak_favorable_r: float
     peak_adverse_r: float
     side: str
+    source_decision_index: int
     entry_index: int
     exit_index: int
     entry_timestamp: str
@@ -272,6 +277,9 @@ class _ClosedTrade:
     ratchet_activated: bool
     exit_reason: str
     hold_bars: int
+    entry_realized_pnl: float
+    entry_mll_floor_pnl: float
+    entry_mll_headroom: float
     shadow_outcomes: tuple["_ShadowOutcome", ...]
 
 
@@ -713,7 +721,11 @@ class HistoricalChallengeEnv:
                     fill,
                     initial_risk_points=initial_risk_points,
                     protective_stop=protective_stop,
+                    source_decision_index=int(info["decision_index"]),
                     entry_index=self._index + 1,
+                    entry_realized_pnl=float(self._account.realized_pnl),
+                    entry_mll_floor_pnl=float(self._account.mll_floor_pnl),
+                    entry_mll_headroom=float(self._account.mll_headroom()),
                 )
                 self._primary_side = "long" if side == PositionSide.LONG else "short"
                 info.update({"fill_price": fill, "fill_side": self._primary_side, "fill_size": size})
@@ -824,6 +836,26 @@ class HistoricalChallengeEnv:
             "ratchet_activated": trade.ratchet_activated,
             "exit_reason": trade.exit_reason,
         }
+
+    def closed_trade_receipts(self) -> tuple[dict[str, object], ...]:
+        """Return detached episode-local trade economics for diagnostics.
+
+        The receipt contains only causal entry state plus realized execution
+        outcomes. Training and validation callers may join the source decision
+        index to separately authenticated Regime evidence without exposing
+        future outcomes to the policy.
+        """
+        ticker = "" if self._ticker is None else self._ticker
+        return tuple({
+            "trade_index": index,
+            "ticker": ticker,
+            **self._trade_context(trade),
+            "source_decision_index": trade.source_decision_index,
+            "entry_realized_pnl": trade.entry_realized_pnl,
+            "entry_mll_floor_pnl": trade.entry_mll_floor_pnl,
+            "entry_mll_headroom": trade.entry_mll_headroom,
+            "pnl": trade.pnl,
+        } for index, trade in enumerate(self._closed_trades))
 
     def _trade_statistics(self) -> dict[str, object]:
         trades = len(self._closed_trade_pnls)
@@ -987,6 +1019,7 @@ class HistoricalChallengeEnv:
                 peak_favorable_r=peak_favorable_r,
                 peak_adverse_r=peak_adverse_r,
                 side=position.side.name.removeprefix("ENTER_").lower(),
+                source_decision_index=position.source_decision_index,
                 entry_index=position.entry_index,
                 exit_index=exit_index,
                 entry_timestamp=np.datetime_as_string(
@@ -998,6 +1031,9 @@ class HistoricalChallengeEnv:
                 ratchet_activated=position.ratchet_active,
                 exit_reason=exit_reason,
                 hold_bars=max(0, exit_index - position.entry_index),
+                entry_realized_pnl=position.entry_realized_pnl,
+                entry_mll_floor_pnl=position.entry_mll_floor_pnl,
+                entry_mll_headroom=position.entry_mll_headroom,
                 shadow_outcomes=self._shadow_entry_outcomes(position),
             ))
 

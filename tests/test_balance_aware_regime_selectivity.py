@@ -17,6 +17,7 @@ from propevolve.decision import Action
 from propevolve.replay import Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
+from propevolve.teachers.trend import CHANNELS as TREND_CHANNELS
 from propevolve.training import (
     _bounded_regime_selectivity_headroom,
     _regime_selectivity_episode_diagnostic,
@@ -563,6 +564,82 @@ def test_selectivity_diagnostics_are_additive_across_declared_strata() -> None:
         assert metrics[
             f"regime_selectivity_{stratum}_declared_side_probability_sum"
         ] > 0.0
+
+
+def test_regime_diagnostics_vectorize_exact_channels_and_exclude_trend() -> None:
+    all_channels = (*CHANNELS, *TREND_CHANNELS)
+    agent = RecurrentC51Agent(
+        3,
+        hidden_dim=16,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=0.01,
+        weight_decay=0.0,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        device="cpu",
+        seed=151,
+        teacher_channels=len(all_channels),
+        teacher_channel_names=all_channels,
+        teacher_loss_weight=1e-6,
+        regime_selectivity_loss_weight=1.0,
+        regime_selectivity_expansion_centers=(0.10, 0.10),
+    )
+    teacher = np.concatenate((
+        _teacher_row(
+            long_attempt=0.9,
+            long_clean=0.8,
+            short_attempt=0.1,
+            short_clean=0.1,
+            chop=0.9,
+            neutral=0.05,
+            trend=0.05,
+        ).numpy(),
+        np.asarray((0.2, 0.3, 0.4, 0.5), np.float32),
+    ))
+    with torch.no_grad():
+        assert agent.online.teacher_output is not None
+        agent.online.teacher_output.weight.zero_()
+        agent.online.teacher_output.bias.zero_()
+        agent.online.output.weight.zero_()
+        agent.online.output.bias.zero_()
+        agent.online.output.bias[agent.atoms - 1] = 20.0
+    sequence = _sequence(
+        (1.0, 0.0, 0.0),
+        torch.from_numpy(teacher),
+        headroom=0.10,
+        target=Action.ENTER_LONG_1,
+    )
+
+    agent.train_batch((sequence, sequence))
+    metrics = agent.last_train_metrics
+
+    assert agent.regime_teacher_channel_names == REGIME_CHANNELS
+    assert metrics[
+        "regime_teacher_channel_structure_chop_probability_rows"
+    ] == 2.0
+    assert metrics[
+        "regime_teacher_channel_structure_chop_probability_"
+        "target_probability_sum"
+    ] == pytest.approx(1.8)
+    assert metrics[
+        "regime_teacher_channel_structure_chop_probability_"
+        "model_probability_sum"
+    ] == pytest.approx(1.0)
+    assert metrics[
+        "regime_teacher_channel_structure_chop_probability_absolute_error_sum"
+    ] == pytest.approx(0.8)
+    assert not any(
+        f"regime_teacher_channel_{channel}_" in key
+        for channel in TREND_CHANNELS
+        for key in metrics
+    )
+    assert metrics[
+        "regime_selectivity_positive_long_target_long_predicted_wait_rows"
+    ] == 2.0
+    assert metrics["regime_selectivity_positive_long_accuracy"] == 0.0
 
 
 def test_padding_is_excluded_and_zero_strata_are_explicit() -> None:
@@ -1312,7 +1389,22 @@ def test_episode_and_training_summary_preserve_row_additive_diagnostics(
     first = _regime_selectivity_episode_diagnostic(update_metrics)
     second = _regime_selectivity_episode_diagnostic({})
 
-    assert first["positive_long_short"] == pytest.approx({
+    assert {
+        key: first["positive_long_short"][key]
+        for key in (
+            "rows",
+            "target_wait_probability_sum",
+            "target_wait_probability_mean",
+            "model_wait_probability_sum",
+            "model_wait_probability_mean",
+            "greedy_wait_rows",
+            "greedy_wait_rate",
+            "declared_side_probability_sum",
+            "declared_side_probability_mean",
+            "greedy_entry_rows",
+            "greedy_entry_rate",
+        )
+    } == pytest.approx({
         "rows": 5,
         "target_wait_probability_sum": 2.5,
         "target_wait_probability_mean": 0.5,
@@ -1325,7 +1417,22 @@ def test_episode_and_training_summary_preserve_row_additive_diagnostics(
         "greedy_entry_rows": 3,
         "greedy_entry_rate": 0.6,
     })
-    assert second["safe_headroom_ge_0_75"] == {
+    assert {
+        key: second["safe_headroom_ge_0_75"][key]
+        for key in (
+            "rows",
+            "target_wait_probability_sum",
+            "target_wait_probability_mean",
+            "model_wait_probability_sum",
+            "model_wait_probability_mean",
+            "greedy_wait_rows",
+            "greedy_wait_rate",
+            "declared_side_probability_sum",
+            "declared_side_probability_mean",
+            "greedy_entry_rows",
+            "greedy_entry_rate",
+        )
+    } == {
         "rows": 0,
         "target_wait_probability_sum": 0.0,
         "target_wait_probability_mean": 0.0,
@@ -1358,9 +1465,18 @@ def test_episode_and_training_summary_preserve_row_additive_diagnostics(
     _write_training_diagnostic_summary(source, destination)
     summary = json.loads(destination.read_text())["overall"]["regime_selectivity"]
 
-    assert summary["positive_long_short"] == pytest.approx(
-        first["positive_long_short"]
-    )
+    assert {
+        key: value
+        for key, value in summary["positive_long_short"].items()
+        if key != "confusion"
+    } == pytest.approx({
+        key: value
+        for key, value in first["positive_long_short"].items()
+        if key != "confusion"
+    })
+    assert summary["positive_long_short"]["confusion"] == first[
+        "positive_long_short"
+    ]["confusion"]
     assert summary["dominant_chop"] == second["dominant_chop"]
     assert summary["safe_headroom_ge_0_75"] == second[
         "safe_headroom_ge_0_75"
@@ -1395,6 +1511,18 @@ def test_stage2a_training_gate_requires_rows_side_response_and_wait_deltas() -> 
     assert all(gate.passes(metrics) for gate in gates)
     metrics["final_regime_probe_chop_minus_nonchop_wait"] = 0.0
     assert not all(gate.passes(metrics) for gate in gates)
+
+    for action in ("wait", "long", "short"):
+        metrics[f"entry_balance_{action}_rows"] = 10.0
+        metrics[
+            f"entry_balance_{action}_weighted_mass_fraction"
+        ] = 1.0 / 3.0
+    repair_gates = _training_evaluation_gates(
+        regime_selectivity_active=True,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+        entry_action_supervision_active=True,
+    )
+    assert all(gate.passes(metrics) for gate in repair_gates)
 
 
 def test_active_selectivity_is_plain_in_candidate_contract_and_resume_identity(

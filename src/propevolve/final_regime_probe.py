@@ -17,6 +17,7 @@ from .balance_aware_regime_selectivity import (
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     REGIME_STATE_CHANNELS,
     REGIME_TRANSITION_CHANNELS,
+    REGIME_TEACHER_CHANNELS,
 )
 from .decision import Action
 from .replay import (
@@ -163,6 +164,7 @@ def evaluate_final_regime_probe(
         raise ValueError("final Regime probe flat-action values are invalid")
     for row_index, receipt in enumerate(row_receipts):
         receipt["greedy_action"] = Action(int(predictions[row_index])).name
+        receipt["correct"] = bool(predictions[row_index] == target_actions[row_index])
         receipt["flat_action_q_values"] = {
             action.name: float(flat_q[row_index, action_index])
             for action_index, action in enumerate(_FLAT_ACTIONS)
@@ -172,6 +174,31 @@ def evaluate_final_regime_probe(
     probabilities = normalized / normalized.sum(axis=1, keepdims=True)
     targets = np.asarray(target_actions, dtype=np.int64)
     teachers = np.stack(teacher_rows)
+    for row_index, receipt in enumerate(row_receipts):
+        receipt["flat_action_probabilities"] = {
+            action.name: float(probabilities[row_index, action_index])
+            for action_index, action in enumerate(_FLAT_ACTIONS)
+        }
+        receipt["regime_channels"] = {
+            channel: float(teachers[row_index, channels.index(channel)])
+            for channel in REGIME_TEACHER_CHANNELS
+            if channel in channels
+        }
+        headroom = samples[row_index].sequence[
+            anchor_positions[row_index]
+        ].regime_selectivity_headroom_fraction
+        receipt["headroom_fraction"] = (
+            None if headroom is None else float(headroom)
+        )
+        receipt["headroom_stratum"] = (
+            "unavailable"
+            if headroom is None
+            else "low_headroom_le_0_25"
+            if float(headroom) <= 0.25
+            else "safe_headroom_ge_0_75"
+            if float(headroom) >= 0.75
+            else "mid_headroom_gt_0_25_lt_0_75"
+        )
 
     metrics: dict[str, float] = {}
     for action, name in zip(_FLAT_ACTIONS, ("wait", "long", "short"), strict=True):
@@ -193,6 +220,12 @@ def evaluate_final_regime_probe(
     dominant_chop = positive_rows & (chop > np.maximum(neutral, trend))
     nonchop = positive_rows & ~dominant_chop
     wait_probability = probabilities[:, int(Action.WAIT)]
+    for row_index, receipt in enumerate(row_receipts):
+        receipt["static_regime_stratum"] = (
+            "dominant_chop"
+            if chop[row_index] > max(neutral[row_index], trend[row_index])
+            else "nonchop"
+        )
     metrics["final_regime_probe_dominant_chop_rows"] = float(
         dominant_chop.sum()
     )
@@ -220,6 +253,13 @@ def evaluate_final_regime_probe(
     short_ready = (
         evidence.transition_positive_short_membership.numpy().astype(np.float64)
     )
+    for row_index, receipt in enumerate(row_receipts):
+        receipt["persistent_regime_strata"] = {
+            "persistent_dead_chop_membership": float(dead[row_index]),
+            "transition_ready_membership": float(ready[row_index]),
+            "transition_positive_long_membership": float(long_ready[row_index]),
+            "transition_positive_short_membership": float(short_ready[row_index]),
+        }
     metrics["final_regime_probe_persistent_dead_wait_mass"] = float(dead.sum())
     metrics["final_regime_probe_transition_ready_wait_mass"] = float(ready.sum())
     metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = (
@@ -237,6 +277,17 @@ def evaluate_final_regime_probe(
         metrics[f"final_regime_probe_transition_positive_{side}_response"] = (
             _weighted_mean(response, membership)
         )
+    for target_index, target_name in enumerate(("wait", "long", "short")):
+        for prediction_index, prediction_name in enumerate(
+            ("wait", "long", "short")
+        ):
+            metrics[
+                f"final_regime_probe_target_{target_name}_predicted_"
+                f"{prediction_name}_rows"
+            ] = float((
+                (targets == int(_FLAT_ACTIONS[target_index]))
+                & (predictions == int(_FLAT_ACTIONS[prediction_index]))
+            ).sum())
     if not all(math.isfinite(value) for value in metrics.values()):
         raise ValueError("final Regime probe produced non-finite metrics")
 
@@ -247,9 +298,15 @@ def evaluate_final_regime_probe(
         "q_temperature": float(q_temperature),
         "rows": [
             {
-                key: value
-                for key, value in receipt.items()
-                if key not in {"greedy_action", "flat_action_q_values"}
+                key: receipt[key]
+                for key in (
+                    "row_identity_sha256",
+                    "ticker",
+                    "source_anchor_index",
+                    "source_decision_index",
+                    "sequence_anchor_index",
+                    "target_action",
+                )
             }
             for receipt in row_receipts
         ],

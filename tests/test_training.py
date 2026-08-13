@@ -217,14 +217,33 @@ def test_runner_balance_seam_keeps_the_v8_negative_control_unweighted() -> None:
 def test_recovery_rejects_entry_balance_drift() -> None:
     class Agent:
         entry_action_class_weights = (0.5, 2.0, 2.0)
+        entry_action_loss_reduction = "equal_present_class_mean_v1"
 
     _assert_recovery_entry_balance(
-        Agent(), {"entry_action_class_weights": (0.5, 2.0, 2.0)}
+        Agent(), {
+            "entry_action_class_weights": (0.5, 2.0, 2.0),
+            "entry_action_loss_reduction": "equal_present_class_mean_v1",
+        }
     )
     with pytest.raises(ValueError, match="recovery entry balance drifted"):
         _assert_recovery_entry_balance(
-            Agent(), {"entry_action_class_weights": (1.0, 1.0, 1.0)}
+            Agent(), {
+                "entry_action_class_weights": (1.0, 1.0, 1.0),
+                "entry_action_loss_reduction": "equal_present_class_mean_v1",
+            }
         )
+
+
+def test_recovery_rejects_entry_action_loss_reduction_drift() -> None:
+    class Agent:
+        entry_action_class_weights = (0.5, 2.0, 2.0)
+        entry_action_loss_reduction = "population_weighted_mean_v1"
+
+    with pytest.raises(ValueError, match="recovery entry balance drifted"):
+        _assert_recovery_entry_balance(Agent(), {
+            "entry_action_class_weights": (0.5, 2.0, 2.0),
+            "entry_action_loss_reduction": "equal_present_class_mean_v1",
+        })
 
 
 def test_recovery_rejects_regime_learning_identity_drift() -> None:
@@ -342,6 +361,106 @@ def test_training_diagnostic_summary_aggregates_side_recall_from_exact_counts(
     }
 
 
+def test_training_summary_separates_guidance_and_autonomy_regime_learning(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "training-diagnostics.jsonl"
+    guided = {
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "terminal_pnl": -300.0,
+        "updates": 1,
+        "guidance_phase": "guidance",
+        "teacher_guidance_eligible_decisions": 10,
+        "teacher_guidance_visible_decisions": 6,
+        "regime_teacher_channels": {
+            "structure_chop_probability": {
+                "rows": 2,
+                "target_probability_sum": 1.6,
+                "model_probability_sum": 1.0,
+                "absolute_error_sum": 0.6,
+                "squared_error_sum": 0.18,
+            },
+        },
+        "entry_action_balance": {
+            "wait": {
+                "rows": 4,
+                "configured_weight": 0.25,
+                "weighted_mass": 1.0,
+                "unweighted_ce_sum": 4.0,
+                "weighted_ce_sum": 1.0,
+            },
+            "long": {
+                "rows": 2,
+                "configured_weight": 2.0,
+                "weighted_mass": 4.0,
+                "unweighted_ce_sum": 2.0,
+                "weighted_ce_sum": 4.0,
+            },
+            "short": {
+                "rows": 1,
+                "configured_weight": 4.0,
+                "weighted_mass": 4.0,
+                "unweighted_ce_sum": 1.0,
+                "weighted_ce_sum": 4.0,
+            },
+        },
+        "regime_entry_conflict": {
+            "long": {
+                "rows": 2,
+                "target_wait_probability_sum": 1.4,
+                "target_declared_side_probability_sum": 0.6,
+                "model_wait_probability_sum": 1.0,
+                "soft_wait_disagreement_rows": 2,
+            },
+            "short": {
+                "rows": 1,
+                "target_wait_probability_sum": 0.2,
+                "target_declared_side_probability_sum": 0.8,
+                "model_wait_probability_sum": 0.3,
+                "soft_wait_disagreement_rows": 0,
+            },
+        },
+    }
+    autonomy = {
+        "ticker": "NQ",
+        "outcome": "pass",
+        "terminal_pnl": 6_000.0,
+        "updates": 1,
+        "guidance_phase": "autonomy",
+        "teacher_guidance_eligible_decisions": 0,
+        "teacher_guidance_visible_decisions": 0,
+    }
+    source.write_text(json.dumps(guided) + "\n" + json.dumps(autonomy) + "\n")
+    destination = tmp_path / "summary.json"
+
+    training_module._write_training_diagnostic_summary(source, destination)
+    summary = json.loads(destination.read_text())
+
+    assert set(summary["by_guidance_phase"]) == {"guidance", "autonomy"}
+    assert summary["by_guidance_phase"]["guidance"][
+        "teacher_guidance_visible_fraction"
+    ] == pytest.approx(0.6)
+    assert summary["by_guidance_phase"]["autonomy"][
+        "regime_teacher_channels"
+    ] == {}
+    chop = summary["overall"]["regime_teacher_channels"][
+        "structure_chop_probability"
+    ]
+    assert chop["target_probability_mean"] == pytest.approx(0.8)
+    assert chop["model_probability_mean"] == pytest.approx(0.5)
+    assert chop["mean_absolute_error"] == pytest.approx(0.3)
+    assert chop["root_mean_squared_error"] == pytest.approx(0.3)
+    balance = summary["overall"]["entry_action_balance"]
+    assert balance["wait"]["weighted_mass_fraction"] == pytest.approx(1 / 9)
+    assert balance["long"]["weighted_mass_fraction"] == pytest.approx(4 / 9)
+    assert balance["short"]["weighted_mass_fraction"] == pytest.approx(4 / 9)
+    conflict = summary["overall"]["regime_entry_conflict"]
+    assert conflict["long"]["target_wait_probability_mean"] == pytest.approx(0.7)
+    assert conflict["long"]["soft_wait_disagreement_rate"] == 1.0
+    assert conflict["short"]["soft_wait_disagreement_rate"] == 0.0
+
+
 def test_persistent_regime_gate_requires_learned_wait_separation(
     tmp_path: Path,
 ) -> None:
@@ -423,6 +542,32 @@ def test_persistent_regime_gate_requires_learned_wait_separation(
     assert all(gate.passes(metrics) for gate in gates)
 
     metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = 0.0
+    assert not all(gate.passes(metrics) for gate in gates)
+
+
+def test_equal_present_class_reduction_gate_requires_all_three_equal_loss_masses() -> None:
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=False,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+        entry_action_supervision_active=True,
+    )
+    metrics = {
+        "short_circuited": 0.0,
+        "entry_balance_wait_rows": 100.0,
+        "entry_balance_long_rows": 100.0,
+        "entry_balance_short_rows": 100.0,
+        "entry_balance_wait_weighted_mass_fraction": 1.0 / 3.0,
+        "entry_balance_long_weighted_mass_fraction": 1.0 / 3.0,
+        "entry_balance_short_weighted_mass_fraction": 1.0 / 3.0,
+    }
+
+    assert all(gate.passes(metrics) for gate in gates)
+
+    metrics["entry_balance_wait_rows"] = 0.0
+    assert not all(gate.passes(metrics) for gate in gates)
+    metrics["entry_balance_wait_rows"] = 100.0
+
+    metrics["entry_balance_wait_weighted_mass_fraction"] = 0.11
     assert not all(gate.passes(metrics) for gate in gates)
 
 
@@ -771,6 +916,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
             "weight_decay": 0.0,
             "gradient_clip": 10.0,
             "target_sync_updates": 2,
+            "entry_action_loss_reduction": "equal_present_class_mean_v1",
             "device": "cpu",
         },
         "runtime": {
@@ -810,6 +956,10 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert candidate.model_path.is_file()
     assert evaluation.path.is_file()
     contract = json.loads((candidate.path / "contract.json").read_text())
+    assert (
+        contract["entry_action_loss_reduction"]
+        == "equal_present_class_mean_v1"
+    )
     assert contract["recovery_curriculum"] == config["recovery_curriculum"]
     assert contract["training_resume_identity"]
     assert set(contract["runtime_source_modules_sha256"]) >= {
@@ -848,6 +998,23 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert diagnostics[-1]["mean_sampled_recurrent_reset_fraction"] is not None
     assert diagnostics[-1]["mean_sampled_burn_in_reset_coverage"] is not None
     assert diagnostics[-1]["mean_policy_retention_loss"] == 0.0
+    validation_diagnostic_path = tmp_path / "run" / "validation-diagnostics.jsonl"
+    assert validation_diagnostic_path.is_file()
+    validation_diagnostics = [
+        json.loads(line)
+        for line in validation_diagnostic_path.read_text().splitlines()
+    ]
+    assert len(validation_diagnostics) == 1
+    assert validation_diagnostics[0]["schema"] == (
+        "propevolve_validation_episode_diagnostic_v1"
+    )
+    assert contract["validation_diagnostics"] == {
+        "schema": "propevolve_validation_episode_diagnostic_v1",
+        "path": str(validation_diagnostic_path),
+        "file_sha256": hashlib.sha256(
+            validation_diagnostic_path.read_bytes()
+        ).hexdigest(),
+    }
     summary_path = tmp_path / "run" / "training-diagnostic-summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["schema"] == "propevolve_training_diagnostic_summary_v1"
@@ -892,6 +1059,47 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         "selection.gave_it_all_back_rate",
         "selection.two_r_mfe_capture_ratio",
     }
+
+    # A killed validation leaves valid forensic evidence, but validation itself
+    # is not resumable: restart it from episode one without appending duplicates.
+    partial_payload = {
+        "schema": "propevolve_validation_episode_diagnostic_v1",
+        "episode": 1,
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "partial": True,
+    }
+    partial_bytes = (
+        json.dumps(partial_payload, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode()
+    validation_diagnostic_path.write_bytes(partial_bytes)
+    partial_sha256 = hashlib.sha256(partial_bytes).hexdigest()
+
+    resumed_candidate, _ = HistoricalCandidateRunner().run(
+        config,
+        parent_candidate_ids=(),
+        hypothesis="complete flow regression",
+    )
+
+    preserved_partial = (
+        tmp_path
+        / "run"
+        / f"validation-diagnostics.partial-{partial_sha256}.jsonl"
+    )
+    assert preserved_partial.read_bytes() == partial_bytes
+    fresh_rows = [
+        json.loads(line)
+        for line in validation_diagnostic_path.read_text().splitlines()
+    ]
+    assert [row["episode"] for row in fresh_rows] == [1]
+    assert all("partial" not in row for row in fresh_rows)
+    resumed_contract = json.loads(
+        (resumed_candidate.path / "contract.json").read_text()
+    )
+    assert resumed_contract["validation_diagnostics"]["file_sha256"] == (
+        hashlib.sha256(validation_diagnostic_path.read_bytes()).hexdigest()
+    )
 
 
 def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) -> None:
@@ -1559,6 +1767,184 @@ def test_teacher_diagnostics_preserve_named_source_channels() -> None:
     })
 
 
+def test_training_joins_only_visible_regime_entry_context_to_trade_economics() -> None:
+    class TradingAgent(Agent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actions = iter((
+                Action.ENTER_LONG_1,
+                Action.CLOSE,
+                Action.ENTER_SHORT_1,
+                Action.CLOSE,
+            ))
+
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
+            values = (
+                np.zeros(len(Action), np.float32)
+                if return_action_values else None
+            )
+            return next(self.actions), None, values
+
+    class TradeReceiptEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.zeros(1, np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "start": 10,
+                "mll_headroom_fraction": 0.20,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 4
+            valid = (
+                (Action.HOLD, Action.CLOSE)
+                if self.index in {1, 3}
+                else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            )
+            return np.ones(1, np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else valid,
+                "ticker": "NQ",
+                "fill_index": 10 + self.index,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "short",
+                "trade_count": 2,
+                "win_count": 1,
+                "winning_r_sum": 2.0,
+                "equity_pnl": 300.0,
+                "mll_headroom_fraction": 0.80,
+            }
+
+        def closed_trade_receipts(self):
+            return (
+                {
+                    "trade_index": 0,
+                    "ticker": "NQ",
+                    "side": "long",
+                    "source_decision_index": 10,
+                    "entry_mll_headroom": 600.0,
+                    "pnl": -300.0,
+                    "realized_r": -1.0,
+                    "mfe_r": 0.25,
+                    "mae_r": 1.0,
+                    "exit_reason": "initial_stop",
+                },
+                {
+                    "trade_index": 1,
+                    "ticker": "NQ",
+                    "side": "short",
+                    "source_decision_index": 12,
+                    "entry_mll_headroom": 2_400.0,
+                    "pnl": 600.0,
+                    "realized_r": 2.0,
+                    "mfe_r": 2.5,
+                    "mae_r": 0.25,
+                    "exit_reason": "ratchet_stop",
+                },
+            )
+
+    channels = (
+        "long_attempt_probability",
+        "long_clean_retained_given_attempt_probability",
+        "short_attempt_probability",
+        "short_clean_retained_given_attempt_probability",
+        "structure_chop_probability",
+        "structure_neutral_probability",
+        "structure_trend_probability",
+    )
+    visible = {
+        10: np.asarray((0.9, 0.8, 0.1, 0.1, 0.9, 0.05, 0.05), np.float32),
+        # Deliberately no row 12: the second trade must be explicitly unattributed.
+    }
+    lookups: list[int] = []
+
+    def lookup(ticker: str, index: int):
+        lookups.append(index)
+        return visible.get(index)
+
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        TradingAgent(),
+        TradeReceiptEnvironment(),
+        episodes=1,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=2, sequence_length=1, seed=3
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=8,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lookup,
+        teacher_channels=channels,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    # Observability joins the targets already returned by the normal lookup;
+    # it never performs a second or post-episode teacher query.
+    assert lookups == [10, 11, 12, 13]
+    economics = diagnostics[0]["regime_trade_economics"]
+    assert economics["total_trades"] == 2
+    assert economics["attributed_trades"] == 1
+    assert economics["unattributed_trades"] == 1
+    assert economics["attribution_coverage"] == 0.5
+    assert economics["unattributed_by_side"] == {"long": 0, "short": 1}
+    assert economics["groups"] == [{
+        "side": "long",
+        "static_regime": "dominant_chop",
+        "headroom_stratum": "low_headroom_le_0_25",
+        "episode_outcome": "timeout",
+        "trades": 1,
+        "wins": 0,
+        "win_rate": 0.0,
+        "realized_r_sum": -1.0,
+        "realized_r_mean": -1.0,
+        "mfe_r_sum": 0.25,
+        "mfe_r_mean": 0.25,
+        "mae_r_sum": 1.0,
+        "mae_r_mean": 1.0,
+        "initial_stop_count": 1,
+        "regime_channel_probability_sums": {
+            "structure_chop_probability": pytest.approx(0.9),
+            "structure_neutral_probability": pytest.approx(0.05),
+            "structure_trend_probability": pytest.approx(0.05),
+        },
+        "regime_channel_probability_means": {
+            "structure_chop_probability": pytest.approx(0.9),
+            "structure_neutral_probability": pytest.approx(0.05),
+            "structure_trend_probability": pytest.approx(0.05),
+        },
+    }]
+    aggregate = training_module._diagnostic_aggregate(diagnostics)[
+        "regime_trade_economics"
+    ]
+    assert aggregate == economics
+
+
 def test_training_short_circuits_without_passes_at_declared_step_boundary() -> None:
     checkpoints = []
 
@@ -2059,6 +2445,188 @@ def test_teacher_free_evaluation_reports_both_entry_sides() -> None:
     assert result.long_entry_count == 1
     assert result.short_entry_count == 1
     assert result.greedy_entry_count == 2
+
+
+def test_teacher_free_validation_emits_one_bounded_regime_diagnostic_per_episode() -> None:
+    class DiagnosticAgent(Agent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows = iter((
+                (Action.WAIT, (1.0, 0.5, 0.25)),
+                (Action.ENTER_LONG_1, (0.0, 2.0, -1.0)),
+                (Action.ENTER_SHORT_1, (0.0, -1.0, 3.0)),
+            ))
+
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
+            action, flat_values = next(self.rows)
+            values = np.full(len(Action), -10.0, dtype=np.float32)
+            values[:3] = flat_values
+            return action, None, values if return_action_values else None
+
+    class DiagnosticEnvironment:
+        def __init__(self) -> None:
+            self.step_index = 0
+
+        def reset(self):
+            self.step_index = 0
+            return np.zeros(1, np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "mll_headroom_fraction": 0.10,
+            }
+
+        def step(self, action):
+            self.step_index += 1
+            terminated = self.step_index == 3
+            headroom = (0.20, 0.80, 0.80)[self.step_index - 1]
+            return np.ones(1, np.float32), 0.5, terminated, False, {
+                "valid_actions": () if terminated else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "outcome": "timeout" if terminated else None,
+                "equity_pnl": -2_400.0,
+                "mll_headroom_fraction": headroom,
+                "trade_count": 2,
+                "win_count": 1,
+                "winning_r_sum": 2.5,
+                "expectancy_r": 0.5,
+                "avg_mfe_r": 2.0,
+                "avg_mae_r": 0.75,
+            }
+
+        def closed_trade_receipts(self):
+            return (
+                {
+                    "trade_index": 0,
+                    "ticker": "NQ",
+                    "side": "long",
+                    "source_decision_index": 0,
+                    "entry_mll_headroom": 250.0,
+                    "realized_r": -1.0,
+                    "mfe_r": 0.25,
+                    "mae_r": 1.0,
+                    "hold_bars": 2,
+                    "exit_reason": "initial_stop",
+                },
+                {
+                    "trade_index": 1,
+                    "ticker": "NQ",
+                    "side": "short",
+                    "source_decision_index": 2,
+                    "entry_mll_headroom": 600.0,
+                    "realized_r": 2.0,
+                    "mfe_r": 2.5,
+                    "mae_r": 0.5,
+                    "hold_bars": 5,
+                    "exit_reason": "ratchet_stop",
+                },
+            )
+
+    diagnostics: list[dict[str, object]] = []
+    evaluate_agent(
+        DiagnosticAgent(),
+        DiagnosticEnvironment(),
+        episodes=1,
+        recurrent_horizon=8,
+        near_blow_loss_threshold=2_250.0,
+        greedy_diagnostic_interval_steps=1,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert len(diagnostics) == 1
+    row = diagnostics[0]
+    assert row["schema"] == "propevolve_validation_episode_diagnostic_v1"
+    assert row["episode"] == 1
+    assert row["ticker"] == "NQ"
+    assert row["outcome"] == "timeout"
+    assert row["terminal_pnl"] == -2_400.0
+    assert row["near_blow_timeout"] is True
+    assert row["trade_count"] == 2
+    assert row["win_rate"] == 0.5
+    assert row["average_win_r"] == 2.5
+    assert row["average_mfe_r"] == 2.0
+    assert row["average_mae_r"] == 0.75
+    assert row["flat_greedy_action_counts"] == {
+        "WAIT": 1,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+    }
+    assert row["flat_entry_rate"] == pytest.approx(2.0 / 3.0)
+    assert row["entry_counts"] == {
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+    }
+    assert row["headroom"] == {
+        "le_0_25": {"flat_decisions": 2, "entries": 1},
+        "between_0_25_and_0_75": {"flat_decisions": 0, "entries": 0},
+        "ge_0_75": {"flat_decisions": 1, "entries": 1},
+        "unavailable": {"flat_decisions": 0, "entries": 0},
+    }
+    assert row["closed_trade_economics"] == {
+        "reported_trade_count": 2,
+        "receipt_trade_count": 2,
+        "unattributed_trade_count": 0,
+        "receipt_coverage": 1.0,
+        "groups": [
+            {
+                "side": "long",
+                "episode_outcome": "timeout",
+                "entry_headroom_stratum": "critical_le_300",
+                "trades": 1,
+                "wins": 0,
+                "win_rate": 0.0,
+                "realized_r_sum": -1.0,
+                "realized_r_mean": -1.0,
+                "mfe_r_sum": 0.25,
+                "mfe_r_mean": 0.25,
+                "mae_r_sum": 1.0,
+                "mae_r_mean": 1.0,
+                "hold_bars_sum": 2,
+                "hold_bars_mean": 2.0,
+                "exit_reason_counts": {"initial_stop": 1},
+            },
+            {
+                "side": "short",
+                "episode_outcome": "timeout",
+                "entry_headroom_stratum": "safe_ge_500",
+                "trades": 1,
+                "wins": 1,
+                "win_rate": 1.0,
+                "realized_r_sum": 2.0,
+                "realized_r_mean": 2.0,
+                "mfe_r_sum": 2.5,
+                "mfe_r_mean": 2.5,
+                "mae_r_sum": 0.5,
+                "mae_r_mean": 0.5,
+                "hold_bars_sum": 5,
+                "hold_bars_mean": 5.0,
+                "exit_reason_counts": {"ratchet_stop": 1},
+            },
+        ],
+    }
+    assert row["sampled_q_margins"] == pytest.approx({
+        "rows": 3,
+        "best_entry_minus_wait_mean": 1.5,
+        "long_minus_wait_mean": 1.0 / 6.0,
+        "short_minus_wait_mean": 5.0 / 12.0,
+        "best_entry_minus_wait_min": -0.5,
+        "best_entry_minus_wait_max": 3.0,
+    })
 
 
 def test_teacher_free_recovery_stress_reports_distinct_outcomes_and_one_entry() -> None:

@@ -27,6 +27,10 @@ AGENT_RUNTIME_FIELDS = (
     "mps_prefer_metal",
     "mps_fast_math",
 )
+ENTRY_ACTION_LOSS_REDUCTIONS = {
+    "population_weighted_mean_v1",
+    "equal_present_class_mean_v1",
+}
 
 LEGACY_REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
     "regime_selectivity.schema",
@@ -627,9 +631,23 @@ def load_experiment_config(path: str | Path) -> dict:
     if not str(cache["encoder_identity_sha256"]).strip():
         raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
+    explicitly_declared_entry_reduction = (
+        "entry_action_loss_reduction" in agent
+    )
     agent.setdefault("n_step_return", 1)
     agent.setdefault("recurrent_burn_in", 0)
     agent.setdefault("policy_retention_loss_weight", 0.0)
+    agent.setdefault(
+        "entry_action_loss_reduction", "population_weighted_mean_v1"
+    )
+    if agent["entry_action_loss_reduction"] not in ENTRY_ACTION_LOSS_REDUCTIONS:
+        raise ValueError("entry action loss reduction is invalid")
+    if (
+        "agent.entry_action_loss_reduction"
+        in payload.get("evolution", {}).get("frozen_paths", ())
+        and not explicitly_declared_entry_reduction
+    ):
+        raise ValueError("entry action loss reduction is missing")
     if agent["device"] not in {"auto", "cuda", "mps", "cpu"}:
         raise ValueError("agent device must be auto, cuda, mps, or cpu")
     if (
@@ -1016,7 +1034,28 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("evolution hypothesis is required")
     allowed = tuple(str(value) for value in evolution.get("allowed_revision_paths", ()))
     frozen = tuple(str(value) for value in evolution.get("frozen_paths", ()))
-    if not allowed or not frozen:
+    campaign_declaration = payload.get("campaign")
+    stages = (
+        campaign_declaration.get("budget_stages")
+        if isinstance(campaign_declaration, dict)
+        else None
+    )
+    explicitly_nonrevisable = (
+        isinstance(campaign_declaration, dict)
+        and campaign_declaration.get("max_revisions_per_stage") == 0
+        and not isinstance(
+            campaign_declaration.get("max_revisions_per_stage"), bool
+        )
+        and isinstance(stages, list)
+        and bool(stages)
+        and all(
+            isinstance(stage, dict)
+            and stage.get("allow_revisions") is False
+            and stage.get("revision_paths") == []
+            for stage in stages
+        )
+    )
+    if (not allowed and not explicitly_nonrevisable) or not frozen:
         raise ValueError("evolution revision and frozen paths must be declared")
     if any(
         path == locked or path.startswith(locked + ".")

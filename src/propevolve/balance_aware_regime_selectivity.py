@@ -36,6 +36,26 @@ REGIME_TRANSITION_CHANNELS = (
     "kaufman_efficiency",
     "volatility_percentile",
 )
+REGIME_TEACHER_CHANNELS = (
+    "structure_chop_probability",
+    "structure_neutral_probability",
+    "structure_trend_probability",
+    "structure_chop_persistence_probability",
+    "structure_trend_onset_probability",
+    "structure_trend_persistence_probability",
+    "structure_trend_weakening_probability",
+    "structure_other_transition_probability",
+    "kaufman_efficiency",
+    "volatility_low_probability",
+    "volatility_normal_probability",
+    "volatility_high_probability",
+    "volatility_low_persistence_probability",
+    "volatility_expansion_onset_probability",
+    "volatility_high_persistence_probability",
+    "volatility_contraction_probability",
+    "volatility_other_transition_probability",
+    "volatility_percentile",
+)
 ACTION_ORDER = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
 SCHEMA = "balance_aware_regime_selectivity_v1"
 TARGET_SOURCE = "post_launch_entry_action_target"
@@ -331,6 +351,7 @@ __all__ = [
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS",
     "PersistentChopEvidence",
     "REGIME_STATE_CHANNELS",
+    "REGIME_TEACHER_CHANNELS",
     "REGIME_TRANSITION_CHANNELS",
     "SCHEMA",
     "STATIC_STATE_SEMANTICS",

@@ -344,6 +344,13 @@ class _CandidateStageAdapter:
                     "path": str(diagnostic_summary),
                     "file_sha256": _sha256(diagnostic_summary),
                 }
+            validation_diagnostics = output_root / "validation-diagnostics.jsonl"
+            validation_reference = None
+            if validation_diagnostics.is_file():
+                validation_reference = {
+                    "path": str(validation_diagnostics),
+                    "file_sha256": _sha256(validation_diagnostics),
+                }
             return {
                 "seed": seed,
                 "candidate_id": candidate.candidate_id,
@@ -355,6 +362,7 @@ class _CandidateStageAdapter:
                 "evaluation_status": evaluation.status,
                 "metrics": dict(evaluation.metrics),
                 "training_diagnostic_summary": diagnostic_reference,
+                "validation_diagnostics": validation_reference,
             }
 
         seeds = request.stage.config.get("seeds")

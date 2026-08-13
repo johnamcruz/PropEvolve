@@ -15,6 +15,8 @@ from propevolve.agent import (
 from propevolve.config import configure_runtime_environment
 from propevolve.decision import Action
 from propevolve.replay import BalancedSequenceReplay, Episode, Transition
+from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
+from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
 
 
 def _agent(observation_dim: int, **overrides) -> RecurrentC51Agent:
@@ -1264,6 +1266,213 @@ def _flat_greedy_action(
     return action
 
 
+def test_equal_present_class_entry_loss_is_invariant_to_side_resampling() -> None:
+    base = (
+        _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),
+        _entry_action_sequence((1.0, 0.0, 0.0), Action.ENTER_LONG_1),
+        _entry_action_sequence((-1.0, 0.0, 0.0), Action.ENTER_SHORT_1),
+    )
+    side_oversampled = (
+        base[0],
+        *(base[1] for _ in range(7)),
+        *(base[2] for _ in range(11)),
+    )
+    settings = {
+        "seed": 401,
+        "entry_action_loss_weight": 1.0,
+        "entry_action_class_weights": (0.4, 3.9, 4.05),
+        "entry_action_loss_reduction": "equal_present_class_mean_v1",
+    }
+    natural = _agent(3, **settings)
+    oversampled = _agent(3, **settings)
+
+    natural.train_batch(base)
+    oversampled.train_batch(side_oversampled)
+
+    assert oversampled.last_train_metrics["entry_action_loss"] == pytest.approx(
+        natural.last_train_metrics["entry_action_loss"], rel=1e-6
+    )
+    for action_name in ("wait", "long", "short"):
+        assert oversampled.last_train_metrics[
+            f"entry_balance_{action_name}_weighted_mass_fraction"
+        ] == pytest.approx(1.0 / 3.0)
+        assert oversampled.last_train_metrics[
+            f"entry_balance_{action_name}_weighted_loss_contribution"
+        ] == pytest.approx(
+            natural.last_train_metrics[
+                f"entry_balance_{action_name}_weighted_loss_contribution"
+            ],
+            rel=1e-6,
+        )
+
+
+def test_equal_present_class_loss_learns_all_actions_with_oversampled_sides() -> None:
+    wait = _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT)
+    long = _entry_action_sequence((1.0, 0.0, 0.0), Action.ENTER_LONG_1)
+    short = _entry_action_sequence((-1.0, 0.0, 0.0), Action.ENTER_SHORT_1)
+    sequences = (
+        wait,
+        *(long for _ in range(12)),
+        *(short for _ in range(15)),
+    )
+    agent = _agent(
+        3,
+        seed=409,
+        learning_rate=0.01,
+        weight_decay=0.0,
+        entry_action_loss_weight=20.0,
+        entry_action_class_weights=(0.4, 3.9, 4.05),
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+    )
+
+    for _ in range(50):
+        agent.train_batch(sequences)
+
+    assert _flat_greedy_action(agent, (0.0, 1.0, 0.0)) == Action.WAIT
+    assert _flat_greedy_action(agent, (1.0, 0.0, 0.0)) == Action.ENTER_LONG_1
+    assert _flat_greedy_action(agent, (-1.0, 0.0, 0.0)) == Action.ENTER_SHORT_1
+
+
+def test_equal_present_class_entry_loss_averages_only_present_classes() -> None:
+    wait = _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT)
+    long = _entry_action_sequence((1.0, 0.0, 0.0), Action.ENTER_LONG_1)
+    agent = _agent(
+        3,
+        seed=419,
+        entry_action_loss_weight=1.0,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+    )
+    with torch.no_grad():
+        for network in (agent.online, agent.target):
+            for parameter in network.parameters():
+                parameter.zero_()
+
+    agent.train_batch((wait, *(long for _ in range(8))))
+
+    assert np.isfinite(agent.last_train_metrics["entry_action_loss"])
+    assert agent.last_train_metrics["entry_action_loss"] == pytest.approx(
+        np.log(3.0)
+    )
+    assert agent.last_train_metrics[
+        "entry_balance_wait_weighted_mass_fraction"
+    ] == pytest.approx(0.5)
+    assert agent.last_train_metrics[
+        "entry_balance_long_weighted_mass_fraction"
+    ] == pytest.approx(0.5)
+    assert agent.last_train_metrics[
+        "entry_balance_short_weighted_mass_fraction"
+    ] == 0.0
+
+
+def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        3,
+        seed=421,
+        entry_action_loss_weight=1.0,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+    )
+    rows = (
+        _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),
+        _entry_action_sequence((1.0, 0.0, 0.0), Action.ENTER_LONG_1),
+        _entry_action_sequence((-1.0, 0.0, 0.0), Action.ENTER_SHORT_1),
+    )
+    agent.train_batch(rows)
+
+    checkpoint = agent.save(tmp_path / "entry-balance-recovery.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert restored.entry_action_loss_reduction == "equal_present_class_mean_v1"
+    restored.train_batch(rows)
+    for action_name in ("wait", "long", "short"):
+        assert restored.last_train_metrics[
+            f"entry_balance_{action_name}_weighted_mass_fraction"
+        ] == pytest.approx(1.0 / 3.0)
+
+
+def test_stage2a_equal_present_class_loss_survives_static_regime_conflict() -> None:
+    channels = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+    channel_weights = (
+        *((0.2 / len(EXPANSION_CHANNELS),) * len(EXPANSION_CHANNELS)),
+        *((0.1 / len(REGIME_CHANNELS),) * len(REGIME_CHANNELS)),
+    )
+
+    def teacher(side: Action) -> np.ndarray:
+        values = np.full(len(channels), 0.1, dtype=np.float32)
+        if side == Action.ENTER_LONG_1:
+            values[:4] = (0.5, 0.5, 0.1, 0.1)
+        else:
+            values[:4] = (0.1, 0.1, 0.5, 0.5)
+        values[channels.index("structure_chop_probability")] = 0.9
+        values[channels.index("structure_neutral_probability")] = 0.05
+        values[channels.index("structure_trend_probability")] = 0.05
+        return values
+
+    def row(
+        observation: tuple[float, float, float],
+        target: Action,
+    ) -> tuple[Transition, ...]:
+        return (
+            Transition(
+                observation=np.asarray(observation, np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.zeros(3, np.float32),
+                terminated=True,
+                valid_actions=_FLAT_ENTRY_ACTIONS,
+                next_valid_actions=(),
+                teacher_target=teacher(
+                    target
+                    if target != Action.WAIT
+                    else Action.ENTER_LONG_1
+                ),
+                entry_action_target=target,
+                regime_selectivity_headroom_fraction=0.1,
+            ),
+        )
+
+    wait = row((0.0, 1.0, 0.0), Action.WAIT)
+    long = row((1.0, 0.0, 0.0), Action.ENTER_LONG_1)
+    short = row((-1.0, 0.0, 0.0), Action.ENTER_SHORT_1)
+    sequences = (wait, *(long for _ in range(12)), *(short for _ in range(15)))
+    agent = _agent(
+        3,
+        hidden_dim=24,
+        seed=431,
+        learning_rate=0.03,
+        weight_decay=0.0,
+        teacher_channels=len(channels),
+        teacher_channel_names=channels,
+        teacher_loss_weight=0.3,
+        teacher_channel_loss_weights=channel_weights,
+        entry_action_loss_weight=0.3,
+        entry_action_class_weights=(0.4, 3.9, 4.05),
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+        regime_selectivity_loss_weight=0.3,
+        regime_selectivity_expansion_centers=(
+            0.10249102659218842,
+            0.10399580328775007,
+        ),
+        regime_selectivity_headroom_pressure=1.0,
+        regime_selectivity_dominant_chop_pressure=2.0,
+        regime_selectivity_side_balance="equal_long_short_v1",
+    )
+
+    for _ in range(100):
+        agent.train_batch(sequences)
+
+    assert agent.last_train_metrics[
+        "regime_selectivity_positive_long_target_wait_probability_mean"
+    ] > 0.8
+    assert agent.last_train_metrics[
+        "regime_selectivity_positive_short_target_wait_probability_mean"
+    ] > 0.8
+    assert _flat_greedy_action(agent, (0.0, 1.0, 0.0)) == Action.WAIT
+    assert _flat_greedy_action(agent, (1.0, 0.0, 0.0)) == Action.ENTER_LONG_1
+    assert _flat_greedy_action(agent, (-1.0, 0.0, 0.0)) == Action.ENTER_SHORT_1
+
+
 @pytest.mark.parametrize(
     "entry_action",
     (Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
@@ -1336,6 +1545,7 @@ def test_class_balanced_entry_loss_has_no_effect_at_zero_auxiliary_scale() -> No
         seed=211,
         entry_action_loss_weight=20.0,
         entry_action_class_weights=(1.0, 5.0, 5.0),
+        entry_action_loss_reduction="equal_present_class_mean_v1",
     )
 
     plain.train_batch(sequences)
@@ -1394,6 +1604,11 @@ def test_authenticated_three_class_balance_learns_long_short_and_wait() -> None:
 def test_entry_action_class_weights_fail_closed(weights: tuple[float, ...]) -> None:
     with pytest.raises(ValueError, match="entry action class weights"):
         _agent(3, entry_action_class_weights=weights)
+
+
+def test_entry_action_loss_reduction_fails_closed() -> None:
+    with pytest.raises(ValueError, match="entry action loss reduction"):
+        _agent(3, entry_action_loss_reduction="unknown")
 
 
 def test_soft_regime_context_and_entry_actions_co_train_without_inference_dependency(

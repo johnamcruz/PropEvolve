@@ -185,6 +185,46 @@ def test_first_recovery_trade_consumes_permit_and_restores_ordinary_entries() ->
     assert recovered_reward == pytest.approx(200.0 / 3_000.0)
 
 
+def test_closed_trade_receipts_expose_entry_risk_and_economic_outcome() -> None:
+    """Episode diagnostics can join decision-time Regime evidence to trades."""
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+
+    env.step(Action.ENTER_LONG_1)
+    env.step(Action.CLOSE)
+
+    assert env.closed_trade_receipts() == ({
+        "trade_index": 0,
+        "ticker": "NQ",
+        "side": "long",
+        "source_decision_index": 0,
+        "entry_index": 1,
+        "exit_index": 2,
+        "entry_timestamp": "2024-01-01T00:01",
+        "exit_timestamp": "2024-01-01T00:02",
+        "entry_realized_pnl": 0.0,
+        "entry_mll_floor_pnl": -3_000.0,
+        "entry_mll_headroom": 3_000.0,
+        "pnl": 20.0,
+        "realized_r": pytest.approx(1.0 / 15.0),
+        "mfe_r": pytest.approx(2.0 / 15.0),
+        "mae_r": pytest.approx(0.5 / 15.0),
+        "ratchet_activated": False,
+        "exit_reason": "voluntary_close",
+        "hold_bars": 1,
+    },)
+
+
 def test_huge_first_recovery_winner_is_a_pass_and_records_recovery_success() -> None:
     market = _recovery_market(
         opens=(100.0, 100.0, 600.0, 600.0, 600.0, 600.0),

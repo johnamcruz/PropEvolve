@@ -536,6 +536,43 @@ def test_static_probe_detects_positive_entry_wait_suppression_in_chop() -> None:
     assert report.metrics["final_regime_probe_chop_minus_nonchop_wait"] > 0.0
 
 
+def test_final_probe_rows_explain_predictions_with_regime_channels_and_strata() -> None:
+    report = _evaluate(ScriptedFinalPolicy({
+        0: (3.0, 0.0, 0.0),
+        1: (1.0, 0.0, 0.0),
+        2: (0.0, 3.0, 0.0),
+        3: (0.0, 0.0, 3.0),
+    }), _probe_replay())
+
+    row = report.rows[0]
+    assert row["target_action"] in {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+    assert row["greedy_action"] in {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+    assert row["correct"] == (row["target_action"] == row["greedy_action"])
+    assert row["flat_action_probabilities"].keys() == {
+        "WAIT",
+        "ENTER_LONG_1",
+        "ENTER_SHORT_1",
+    }
+    assert set(row["regime_channels"]) == set(REGIME_CHANNELS)
+    assert row["headroom_fraction"] == 1.0
+    assert row["headroom_stratum"] == "safe_headroom_ge_0_75"
+    assert row["static_regime_stratum"] in {"dominant_chop", "nonchop"}
+    assert row["persistent_regime_strata"].keys() == {
+        "persistent_dead_chop_membership",
+        "transition_ready_membership",
+        "transition_positive_long_membership",
+        "transition_positive_short_membership",
+    }
+    confusion_total = sum(
+        report.metrics[
+            f"final_regime_probe_target_{target}_predicted_{prediction}_rows"
+        ]
+        for target in ("wait", "long", "short")
+        for prediction in ("wait", "long", "short")
+    )
+    assert confusion_total == 96.0
+
+
 def _real_agent(seed: int = 71) -> RecurrentC51Agent:
     return RecurrentC51Agent(
         3,

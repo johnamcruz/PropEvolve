@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 import numpy as np
 
 from .assets import AssetContract
+from .balance_aware_regime_selectivity import REGIME_TEACHER_CHANNELS
 from .cache import load_market_series
 from .config import (
     DEFAULT_RUNTIME,
@@ -58,15 +59,49 @@ _REGIME_SELECTIVITY_STRATA = (
     "dominant_chop",
     "nonchop",
     "low_headroom_le_0_25",
+    "mid_headroom_gt_0_25_lt_0_75",
     "safe_headroom_ge_0_75",
+)
+_REGIME_ACTION_NAMES = ("wait", "long", "short")
+_REGIME_CONFUSION_FIELDS = tuple(
+    f"target_{target}_predicted_{prediction}_rows"
+    for target in _REGIME_ACTION_NAMES
+    for prediction in _REGIME_ACTION_NAMES
 )
 _REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "rows",
     "target_wait_probability_sum",
     "model_wait_probability_sum",
+    "wait_absolute_error_sum",
+    "target_action_probability_sum",
+    "model_target_action_probability_sum",
+    "target_action_absolute_error_sum",
     "greedy_wait_rows",
     "declared_side_probability_sum",
     "greedy_entry_rows",
+    "correct_rows",
+    *_REGIME_CONFUSION_FIELDS,
+)
+_REGIME_CHANNEL_ADDITIVE_FIELDS = (
+    "rows",
+    "target_probability_sum",
+    "model_probability_sum",
+    "absolute_error_sum",
+    "squared_error_sum",
+)
+_ENTRY_BALANCE_ACTION_NAMES = ("wait", "long", "short")
+_ENTRY_BALANCE_ADDITIVE_FIELDS = (
+    "rows",
+    "weighted_mass",
+    "unweighted_ce_sum",
+    "weighted_ce_sum",
+)
+_REGIME_ENTRY_CONFLICT_FIELDS = (
+    "rows",
+    "target_wait_probability_sum",
+    "target_declared_side_probability_sum",
+    "model_wait_probability_sum",
+    "soft_wait_disagreement_rows",
 )
 _PERSISTENT_REGIME_SELECTIVITY_STRATA = (
     "exact_wait",
@@ -126,7 +161,18 @@ def _assert_recovery_entry_balance(
     expected = tuple(
         agent_settings.get("entry_action_class_weights", (1.0, 1.0, 1.0))
     )
-    if agent.entry_action_class_weights != expected:
+    expected_reduction = str(agent_settings.get(
+        "entry_action_loss_reduction", "population_weighted_mean_v1"
+    ))
+    if (
+        agent.entry_action_class_weights != expected
+        or getattr(
+            agent,
+            "entry_action_loss_reduction",
+            "population_weighted_mean_v1",
+        )
+        != expected_reduction
+    ):
         raise ValueError("training recovery entry balance drifted")
 
 
@@ -260,6 +306,31 @@ def _regime_selectivity_episode_diagnostic(
                 additive["model_wait_probability_sum"] / rows
                 if rows else 0.0
             ),
+            "wait_absolute_error_sum": additive["wait_absolute_error_sum"],
+            "wait_mean_absolute_error": (
+                additive["wait_absolute_error_sum"] / rows if rows else 0.0
+            ),
+            "target_action_probability_sum": additive[
+                "target_action_probability_sum"
+            ],
+            "target_action_probability_mean": (
+                additive["target_action_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "model_target_action_probability_sum": additive[
+                "model_target_action_probability_sum"
+            ],
+            "model_target_action_probability_mean": (
+                additive["model_target_action_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "target_action_absolute_error_sum": additive[
+                "target_action_absolute_error_sum"
+            ],
+            "target_action_mean_absolute_error": (
+                additive["target_action_absolute_error_sum"] / rows
+                if rows else 0.0
+            ),
             "greedy_wait_rows": int(round(additive["greedy_wait_rows"])),
             "greedy_wait_rate": (
                 additive["greedy_wait_rows"] / rows if rows else 0.0
@@ -275,6 +346,17 @@ def _regime_selectivity_episode_diagnostic(
             "greedy_entry_rate": (
                 additive["greedy_entry_rows"] / rows if rows else 0.0
             ),
+            "correct_rows": int(round(additive["correct_rows"])),
+            "accuracy": additive["correct_rows"] / rows if rows else 0.0,
+            "confusion": {
+                target: {
+                    prediction: int(round(additive[
+                        f"target_{target}_predicted_{prediction}_rows"
+                    ]))
+                    for prediction in _REGIME_ACTION_NAMES
+                }
+                for target in _REGIME_ACTION_NAMES
+            },
         }
     return result
 
@@ -295,10 +377,525 @@ def _regime_selectivity_summary(
             values = diagnostics.get(stratum)
             values = values if isinstance(values, Mapping) else {}
             for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS:
+                if field in _REGIME_CONFUSION_FIELDS:
+                    target, prediction = field.removeprefix(
+                        "target_"
+                    ).removesuffix("_rows").split("_predicted_", 1)
+                    confusion = values.get("confusion")
+                    confusion = (
+                        confusion if isinstance(confusion, Mapping) else {}
+                    )
+                    target_values = confusion.get(target)
+                    target_values = (
+                        target_values
+                        if isinstance(target_values, Mapping) else {}
+                    )
+                    value = target_values.get(prediction, 0.0)
+                else:
+                    value = values.get(field, 0.0)
                 update_metrics[
                     f"regime_selectivity_{stratum}_{field}"
-                ].append(float(values.get(field, 0.0) or 0.0))
+                ].append(float(value or 0.0))
     return _regime_selectivity_episode_diagnostic(update_metrics)
+
+
+def _regime_channel_episode_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+    channel_names: Sequence[str],
+) -> dict[str, dict[str, float | int]]:
+    """Reduce named teacher-head errors with one additive update ledger."""
+    result: dict[str, dict[str, float | int]] = {}
+    for channel in channel_names:
+        prefix = f"regime_teacher_channel_{channel}_"
+        additive = {
+            field: float(sum(update_metrics.get(prefix + field, ())))
+            for field in _REGIME_CHANNEL_ADDITIVE_FIELDS
+        }
+        rows = int(round(additive["rows"]))
+        target_mean = (
+            additive["target_probability_sum"] / rows if rows else 0.0
+        )
+        model_mean = (
+            additive["model_probability_sum"] / rows if rows else 0.0
+        )
+        result[channel] = {
+            "rows": rows,
+            **{
+                field: additive[field]
+                for field in _REGIME_CHANNEL_ADDITIVE_FIELDS
+                if field != "rows"
+            },
+            "target_probability_mean": target_mean,
+            "model_probability_mean": model_mean,
+            "mean_error": model_mean - target_mean,
+            "mean_absolute_error": (
+                additive["absolute_error_sum"] / rows if rows else 0.0
+            ),
+            "root_mean_squared_error": (
+                math.sqrt(additive["squared_error_sum"] / rows)
+                if rows else 0.0
+            ),
+        }
+    return result
+
+
+def _regime_channel_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float | int]]:
+    channel_names = sorted({
+        str(channel)
+        for row in rows
+        for channel in (
+            row.get("regime_teacher_channels", {}).keys()
+            if isinstance(row.get("regime_teacher_channels"), Mapping)
+            else ()
+        )
+    })
+    update_metrics: dict[str, list[float]] = {
+        f"regime_teacher_channel_{channel}_{field}": []
+        for channel in channel_names
+        for field in _REGIME_CHANNEL_ADDITIVE_FIELDS
+    }
+    for row in rows:
+        diagnostics = row.get("regime_teacher_channels")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for channel in channel_names:
+            values = diagnostics.get(channel)
+            values = values if isinstance(values, Mapping) else {}
+            for field in _REGIME_CHANNEL_ADDITIVE_FIELDS:
+                update_metrics[
+                    f"regime_teacher_channel_{channel}_{field}"
+                ].append(float(values.get(field, 0.0) or 0.0))
+    return _regime_channel_episode_diagnostic(update_metrics, channel_names)
+
+
+def _entry_balance_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, dict[str, float | int]]:
+    additive_by_action: dict[str, dict[str, float]] = {}
+    for action in _ENTRY_BALANCE_ACTION_NAMES:
+        prefix = f"entry_balance_{action}_"
+        additive_by_action[action] = {
+            field: float(sum(update_metrics.get(prefix + field, ())))
+            for field in _ENTRY_BALANCE_ADDITIVE_FIELDS
+        }
+    total_mass = sum(
+        values["weighted_mass"] for values in additive_by_action.values()
+    )
+    total_weighted_ce = sum(
+        values["weighted_ce_sum"] for values in additive_by_action.values()
+    )
+    result: dict[str, dict[str, float | int]] = {}
+    for action, additive in additive_by_action.items():
+        rows = int(round(additive["rows"]))
+        weights = tuple(update_metrics.get(
+            f"entry_balance_{action}_configured_weight", ()
+        ))
+        configured_weight = float(weights[-1]) if weights else 0.0
+        result[action] = {
+            "rows": rows,
+            "configured_weight": configured_weight,
+            "weighted_mass": additive["weighted_mass"],
+            "weighted_mass_fraction": (
+                additive["weighted_mass"] / total_mass if total_mass else 0.0
+            ),
+            "unweighted_ce_sum": additive["unweighted_ce_sum"],
+            "unweighted_ce_mean": (
+                additive["unweighted_ce_sum"] / rows if rows else 0.0
+            ),
+            "weighted_ce_sum": additive["weighted_ce_sum"],
+            "weighted_loss_contribution": (
+                additive["weighted_ce_sum"] / total_mass
+                if total_mass else 0.0
+            ),
+            "weighted_ce_fraction": (
+                additive["weighted_ce_sum"] / total_weighted_ce
+                if total_weighted_ce else 0.0
+            ),
+        }
+    return result
+
+
+def _entry_balance_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float | int]]:
+    update_metrics: dict[str, list[float]] = {
+        f"entry_balance_{action}_{field}": []
+        for action in _ENTRY_BALANCE_ACTION_NAMES
+        for field in (
+            *_ENTRY_BALANCE_ADDITIVE_FIELDS,
+            "configured_weight",
+        )
+    }
+    for row in rows:
+        diagnostics = row.get("entry_action_balance")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for action in _ENTRY_BALANCE_ACTION_NAMES:
+            values = diagnostics.get(action)
+            values = values if isinstance(values, Mapping) else {}
+            for field in (
+                *_ENTRY_BALANCE_ADDITIVE_FIELDS,
+                "configured_weight",
+            ):
+                update_metrics[f"entry_balance_{action}_{field}"].append(
+                    float(values.get(field, 0.0) or 0.0)
+                )
+    return _entry_balance_diagnostic(update_metrics)
+
+
+def _regime_entry_conflict_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, dict[str, float | int]]:
+    result: dict[str, dict[str, float | int]] = {}
+    for side in ("long", "short"):
+        prefix = f"regime_entry_conflict_{side}_"
+        additive = {
+            field: float(sum(update_metrics.get(prefix + field, ())))
+            for field in _REGIME_ENTRY_CONFLICT_FIELDS
+        }
+        rows = int(round(additive["rows"]))
+        result[side] = {
+            "rows": rows,
+            **{
+                field: additive[field]
+                for field in _REGIME_ENTRY_CONFLICT_FIELDS
+                if field != "rows"
+            },
+            "target_wait_probability_mean": (
+                additive["target_wait_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "target_declared_side_probability_mean": (
+                additive["target_declared_side_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "model_wait_probability_mean": (
+                additive["model_wait_probability_sum"] / rows
+                if rows else 0.0
+            ),
+            "soft_wait_disagreement_rate": (
+                additive["soft_wait_disagreement_rows"] / rows
+                if rows else 0.0
+            ),
+        }
+    return result
+
+
+def _regime_entry_conflict_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float | int]]:
+    update_metrics: dict[str, list[float]] = {
+        f"regime_entry_conflict_{side}_{field}": []
+        for side in ("long", "short")
+        for field in _REGIME_ENTRY_CONFLICT_FIELDS
+    }
+    for row in rows:
+        diagnostics = row.get("regime_entry_conflict")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for side in ("long", "short"):
+            values = diagnostics.get(side)
+            values = values if isinstance(values, Mapping) else {}
+            for field in _REGIME_ENTRY_CONFLICT_FIELDS:
+                update_metrics[f"regime_entry_conflict_{side}_{field}"].append(
+                    float(values.get(field, 0.0) or 0.0)
+                )
+    return _regime_entry_conflict_diagnostic(update_metrics)
+
+
+def _regime_trade_economics(
+    receipts: Sequence[Mapping[str, object]],
+    visible_context: Mapping[int, Mapping[str, object]],
+    *,
+    episode_outcome: str,
+) -> dict[str, object]:
+    """Join closed trades to teacher context already visible at entry time."""
+    grouped: dict[tuple[str, str, str, str], dict[str, float | int]] = {}
+    unattributed = {"long": 0, "short": 0}
+    attributed = 0
+    for receipt in receipts:
+        side = str(receipt.get("side", "unknown"))
+        source_index = int(receipt["source_decision_index"])
+        context = visible_context.get(source_index)
+        if context is None:
+            unattributed[side] = unattributed.get(side, 0) + 1
+            continue
+        attributed += 1
+        teacher = context["teacher"]
+        channels = context["channels"]
+        assert isinstance(teacher, np.ndarray)
+        assert isinstance(channels, tuple)
+        channel_index = {channel: index for index, channel in enumerate(channels)}
+        chop = float(teacher[channel_index["structure_chop_probability"]])
+        neutral = float(teacher[channel_index["structure_neutral_probability"]])
+        trend = float(teacher[channel_index["structure_trend_probability"]])
+        static_regime = (
+            "dominant_chop" if chop > max(neutral, trend) else "nonchop"
+        )
+        headroom = float(context["headroom_fraction"])
+        headroom_stratum = (
+            "low_headroom_le_0_25"
+            if headroom <= 0.25 else
+            "safe_headroom_ge_0_75"
+            if headroom >= 0.75 else
+            "mid_headroom_gt_0_25_lt_0_75"
+        )
+        key = (side, static_regime, headroom_stratum, episode_outcome)
+        values = grouped.setdefault(key, {
+            "trades": 0,
+            "wins": 0,
+            "realized_r_sum": 0.0,
+            "mfe_r_sum": 0.0,
+            "mae_r_sum": 0.0,
+            "initial_stop_count": 0,
+            "regime_channel_probability_sums": {
+                channel: 0.0
+                for channel in REGIME_TEACHER_CHANNELS
+                if channel in channel_index
+            },
+        })
+        realized_r = float(receipt.get("realized_r", 0.0))
+        values["trades"] = int(values["trades"]) + 1
+        values["wins"] = int(values["wins"]) + int(realized_r > 0.0)
+        values["realized_r_sum"] = float(values["realized_r_sum"]) + realized_r
+        values["mfe_r_sum"] = float(values["mfe_r_sum"]) + float(
+            receipt.get("mfe_r", 0.0)
+        )
+        values["mae_r_sum"] = float(values["mae_r_sum"]) + float(
+            receipt.get("mae_r", 0.0)
+        )
+        values["initial_stop_count"] = int(values["initial_stop_count"]) + int(
+            receipt.get("exit_reason") == "initial_stop"
+        )
+        channel_sums = values["regime_channel_probability_sums"]
+        assert isinstance(channel_sums, dict)
+        for channel in channel_sums:
+            channel_sums[channel] += float(teacher[channel_index[channel]])
+    groups = []
+    for key in sorted(grouped):
+        side, static_regime, headroom_stratum, outcome = key
+        values = grouped[key]
+        trades = int(values["trades"])
+        wins = int(values["wins"])
+        groups.append({
+            "side": side,
+            "static_regime": static_regime,
+            "headroom_stratum": headroom_stratum,
+            "episode_outcome": outcome,
+            "trades": trades,
+            "wins": wins,
+            "win_rate": wins / trades if trades else 0.0,
+            "realized_r_sum": float(values["realized_r_sum"]),
+            "realized_r_mean": float(values["realized_r_sum"]) / trades,
+            "mfe_r_sum": float(values["mfe_r_sum"]),
+            "mfe_r_mean": float(values["mfe_r_sum"]) / trades,
+            "mae_r_sum": float(values["mae_r_sum"]),
+            "mae_r_mean": float(values["mae_r_sum"]) / trades,
+            "initial_stop_count": int(values["initial_stop_count"]),
+            "regime_channel_probability_sums": dict(
+                values["regime_channel_probability_sums"]
+            ),
+            "regime_channel_probability_means": {
+                channel: float(total) / trades
+                for channel, total in dict(
+                    values["regime_channel_probability_sums"]
+                ).items()
+            },
+        })
+    total = len(receipts)
+    return {
+        "total_trades": total,
+        "attributed_trades": attributed,
+        "unattributed_trades": total - attributed,
+        "attribution_coverage": attributed / total if total else 0.0,
+        "unattributed_by_side": unattributed,
+        "groups": groups,
+    }
+
+
+def _validation_closed_trade_economics(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    reported_trade_count: int,
+    episode_outcome: str,
+) -> dict[str, object]:
+    """Aggregate policy-only validation economics without teacher lookups."""
+    if reported_trade_count < 0:
+        raise ValueError("reported validation trade count must be nonnegative")
+    if len(receipts) > reported_trade_count:
+        raise ValueError("closed trade receipts exceed reported trade count")
+    grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+    for receipt in receipts:
+        side = str(receipt.get("side", "unknown"))
+        if side not in {"long", "short"}:
+            side = "unknown"
+        raw_headroom = receipt.get("entry_mll_headroom")
+        if (
+            raw_headroom is None
+            or isinstance(raw_headroom, bool)
+            or not np.isfinite(float(raw_headroom))
+        ):
+            headroom_stratum = "unavailable"
+        else:
+            headroom = float(raw_headroom)
+            headroom_stratum = (
+                "critical_le_300"
+                if headroom <= 300.0 else
+                "safe_ge_500"
+                if headroom >= 500.0 else
+                "constrained_gt_300_lt_500"
+            )
+        key = (side, episode_outcome, headroom_stratum)
+        values = grouped.setdefault(key, {
+            "trades": 0,
+            "wins": 0,
+            "realized_r_sum": 0.0,
+            "mfe_r_sum": 0.0,
+            "mae_r_sum": 0.0,
+            "hold_bars_sum": 0,
+            "exit_reason_counts": {},
+        })
+        realized_r = float(receipt.get("realized_r", 0.0))
+        values["trades"] = int(values["trades"]) + 1
+        values["wins"] = int(values["wins"]) + int(realized_r > 0.0)
+        values["realized_r_sum"] = (
+            float(values["realized_r_sum"]) + realized_r
+        )
+        values["mfe_r_sum"] = float(values["mfe_r_sum"]) + float(
+            receipt.get("mfe_r", 0.0)
+        )
+        values["mae_r_sum"] = float(values["mae_r_sum"]) + float(
+            receipt.get("mae_r", 0.0)
+        )
+        values["hold_bars_sum"] = int(values["hold_bars_sum"]) + int(
+            receipt.get("hold_bars", 0)
+        )
+        exit_reasons = values["exit_reason_counts"]
+        assert isinstance(exit_reasons, dict)
+        exit_reason = str(receipt.get("exit_reason", "unknown"))
+        exit_reasons[exit_reason] = int(exit_reasons.get(exit_reason, 0)) + 1
+    groups = []
+    for side, outcome, headroom_stratum in sorted(grouped):
+        values = grouped[(side, outcome, headroom_stratum)]
+        trades = int(values["trades"])
+        wins = int(values["wins"])
+        groups.append({
+            "side": side,
+            "episode_outcome": outcome,
+            "entry_headroom_stratum": headroom_stratum,
+            "trades": trades,
+            "wins": wins,
+            "win_rate": wins / trades,
+            "realized_r_sum": float(values["realized_r_sum"]),
+            "realized_r_mean": float(values["realized_r_sum"]) / trades,
+            "mfe_r_sum": float(values["mfe_r_sum"]),
+            "mfe_r_mean": float(values["mfe_r_sum"]) / trades,
+            "mae_r_sum": float(values["mae_r_sum"]),
+            "mae_r_mean": float(values["mae_r_sum"]) / trades,
+            "hold_bars_sum": int(values["hold_bars_sum"]),
+            "hold_bars_mean": float(values["hold_bars_sum"]) / trades,
+            "exit_reason_counts": dict(values["exit_reason_counts"]),
+        })
+    receipt_count = len(receipts)
+    return {
+        "reported_trade_count": reported_trade_count,
+        "receipt_trade_count": receipt_count,
+        "unattributed_trade_count": reported_trade_count - receipt_count,
+        "receipt_coverage": (
+            receipt_count / reported_trade_count
+            if reported_trade_count else 0.0
+        ),
+        "groups": groups,
+    }
+
+
+def _regime_trade_economics_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    total = attributed = unattributed = 0
+    unattributed_by_side: dict[str, int] = {"long": 0, "short": 0}
+    grouped: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for row in rows:
+        raw = row.get("regime_trade_economics")
+        evidence = raw if isinstance(raw, Mapping) else {}
+        total += int(evidence.get("total_trades", 0))
+        attributed += int(evidence.get("attributed_trades", 0))
+        unattributed += int(evidence.get("unattributed_trades", 0))
+        side_counts = evidence.get("unattributed_by_side")
+        side_counts = side_counts if isinstance(side_counts, Mapping) else {}
+        for side, count in side_counts.items():
+            unattributed_by_side[str(side)] = (
+                unattributed_by_side.get(str(side), 0) + int(count)
+            )
+        raw_groups = evidence.get("groups")
+        groups = raw_groups if isinstance(raw_groups, list) else []
+        for item in groups:
+            if not isinstance(item, Mapping):
+                continue
+            key = (
+                str(item["side"]),
+                str(item["static_regime"]),
+                str(item["headroom_stratum"]),
+                str(item["episode_outcome"]),
+            )
+            values = grouped.setdefault(key, {
+                "trades": 0,
+                "wins": 0,
+                "realized_r_sum": 0.0,
+                "mfe_r_sum": 0.0,
+                "mae_r_sum": 0.0,
+                "initial_stop_count": 0,
+                "regime_channel_probability_sums": {},
+            })
+            for field in ("trades", "wins", "initial_stop_count"):
+                values[field] = int(values[field]) + int(item.get(field, 0))
+            for field in ("realized_r_sum", "mfe_r_sum", "mae_r_sum"):
+                values[field] = float(values[field]) + float(item.get(field, 0.0))
+            channel_values = item.get("regime_channel_probability_sums")
+            channel_values = (
+                channel_values if isinstance(channel_values, Mapping) else {}
+            )
+            channel_sums = values["regime_channel_probability_sums"]
+            assert isinstance(channel_sums, dict)
+            for channel, value in channel_values.items():
+                channel_sums[str(channel)] = (
+                    channel_sums.get(str(channel), 0.0) + float(value)
+                )
+    groups = []
+    for key in sorted(grouped):
+        side, static_regime, headroom_stratum, outcome = key
+        values = grouped[key]
+        trades = int(values["trades"])
+        wins = int(values["wins"])
+        channel_sums = dict(values["regime_channel_probability_sums"])
+        groups.append({
+            "side": side,
+            "static_regime": static_regime,
+            "headroom_stratum": headroom_stratum,
+            "episode_outcome": outcome,
+            "trades": trades,
+            "wins": wins,
+            "win_rate": wins / trades if trades else 0.0,
+            "realized_r_sum": float(values["realized_r_sum"]),
+            "realized_r_mean": float(values["realized_r_sum"]) / trades,
+            "mfe_r_sum": float(values["mfe_r_sum"]),
+            "mfe_r_mean": float(values["mfe_r_sum"]) / trades,
+            "mae_r_sum": float(values["mae_r_sum"]),
+            "mae_r_mean": float(values["mae_r_sum"]) / trades,
+            "initial_stop_count": int(values["initial_stop_count"]),
+            "regime_channel_probability_sums": channel_sums,
+            "regime_channel_probability_means": {
+                channel: value / trades
+                for channel, value in channel_sums.items()
+            },
+        })
+    return {
+        "total_trades": total,
+        "attributed_trades": attributed,
+        "unattributed_trades": unattributed,
+        "attribution_coverage": attributed / total if total else 0.0,
+        "unattributed_by_side": unattributed_by_side,
+        "groups": groups,
+    }
 
 
 def _persistent_regime_selectivity_diagnostic(
@@ -386,13 +983,28 @@ def _regime_selectivity_evaluation_metrics(
             "rows",
             "target_wait_probability_mean",
             "model_wait_probability_mean",
+            "wait_mean_absolute_error",
+            "target_action_probability_mean",
+            "model_target_action_probability_mean",
+            "target_action_mean_absolute_error",
             "greedy_wait_rate",
             "declared_side_probability_sum",
             "declared_side_probability_mean",
             "greedy_entry_rows",
             "greedy_entry_rate",
+            "correct_rows",
+            "accuracy",
         )
     }
+    for stratum in _REGIME_SELECTIVITY_STRATA:
+        confusion = diagnostics.get(stratum, {}).get("confusion", {})
+        for target in _REGIME_ACTION_NAMES:
+            target_values = confusion.get(target, {})
+            for prediction in _REGIME_ACTION_NAMES:
+                metrics[
+                    f"regime_selectivity_{stratum}_target_{target}_"
+                    f"predicted_{prediction}_rows"
+                ] = float(target_values.get(prediction, 0.0))
     metrics["regime_selectivity_chop_minus_nonchop_target_wait"] = (
         metrics[
             "regime_selectivity_dominant_chop_target_wait_probability_mean"
@@ -467,12 +1079,150 @@ def _persistent_regime_selectivity_evaluation_metrics(
     return metrics
 
 
+def _regime_observability_evaluation_metrics(
+    overall: Mapping[str, object],
+    by_guidance_phase: Mapping[str, object],
+) -> dict[str, float]:
+    """Flatten bounded Regime learning diagnostics for candidate reasoning."""
+    metrics: dict[str, float] = {}
+    channels = overall.get("regime_teacher_channels")
+    channels = channels if isinstance(channels, Mapping) else {}
+    for channel, raw_values in channels.items():
+        values = raw_values if isinstance(raw_values, Mapping) else {}
+        for field in (
+            "rows",
+            "target_probability_mean",
+            "model_probability_mean",
+            "mean_error",
+            "mean_absolute_error",
+            "root_mean_squared_error",
+        ):
+            metrics[f"regime_teacher_channel_{channel}_{field}"] = float(
+                values.get(field, 0.0)
+            )
+    balance = overall.get("entry_action_balance")
+    balance = balance if isinstance(balance, Mapping) else {}
+    for action in _ENTRY_BALANCE_ACTION_NAMES:
+        raw_values = balance.get(action)
+        values = raw_values if isinstance(raw_values, Mapping) else {}
+        for field in (
+            "rows",
+            "configured_weight",
+            "weighted_mass",
+            "weighted_mass_fraction",
+            "unweighted_ce_mean",
+            "weighted_loss_contribution",
+            "weighted_ce_fraction",
+        ):
+            metrics[f"entry_balance_{action}_{field}"] = float(
+                values.get(field, 0.0)
+            )
+    conflict = overall.get("regime_entry_conflict")
+    conflict = conflict if isinstance(conflict, Mapping) else {}
+    for side in ("long", "short"):
+        raw_values = conflict.get(side)
+        values = raw_values if isinstance(raw_values, Mapping) else {}
+        for field in (
+            "rows",
+            "target_wait_probability_mean",
+            "target_declared_side_probability_mean",
+            "model_wait_probability_mean",
+            "soft_wait_disagreement_rows",
+            "soft_wait_disagreement_rate",
+        ):
+            metrics[f"regime_entry_conflict_{side}_{field}"] = float(
+                values.get(field, 0.0)
+            )
+    for phase, raw_phase in by_guidance_phase.items():
+        phase_values = raw_phase if isinstance(raw_phase, Mapping) else {}
+        metrics[f"regime_guidance_phase_{phase}_episodes"] = float(
+            phase_values.get("episodes", 0.0)
+        )
+        metrics[f"regime_guidance_phase_{phase}_pass_rate"] = float(
+            phase_values.get("pass_rate", 0.0)
+        )
+        metrics[f"regime_guidance_phase_{phase}_trade_win_rate"] = float(
+            phase_values.get("trade_win_rate", 0.0)
+        )
+        metrics[f"regime_guidance_phase_{phase}_mean_terminal_pnl"] = float(
+            phase_values.get("mean_terminal_pnl", 0.0)
+        )
+        metrics[
+            f"regime_guidance_phase_{phase}_visible_fraction"
+        ] = float(phase_values.get("teacher_guidance_visible_fraction", 0.0))
+    trade_economics = overall.get("regime_trade_economics")
+    trade_economics = (
+        trade_economics if isinstance(trade_economics, Mapping) else {}
+    )
+    for field in (
+        "total_trades",
+        "attributed_trades",
+        "unattributed_trades",
+        "attribution_coverage",
+    ):
+        metrics[f"regime_trade_economics_{field}"] = float(
+            trade_economics.get(field, 0.0)
+        )
+    raw_groups = trade_economics.get("groups")
+    groups = raw_groups if isinstance(raw_groups, list) else []
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        prefix = "regime_trade_economics_" + "_".join((
+            str(group.get("side", "unknown")),
+            str(group.get("static_regime", "unknown")),
+            str(group.get("headroom_stratum", "unknown")),
+            str(group.get("episode_outcome", "unknown")),
+        ))
+        for field in (
+            "trades",
+            "win_rate",
+            "realized_r_mean",
+            "mfe_r_mean",
+            "mae_r_mean",
+            "initial_stop_count",
+        ):
+            metrics[f"{prefix}_{field}"] = float(group.get(field, 0.0))
+        channel_means = group.get("regime_channel_probability_means")
+        channel_means = (
+            channel_means if isinstance(channel_means, Mapping) else {}
+        )
+        for channel, value in channel_means.items():
+            metrics[f"{prefix}_{channel}_mean"] = float(value)
+    return metrics
+
+
 def _training_evaluation_gates(
     *,
     regime_selectivity_active: bool,
     regime_selectivity_semantics: str = "static_state_v1",
+    entry_action_loss_reduction: str = "population_weighted_mean_v1",
+    entry_action_supervision_active: bool = False,
 ) -> tuple[EvaluationGate, ...]:
     gates = [EvaluationGate("short_circuited", "==", 0.0)]
+    if entry_action_loss_reduction not in {
+        "population_weighted_mean_v1",
+        "equal_present_class_mean_v1",
+    }:
+        raise ValueError("entry action loss reduction gate is invalid")
+    if (
+        entry_action_supervision_active
+        and entry_action_loss_reduction == "equal_present_class_mean_v1"
+    ):
+        for action in _ENTRY_BALANCE_ACTION_NAMES:
+            gates.extend((
+                EvaluationGate(f"entry_balance_{action}_rows", ">", 0.0),
+                EvaluationGate(
+                    f"entry_balance_{action}_weighted_mass_fraction",
+                    ">=",
+                    0.32,
+                ),
+                EvaluationGate(
+                    f"entry_balance_{action}_weighted_mass_fraction",
+                    "<=",
+                    0.34,
+                ),
+            ))
     if regime_selectivity_active:
         gates.extend(
             (
@@ -534,9 +1284,17 @@ def _training_evaluation_gates(
                     "regime_selectivity_nonchop_rows",
                     "final_regime_probe_dominant_chop_rows",
                     "final_regime_probe_nonchop_rows",
-                    "final_regime_probe_chop_minus_nonchop_wait",
                 )
             )
+            # The matched class-reduction screen measures whether balanced
+            # optimizer mass restores deployable WAIT/Long/Short behavior. Its
+            # frozen hypothesis explicitly does not claim that the legacy
+            # static Regime score has economic chop separation, so retain that
+            # contrast as diagnostic evidence without selecting on noise.
+            if entry_action_loss_reduction == "population_weighted_mean_v1":
+                gates.append(EvaluationGate(
+                    "final_regime_probe_chop_minus_nonchop_wait", ">", 0.0
+                ))
         elif regime_selectivity_semantics == "persistent_chop_negative_weight_v1":
             gates.extend(
                 EvaluationGate(metric, ">", 0.0)
@@ -1202,6 +1960,7 @@ class HistoricalCandidateRunner:
         recovery_path = output / "training-recovery.pt"
         retained_policy_path = output / "retained-pass-policy.pt"
         diagnostics_path = output / "training-diagnostics.jsonl"
+        validation_diagnostics_path = output / "validation-diagnostics.jsonl"
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
         resume = None
         replay_state = None
@@ -1443,6 +2202,9 @@ class HistoricalCandidateRunner:
         validation = None
         recovery_stress = None
         if not training.short_circuited:
+            _preserve_partial_validation_diagnostics(
+                validation_diagnostics_path
+            )
             validation = evaluate_agent(
                 agent,
                 validation_environment,
@@ -1459,6 +2221,9 @@ class HistoricalCandidateRunner:
                 ),
                 greedy_diagnostic_interval_steps=int(
                     training_config.get("greedy_diagnostic_interval_steps", 256)
+                ),
+                episode_diagnostic_callback=lambda payload: _append_jsonl(
+                    validation_diagnostics_path, payload
                 ),
             )
             if recovery_stress_episodes:
@@ -1482,6 +2247,9 @@ class HistoricalCandidateRunner:
             },
             "experiment_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
             "training_resume_identity": resume_identity,
+            "entry_action_loss_reduction": str(
+                agent.entry_action_loss_reduction
+            ),
             "runtime_source_modules_sha256": (
                 _runtime_source_modules_sha256(config)
             ),
@@ -1539,6 +2307,15 @@ class HistoricalCandidateRunner:
                     "file_sha256": _path_sha256(
                         output / "final-regime-probe.json"
                     ),
+                }
+            ),
+            "validation_diagnostics": (
+                None
+                if validation is None
+                else {
+                    "schema": "propevolve_validation_episode_diagnostic_v1",
+                    "path": str(validation_diagnostics_path),
+                    "file_sha256": _path_sha256(validation_diagnostics_path),
                 }
             ),
             "recovery_curriculum": _plain_contract_value(
@@ -1618,6 +2395,10 @@ class HistoricalCandidateRunner:
                         overall_diagnostics["persistent_regime_selectivity"]
                     )
                 )
+                metrics.update(_regime_observability_evaluation_metrics(
+                    overall_diagnostics,
+                    diagnostic_summary.get("by_guidance_phase", {}),
+                ))
                 for side in ("ENTER_LONG_1", "ENTER_SHORT_1"):
                     metric_side = "long" if side.endswith("LONG_1") else "short"
                     metrics[
@@ -1741,6 +2522,12 @@ class HistoricalCandidateRunner:
                         "static_state_v1"
                         if regime_selectivity_spec is None
                         else str(regime_selectivity_spec["semantics"])
+                    ),
+                    entry_action_loss_reduction=str(
+                        agent.entry_action_loss_reduction
+                    ),
+                    entry_action_supervision_active=(
+                        entry_supervision_spec is not None
                     ),
                 ),
             ),
@@ -1912,6 +2699,22 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
         stream.write("\n")
 
 
+def _preserve_partial_validation_diagnostics(path: Path) -> Path | None:
+    """Atomically rotate exactly one prior validation stream before restart."""
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ValueError("validation diagnostics path is not a file")
+    content_sha256 = _path_sha256(path)
+    preserved = path.with_name(
+        f"{path.stem}.partial-{content_sha256}{path.suffix}"
+    )
+    if preserved.exists() and not preserved.is_file():
+        raise ValueError("preserved validation diagnostics path is not a file")
+    os.replace(path, preserved)
+    return preserved
+
+
 def _path_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1962,6 +2765,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         for row in rows
         for channel in (row.get("selected_teacher_channel_means") or {})
     })
+    guidance_eligible = sum(
+        int(row.get("teacher_guidance_eligible_decisions", 0)) for row in rows
+    )
+    guidance_visible = sum(
+        int(row.get("teacher_guidance_visible_decisions", 0)) for row in rows
+    )
     result: dict[str, object] = {
         "episodes": episodes,
         "passes": sum(row.get("outcome") == "pass" for row in rows),
@@ -2036,6 +2845,17 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         ),
         "latest_management_epsilon": (
             float(rows[-1].get("management_epsilon", 0.0)) if rows else 0.0
+        ),
+        "guidance_phase": (
+            str(rows[0].get("guidance_phase", "unknown"))
+            if rows
+            and len({str(row.get("guidance_phase", "unknown")) for row in rows}) == 1
+            else "mixed"
+        ),
+        "teacher_guidance_eligible_decisions": guidance_eligible,
+        "teacher_guidance_visible_decisions": guidance_visible,
+        "teacher_guidance_visible_fraction": (
+            guidance_visible / guidance_eligible if guidance_eligible else 0.0
         ),
         "mean_training_loss": weighted("mean_training_loss", update_weights),
         "mean_rl_loss": weighted("mean_rl_loss", update_weights),
@@ -2137,6 +2957,10 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
             )
         },
         "regime_selectivity": _regime_selectivity_summary(rows),
+        "regime_teacher_channels": _regime_channel_summary(rows),
+        "entry_action_balance": _entry_balance_summary(rows),
+        "regime_entry_conflict": _regime_entry_conflict_summary(rows),
+        "regime_trade_economics": _regime_trade_economics_summary(rows),
         "persistent_regime_selectivity": (
             _persistent_regime_selectivity_summary(rows)
         ),
@@ -2220,6 +3044,12 @@ def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
         ])
         for outcome in sorted({str(row.get("outcome")) for row in rows})
     }
+    by_guidance_phase = {
+        phase: _diagnostic_aggregate([
+            row for row in rows if str(row.get("guidance_phase")) == phase
+        ])
+        for phase in sorted({str(row.get("guidance_phase")) for row in rows})
+    }
     payload = {
         "schema": "propevolve_training_diagnostic_summary_v1",
         "source": source.name,
@@ -2228,6 +3058,7 @@ def _write_training_diagnostic_summary(source: Path, destination: Path) -> None:
         "recent_20": _diagnostic_aggregate(rows[-20:]),
         "by_ticker": by_ticker,
         "by_outcome": by_outcome,
+        "by_guidance_phase": by_guidance_phase,
     }
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -2491,6 +3322,9 @@ def train_agent(
         greedy_flat_entry_advantages: list[float] = []
         selected_entry_teacher_targets: list[tuple[float, float]] = []
         selected_teacher_targets: list[np.ndarray] = []
+        visible_regime_entry_context: dict[int, dict[str, object]] = {}
+        teacher_guidance_eligible_decisions = 0
+        teacher_guidance_visible_decisions = 0
         entry_action_target_counts = {
             Action.WAIT: 0,
             Action.ENTER_LONG_1: 0,
@@ -2584,6 +3418,14 @@ def train_agent(
                 decision_index=decision_index,
                 dropout_probability=teacher_guidance_dropout_probability,
             )
+            guidance_eligible = bool(
+                teacher_lookup is not None
+                and teacher_weight_scale > 0.0
+            )
+            teacher_guidance_eligible_decisions += int(guidance_eligible)
+            teacher_guidance_visible_decisions += int(
+                guidance_eligible and teacher_visible
+            )
             teacher_target = (
                 teacher_lookup(episode_ticker, decision_index)
                 if teacher_lookup is not None and teacher_visible
@@ -2623,6 +3465,29 @@ def train_agent(
                         terminal_info["mll_headroom_fraction"]
                     )
                 )
+            if (
+                teacher_target is not None
+                and teacher_channels is not None
+                and flat_actions.issubset(valid)
+                and "mll_headroom_fraction" in terminal_info
+                and all(
+                    channel in teacher_channels
+                    for channel in (
+                        "structure_chop_probability",
+                        "structure_neutral_probability",
+                        "structure_trend_probability",
+                    )
+                )
+            ):
+                visible_regime_entry_context[decision_index] = {
+                    "teacher": np.asarray(
+                        teacher_target, dtype=np.float32
+                    ).reshape(-1).copy(),
+                    "channels": tuple(teacher_channels),
+                    "headroom_fraction": _bounded_regime_selectivity_headroom(
+                        terminal_info["mll_headroom_fraction"]
+                    ),
+                }
             if entry_action_target is not None:
                 entry_action_target = Action(entry_action_target)
                 if entry_action_target not in entry_action_target_counts:
@@ -2743,6 +3608,14 @@ def train_agent(
             and near_blow_loss_threshold is not None
             and terminal_pnl <= -near_blow_loss_threshold
         )
+        closed_trade_receipts = getattr(
+            environment, "closed_trade_receipts", None
+        )
+        regime_trade_economics = _regime_trade_economics(
+            () if closed_trade_receipts is None else closed_trade_receipts(),
+            visible_regime_entry_context,
+            episode_outcome=outcome,
+        )
         replay.add(Episode(
             episode_id=f"historical-{episode_index}-{time.time_ns()}",
             ticker=str(terminal_info["ticker"]),
@@ -2808,8 +3681,36 @@ def train_agent(
                     for stratum in _REGIME_SELECTIVITY_STRATA
                     for field in _REGIME_SELECTIVITY_ADDITIVE_FIELDS
                 ),
+                *(
+                    f"regime_teacher_channel_{channel}_{field}"
+                    for channel in REGIME_TEACHER_CHANNELS
+                    if teacher_channels is not None
+                    and channel in teacher_channels
+                    for field in _REGIME_CHANNEL_ADDITIVE_FIELDS
+                ),
+                *(
+                    f"entry_balance_{action}_{field}"
+                    for action in _ENTRY_BALANCE_ACTION_NAMES
+                    for field in (
+                        *_ENTRY_BALANCE_ADDITIVE_FIELDS,
+                        "configured_weight",
+                    )
+                ),
+                *(
+                    f"regime_entry_conflict_{side}_{field}"
+                    for side in ("long", "short")
+                    for field in _REGIME_ENTRY_CONFLICT_FIELDS
+                ),
             )
         }
+        for class_index, action in enumerate(_ENTRY_BALANCE_ACTION_NAMES):
+            learner_diagnostics[
+                f"entry_balance_{action}_configured_weight"
+            ].append(float(
+                getattr(agent, "entry_action_class_weights", (1.0, 1.0, 1.0))[
+                    class_index
+                ]
+            ))
         if len(replay) >= warmup_episodes:
             def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
                 episode_losses.append(agent.train_batch(
@@ -3112,12 +4013,27 @@ def train_agent(
                     terminal_info.get("recovery_entry_permit_remaining", 0)
                 ),
                 "near_blow_timeout": near_blow_timeout,
+                "regime_trade_economics": regime_trade_economics,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
                 "teacher_weight_scale": teacher_weight_scale,
                 "entry_action_weight_scale": teacher_weight_scale,
                 "teacher_schedule_progress": teacher_schedule_progress,
+                "guidance_phase": (
+                    "autonomy" if teacher_weight_scale <= 0.0 else "guidance"
+                ),
+                "teacher_guidance_eligible_decisions": (
+                    teacher_guidance_eligible_decisions
+                ),
+                "teacher_guidance_visible_decisions": (
+                    teacher_guidance_visible_decisions
+                ),
+                "teacher_guidance_visible_fraction": (
+                    teacher_guidance_visible_decisions
+                    / teacher_guidance_eligible_decisions
+                    if teacher_guidance_eligible_decisions else 0.0
+                ),
                 "teacher_guidance_dropout_probability": (
                     teacher_guidance_dropout_probability
                 ),
@@ -3205,6 +4121,21 @@ def train_agent(
                 },
                 "regime_selectivity": (
                     _regime_selectivity_episode_diagnostic(learner_diagnostics)
+                ),
+                "regime_teacher_channels": _regime_channel_episode_diagnostic(
+                    learner_diagnostics,
+                    tuple(
+                        channel
+                        for channel in REGIME_TEACHER_CHANNELS
+                        if teacher_channels is not None
+                        and channel in teacher_channels
+                    ),
+                ),
+                "entry_action_balance": _entry_balance_diagnostic(
+                    learner_diagnostics
+                ),
+                "regime_entry_conflict": _regime_entry_conflict_diagnostic(
+                    learner_diagnostics
                 ),
                 "persistent_regime_selectivity": (
                     _persistent_regime_selectivity_diagnostic(
@@ -3371,6 +4302,7 @@ def evaluate_agent(
     stop_on_first_blow: bool = False,
     no_trade_patience_episodes: int = 0,
     greedy_diagnostic_interval_steps: int = 256,
+    episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> TrainingResult:
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
@@ -3431,6 +4363,23 @@ def evaluate_agent(
         hidden = None
         total = 0.0
         step_index = 0
+        episode_flat_action_counts = {
+            Action.WAIT: 0,
+            Action.ENTER_LONG_1: 0,
+            Action.ENTER_SHORT_1: 0,
+        }
+        episode_headroom = {
+            name: {"flat_decisions": 0, "entries": 0}
+            for name in (
+                "le_0_25",
+                "between_0_25_and_0_75",
+                "ge_0_75",
+                "unavailable",
+            )
+        }
+        episode_best_entry_margins: list[float] = []
+        episode_long_margins: list[float] = []
+        episode_short_margins: list[float] = []
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
@@ -3453,19 +4402,41 @@ def evaluate_agent(
             )
             if is_flat_decision:
                 flat_decision_count += 1
+                episode_flat_action_counts[Action(action)] += 1
                 greedy_entry_count += int(
                     action in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
                 )
                 long_entry_count += int(action == Action.ENTER_LONG_1)
                 short_entry_count += int(action == Action.ENTER_SHORT_1)
+                headroom_value = info.get("mll_headroom_fraction")
+                if (
+                    headroom_value is None
+                    or isinstance(headroom_value, bool)
+                    or not np.isfinite(float(headroom_value))
+                ):
+                    headroom_bucket = "unavailable"
+                elif float(headroom_value) <= 0.25:
+                    headroom_bucket = "le_0_25"
+                elif float(headroom_value) >= 0.75:
+                    headroom_bucket = "ge_0_75"
+                else:
+                    headroom_bucket = "between_0_25_and_0_75"
+                episode_headroom[headroom_bucket]["flat_decisions"] += 1
+                episode_headroom[headroom_bucket]["entries"] += int(
+                    action in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                )
             if diagnostic_probe:
                 assert action_values is not None
                 values = np.asarray(action_values, dtype=np.float64)
-                best_entry_advantage_sum += max(
-                    values[int(Action.ENTER_LONG_1)],
-                    values[int(Action.ENTER_SHORT_1)],
-                ) - values[int(Action.WAIT)]
+                wait_value = values[int(Action.WAIT)]
+                long_margin = values[int(Action.ENTER_LONG_1)] - wait_value
+                short_margin = values[int(Action.ENTER_SHORT_1)] - wait_value
+                best_margin = max(long_margin, short_margin)
+                best_entry_advantage_sum += best_margin
                 entry_advantage_probe_count += 1
+                episode_best_entry_margins.append(float(best_margin))
+                episode_long_margins.append(float(long_margin))
+                episode_short_margins.append(float(short_margin))
             observation, reward, terminated, _, info = environment.step(action)
             valid = tuple(info["valid_actions"])
             total += reward
@@ -3544,6 +4515,86 @@ def evaluate_agent(
         episode_average_win_r = (
             episode_winning_r / episode_wins if episode_wins else 0.0
         )
+        if episode_diagnostic_callback is not None:
+            episode_flat_decisions = sum(episode_flat_action_counts.values())
+            episode_entries = (
+                episode_flat_action_counts[Action.ENTER_LONG_1]
+                + episode_flat_action_counts[Action.ENTER_SHORT_1]
+            )
+            margin_rows = len(episode_best_entry_margins)
+            closed_trade_receipts = getattr(
+                environment, "closed_trade_receipts", None
+            )
+            closed_trade_economics = _validation_closed_trade_economics(
+                (
+                    ()
+                    if closed_trade_receipts is None
+                    else closed_trade_receipts()
+                ),
+                reported_trade_count=episode_trades,
+                episode_outcome=outcome,
+            )
+            episode_diagnostic_callback({
+                "schema": "propevolve_validation_episode_diagnostic_v1",
+                "episode": episode_index + 1,
+                "ticker": str(info.get("ticker", "?")),
+                "outcome": outcome,
+                "reward": total,
+                "terminal_pnl": terminal_pnl,
+                "near_blow_timeout": near_blow_timeout,
+                "trade_count": episode_trades,
+                "win_rate": episode_win_rate,
+                "average_win_r": episode_average_win_r,
+                "expectancy_r": float(info.get("expectancy_r", 0.0)),
+                "average_mfe_r": float(info.get("avg_mfe_r", 0.0)),
+                "average_mae_r": float(info.get("avg_mae_r", 0.0)),
+                "environment_steps": step_index,
+                "flat_greedy_action_counts": {
+                    action.name: episode_flat_action_counts[action]
+                    for action in (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                },
+                "flat_entry_rate": (
+                    episode_entries / episode_flat_decisions
+                    if episode_flat_decisions else 0.0
+                ),
+                "entry_counts": {
+                    "ENTER_LONG_1": episode_flat_action_counts[
+                        Action.ENTER_LONG_1
+                    ],
+                    "ENTER_SHORT_1": episode_flat_action_counts[
+                        Action.ENTER_SHORT_1
+                    ],
+                },
+                "headroom": episode_headroom,
+                "closed_trade_economics": closed_trade_economics,
+                "sampled_q_margins": {
+                    "rows": margin_rows,
+                    "best_entry_minus_wait_mean": (
+                        float(np.mean(episode_best_entry_margins))
+                        if margin_rows else 0.0
+                    ),
+                    "long_minus_wait_mean": (
+                        float(np.mean(episode_long_margins))
+                        if margin_rows else 0.0
+                    ),
+                    "short_minus_wait_mean": (
+                        float(np.mean(episode_short_margins))
+                        if margin_rows else 0.0
+                    ),
+                    "best_entry_minus_wait_min": (
+                        float(np.min(episode_best_entry_margins))
+                        if margin_rows else 0.0
+                    ),
+                    "best_entry_minus_wait_max": (
+                        float(np.max(episode_best_entry_margins))
+                        if margin_rows else 0.0
+                    ),
+                },
+            })
         print(
             f"[validation] episode={episode_index + 1}/{episodes} "
             f"ticker={info.get('ticker', '?')} outcome={outcome} "

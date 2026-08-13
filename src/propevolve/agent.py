@@ -16,6 +16,7 @@ from .balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     STATIC_STATE_SEMANTICS,
+    REGIME_TEACHER_CHANNELS,
 )
 from .decision import Action
 from .config import configure_runtime_environment
@@ -29,15 +30,53 @@ _REGIME_SELECTIVITY_STRATA = (
     "dominant_chop",
     "nonchop",
     "low_headroom_le_0_25",
+    "mid_headroom_gt_0_25_lt_0_75",
     "safe_headroom_ge_0_75",
+)
+_REGIME_ACTION_NAMES = ("wait", "long", "short")
+_REGIME_CONFUSION_FIELDS = tuple(
+    f"target_{target}_predicted_{prediction}_rows"
+    for target in _REGIME_ACTION_NAMES
+    for prediction in _REGIME_ACTION_NAMES
 )
 _REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "rows",
     "target_wait_probability_sum",
     "model_wait_probability_sum",
+    "wait_absolute_error_sum",
+    "target_action_probability_sum",
+    "model_target_action_probability_sum",
+    "target_action_absolute_error_sum",
     "greedy_wait_rows",
     "declared_side_probability_sum",
     "greedy_entry_rows",
+    "correct_rows",
+    *_REGIME_CONFUSION_FIELDS,
+)
+_REGIME_CHANNEL_ADDITIVE_FIELDS = (
+    "rows",
+    "target_probability_sum",
+    "model_probability_sum",
+    "absolute_error_sum",
+    "squared_error_sum",
+)
+_ENTRY_BALANCE_ACTION_NAMES = ("wait", "long", "short")
+_ENTRY_ACTION_LOSS_REDUCTIONS = {
+    "population_weighted_mean_v1",
+    "equal_present_class_mean_v1",
+}
+_ENTRY_BALANCE_ADDITIVE_FIELDS = (
+    "rows",
+    "weighted_mass",
+    "unweighted_ce_sum",
+    "weighted_ce_sum",
+)
+_REGIME_ENTRY_CONFLICT_FIELDS = (
+    "rows",
+    "target_wait_probability_sum",
+    "target_declared_side_probability_sum",
+    "model_wait_probability_sum",
+    "soft_wait_disagreement_rows",
 )
 _REGIME_PERSISTENT_ADDITIVE_METRICS = (
     "regime_selectivity_exact_wait_rows",
@@ -190,6 +229,7 @@ class RecurrentC51Agent:
         teacher_entry_search_q_temperature: float = 1.0,
         entry_action_loss_weight: float = 0.0,
         entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
+        entry_action_loss_reduction: str = "population_weighted_mean_v1",
         regime_selectivity_loss_weight: float = 0.0,
         regime_selectivity_expansion_centers: Sequence[float] | None = None,
         regime_selectivity_probability_epsilon: float = 1e-6,
@@ -288,6 +328,8 @@ class RecurrentC51Agent:
             )
         ):
             raise ValueError("entry action class weights are invalid")
+        if entry_action_loss_reduction not in _ENTRY_ACTION_LOSS_REDUCTIONS:
+            raise ValueError("entry action loss reduction is invalid")
         if mixed_precision not in {"off", "fp16"}:
             raise ValueError("mixed precision must be off or fp16")
         if regime_selectivity_side_balance not in {
@@ -369,6 +411,7 @@ class RecurrentC51Agent:
         )
         self.entry_action_loss_weight = float(entry_action_loss_weight)
         self.entry_action_class_weights = entry_action_class_weights
+        self.entry_action_loss_reduction = str(entry_action_loss_reduction)
         self.regime_selectivity_loss_weight = float(
             regime_selectivity_loss_weight
         )
@@ -438,6 +481,19 @@ class RecurrentC51Agent:
                 int(Action.WAIT),
                 int(Action.ENTER_LONG_1),
                 int(Action.ENTER_SHORT_1),
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.regime_teacher_channel_names = tuple(
+            channel
+            for channel in REGIME_TEACHER_CHANNELS
+            if channel in self.teacher_channel_names
+        )
+        self._regime_teacher_channel_indices_tensor = torch.tensor(
+            tuple(
+                self.teacher_channel_names.index(channel)
+                for channel in self.regime_teacher_channel_names
             ),
             dtype=torch.long,
             device=self.device,
@@ -940,6 +996,15 @@ class RecurrentC51Agent:
         regime_selectivity_positive_short_loss = teacher_loss
         regime_selectivity_exact_wait_loss = teacher_loss
         regime_selectivity_additive: dict[str, torch.Tensor] = {}
+        regime_channel_names = self.regime_teacher_channel_names
+        regime_channel_additive = torch.zeros(
+            (
+                len(regime_channel_names),
+                len(_REGIME_CHANNEL_ADDITIVE_FIELDS),
+            ),
+            dtype=torch.float32,
+            device=self.device,
+        )
         regime_persistent_additive = {
             name: torch.zeros((), dtype=torch.float32, device=self.device)
             for name in _REGIME_PERSISTENT_ADDITIVE_METRICS
@@ -956,6 +1021,20 @@ class RecurrentC51Agent:
         entry_action_correct_counts = torch.zeros(
             3, dtype=torch.float32, device=self.device
         )
+        entry_balance_additive = {
+            f"entry_balance_{action}_{field}": torch.zeros(
+                (), dtype=torch.float32, device=self.device
+            )
+            for action in _ENTRY_BALANCE_ACTION_NAMES
+            for field in _ENTRY_BALANCE_ADDITIVE_FIELDS
+        }
+        regime_entry_conflict_additive = {
+            f"regime_entry_conflict_{side}_{field}": torch.zeros(
+                (), dtype=torch.float32, device=self.device
+            )
+            for side in ("long", "short")
+            for field in _REGIME_ENTRY_CONFLICT_FIELDS
+        }
         entry_diagnostics_active = (
             (
                 self.regime_selectivity is not None
@@ -1067,6 +1146,24 @@ class RecurrentC51Agent:
                     teacher_targets_tensor[teacher_rows],
                     reduction="none",
                 )
+                teacher_probabilities = teacher_logits.float()[teacher_rows].sigmoid()
+                teacher_probability_targets = teacher_targets_tensor[teacher_rows]
+                if regime_channel_names:
+                    regime_targets = teacher_probability_targets.index_select(
+                        -1, self._regime_teacher_channel_indices_tensor
+                    )
+                    regime_predictions = teacher_probabilities.index_select(
+                        -1, self._regime_teacher_channel_indices_tensor
+                    )
+                    regime_errors = regime_predictions - regime_targets
+                    teacher_row_count = teacher_rows.sum().to(torch.float32)
+                    regime_channel_additive = torch.stack((
+                        teacher_row_count.expand(len(regime_channel_names)),
+                        regime_targets.sum(dim=0),
+                        regime_predictions.sum(dim=0),
+                        regime_errors.abs().sum(dim=0),
+                        regime_errors.square().sum(dim=0),
+                    ), dim=-1)
                 teacher_loss = (
                     teacher_losses * self._teacher_channel_loss_weights_tensor
                 ).sum(dim=-1).mean()
@@ -1410,12 +1507,44 @@ class RecurrentC51Agent:
                     target_wait = selectivity_targets[:, int(Action.WAIT)]
                     model_probabilities = model_log_probabilities.exp()
                     model_wait = model_probabilities[:, int(Action.WAIT)]
+                    target_action_probability = selectivity_targets.gather(
+                        -1, selected_actions[:, None]
+                    ).squeeze(-1)
+                    model_target_action_probability = model_probabilities.gather(
+                        -1, selected_actions[:, None]
+                    ).squeeze(-1)
                     declared_side = model_probabilities.gather(
                         -1, selected_actions[:, None]
                     ).squeeze(-1)
                     greedy_actions = model_probabilities.argmax(-1)
                     greedy_wait = greedy_actions == int(Action.WAIT)
                     greedy_entry = greedy_actions == selected_actions
+                    for side, action_index in (
+                        ("long", int(Action.ENTER_LONG_1)),
+                        ("short", int(Action.ENTER_SHORT_1)),
+                    ):
+                        side_rows = (
+                            selected_actions == action_index
+                        ).to(model_wait.dtype)
+                        prefix = f"regime_entry_conflict_{side}_"
+                        regime_entry_conflict_additive.update({
+                            prefix + "rows": side_rows.sum(),
+                            prefix + "target_wait_probability_sum": (
+                                target_wait * side_rows
+                            ).sum(),
+                            prefix + "target_declared_side_probability_sum": (
+                                target_action_probability * side_rows
+                            ).sum(),
+                            prefix + "model_wait_probability_sum": (
+                                model_wait * side_rows
+                            ).sum(),
+                            prefix + "soft_wait_disagreement_rows": (
+                                (
+                                    target_wait
+                                    > target_action_probability
+                                ).to(model_wait.dtype) * side_rows
+                            ).sum(),
+                        })
                     names = self.teacher_channel_names
                     chop = selected_teachers[
                         :, names.index("structure_chop_probability")
@@ -1442,6 +1571,10 @@ class RecurrentC51Agent:
                         "dominant_chop": dominant_chop,
                         "nonchop": ~dominant_chop,
                         "low_headroom_le_0_25": selected_headroom <= 0.25,
+                        "mid_headroom_gt_0_25_lt_0_75": (
+                            (selected_headroom > 0.25)
+                            & (selected_headroom < 0.75)
+                        ),
                         "safe_headroom_ge_0_75": selected_headroom >= 0.75,
                     }
                     stratum_weights = torch.stack(
@@ -1451,9 +1584,25 @@ class RecurrentC51Agent:
                         torch.ones_like(target_wait),
                         target_wait,
                         model_wait,
+                        (model_wait - target_wait).abs(),
+                        target_action_probability,
+                        model_target_action_probability,
+                        (
+                            model_target_action_probability
+                            - target_action_probability
+                        ).abs(),
                         greedy_wait.to(torch.float32),
                         declared_side,
                         greedy_entry.to(torch.float32),
+                        (greedy_actions == selected_actions).to(torch.float32),
+                        *(
+                            (
+                                (selected_actions == target_index)
+                                & (greedy_actions == prediction_index)
+                            ).to(torch.float32)
+                            for target_index in range(3)
+                            for prediction_index in range(3)
+                        ),
                     ), dim=-1)
                     additive_matrix = stratum_weights.transpose(0, 1).matmul(
                         row_diagnostics
@@ -1543,16 +1692,39 @@ class RecurrentC51Agent:
                     ),
                     dim=-1,
                 )
-                entry_action_loss = nn.functional.cross_entropy(
-                    entry_q[timing_rows],
-                    timing_targets[timing_rows],
-                    weight=self._entry_action_class_weights_tensor,
+                selected_entry_q = entry_q[timing_rows]
+                selected_timing_targets = timing_targets[timing_rows]
+                unweighted_entry_ce = nn.functional.cross_entropy(
+                    selected_entry_q,
+                    selected_timing_targets,
+                    reduction="none",
                 )
+                selected_class_counts = torch.bincount(
+                    selected_timing_targets, minlength=3
+                ).to(unweighted_entry_ce.dtype)
+                present_classes = selected_class_counts > 0
+                if (
+                    self.entry_action_loss_reduction
+                    == "equal_present_class_mean_v1"
+                ):
+                    class_ce_means = torch.stack(tuple(
+                        unweighted_entry_ce[
+                            selected_timing_targets == class_index
+                        ].sum() / selected_class_counts[class_index].clamp_min(1.0)
+                        for class_index in range(3)
+                    ))
+                    entry_action_loss = class_ce_means[present_classes].mean()
+                else:
+                    entry_action_loss = nn.functional.cross_entropy(
+                        selected_entry_q,
+                        selected_timing_targets,
+                        weight=self._entry_action_class_weights_tensor,
+                    )
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
                 )
-                selected_targets = timing_targets[timing_rows]
-                selected_predictions = entry_q[timing_rows].argmax(-1)
+                selected_targets = selected_timing_targets
+                selected_predictions = selected_entry_q.argmax(-1)
                 entry_action_target_counts = torch.bincount(
                     selected_targets, minlength=3
                 ).to(torch.float32)
@@ -1560,6 +1732,43 @@ class RecurrentC51Agent:
                     selected_predictions, minlength=3
                 ).to(torch.float32)
                 for class_index in range(3):
+                    action_name = _ENTRY_BALANCE_ACTION_NAMES[class_index]
+                    class_rows = (
+                        selected_targets == class_index
+                    ).to(unweighted_entry_ce.dtype)
+                    class_weight = self._entry_action_class_weights_tensor[
+                        class_index
+                    ]
+                    if (
+                        self.entry_action_loss_reduction
+                        == "equal_present_class_mean_v1"
+                    ):
+                        effective_row_weight = torch.where(
+                            present_classes[class_index],
+                            1.0
+                            / (
+                                present_classes.sum().to(unweighted_entry_ce.dtype)
+                                * selected_class_counts[class_index].clamp_min(1.0)
+                            ),
+                            torch.zeros((), device=self.device),
+                        )
+                    else:
+                        effective_row_weight = class_weight
+                    prefix = f"entry_balance_{action_name}_"
+                    entry_balance_additive.update({
+                        prefix + "rows": class_rows.sum(),
+                        prefix + "weighted_mass": (
+                            class_rows.sum() * effective_row_weight
+                        ),
+                        prefix + "unweighted_ce_sum": (
+                            unweighted_entry_ce * class_rows
+                        ).sum(),
+                        prefix + "weighted_ce_sum": (
+                            unweighted_entry_ce
+                            * class_rows
+                            * effective_row_weight
+                        ).sum(),
+                    })
                     entry_action_correct_counts[class_index] = (
                         (selected_targets == class_index)
                         & (selected_predictions == class_index)
@@ -1704,6 +1913,9 @@ class RecurrentC51Agent:
             (~training_valid).sum().to(torch.float32),
             terminal_truncated_rows.sum().to(torch.float32),
             *regime_selectivity_additive.values(),
+            *regime_channel_additive.flatten().unbind(),
+            *entry_balance_additive.values(),
+            *regime_entry_conflict_additive.values(),
             *regime_persistent_additive.values(),
         ))
         (
@@ -1757,8 +1969,27 @@ class RecurrentC51Agent:
         regime_selectivity_additive_values = all_regime_additive_values[
             :selectivity_additive_count
         ]
-        regime_persistent_additive_values = all_regime_additive_values[
+        regime_channel_additive_count = (
+            len(regime_channel_names) * len(_REGIME_CHANNEL_ADDITIVE_FIELDS)
+        )
+        regime_channel_additive_values = all_regime_additive_values[
             selectivity_additive_count:
+            selectivity_additive_count + regime_channel_additive_count
+        ]
+        entry_balance_start = (
+            selectivity_additive_count + regime_channel_additive_count
+        )
+        entry_balance_count = len(entry_balance_additive)
+        entry_balance_values = all_regime_additive_values[
+            entry_balance_start:entry_balance_start + entry_balance_count
+        ]
+        regime_conflict_start = entry_balance_start + entry_balance_count
+        regime_conflict_count = len(regime_entry_conflict_additive)
+        regime_conflict_values = all_regime_additive_values[
+            regime_conflict_start:regime_conflict_start + regime_conflict_count
+        ]
+        regime_persistent_additive_values = all_regime_additive_values[
+            regime_conflict_start + regime_conflict_count:
         ]
         regime_selectivity_metric_values = {
             f"regime_selectivity_{stratum}_{field}": 0.0
@@ -1770,6 +2001,93 @@ class RecurrentC51Agent:
             regime_selectivity_additive_values,
             strict=True,
         )))
+        regime_channel_metric_values = {
+            f"regime_teacher_channel_{channel}_{field}": (
+                regime_channel_additive_values[
+                    channel_index * len(_REGIME_CHANNEL_ADDITIVE_FIELDS)
+                    + field_index
+                ]
+            )
+            for channel_index, channel in enumerate(regime_channel_names)
+            for field_index, field in enumerate(
+                _REGIME_CHANNEL_ADDITIVE_FIELDS
+            )
+        }
+        for channel in regime_channel_names:
+            prefix = f"regime_teacher_channel_{channel}_"
+            rows = regime_channel_metric_values[prefix + "rows"]
+            for total_field, mean_field in (
+                ("target_probability_sum", "target_probability_mean"),
+                ("model_probability_sum", "model_probability_mean"),
+                ("absolute_error_sum", "mean_absolute_error"),
+                ("squared_error_sum", "mean_squared_error"),
+            ):
+                regime_channel_metric_values[prefix + mean_field] = (
+                    regime_channel_metric_values[prefix + total_field] / rows
+                    if rows else 0.0
+                )
+        entry_balance_metric_values = dict(zip(
+            entry_balance_additive,
+            entry_balance_values,
+            strict=True,
+        ))
+        total_weighted_mass = sum(
+            entry_balance_metric_values[
+                f"entry_balance_{action}_weighted_mass"
+            ]
+            for action in _ENTRY_BALANCE_ACTION_NAMES
+        )
+        total_weighted_ce = sum(
+            entry_balance_metric_values[
+                f"entry_balance_{action}_weighted_ce_sum"
+            ]
+            for action in _ENTRY_BALANCE_ACTION_NAMES
+        )
+        for class_index, action in enumerate(_ENTRY_BALANCE_ACTION_NAMES):
+            prefix = f"entry_balance_{action}_"
+            rows = entry_balance_metric_values[prefix + "rows"]
+            entry_balance_metric_values[prefix + "configured_weight"] = float(
+                self.entry_action_class_weights[class_index]
+            )
+            entry_balance_metric_values[prefix + "weighted_mass_fraction"] = (
+                entry_balance_metric_values[prefix + "weighted_mass"]
+                / total_weighted_mass if total_weighted_mass else 0.0
+            )
+            entry_balance_metric_values[prefix + "unweighted_ce_mean"] = (
+                entry_balance_metric_values[prefix + "unweighted_ce_sum"]
+                / rows if rows else 0.0
+            )
+            entry_balance_metric_values[
+                prefix + "weighted_loss_contribution"
+            ] = (
+                entry_balance_metric_values[prefix + "weighted_ce_sum"]
+                / total_weighted_mass if total_weighted_mass else 0.0
+            )
+            entry_balance_metric_values[prefix + "weighted_ce_fraction"] = (
+                entry_balance_metric_values[prefix + "weighted_ce_sum"]
+                / total_weighted_ce if total_weighted_ce else 0.0
+            )
+        regime_entry_conflict_metric_values = dict(zip(
+            regime_entry_conflict_additive,
+            regime_conflict_values,
+            strict=True,
+        ))
+        for side in ("long", "short"):
+            prefix = f"regime_entry_conflict_{side}_"
+            rows = regime_entry_conflict_metric_values[prefix + "rows"]
+            for total_field, mean_field in (
+                ("target_wait_probability_sum", "target_wait_probability_mean"),
+                (
+                    "target_declared_side_probability_sum",
+                    "target_declared_side_probability_mean",
+                ),
+                ("model_wait_probability_sum", "model_wait_probability_mean"),
+                ("soft_wait_disagreement_rows", "soft_wait_disagreement_rate"),
+            ):
+                regime_entry_conflict_metric_values[prefix + mean_field] = (
+                    regime_entry_conflict_metric_values[prefix + total_field]
+                    / rows if rows else 0.0
+                )
         regime_persistent_metric_values = dict(zip(
             regime_persistent_additive,
             regime_persistent_additive_values,
@@ -1861,6 +2179,22 @@ class RecurrentC51Agent:
                     "model_wait_probability_mean",
                 ),
                 (
+                    "wait_absolute_error_sum",
+                    "wait_mean_absolute_error",
+                ),
+                (
+                    "target_action_probability_sum",
+                    "target_action_probability_mean",
+                ),
+                (
+                    "model_target_action_probability_sum",
+                    "model_target_action_probability_mean",
+                ),
+                (
+                    "target_action_absolute_error_sum",
+                    "target_action_mean_absolute_error",
+                ),
+                (
                     "greedy_wait_rows",
                     "greedy_wait_rate",
                 ),
@@ -1871,6 +2205,10 @@ class RecurrentC51Agent:
                 (
                     "greedy_entry_rows",
                     "greedy_entry_rate",
+                ),
+                (
+                    "correct_rows",
+                    "accuracy",
                 ),
             ):
                 regime_selectivity_metric_values[prefix + derived_field] = (
@@ -1909,6 +2247,9 @@ class RecurrentC51Agent:
                 regime_selectivity_exact_wait_loss_value
             ),
             **regime_selectivity_metric_values,
+            **regime_channel_metric_values,
+            **entry_balance_metric_values,
+            **regime_entry_conflict_metric_values,
             **regime_persistent_metric_values,
             "entry_action_supervised_rows": entry_action_supervised_rows_value,
             "entry_action_target_wait_rows": entry_target_wait_rows,
@@ -2116,6 +2457,7 @@ class RecurrentC51Agent:
                 ),
                 "entry_action_loss_weight": self.entry_action_loss_weight,
                 "entry_action_class_weights": self.entry_action_class_weights,
+                "entry_action_loss_reduction": self.entry_action_loss_reduction,
                 "regime_selectivity_loss_weight": (
                     self.regime_selectivity_loss_weight
                 ),
@@ -2232,6 +2574,9 @@ class RecurrentC51Agent:
         config.setdefault("teacher_entry_search_q_temperature", 1.0)
         config.setdefault("entry_action_loss_weight", 0.0)
         config.setdefault("entry_action_class_weights", (1.0, 1.0, 1.0))
+        config.setdefault(
+            "entry_action_loss_reduction", "population_weighted_mean_v1"
+        )
         config.setdefault("teacher_channel_names", ())
         config.setdefault("regime_selectivity_loss_weight", 0.0)
         config.setdefault("regime_selectivity_expansion_centers", None)

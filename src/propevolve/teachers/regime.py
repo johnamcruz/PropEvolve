@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from ..agent import resolve_device
+from ..balance_aware_regime_selectivity import REGIME_TEACHER_CHANNELS
 from ..cache import EmbeddingCache
 from .base import BaseTeacher
 from .expansion import _flush_scores, _validate_source_receipt
@@ -26,26 +27,7 @@ MODEL_SCHEMA = "frozen-mask-structure-volatility-regime-teacher-v2"
 TRAINING_SCHEMA = "structure-volatility-regime-teacher-training-v2"
 CONTEXT_LENGTH = 50
 SUFFIX_LOOKBACKS = (5, 10, 20, 50)
-CHANNELS = (
-    "structure_chop_probability",
-    "structure_neutral_probability",
-    "structure_trend_probability",
-    "structure_chop_persistence_probability",
-    "structure_trend_onset_probability",
-    "structure_trend_persistence_probability",
-    "structure_trend_weakening_probability",
-    "structure_other_transition_probability",
-    "kaufman_efficiency",
-    "volatility_low_probability",
-    "volatility_normal_probability",
-    "volatility_high_probability",
-    "volatility_low_persistence_probability",
-    "volatility_expansion_onset_probability",
-    "volatility_high_persistence_probability",
-    "volatility_contraction_probability",
-    "volatility_other_transition_probability",
-    "volatility_percentile",
-)
+CHANNELS = REGIME_TEACHER_CHANNELS
 
 
 def _sha256(path: Path) -> str:

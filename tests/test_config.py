@@ -445,6 +445,151 @@ def test_entry_action_balance_contract_fails_closed(
         load_experiment_config(path)
 
 
+def test_legacy_entry_action_recipes_keep_population_weighted_reduction() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json"
+    )
+
+    assert (
+        config["agent"]["entry_action_loss_reduction"]
+        == "population_weighted_mean_v1"
+    )
+
+
+def test_entry_action_loss_reduction_fails_closed_on_unknown_value(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json"
+    ).read_text())
+    payload["agent"]["entry_action_loss_reduction"] = "unknown"
+    path = tmp_path / "unknown-entry-action-reduction.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="entry action loss reduction is invalid"):
+        load_experiment_config(path)
+
+
+def test_stage2a_entry_balance_repair_is_one_matched_nonrevisable_screen() -> None:
+    source = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json"
+    )
+    repaired = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2a_entry_balance_repair_v1.json"
+    )
+
+    assert (
+        repaired["agent"]["entry_action_loss_reduction"]
+        == "equal_present_class_mean_v1"
+    )
+    assert repaired["evolution"]["base_parent"] == source["evolution"][
+        "base_parent"
+    ]
+    assert repaired["evolution"]["parent_candidate_ids"] == source[
+        "evolution"
+    ]["parent_candidate_ids"]
+    assert "recovery_curriculum" not in repaired
+    assert "agent.entry_action_loss_reduction" in repaired["evolution"][
+        "frozen_paths"
+    ]
+    assert "agent.entry_action_loss_reduction" not in repaired["evolution"][
+        "allowed_revision_paths"
+    ]
+    assert repaired["evolution"]["allowed_revision_paths"] == ()
+    assert repaired["evolution"]["revision_bounds"] == {}
+    assert {
+        "regime_selectivity.loss_weight",
+        "regime_selectivity.q_temperature",
+        *REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
+    } <= set(repaired["evolution"]["frozen_paths"])
+    assert repaired["campaign"]["max_revisions_per_stage"] == 0
+    assert len(repaired["campaign"]["budget_stages"]) == 1
+    assert repaired["campaign"]["budget_stages"][0][
+        "minimum_environment_steps"
+    ] == 500_000
+    assert repaired["campaign"]["budget_stages"][0]["allow_revisions"] is False
+    assert repaired["campaign"]["budget_stages"][0]["revision_paths"] == ()
+
+    expected = json.loads(json.dumps(source))
+    actual = json.loads(json.dumps(repaired))
+    expected["agent"]["entry_action_loss_reduction"] = (
+        "equal_present_class_mean_v1"
+    )
+    expected["evolution"]["hypothesis"] = actual["evolution"]["hypothesis"]
+    expected["evolution"]["frozen_paths"].append(
+        "agent.entry_action_loss_reduction"
+    )
+    expected["evolution"]["frozen_paths"].extend([
+        "regime_selectivity.loss_weight",
+        "regime_selectivity.q_temperature",
+        "regime_selectivity.formula",
+        "regime_selectivity.semantics",
+        "regime_selectivity.persistent_chop_negative_emphasis",
+    ])
+    expected["evolution"]["frozen_paths"] = sorted(
+        expected["evolution"]["frozen_paths"]
+    )
+    actual["evolution"]["frozen_paths"] = sorted(
+        actual["evolution"]["frozen_paths"]
+    )
+    expected["evolution"]["allowed_revision_paths"] = []
+    expected["evolution"]["revision_bounds"] = {}
+    expected["campaign"]["state_root"] = actual["campaign"]["state_root"]
+    expected["campaign"]["max_revisions_per_stage"] = 0
+    expected["campaign"]["budget_stages"] = [
+        expected["campaign"]["budget_stages"][0]
+    ]
+    expected["campaign"]["budget_stages"][0]["name"] = actual["campaign"][
+        "budget_stages"
+    ][0]["name"]
+    expected["campaign"]["budget_stages"][0]["allow_revisions"] = False
+    expected["campaign"]["budget_stages"][0]["revision_paths"] = []
+    expected["output"] = actual["output"]
+    expected["_path"] = actual["_path"]
+
+    assert actual == expected
+
+
+def test_fresh_entry_action_reduction_contract_rejects_missing_field(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_stage2a_entry_balance_repair_v1.json"
+    ).read_text())
+    del payload["agent"]["entry_action_loss_reduction"]
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path = tmp_path / "config" / "missing-entry-action-reduction.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="entry action loss reduction is missing"):
+        load_experiment_config(path)
+
+
+def test_empty_revision_allowlist_requires_explicitly_nonrevisable_campaign(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_stage2a_entry_balance_repair_v1.json"
+    ).read_text())
+    payload["campaign"]["budget_stages"][0]["allow_revisions"] = True
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path = tmp_path / "config" / "revisable-without-allowlist.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="revision and frozen paths"):
+        load_experiment_config(path)
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     (
