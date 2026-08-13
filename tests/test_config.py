@@ -8,6 +8,7 @@ import pytest
 
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
+    REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
     agent_runtime_settings,
     load_experiment_config,
 )
@@ -37,6 +38,12 @@ def _stage2a_config(tmp_path: Path) -> Path:
         "target_source": REGIME_SELECTIVITY_TARGET_SOURCE,
         "action_order": list(REGIME_SELECTIVITY_ACTION_ORDER),
         "formula": REGIME_SELECTIVITY_FORMULA,
+        "semantics": "static_state_v1",
+        "persistent_chop_negative_emphasis": 0.0,
+        "side_balance": {
+            "schema": "equal_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
         "loss_weight": 0.3,
         "expansion_center_receipt": "config/receipts/centers.json",
         "expansion_center_receipt_sha256": hashlib.sha256(receipt).hexdigest(),
@@ -71,6 +78,10 @@ def test_stage2a_regime_selectivity_is_authenticated_and_frozen(
     assert set(REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS) <= set(
         config["evolution"]["frozen_paths"]
     )
+    assert config["regime_selectivity"]["side_balance"] == {
+        "schema": "equal_long_short_v1",
+        "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+    }
 
     payload = json.loads(path.read_text())
     payload["regime_selectivity"]["expansion_long_center"] = 0.5
@@ -90,6 +101,67 @@ def test_stage2a_requires_every_selectivity_identity_field_to_be_frozen(
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="identity must be frozen"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "regime_selectivity.headroom_pressure",
+        "regime_selectivity.dominant_chop_pressure",
+    ),
+)
+def test_stage2a_requires_static_pressure_identity_to_be_frozen(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    frozen_paths = payload["evolution"]["frozen_paths"]
+    if field in frozen_paths:
+        frozen_paths.remove(field)
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="identity must be frozen"):
+        load_experiment_config(path)
+
+
+def test_stage2a_transition_semantics_switch_is_atomic_and_stage_bound(
+    tmp_path: Path,
+) -> None:
+    from propevolve.balance_aware_regime_selectivity import (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    )
+
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    for field in REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS:
+        payload["evolution"]["frozen_paths"].remove(field)
+        payload["evolution"]["allowed_revision_paths"].append(field)
+    payload["evolution"]["revision_bounds"][
+        "regime_selectivity.persistent_chop_negative_emphasis"
+    ] = {"minimum": 0.25, "maximum": 2.0}
+    transition = payload["campaign"]["budget_stages"][1]
+    transition["curriculum_override"] = {
+        "regime_selectivity.formula": PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        "regime_selectivity.semantics": (
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+        ),
+        "regime_selectivity.persistent_chop_negative_emphasis": 1.0,
+    }
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+    assert config["campaign"]["budget_stages"][1][
+        "curriculum_override"
+    ] == transition["curriculum_override"]
+
+    del payload["campaign"]["budget_stages"][1]["curriculum_override"][
+        "regime_selectivity.formula"
+    ]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="must be atomic"):
         load_experiment_config(path)
 
 
@@ -475,6 +547,17 @@ def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> N
         "minimum_prior_passes": 2,
         "maximum_recent_passes": 0,
         "maximum_average_hold_bars": 4.0,
+        "minimum_voluntary_close_rate": 0.8,
+    }
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="collapse detector"):
+        load_experiment_config(path)
+
+    payload["training"]["short_circuit"]["collapse"] = {
+        "window_episodes": 5,
+        "minimum_prior_passes": 2,
+        "maximum_recent_passes": 0,
+        "maximum_average_hold_bars": float("nan"),
         "minimum_voluntary_close_rate": 0.8,
     }
     path.write_text(json.dumps(payload))
@@ -1229,6 +1312,142 @@ def test_stage2_recovery_recipe_authenticates_one_shot_account_contract(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="start contract drifted"):
         load_experiment_config(path)
+
+
+def test_stage2a_regime_repair_is_two_matched_stage1_warm_started_screens() -> None:
+    from propevolve.balance_aware_regime_selectivity import (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    )
+
+    failed = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json"
+    )
+    repaired = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json"
+    )
+
+    assert repaired["output"] != failed["output"]
+    assert repaired["campaign"]["state_root"] != failed["campaign"]["state_root"]
+    assert repaired["evolution"]["base_parent"] == failed["evolution"][
+        "base_parent"
+    ]
+    assert repaired["evolution"]["parent_candidate_ids"] == failed[
+        "evolution"
+    ]["parent_candidate_ids"]
+    assert repaired["evolution"]["base_parent"] == {
+        "archive_root": (
+            "runs/historical_mask_expansion_regime_post_launch_entry_"
+            "balanced_v8b/archive"
+        ),
+        "candidate_id": (
+            "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0"
+        ),
+        "evaluation_id": (
+            "c49852955655b705e376e057dfe2bf58784481175363b970bab063d8c42f981b"
+        ),
+        "model_sha256": (
+            "b445ce526eebafd3121981e9de720031d9710cd4e99c8dc49017d35e50d55584"
+        ),
+    }
+    assert "recovery_curriculum" not in repaired
+    for field in (
+        "assets",
+        "cache",
+        "cache_root",
+        "tickers",
+        "deployment_tickers",
+        "training_only_tickers",
+        "timeframe_minutes",
+        "temporal",
+        "point_values",
+        "round_trip_fees",
+        "teachers",
+        "entry_supervision",
+        "observation",
+        "runtime",
+        "challenge",
+        "agent",
+    ):
+        assert repaired[field] == failed[field]
+
+    selectivity = repaired["regime_selectivity"]
+    assert selectivity["semantics"] == "static_state_v1"
+    assert selectivity["persistent_chop_negative_emphasis"] == 0.0
+    assert selectivity["side_balance"] == {
+        "schema": "equal_long_short_v1",
+        "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+    }
+    assert {
+        "regime_selectivity.headroom_pressure",
+        "regime_selectivity.dominant_chop_pressure",
+    } <= set(repaired["evolution"]["frozen_paths"])
+    stages = repaired["campaign"]["budget_stages"]
+    assert repaired["campaign"]["max_revisions_per_stage"] == 3
+    assert [stage["name"] for stage in stages] == [
+        "regime_side_balance_500k",
+        "persistent_chop_regime_500k",
+    ]
+    assert [stage["minimum_environment_steps"] for stage in stages] == [
+        500_000,
+        500_000,
+    ]
+    assert all(stage["warm_start_parent"] is True for stage in stages)
+    assert stages[0]["curriculum_override"] == {}
+    assert stages[1]["curriculum_override"] == {
+        "regime_selectivity.formula": PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        "regime_selectivity.semantics": (
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+        ),
+        "regime_selectivity.persistent_chop_negative_emphasis": 1.0,
+    }
+    assert stages[1]["parent_improvement_requirements"] == [{
+        "metric": "selection.near_blow_timeout_rate",
+        "direction": "minimize",
+        "minimum_delta": 0.01,
+    }]
+    expected_parent_retention = [
+        {
+            "metric": "selection.pass_rate",
+            "direction": "maximize",
+            "maximum_regression": 0.0,
+        },
+        {
+            "metric": "selection.average_win_r",
+            "direction": "maximize",
+            "maximum_regression": 0.0,
+        },
+        {
+            "metric": "selection.expectancy_r",
+            "direction": "maximize",
+            "maximum_regression": 0.0,
+        },
+        {
+            "metric": "selection.two_r_mfe_capture_ratio",
+            "direction": "maximize",
+            "maximum_regression": 0.0,
+        },
+        {
+            "metric": "selection.near_blow_timeout_rate",
+            "direction": "minimize",
+            "maximum_regression": 0.0,
+        },
+    ]
+    assert all(
+        stage["parent_retention_requirements"] == expected_parent_retention
+        for stage in stages
+    )
+    for stage in stages:
+        assert {
+            "metric": "selection.long_entry_count",
+            "operator": ">",
+            "value": 0,
+        } in stage["selection_requirements"]
+        assert {
+            "metric": "selection.short_entry_count",
+            "operator": ">",
+            "value": 0,
+        } in stage["selection_requirements"]
 
 
 def test_stage2_recovery_stress_baseline_is_frozen_while_fraction_may_revise(

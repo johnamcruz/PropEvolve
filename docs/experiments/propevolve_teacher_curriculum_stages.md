@@ -345,9 +345,19 @@ evidence and integration parity authorize a separate production handoff.
 
 ## Campaign implementation note
 
-The v8b JSON and archive remain unchanged. The fresh
-`historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json` recipe
+The v8b JSON and archive remain unchanged. The original
+`historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json` campaign
+is retained as failed development evidence; it must not be resumed or used as
+a warm-start parent. Its Regime training sampled roughly 9.4 times as much
+positive Long mass as Short mass, and Short recall collapsed.
+
+The replacement
+`historical_mask_expansion_regime_stage2a_learning_repair_v1.json` recipe
 authenticates the selected v8b candidate as its external parent and executes
-only `regime_selectivity_1m -> deficit_recovery_1m`. It has fresh output and
+only `regime_side_balance_500k -> persistent_chop_regime_500k`. The first
+screen repairs Long/Short exposure. The second separately tests whether the
+policy learns stronger WAIT behavior in persistent dead chop while preserving
+transition-ready Long and Short behavior. Both screens have fresh output and
 campaign-state roots, no finalization stage, and no sealed evaluation step.
+Deficit recovery is deferred until this Regime-learning boundary passes.
 Stage 3 and later work require a new recipe after Stage 2 evidence is accepted.

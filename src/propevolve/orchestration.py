@@ -650,22 +650,38 @@ class _EconomicEvidenceGate:
                         f"parent-retention metric is missing: {metric}"
                     )
                 current = float(evaluation.metrics[metric])
-                baseline = max(
+                explicit_direction = "direction" in requirement
+                direction = requirement.get("direction", "minimize")
+                parent_metrics = [
                     float(parent.metrics[metric])
                     for parent in parent_evaluations
+                ]
+                baseline = (
+                    max(parent_metrics)
+                    if not explicit_direction or direction == "maximize"
+                    else min(parent_metrics)
                 )
                 maximum_regression = float(requirement["maximum_regression"])
-                regression = current - baseline
+                regression = (
+                    baseline - current
+                    if direction == "maximize"
+                    else current - baseline
+                )
                 parent_values[f"retain:{metric}"] = {
                     "current": current,
                     "parent": baseline,
+                    "direction": direction,
                     "regression": regression,
                     "maximum_regression": maximum_regression,
                 }
                 if regression > maximum_regression:
                     failures.append({
                         "metric": metric,
-                        "direction": "retain_upper_bound",
+                        "direction": (
+                            f"retain_{direction}"
+                            if explicit_direction
+                            else "retain_upper_bound"
+                        ),
                         "parent": baseline,
                         "maximum_regression": maximum_regression,
                         "actual": current,
@@ -840,7 +856,39 @@ def _reasoning_prompt(request: ReasoningRequest) -> str:
         "only one or more paths from that exact list; do not propose a frozen "
         "mechanism merely because it appears in the general diagnostic guidance."
     )
-    if request.stage.name == "regime_selectivity_1m":
+    if request.stage.name == "regime_side_balance_500k":
+        prompt += (
+            " These Stage 2A.1 instructions supersede the general reward, risk, "
+            "and exit-mechanism menu. Diagnose the matched side-balance mechanism "
+            "using sampled Long and Short Regime rows and global recall together "
+            "with teacher-free selection Long and Short entry counts. Preserve "
+            "the exact immutable Stage 1 parent, static-state target semantics, "
+            "zero selection blows, pass rate, winner R, and winner retention. "
+            "For REVISE, revise only loss weight or Q temperature through the "
+            "stage's exact allowlist; do not propose reward, risk, replay, target "
+            "formula, semantics, teacher, data, or evaluator changes. Never "
+            "disable or weaken Short chop learning, and never introduce an "
+            "inference-time teacher gate."
+        )
+    elif request.stage.name == "persistent_chop_regime_500k":
+        prompt += (
+            " These Stage 2A.2 instructions supersede the general reward, risk, "
+            "and exit-mechanism menu. Diagnose learned persistent-chop behavior "
+            "with same-label exact-WAIT evidence: the authenticated "
+            "regime_selectivity_dead_wait_minus_transition_ready_wait_model_wait "
+            "delta must compare model WAIT probability on persistent-dead-chop "
+            "WAIT rows against transition-ready WAIT rows. Separately inspect "
+            "transition-positive Long and Short rows and declared-side response "
+            "to retain both directions, teacher-free selection Long and Short "
+            "entry counts, and selection.near_blow_timeout_rate relative to the "
+            "selected Stage 2A.1 parent. Preserve zero selection blows, pass "
+            "rate, winner R, and winner retention. For REVISE, revise only loss "
+            "weight or persistent-chop emphasis through the stage's exact "
+            "allowlist; do not propose reward, risk, replay, formula-family, "
+            "teacher, data, or evaluator changes. Never disable or weaken Short "
+            "chop learning, and never introduce an inference-time teacher gate."
+        )
+    elif request.stage.name == "regime_selectivity_1m":
         prompt += (
             " For this Stage 2A boundary, use the authenticated Regime-selectivity "
             "strata to compare dominant-chop versus non-chop and low-headroom "
@@ -897,6 +945,13 @@ def _build_codex_provider(config: Mapping, state_root: Path) -> ReasoningAdapter
 
 def _plan(config: Mapping) -> TrainingPlan:
     campaign = config["campaign"]
+    public_base_recipe_sha256 = hashlib.sha256(
+        json.dumps(
+            _public_config(config),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     frozen_recipe_sha256 = hashlib.sha256(
         json.dumps(
             {
@@ -962,6 +1017,7 @@ def _plan(config: Mapping) -> TrainingPlan:
                         config["evolution"]["allowed_revision_paths"],
                     )
                 ),
+                "public_base_recipe_sha256": public_base_recipe_sha256,
                 "frozen_recipe_sha256": frozen_recipe_sha256,
             },
             required_skills=(

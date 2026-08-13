@@ -23,9 +23,11 @@ from propevolve.training import (
     TrainingResult,
     TrainingProgress,
     _assert_recovery_entry_balance,
+    _assert_recovery_regime_selectivity,
     _entry_action_balance,
     _entry_supervision_frozen_contract,
     _regime_selectivity_agent_settings,
+    _regime_selectivity_replay_settings,
     _recovery_curriculum_from_config,
     _selection_evaluation_gates,
     _plain_contract_value,
@@ -126,6 +128,12 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
         "headroom_pressure": 1.0,
         "dominant_chop_pressure": 2.0,
         "q_temperature": 1.0,
+        "semantics": "static_state_v1",
+        "persistent_chop_negative_emphasis": 0.0,
+        "side_balance": {
+            "schema": "equal_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
     }) == {
         "regime_selectivity_loss_weight": 0.3,
         "regime_selectivity_expansion_centers": (
@@ -136,7 +144,16 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
         "regime_selectivity_headroom_pressure": 1.0,
         "regime_selectivity_dominant_chop_pressure": 2.0,
         "regime_selectivity_q_temperature": 1.0,
+        "regime_selectivity_semantics": "static_state_v1",
+        "regime_selectivity_persistent_chop_negative_emphasis": 0.0,
+        "regime_selectivity_side_balance": "equal_long_short_v1",
     }
+    assert _regime_selectivity_replay_settings({
+        "side_balance": {
+            "schema": "equal_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+    }) == {"entry_opportunity_side_balance": "equal_long_short_v1"}
 
 
 def test_runner_balance_seam_passes_authenticated_weights_and_archives_receipt() -> None:
@@ -210,6 +227,26 @@ def test_recovery_rejects_entry_balance_drift() -> None:
         )
 
 
+def test_recovery_rejects_regime_learning_identity_drift() -> None:
+    class Agent:
+        regime_selectivity_semantics = "static_state_v1"
+        regime_selectivity_persistent_chop_negative_emphasis = 0.0
+        regime_selectivity_side_balance = "equal_long_short_v1"
+
+    expected = {
+        "regime_selectivity_semantics": "static_state_v1",
+        "regime_selectivity_persistent_chop_negative_emphasis": 0.0,
+        "regime_selectivity_side_balance": "equal_long_short_v1",
+    }
+    _assert_recovery_regime_selectivity(Agent(), expected)
+
+    with pytest.raises(ValueError, match="recovery Regime learning identity drifted"):
+        _assert_recovery_regime_selectivity(
+            Agent(),
+            {**expected, "regime_selectivity_side_balance": "none"},
+        )
+
+
 def test_immutable_entry_manifest_becomes_archive_safe_plain_data() -> None:
     from types import MappingProxyType
 
@@ -239,6 +276,154 @@ def test_incomplete_selection_cannot_pass_on_earlier_successes() -> None:
         gate.passes({"pass_minus_blow": 0.1, "short_circuited": 0.0})
         for gate in _selection_evaluation_gates()
     )
+
+
+def test_stage2a_selection_rejects_a_teacher_free_one_side_policy() -> None:
+    gates = _selection_evaluation_gates(require_both_entry_sides=True)
+    common = {"pass_minus_blow": 0.1, "short_circuited": 0.0}
+
+    assert all(gate.passes({
+        **common,
+        "long_entry_count": 12.0,
+        "short_entry_count": 9.0,
+    }) for gate in gates)
+    assert not all(gate.passes({
+        **common,
+        "long_entry_count": 12.0,
+        "short_entry_count": 0.0,
+    }) for gate in gates)
+
+
+def test_training_diagnostic_summary_aggregates_side_recall_from_exact_counts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "training-diagnostics.jsonl"
+    source.write_text("\n".join(json.dumps({
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "updates": 1,
+        "sampled_entry_action_target_counts": {
+            "WAIT": 0,
+            "ENTER_LONG_1": long_rows,
+            "ENTER_SHORT_1": short_rows,
+        },
+        "sampled_entry_action_prediction_counts": {
+            "WAIT": 0,
+            "ENTER_LONG_1": long_predictions,
+            "ENTER_SHORT_1": short_predictions,
+        },
+        "sampled_entry_action_correct_counts": {
+            "WAIT": 0,
+            "ENTER_LONG_1": long_correct,
+            "ENTER_SHORT_1": short_correct,
+        },
+    }) for (
+        long_rows,
+        short_rows,
+        long_predictions,
+        short_predictions,
+        long_correct,
+        short_correct,
+    ) in ((8, 2, 4, 2, 4, 1), (2, 8, 2, 4, 1, 4))) + "\n")
+    destination = tmp_path / "summary.json"
+
+    training_module._write_training_diagnostic_summary(source, destination)
+
+    overall = json.loads(destination.read_text())["overall"]
+    assert overall["sampled_entry_action_target_counts"] == {
+        "WAIT": 0,
+        "ENTER_LONG_1": 10,
+        "ENTER_SHORT_1": 10,
+    }
+    assert overall["sampled_entry_action_recall"] == {
+        "WAIT": 0.0,
+        "ENTER_LONG_1": 0.5,
+        "ENTER_SHORT_1": 0.5,
+    }
+
+
+def test_persistent_regime_gate_requires_learned_wait_separation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "training-diagnostics.jsonl"
+    source.write_text(json.dumps({
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "updates": 1,
+        "persistent_regime_selectivity": {
+            "exact_wait": {
+                "rows": 10.0,
+                "weight_sum": 14.0,
+                "model_wait_probability_sum": 7.0,
+            },
+            "persistent_dead_chop": {
+                "rows": 4.0,
+                "weight_sum": 7.0,
+                "model_wait_probability_sum": 3.2,
+            },
+            "transition_ready": {
+                "rows": 2.0,
+                "weight_sum": 2.5,
+                "model_wait_probability_sum": 0.4,
+            },
+            "transition_positive_long": {
+                "rows": 2.0,
+                "declared_side_probability_sum": 1.4,
+            },
+            "transition_positive_short": {
+                "rows": 3.0,
+                "declared_side_probability_sum": 2.1,
+            },
+        },
+    }) + "\n")
+    destination = tmp_path / "summary.json"
+
+    training_module._write_training_diagnostic_summary(source, destination)
+    persistent = json.loads(destination.read_text())["overall"][
+        "persistent_regime_selectivity"
+    ]
+    optimizer_metrics = (
+        training_module._persistent_regime_selectivity_evaluation_metrics(
+            persistent
+        )
+    )
+    metrics = {
+        "short_circuited": 0.0,
+        **optimizer_metrics,
+        "sampled_entry_action_long_rows": 10.0,
+        "sampled_entry_action_short_rows": 10.0,
+        "sampled_entry_action_long_recall": 0.5,
+        "sampled_entry_action_short_recall": 0.5,
+        "regime_selectivity_positive_long_rows": 10.0,
+        "regime_selectivity_positive_short_rows": 10.0,
+        "regime_selectivity_positive_long_declared_side_probability_sum": 5.0,
+        "regime_selectivity_positive_short_declared_side_probability_sum": 5.0,
+        "final_regime_probe_wait_rows": 32.0,
+        "final_regime_probe_long_rows": 32.0,
+        "final_regime_probe_short_rows": 32.0,
+        "final_regime_probe_long_recall": 0.5,
+        "final_regime_probe_short_recall": 0.5,
+        "final_regime_probe_wait_recall": 0.75,
+        "final_regime_probe_persistent_dead_wait_mass": 12.0,
+        "final_regime_probe_transition_ready_wait_mass": 8.0,
+        "final_regime_probe_transition_positive_long_mass": 8.0,
+        "final_regime_probe_transition_positive_short_mass": 8.0,
+        "final_regime_probe_dead_wait_minus_transition_ready_wait": 0.6,
+        "final_regime_probe_transition_positive_long_response": 0.2,
+        "final_regime_probe_transition_positive_short_response": 0.2,
+    }
+
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics="persistent_chop_negative_weight_v1",
+    )
+    assert metrics[
+        "regime_selectivity_dead_wait_minus_transition_ready_wait_model_wait"
+    ] == pytest.approx(0.6)
+    assert all(gate.passes(metrics) for gate in gates)
+
+    metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = 0.0
+    assert not all(gate.passes(metrics) for gate in gates)
 
 
 class Agent:
@@ -1454,7 +1639,7 @@ def test_training_short_circuits_only_when_blow_rate_exceeds_ceiling() -> None:
     assert result.short_circuit_reason == "blow rate 0.500000 > 0.100000"
 
 
-def test_training_short_circuits_a_close_churn_collapse_after_prior_passes() -> None:
+def test_training_waits_for_the_evidence_boundary_before_collapse_detection() -> None:
     class CollapseEnvironment:
         def __init__(self) -> None:
             self.episode = -1
@@ -1509,7 +1694,7 @@ def test_training_short_circuits_a_close_churn_collapse_after_prior_passes() -> 
         collapse_minimum_voluntary_close_rate=0.8,
     )
 
-    assert result.episodes == 3
+    assert result.episodes == 10
     assert result.short_circuited is True
     assert result.short_circuit_reason == (
         "policy collapse: prior passes 1; recent passes 0/2; "
@@ -1824,6 +2009,56 @@ def test_evaluation_never_updates_agent() -> None:
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
     assert result.passes == 2
     assert agent.updates == 0
+
+
+def test_teacher_free_evaluation_reports_both_entry_sides() -> None:
+    class DirectionalAgent(Agent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actions = iter((Action.ENTER_LONG_1, Action.ENTER_SHORT_1))
+
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
+            return next(self.actions), None, np.zeros(len(Action), np.float32)
+
+    class FlatEpisodeEnvironment:
+        def reset(self):
+            return np.zeros(1, np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            }
+
+        def step(self, action):
+            return np.zeros(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": "timeout",
+                "ticker": "NQ",
+                "trade_count": 1,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    result = evaluate_agent(
+        DirectionalAgent(),
+        FlatEpisodeEnvironment(),
+        episodes=2,
+        recurrent_horizon=2,
+    )
+
+    assert result.long_entry_count == 1
+    assert result.short_entry_count == 1
+    assert result.greedy_entry_count == 2
 
 
 def test_teacher_free_recovery_stress_reports_distinct_outcomes_and_one_entry() -> None:

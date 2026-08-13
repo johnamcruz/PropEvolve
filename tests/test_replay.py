@@ -201,6 +201,382 @@ def test_replay_entry_anchor_keeps_wait_wait_enter_context() -> None:
     )
 
 
+def _entry_opportunity_episode(
+    *,
+    episode_id: str,
+    side: Action,
+    offset: int,
+) -> Episode:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    transitions = tuple(
+        Transition(
+            observation=np.array([offset + index], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([offset + index + 1], np.float32),
+            terminated=index == 11,
+            valid_actions=flat_actions,
+            next_valid_actions=() if index == 11 else flat_actions,
+            entry_action_target=(
+                Action.WAIT if index in {3, 4} else side if index == 5 else None
+            ),
+            entry_opportunity_priority=1.0 if index == 5 else 0.0,
+        )
+        for index in range(12)
+    )
+    return Episode(
+        episode_id=episode_id,
+        ticker="NQ",
+        outcome="timeout",
+        primary_side="long" if side == Action.ENTER_LONG_1 else "short",
+        ended_at_ns=offset,
+        transitions=transitions,
+    )
+
+
+def test_replay_side_balances_entry_anchors_inside_the_learnable_window() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=41,
+    )
+    for index in range(4):
+        replay.add(_entry_opportunity_episode(
+            episode_id=f"long-{index}",
+            side=Action.ENTER_LONG_1,
+            offset=index * 100,
+        ))
+    replay.add(_entry_opportunity_episode(
+        episode_id="short-0",
+        side=Action.ENTER_SHORT_1,
+        offset=1000,
+    ))
+
+    sampled = replay.sample(4)
+
+    anchored_sides = []
+    for sequence in sampled:
+        learnable = sequence[2:5]
+        anchors = [
+            (index, row.entry_action_target)
+            for index, row in enumerate(sequence)
+            if row.entry_action_target in {
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }
+        ]
+        assert len(anchors) == 1
+        anchor_index, anchor_side = anchors[0]
+        assert sequence[anchor_index] in learnable
+        assert sequence[anchor_index - 2].entry_action_target == Action.WAIT
+        assert sequence[anchor_index - 1].entry_action_target == Action.WAIT
+        anchored_sides.append(anchor_side)
+    assert Counter(anchored_sides) == {
+        Action.ENTER_LONG_1: 2,
+        Action.ENTER_SHORT_1: 2,
+    }
+
+
+def test_replay_side_balance_falls_back_to_the_only_authentic_side() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=43,
+    )
+    replay.add(_entry_opportunity_episode(
+        episode_id="long-only",
+        side=Action.ENTER_LONG_1,
+        offset=0,
+    ))
+
+    sampled = replay.sample(3)
+
+    for sequence in sampled:
+        authentic_targets = [
+            row.entry_action_target
+            for row in sequence[2:5]
+            if row.entry_action_target is not None
+        ]
+        assert authentic_targets == [Action.ENTER_LONG_1]
+        assert all(
+            row.entry_action_target != Action.ENTER_SHORT_1
+            for row in sequence
+        )
+
+
+def test_replay_side_balance_splits_an_odd_entry_stratum_by_at_most_one() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=45,
+    )
+    replay.add(_entry_opportunity_episode(
+        episode_id="long",
+        side=Action.ENTER_LONG_1,
+        offset=0,
+    ))
+    replay.add(_entry_opportunity_episode(
+        episode_id="short",
+        side=Action.ENTER_SHORT_1,
+        offset=100,
+    ))
+
+    sampled = replay.sample(5)
+
+    counts = Counter(
+        row.entry_action_target
+        for sequence in sampled
+        for row in sequence[2:5]
+        if row.entry_action_target in {
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
+    )
+    assert sum(counts.values()) == 5
+    assert abs(counts[Action.ENTER_LONG_1] - counts[Action.ENTER_SHORT_1]) == 1
+
+
+def test_replay_side_balance_never_fabricates_a_missing_entry_target() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=3,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        seed=46,
+    )
+    replay.add(_episode("NQ", "timeout", "long", 0))
+
+    sampled = replay.sample(2)
+
+    assert all(
+        row.entry_action_target is None
+        for sequence in sampled
+        for row in sequence
+    )
+
+
+def test_replay_sampling_reuses_precomputed_entry_anchor_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=64,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=46,
+    )
+    for index in range(32):
+        replay.add(_entry_opportunity_episode(
+            episode_id=f"episode-{index}",
+            side=(
+                Action.ENTER_LONG_1
+                if index % 2 == 0
+                else Action.ENTER_SHORT_1
+            ),
+            offset=index * 100,
+        ))
+
+    calls = 0
+    original_flatnonzero = np.flatnonzero
+
+    def counted_flatnonzero(values: np.ndarray) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return original_flatnonzero(values)
+
+    monkeypatch.setattr(np, "flatnonzero", counted_flatnonzero)
+
+    for _ in range(20):
+        replay.sample(16)
+
+    assert calls == 0
+
+
+def test_replay_samples_uniformly_across_precomputed_entry_events() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    def episode_with_anchors(
+        episode_id: str,
+        offset: int,
+        anchors: set[int],
+    ) -> Episode:
+        transitions = tuple(
+            Transition(
+                observation=np.array([offset + index], np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array([offset + index + 1], np.float32),
+                terminated=index == 19,
+                valid_actions=flat_actions,
+                next_valid_actions=() if index == 19 else flat_actions,
+                entry_action_target=(
+                    Action.ENTER_LONG_1 if index in anchors else None
+                ),
+                entry_opportunity_priority=float(index in anchors),
+            )
+            for index in range(20)
+        )
+        return Episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            outcome="timeout",
+            primary_side="long",
+            ended_at_ns=offset,
+            transitions=transitions,
+        )
+
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=47,
+    )
+    replay.add(episode_with_anchors("three-events", 0, {3, 8, 13}))
+    replay.add(episode_with_anchors("one-event", 100, {3}))
+
+    sampled = replay.sample(400)
+
+    first_episode_count = sum(
+        int(row.observation[0]) < 100
+        for sequence in sampled
+        for row in sequence
+        if row.entry_action_target == Action.ENTER_LONG_1
+    )
+    assert 270 <= first_episode_count <= 330
+
+
+def test_replay_side_balance_uses_only_retained_episode_anchors() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=46,
+    )
+    replay.add(_entry_opportunity_episode(
+        episode_id="evicted-long",
+        side=Action.ENTER_LONG_1,
+        offset=0,
+    ))
+    replay.add(_entry_opportunity_episode(
+        episode_id="retained-short",
+        side=Action.ENTER_SHORT_1,
+        offset=100,
+    ))
+    replay.add(_entry_opportunity_episode(
+        episode_id="retained-long",
+        side=Action.ENTER_LONG_1,
+        offset=200,
+    ))
+
+    sampled = replay.sample(4)
+
+    anchor_observations = {
+        int(row.observation[0])
+        for sequence in sampled
+        for row in sequence
+        if row.entry_action_target in {
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
+    }
+    assert anchor_observations == {105, 205}
+
+
+def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=47,
+    )
+    replay.add(_entry_opportunity_episode(
+        episode_id="long",
+        side=Action.ENTER_LONG_1,
+        offset=0,
+    ))
+    replay.add(_entry_opportunity_episode(
+        episode_id="short",
+        side=Action.ENTER_SHORT_1,
+        offset=100,
+    ))
+
+    state = replay.state_dict()
+
+    assert state["schema_version"] == 6
+    assert state["contract"]["entry_opportunity_side_balance"] == (
+        "equal_long_short_v1"
+    )
+    restored = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    restored.load_state_dict(state)
+    assert restored.state_dict()["contract"] == state["contract"]
+    expected = replay.sample(5)
+    actual = restored.sample(5)
+    for expected_sequence, actual_sequence in zip(expected, actual, strict=True):
+        assert [row.entry_action_target for row in actual_sequence] == [
+            row.entry_action_target for row in expected_sequence
+        ]
+        np.testing.assert_array_equal(
+            [row.observation for row in actual_sequence],
+            [row.observation for row in expected_sequence],
+        )
+
+    stale = dict(state)
+    stale["schema_version"] = 5
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        restored.load_state_dict(stale)
+
+    drifted = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="none",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    with pytest.raises(ValueError, match="contract drifted"):
+        drifted.load_state_dict(state)
+
+
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,
@@ -538,7 +914,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 5
+    assert state["schema_version"] == 6
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]
@@ -551,7 +927,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         [row.observation for row in expected],
     )
 
-    state["schema_version"] = 4
+    state["schema_version"] = 5
     with pytest.raises(ValueError, match="schema is unsupported"):
         restored.load_state_dict(state)
 

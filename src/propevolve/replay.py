@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+import hashlib
 import random
 from typing import Mapping
 
@@ -30,6 +32,7 @@ class Transition:
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
     training_valid: bool = True
+    source_decision_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,54 @@ class Episode:
     @property
     def bucket(self) -> tuple[str, str, str]:
         return self.ticker, self.outcome, self.primary_side
+
+
+@dataclass(frozen=True)
+class FinalRegimeProbeSequence:
+    """One immutable authentic replay row plus its recurrent context."""
+
+    episode_id: str
+    ticker: str
+    anchor_index: int
+    sequence_anchor_index: int
+    source_decision_index: int
+    target_action: Action
+    row_identity_sha256: str
+    sequence: tuple[Transition, ...]
+
+
+def final_regime_probe_row_identity(
+    *,
+    ticker: str,
+    source_decision_index: int,
+    target_action: Action,
+    observation: np.ndarray,
+    teacher_target: np.ndarray,
+) -> str:
+    """Content-address one stable market row without wall-clock identity."""
+    if (
+        not ticker
+        or isinstance(source_decision_index, bool)
+        or int(source_decision_index) < 0
+    ):
+        raise ValueError("final Regime probe source identity is invalid")
+    observation = np.asarray(observation, dtype=np.float32).reshape(-1)
+    teacher_target = np.asarray(teacher_target, dtype=np.float32).reshape(-1)
+    if (
+        observation.size < 1
+        or teacher_target.size < 1
+        or not np.isfinite(observation).all()
+        or not np.isfinite(teacher_target).all()
+    ):
+        raise ValueError("final Regime probe source row is invalid")
+    hasher = hashlib.sha256()
+    hasher.update(b"propevolve-final-regime-probe-row-v1\0")
+    hasher.update(ticker.encode("utf-8"))
+    hasher.update(int(source_decision_index).to_bytes(8, "big", signed=False))
+    hasher.update(int(Action(target_action)).to_bytes(2, "big", signed=False))
+    hasher.update(observation.tobytes())
+    hasher.update(teacher_target.tobytes())
+    return hasher.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -63,9 +114,12 @@ class _StoredEpisode:
     next_recurrent_resets: np.ndarray
     teacher_targets: np.ndarray | None
     entry_action_targets: np.ndarray
+    entry_long_anchor_indices: np.ndarray
+    entry_short_anchor_indices: np.ndarray
     regime_selectivity_headroom_fractions: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
+    source_decision_indices: np.ndarray
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -91,6 +145,15 @@ class _StoredEpisode:
             for item in transitions
         ):
             raise ValueError("replay entry opportunity priority is invalid")
+        if any(
+            item.source_decision_index is not None
+            and (
+                isinstance(item.source_decision_index, bool)
+                or int(item.source_decision_index) < 0
+            )
+            for item in transitions
+        ):
+            raise ValueError("replay source decision index is invalid")
         for current, following in zip(transitions, transitions[1:]):
             if not np.array_equal(current.next_observation, following.observation):
                 raise ValueError("replay episode observations are not contiguous")
@@ -175,6 +238,12 @@ class _StoredEpisode:
             ),
             teacher_targets=teacher_targets,
             entry_action_targets=entry_action_targets,
+            entry_long_anchor_indices=np.flatnonzero(
+                entry_action_targets == int(Action.ENTER_LONG_1)
+            ).astype(np.int32, copy=False),
+            entry_short_anchor_indices=np.flatnonzero(
+                entry_action_targets == int(Action.ENTER_SHORT_1)
+            ).astype(np.int32, copy=False),
             regime_selectivity_headroom_fractions=(
                 regime_selectivity_headroom_fractions
             ),
@@ -183,6 +252,15 @@ class _StoredEpisode:
             ),
             entry_opportunity_priorities=np.asarray(
                 [item.entry_opportunity_priority for item in transitions], np.float32
+            ),
+            source_decision_indices=np.asarray(
+                [
+                    -1
+                    if item.source_decision_index is None
+                    else int(item.source_decision_index)
+                    for item in transitions
+                ],
+                np.int64,
             ),
         )
 
@@ -231,6 +309,11 @@ class _StoredEpisode:
                     self.entry_opportunity_priorities[index]
                 ),
                 training_valid=True,
+                source_decision_index=(
+                    None
+                    if self.source_decision_indices[index] < 0
+                    else int(self.source_decision_indices[index])
+                ),
             )
             for index in range(start, stop)
         )
@@ -259,6 +342,7 @@ class _StoredEpisode:
             next_recurrent_reset=next_recurrent_reset,
             competence_anchor=False,
             training_valid=False,
+            source_decision_index=None,
         )
 
     def padded_sequence(
@@ -317,6 +401,99 @@ class _StoredEpisode:
         ]
         return tuple((*pre, *real, *post))
 
+    def entry_anchored_sequence(
+        self,
+        *,
+        anchor_index: int,
+        length: int,
+        recurrent_burn_in: int,
+        n_step_return: int,
+    ) -> tuple[Transition, ...]:
+        """Place an authentic entry target at the first learnable timestep."""
+        last_learning_index = length - n_step_return
+        if (
+            not 0 <= anchor_index < self.transition_count
+            or not recurrent_burn_in <= last_learning_index < length
+            or self.entry_action_targets[anchor_index]
+            not in {int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)}
+        ):
+            raise ValueError("entry replay anchor is invalid")
+        source_start = max(0, anchor_index - recurrent_burn_in)
+        context_before_anchor = anchor_index - source_start
+        real_start = recurrent_burn_in - context_before_anchor
+        source_stop = min(
+            self.transition_count,
+            source_start + length - real_start,
+        )
+        real = list(self.sequence(source_start, source_stop - source_start))
+        pre = [
+            self._padding_transition(
+                real[0].observation,
+                next_recurrent_reset=index == real_start - 1,
+            )
+            for index in range(real_start)
+        ]
+        if pre:
+            real[0] = Transition(**{**real[0].__dict__, "recurrent_reset": True})
+        post = [
+            self._padding_transition(real[-1].next_observation)
+            for _ in range(length - real_start - len(real))
+        ]
+        return tuple((*pre, *real, *post))
+
+    def target_anchored_sequence(
+        self,
+        *,
+        anchor_index: int,
+        length: int,
+        recurrent_burn_in: int,
+        n_step_return: int,
+    ) -> tuple[Transition, ...]:
+        """Place any exact flat-action target at the first learnable row."""
+        if (
+            not 0 <= anchor_index < self.transition_count
+            or self.entry_action_targets[anchor_index]
+            not in {
+                int(Action.WAIT),
+                int(Action.ENTER_LONG_1),
+                int(Action.ENTER_SHORT_1),
+            }
+        ):
+            raise ValueError("Regime probe anchor is invalid")
+        target = int(self.entry_action_targets[anchor_index])
+        if target in {int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)}:
+            return self.entry_anchored_sequence(
+                anchor_index=anchor_index,
+                length=length,
+                recurrent_burn_in=recurrent_burn_in,
+                n_step_return=n_step_return,
+            )
+        last_learning_index = length - n_step_return
+        if not recurrent_burn_in <= last_learning_index < length:
+            raise ValueError("Regime probe learning contract is invalid")
+        source_start = max(0, anchor_index - recurrent_burn_in)
+        context_before_anchor = anchor_index - source_start
+        real_start = recurrent_burn_in - context_before_anchor
+        source_stop = min(
+            self.transition_count,
+            source_start + length - real_start,
+        )
+        real = list(self.sequence(source_start, source_stop - source_start))
+        pre = [
+            self._padding_transition(
+                real[0].observation,
+                next_recurrent_reset=index == real_start - 1,
+            )
+            for index in range(real_start)
+        ]
+        if pre:
+            real[0] = Transition(**{**real[0].__dict__, "recurrent_reset": True})
+        post = [
+            self._padding_transition(real[-1].next_observation)
+            for _ in range(length - real_start - len(real))
+        ]
+        return tuple((*pre, *real, *post))
+
 
 class BalancedSequenceReplay:
     """Retain recent episodes while sampling scarce outcome buckets fairly."""
@@ -330,6 +507,7 @@ class BalancedSequenceReplay:
         terminal_sequence_fraction: float = 0.0,
         safety_sequence_fraction: float = 0.0,
         entry_opportunity_sequence_fraction: float = 0.0,
+        entry_opportunity_side_balance: str = "none",
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
         seed: int,
@@ -367,6 +545,12 @@ class BalancedSequenceReplay:
         self.entry_opportunity_sequence_fraction = float(
             entry_opportunity_sequence_fraction
         )
+        if entry_opportunity_side_balance not in {
+            "none",
+            "equal_long_short_v1",
+        }:
+            raise ValueError("replay entry opportunity side balance is invalid")
+        self.entry_opportunity_side_balance = entry_opportunity_side_balance
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -378,10 +562,111 @@ class BalancedSequenceReplay:
     def transition_count(self) -> int:
         return self._transition_count
 
+    def final_regime_probe_sequences(
+        self,
+        *,
+        samples_per_action: int,
+    ) -> tuple[FinalRegimeProbeSequence, ...]:
+        """Return a fixed class-balanced probe without advancing replay RNG.
+
+        Every anchor is an authentic training row already admitted by replay.
+        SHA ranking makes the bounded sample invariant to sampler RNG state and
+        stable across repeated evaluation of the same replay contents.
+        """
+        if (
+            isinstance(samples_per_action, bool)
+            or not isinstance(samples_per_action, int)
+            or samples_per_action < 1
+        ):
+            raise ValueError("Regime probe sample count must be positive")
+        classes = (
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        )
+        candidates: dict[
+            Action,
+            list[tuple[str, _StoredEpisode, int, str]],
+        ] = {action: [] for action in classes}
+        for episode in self._episodes.values():
+            if episode.teacher_targets is None:
+                continue
+            for anchor_index, raw_target in enumerate(
+                episode.entry_action_targets.tolist()
+            ):
+                if raw_target not in {int(action) for action in classes}:
+                    continue
+                if (
+                    not np.isfinite(episode.teacher_targets[anchor_index]).all()
+                    or not np.isfinite(
+                        episode.regime_selectivity_headroom_fractions[anchor_index]
+                    )
+                    or episode.source_decision_indices[anchor_index] < 0
+                ):
+                    continue
+                target = Action(int(raw_target))
+                row_identity = final_regime_probe_row_identity(
+                    ticker=episode.ticker,
+                    source_decision_index=int(
+                        episode.source_decision_indices[anchor_index]
+                    ),
+                    target_action=target,
+                    observation=episode.observations[anchor_index],
+                    teacher_target=episode.teacher_targets[anchor_index],
+                )
+                rank = hashlib.sha256(
+                    b"propevolve-final-regime-probe-order-v1\0"
+                    + row_identity.encode("ascii")
+                ).hexdigest()
+                candidates[target].append(
+                    (rank, episode, anchor_index, row_identity)
+                )
+
+        selected: list[FinalRegimeProbeSequence] = []
+        for target in classes:
+            ranked = []
+            seen_identities = set()
+            for candidate in sorted(candidates[target], key=lambda item: item[0]):
+                row_identity = candidate[3]
+                if row_identity not in seen_identities:
+                    ranked.append(candidate)
+                    seen_identities.add(row_identity)
+            if len(ranked) < samples_per_action:
+                raise ValueError(
+                    "final Regime probe lacks exact balanced authentic rows"
+                )
+            for _, episode, anchor_index, row_identity in ranked[:samples_per_action]:
+                sequence = episode.target_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                )
+                anchor = sequence[self.recurrent_burn_in]
+                if (
+                    not anchor.training_valid
+                    or anchor.entry_action_target != target
+                    or anchor.teacher_target is None
+                ):
+                    raise ValueError("Regime probe anchor lost authentic lineage")
+                selected.append(FinalRegimeProbeSequence(
+                    episode_id=episode.episode_id,
+                    ticker=episode.ticker,
+                    anchor_index=anchor_index,
+                    sequence_anchor_index=self.recurrent_burn_in,
+                    source_decision_index=int(
+                        episode.source_decision_indices[anchor_index]
+                    ),
+                    target_action=target,
+                    row_identity_sha256=row_identity,
+                    sequence=sequence,
+                ))
+        return tuple(selected)
+
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -393,12 +678,19 @@ class BalancedSequenceReplay:
                 "entry_opportunity_sequence_fraction": (
                     self.entry_opportunity_sequence_fraction
                 ),
+                "entry_opportunity_side_balance": (
+                    self.entry_opportunity_side_balance
+                ),
             },
             "random_state": self._random.getstate(),
             "episodes": [
                 {
                     field: getattr(episode, field)
                     for field in _StoredEpisode.__dataclass_fields__
+                    if field not in {
+                        "entry_long_anchor_indices",
+                        "entry_short_anchor_indices",
+                    }
                 }
                 for episode in self._episodes.values()
             ],
@@ -406,7 +698,7 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 5:
+        if state.get("schema_version") != 6:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -418,6 +710,9 @@ class BalancedSequenceReplay:
             "safety_sequence_fraction": self.safety_sequence_fraction,
             "entry_opportunity_sequence_fraction": (
                 self.entry_opportunity_sequence_fraction
+            ),
+            "entry_opportunity_side_balance": (
+                self.entry_opportunity_side_balance
             ),
         }
         if state.get("contract") != expected_contract:
@@ -457,6 +752,13 @@ class BalancedSequenceReplay:
                 raw_regime_selectivity_headroom = payload[
                     "regime_selectivity_headroom_fractions"
                 ]
+                source_decision_indices = np.asarray(
+                    payload.get(
+                        "source_decision_indices",
+                        np.full(actions.size, -1, dtype=np.int64),
+                    ),
+                    dtype=np.int64,
+                )
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("replay checkpoint episode is malformed") from error
             count = int(actions.size)
@@ -482,6 +784,7 @@ class BalancedSequenceReplay:
                 or next_recurrent_resets.shape != (count,)
                 or entry_action_targets.shape != (count,)
                 or regime_selectivity_headroom.shape != (count,)
+                or source_decision_indices.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
@@ -495,6 +798,7 @@ class BalancedSequenceReplay:
                 or (actions >= action_count).any()
                 or (entry_action_targets < -1).any()
                 or (entry_action_targets > int(Action.ENTER_SHORT_1)).any()
+                or (source_decision_indices < -1).any()
                 or not np.logical_or(
                     np.isnan(regime_selectivity_headroom),
                     (
@@ -542,11 +846,18 @@ class BalancedSequenceReplay:
                 next_recurrent_resets=next_recurrent_resets,
                 teacher_targets=teacher_targets,
                 entry_action_targets=entry_action_targets,
+                entry_long_anchor_indices=np.flatnonzero(
+                    entry_action_targets == int(Action.ENTER_LONG_1)
+                ).astype(np.int32, copy=False),
+                entry_short_anchor_indices=np.flatnonzero(
+                    entry_action_targets == int(Action.ENTER_SHORT_1)
+                ).astype(np.int32, copy=False),
                 regime_selectivity_headroom_fractions=(
                     regime_selectivity_headroom
                 ),
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
+                source_decision_indices=source_decision_indices,
             )
             if not episode.ticker or not episode.outcome or not episode.primary_side:
                 raise ValueError("replay checkpoint episode metadata is invalid")
@@ -626,7 +937,68 @@ class BalancedSequenceReplay:
         terminal_count = round(count * self.terminal_sequence_fraction)
         safety_count = round(count * self.safety_sequence_fraction)
         entry_count = round(count * self.entry_opportunity_sequence_fraction)
-        for index, episode in enumerate(self.sample_episodes(count)):
+        sampled_episodes = list(self.sample_episodes(count))
+        balanced_entry_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
+        if self.entry_opportunity_side_balance == "equal_long_short_v1":
+            opportunity_episodes: dict[Action, list[_StoredEpisode]] = defaultdict(list)
+            cumulative_counts: dict[Action, list[int]] = defaultdict(list)
+            for stored in self._episodes.values():
+                for side, anchors in (
+                    (Action.ENTER_LONG_1, stored.entry_long_anchor_indices),
+                    (Action.ENTER_SHORT_1, stored.entry_short_anchor_indices),
+                ):
+                    if not anchors.size:
+                        continue
+                    opportunity_episodes[side].append(stored)
+                    previous = (
+                        cumulative_counts[side][-1]
+                        if cumulative_counts[side]
+                        else 0
+                    )
+                    cumulative_counts[side].append(previous + int(anchors.size))
+            available_sides = [
+                side
+                for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+                if cumulative_counts[side]
+            ]
+            if len(available_sides) == 2:
+                self._random.shuffle(available_sides)
+            entry_start = terminal_count + safety_count
+            for offset in range(entry_count):
+                if not available_sides:
+                    break
+                side = available_sides[offset % len(available_sides)]
+                anchor_offset = self._random.randrange(cumulative_counts[side][-1])
+                episode_offset = bisect_right(
+                    cumulative_counts[side], anchor_offset
+                )
+                previous_count = (
+                    cumulative_counts[side][episode_offset - 1]
+                    if episode_offset
+                    else 0
+                )
+                episode = opportunity_episodes[side][episode_offset]
+                anchor_indices = (
+                    episode.entry_long_anchor_indices
+                    if side == Action.ENTER_LONG_1
+                    else episode.entry_short_anchor_indices
+                )
+                anchor_index = int(anchor_indices[anchor_offset - previous_count])
+                balanced_entry_anchors[entry_start + offset] = (
+                    episode,
+                    anchor_index,
+                )
+        for index, episode in enumerate(sampled_episodes):
+            balanced_entry_anchor = balanced_entry_anchors.get(index)
+            if balanced_entry_anchor is not None:
+                episode, anchor_index = balanced_entry_anchor
+                sequences.append(episode.entry_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                ))
+                continue
             if episode.transition_count < self.sequence_length:
                 if index < terminal_count:
                     anchor = "terminal"

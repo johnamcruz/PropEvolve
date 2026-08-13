@@ -38,6 +38,10 @@ from .evolution import (
     EvaluationStage,
     EvaluatorCascade,
 )
+from .final_regime_probe import (
+    SAMPLES_PER_ACTION as FINAL_REGIME_PROBE_SAMPLES_PER_ACTION,
+    evaluate_final_regime_probe,
+)
 from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
 from .teachers import agent_teacher_settings
@@ -63,6 +67,20 @@ _REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "greedy_wait_rows",
     "declared_side_probability_sum",
     "greedy_entry_rows",
+)
+_PERSISTENT_REGIME_SELECTIVITY_STRATA = (
+    "exact_wait",
+    "persistent_dead_chop",
+    "transition_ready",
+)
+_PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
+    "rows",
+    "weight_sum",
+    "model_wait_probability_sum",
+)
+_TRANSITION_POSITIVE_SIDE_FIELDS = (
+    "long",
+    "short",
 )
 
 
@@ -112,12 +130,41 @@ def _assert_recovery_entry_balance(
         raise ValueError("training recovery entry balance drifted")
 
 
+def _assert_recovery_regime_selectivity(
+    agent,
+    agent_settings: Mapping[str, object],
+) -> None:
+    """Fail closed when resumed Stage 2A learning semantics drift."""
+    expected_semantics = agent_settings.get("regime_selectivity_semantics")
+    if expected_semantics is None:
+        return
+    expected_emphasis = float(
+        agent_settings["regime_selectivity_persistent_chop_negative_emphasis"]
+    )
+    if (
+        getattr(agent, "regime_selectivity_semantics", None)
+        != expected_semantics
+        or not math.isclose(
+            float(getattr(
+                agent,
+                "regime_selectivity_persistent_chop_negative_emphasis",
+                math.nan,
+            )),
+            expected_emphasis,
+        )
+        or getattr(agent, "regime_selectivity_side_balance", None)
+        != agent_settings.get("regime_selectivity_side_balance")
+    ):
+        raise ValueError("training recovery Regime learning identity drifted")
+
+
 def _regime_selectivity_agent_settings(
     specification: Mapping[str, object] | None,
 ) -> dict[str, object]:
     """Project one validated Stage 2A recipe onto the learner interface."""
     if specification is None:
         return {}
+    side_balance = specification.get("side_balance")
     return {
         "regime_selectivity_loss_weight": float(specification["loss_weight"]),
         "regime_selectivity_expansion_centers": (
@@ -136,6 +183,33 @@ def _regime_selectivity_agent_settings(
         "regime_selectivity_q_temperature": float(
             specification["q_temperature"]
         ),
+        "regime_selectivity_semantics": str(
+            specification.get("semantics", "static_state_v1")
+        ),
+        "regime_selectivity_persistent_chop_negative_emphasis": float(
+            specification.get("persistent_chop_negative_emphasis", 0.0)
+        ),
+        "regime_selectivity_side_balance": (
+            "none"
+            if side_balance is None
+            else str(side_balance["schema"])
+        ),
+    }
+
+
+def _regime_selectivity_replay_settings(
+    specification: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Project the frozen side sampler identity onto replay construction."""
+    if specification is None:
+        return {}
+    side_balance = specification.get("side_balance")
+    return {
+        "entry_opportunity_side_balance": (
+            "none"
+            if side_balance is None
+            else str(side_balance["schema"])
+        )
     }
 
 
@@ -227,6 +301,78 @@ def _regime_selectivity_summary(
     return _regime_selectivity_episode_diagnostic(update_metrics)
 
 
+def _persistent_regime_selectivity_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, dict[str, float]]:
+    """Reduce transition-aware WAIT evidence from additive optimizer metrics."""
+    result: dict[str, dict[str, float]] = {}
+    for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA:
+        values = {
+            field: float(sum(update_metrics.get(
+                f"regime_selectivity_{stratum}_{field}", ()
+            )))
+            for field in _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS
+        }
+        rows = values["rows"]
+        result[stratum] = {
+            **values,
+            "weight_mean": values["weight_sum"] / rows if rows else 0.0,
+            "model_wait_probability_mean": (
+                values["model_wait_probability_sum"] / rows
+                if rows else 0.0
+            ),
+        }
+    for side in _TRANSITION_POSITIVE_SIDE_FIELDS:
+        prefix = f"regime_selectivity_transition_positive_{side}_"
+        rows = float(sum(update_metrics.get(prefix + "rows", ())))
+        probability_sum = float(sum(update_metrics.get(
+            prefix + "declared_side_probability_sum", ()
+        )))
+        result[f"transition_positive_{side}"] = {
+            "rows": rows,
+            "declared_side_probability_sum": probability_sum,
+            "declared_side_probability_mean": (
+                probability_sum / rows if rows else 0.0
+            ),
+        }
+    return result
+
+
+def _persistent_regime_selectivity_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, float]]:
+    """Aggregate continuous persistent-chop evidence without thresholds."""
+    update_metrics: dict[str, list[float]] = {
+        f"regime_selectivity_{stratum}_{field}": []
+        for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA
+        for field in _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS
+    }
+    for side in _TRANSITION_POSITIVE_SIDE_FIELDS:
+        update_metrics.update({
+            f"regime_selectivity_transition_positive_{side}_rows": [],
+            f"regime_selectivity_transition_positive_{side}_"
+            "declared_side_probability_sum": [],
+        })
+    for row in rows:
+        diagnostics = row.get("persistent_regime_selectivity")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA:
+            values = diagnostics.get(stratum)
+            values = values if isinstance(values, Mapping) else {}
+            for field in _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS:
+                update_metrics[
+                    f"regime_selectivity_{stratum}_{field}"
+                ].append(float(values.get(field, 0.0) or 0.0))
+        for side in _TRANSITION_POSITIVE_SIDE_FIELDS:
+            values = diagnostics.get(f"transition_positive_{side}")
+            values = values if isinstance(values, Mapping) else {}
+            for field in ("rows", "declared_side_probability_sum"):
+                update_metrics[
+                    f"regime_selectivity_transition_positive_{side}_{field}"
+                ].append(float(values.get(field, 0.0) or 0.0))
+    return _persistent_regime_selectivity_diagnostic(update_metrics)
+
+
 def _regime_selectivity_evaluation_metrics(
     diagnostics: Mapping[str, Mapping[str, float | int]],
 ) -> dict[str, float]:
@@ -255,6 +401,14 @@ def _regime_selectivity_evaluation_metrics(
             "regime_selectivity_nonchop_target_wait_probability_mean"
         ]
     )
+    metrics["regime_selectivity_chop_minus_nonchop_model_wait"] = (
+        metrics[
+            "regime_selectivity_dominant_chop_model_wait_probability_mean"
+        ]
+        - metrics[
+            "regime_selectivity_nonchop_model_wait_probability_mean"
+        ]
+    )
     metrics["regime_selectivity_low_minus_safe_target_wait"] = (
         metrics[
             "regime_selectivity_low_headroom_le_0_25_"
@@ -268,26 +422,145 @@ def _regime_selectivity_evaluation_metrics(
     return metrics
 
 
+def _persistent_regime_selectivity_evaluation_metrics(
+    diagnostics: Mapping[str, Mapping[str, float]],
+) -> dict[str, float]:
+    metrics = {
+        f"regime_selectivity_{stratum}_{field}": float(
+            diagnostics.get(stratum, {}).get(field, 0.0)
+        )
+        for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA
+        for field in (
+            "rows",
+            "weight_sum",
+            "weight_mean",
+            "model_wait_probability_sum",
+            "model_wait_probability_mean",
+        )
+    }
+    for side in _TRANSITION_POSITIVE_SIDE_FIELDS:
+        for field in (
+            "rows",
+            "declared_side_probability_sum",
+            "declared_side_probability_mean",
+        ):
+            metrics[
+                f"regime_selectivity_transition_positive_{side}_{field}"
+            ] = float(
+                diagnostics.get(f"transition_positive_{side}", {}).get(
+                    field, 0.0
+                )
+            )
+    metrics[
+        "regime_selectivity_dead_wait_minus_"
+        "transition_ready_wait_model_wait"
+    ] = (
+        metrics[
+            "regime_selectivity_persistent_dead_chop_"
+            "model_wait_probability_mean"
+        ]
+        - metrics[
+            "regime_selectivity_transition_ready_"
+            "model_wait_probability_mean"
+        ]
+    )
+    return metrics
+
+
 def _training_evaluation_gates(
-    *, regime_selectivity_active: bool,
+    *,
+    regime_selectivity_active: bool,
+    regime_selectivity_semantics: str = "static_state_v1",
 ) -> tuple[EvaluationGate, ...]:
     gates = [EvaluationGate("short_circuited", "==", 0.0)]
     if regime_selectivity_active:
         gates.extend(
-            EvaluationGate(metric, ">", 0.0)
-            for metric in (
-                "regime_selectivity_positive_long_rows",
-                "regime_selectivity_positive_short_rows",
-                "regime_selectivity_dominant_chop_rows",
-                "regime_selectivity_nonchop_rows",
-                "regime_selectivity_low_headroom_le_0_25_rows",
-                "regime_selectivity_safe_headroom_ge_0_75_rows",
-                "regime_selectivity_positive_long_declared_side_probability_sum",
-                "regime_selectivity_positive_short_declared_side_probability_sum",
-                "regime_selectivity_chop_minus_nonchop_target_wait",
-                "regime_selectivity_low_minus_safe_target_wait",
+            (
+                EvaluationGate(
+                    "sampled_entry_action_long_rows", ">", 0.0
+                ),
+                EvaluationGate(
+                    "sampled_entry_action_short_rows", ">", 0.0
+                ),
+                EvaluationGate(
+                    "sampled_entry_action_long_recall", ">", 0.0
+                ),
+                EvaluationGate(
+                    "sampled_entry_action_short_recall", ">", 0.0
+                ),
+                EvaluationGate(
+                    "regime_selectivity_positive_long_rows", ">", 0.0
+                ),
+                EvaluationGate(
+                    "regime_selectivity_positive_short_rows", ">", 0.0
+                ),
+                EvaluationGate(
+                    "regime_selectivity_positive_long_"
+                    "declared_side_probability_sum",
+                    ">",
+                    0.0,
+                ),
+                EvaluationGate(
+                    "regime_selectivity_positive_short_"
+                    "declared_side_probability_sum",
+                    ">",
+                    0.0,
+                ),
+                EvaluationGate(
+                    "final_regime_probe_wait_rows",
+                    "==",
+                    float(FINAL_REGIME_PROBE_SAMPLES_PER_ACTION),
+                ),
+                EvaluationGate(
+                    "final_regime_probe_long_rows",
+                    "==",
+                    float(FINAL_REGIME_PROBE_SAMPLES_PER_ACTION),
+                ),
+                EvaluationGate(
+                    "final_regime_probe_short_rows",
+                    "==",
+                    float(FINAL_REGIME_PROBE_SAMPLES_PER_ACTION),
+                ),
+                EvaluationGate("final_regime_probe_wait_recall", ">=", 0.5),
+                EvaluationGate("final_regime_probe_long_recall", ">=", 0.4),
+                EvaluationGate("final_regime_probe_short_recall", ">=", 0.4),
             )
         )
+        if regime_selectivity_semantics == "static_state_v1":
+            gates.extend(
+                EvaluationGate(metric, ">", 0.0)
+                for metric in (
+                    "regime_selectivity_dominant_chop_rows",
+                    "regime_selectivity_nonchop_rows",
+                    "final_regime_probe_dominant_chop_rows",
+                    "final_regime_probe_nonchop_rows",
+                    "final_regime_probe_chop_minus_nonchop_wait",
+                )
+            )
+        elif regime_selectivity_semantics == "persistent_chop_negative_weight_v1":
+            gates.extend(
+                EvaluationGate(metric, ">", 0.0)
+                for metric in (
+                    "regime_selectivity_exact_wait_rows",
+                    "regime_selectivity_persistent_dead_chop_weight_sum",
+                    "regime_selectivity_transition_ready_weight_sum",
+                    "regime_selectivity_transition_positive_long_rows",
+                    "regime_selectivity_transition_positive_short_rows",
+                    "regime_selectivity_transition_positive_long_"
+                    "declared_side_probability_sum",
+                    "regime_selectivity_transition_positive_short_"
+                    "declared_side_probability_sum",
+                    "final_regime_probe_persistent_dead_wait_mass",
+                    "final_regime_probe_transition_ready_wait_mass",
+                    "final_regime_probe_transition_positive_long_mass",
+                    "final_regime_probe_transition_positive_short_mass",
+                    "final_regime_probe_dead_wait_minus_transition_ready_wait",
+                    "final_regime_probe_transition_positive_long_response",
+                    "final_regime_probe_transition_positive_short_response",
+                )
+            )
+        else:
+            raise ValueError("Regime selectivity gate semantics are invalid")
     return tuple(gates)
 
 
@@ -388,6 +661,8 @@ class TrainingResult:
     near_blow_timeout_count: int = 0
     flat_decision_count: int = 0
     greedy_entry_count: int = 0
+    long_entry_count: int = 0
+    short_entry_count: int = 0
     best_entry_advantage_sum: float = 0.0
     entry_advantage_probe_count: int = 0
     short_circuited: bool = False
@@ -942,6 +1217,7 @@ class HistoricalCandidateRunner:
             if not manifest.get("replay_restored", False) or replay_state is None:
                 raise ValueError("training recovery is missing replay state")
             _assert_recovery_entry_balance(loaded, agent_settings)
+            _assert_recovery_regime_selectivity(loaded, agent_settings)
             agent = loaded
         else:
             if diagnostics_path.exists():
@@ -996,6 +1272,7 @@ class HistoricalCandidateRunner:
             entry_opportunity_sequence_fraction=float(
                 training_config.get("entry_opportunity_sequence_fraction", 0.0)
             ),
+            **_regime_selectivity_replay_settings(regime_selectivity_spec),
             recurrent_burn_in=int(agent.recurrent_burn_in),
             n_step_return=int(agent.n_step_return),
             seed=seed,
@@ -1137,6 +1414,32 @@ class HistoricalCandidateRunner:
             retained_policy_restored = True
         agent.discard_retention_anchor()
         agent.discard_teacher()
+        final_regime_probe = None
+        if regime_selectivity_spec is not None:
+            if teacher_targets is None:
+                raise ValueError("final Regime probe requires training label lineage")
+            final_regime_probe = evaluate_final_regime_probe(
+                agent,
+                replay.final_regime_probe_sequences(
+                    samples_per_action=FINAL_REGIME_PROBE_SAMPLES_PER_ACTION,
+                ),
+                teacher_channel_names=teacher_targets.channels,
+                q_temperature=float(regime_selectivity_spec["q_temperature"]),
+                source_period=(
+                    str(temporal["train_start"]),
+                    str(temporal["train_end"]),
+                ),
+            )
+            probe_path = output / "final-regime-probe.json"
+            probe_temporary = probe_path.with_suffix(".json.tmp")
+            probe_temporary.write_text(
+                json.dumps(
+                    final_regime_probe.as_dict(),
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n"
+            )
+            os.replace(probe_temporary, probe_path)
         validation = None
         recovery_stress = None
         if not training.short_circuited:
@@ -1223,6 +1526,21 @@ class HistoricalCandidateRunner:
             "regime_selectivity": _regime_selectivity_frozen_contract(
                 regime_selectivity_spec
             ),
+            "final_regime_probe": (
+                None
+                if final_regime_probe is None
+                else {
+                    "schema": final_regime_probe.schema,
+                    "source_period": list(final_regime_probe.source_period),
+                    "sample_identity_sha256": (
+                        final_regime_probe.sample_identity_sha256
+                    ),
+                    "path": str(output / "final-regime-probe.json"),
+                    "file_sha256": _path_sha256(
+                        output / "final-regime-probe.json"
+                    ),
+                }
+            ),
             "recovery_curriculum": _plain_contract_value(
                 config.get("recovery_curriculum")
             ),
@@ -1289,9 +1607,31 @@ class HistoricalCandidateRunner:
                 ),
             }
             if regime_selectivity_spec is not None:
+                assert final_regime_probe is not None
+                metrics.update(final_regime_probe.metrics)
+                overall_diagnostics = diagnostic_summary["overall"]
                 metrics.update(_regime_selectivity_evaluation_metrics(
-                    diagnostic_summary["overall"]["regime_selectivity"]
+                    overall_diagnostics["regime_selectivity"]
                 ))
+                metrics.update(
+                    _persistent_regime_selectivity_evaluation_metrics(
+                        overall_diagnostics["persistent_regime_selectivity"]
+                    )
+                )
+                for side in ("ENTER_LONG_1", "ENTER_SHORT_1"):
+                    metric_side = "long" if side.endswith("LONG_1") else "short"
+                    metrics[
+                        f"sampled_entry_action_{metric_side}_rows"
+                    ] = float(
+                        overall_diagnostics[
+                            "sampled_entry_action_target_counts"
+                        ][side]
+                    )
+                    metrics[
+                        f"sampled_entry_action_{metric_side}_recall"
+                    ] = float(
+                        overall_diagnostics["sampled_entry_action_recall"][side]
+                    )
             if math.isfinite(training.mean_loss):
                 metrics["mean_loss"] = training.mean_loss
             return metrics
@@ -1317,6 +1657,16 @@ class HistoricalCandidateRunner:
                 "trade_count": float(validation.trade_count),
                 "flat_decision_count": float(validation.flat_decision_count),
                 "greedy_entry_count": float(validation.greedy_entry_count),
+                "long_entry_count": float(validation.long_entry_count),
+                "short_entry_count": float(validation.short_entry_count),
+                "long_entry_share": (
+                    validation.long_entry_count / validation.greedy_entry_count
+                    if validation.greedy_entry_count else 0.0
+                ),
+                "short_entry_share": (
+                    validation.short_entry_count / validation.greedy_entry_count
+                    if validation.greedy_entry_count else 0.0
+                ),
                 "entry_advantage_probe_count": float(
                     validation.entry_advantage_probe_count
                 ),
@@ -1386,13 +1736,24 @@ class HistoricalCandidateRunner:
                 gates=_training_evaluation_gates(
                     regime_selectivity_active=(
                         regime_selectivity_spec is not None
-                    )
+                    ),
+                    regime_selectivity_semantics=(
+                        "static_state_v1"
+                        if regime_selectivity_spec is None
+                        else str(regime_selectivity_spec["semantics"])
+                    ),
                 ),
             ),
             EvaluationStage(
                 "selection",
                 selection_metrics,
-                gates=_selection_evaluation_gates(),
+                gates=_selection_evaluation_gates(
+                    require_both_entry_sides=(
+                        regime_selectivity_spec is not None
+                        and regime_selectivity_spec.get("side_balance")
+                        is not None
+                    )
+                ),
             ),
         ]
         if recovery_stress is not None:
@@ -1417,12 +1778,20 @@ class HistoricalCandidateRunner:
         return candidate, cascade.evaluate(candidate.candidate_id)
 
 
-def _selection_evaluation_gates() -> tuple[EvaluationGate, ...]:
+def _selection_evaluation_gates(
+    *, require_both_entry_sides: bool = False,
+) -> tuple[EvaluationGate, ...]:
     """Reject incomplete selection even when its partial economics look positive."""
-    return (
+    gates = [
         EvaluationGate("short_circuited", "==", 0.0),
         EvaluationGate("pass_minus_blow", ">", 0.0),
-    )
+    ]
+    if require_both_entry_sides:
+        gates.extend((
+            EvaluationGate("long_entry_count", ">", 0.0),
+            EvaluationGate("short_entry_count", ">", 0.0),
+        ))
+    return tuple(gates)
 
 
 def _recovery_stress_integrity_gates() -> tuple[EvaluationGate, ...]:
@@ -1768,6 +2137,51 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
             )
         },
         "regime_selectivity": _regime_selectivity_summary(rows),
+        "persistent_regime_selectivity": (
+            _persistent_regime_selectivity_summary(rows)
+        ),
+    }
+    sampled_target_counts = {
+        action: sum(
+            int(row.get("sampled_entry_action_target_counts", {}).get(action, 0))
+            for row in rows
+        )
+        for action in _ENTRY_ACTION_ORDER
+    }
+    sampled_prediction_counts = {
+        action: sum(
+            int(
+                row.get("sampled_entry_action_prediction_counts", {}).get(
+                    action, 0
+                )
+            )
+            for row in rows
+        )
+        for action in _ENTRY_ACTION_ORDER
+    }
+    sampled_correct_counts = {
+        action: sum(
+            int(row.get("sampled_entry_action_correct_counts", {}).get(action, 0))
+            for row in rows
+        )
+        for action in _ENTRY_ACTION_ORDER
+    }
+    result["sampled_entry_action_target_counts"] = sampled_target_counts
+    result["sampled_entry_action_prediction_counts"] = sampled_prediction_counts
+    result["sampled_entry_action_correct_counts"] = sampled_correct_counts
+    result["sampled_entry_action_recall"] = {
+        action: (
+            sampled_correct_counts[action] / sampled_target_counts[action]
+            if sampled_target_counts[action] else 0.0
+        )
+        for action in _ENTRY_ACTION_ORDER
+    }
+    result["sampled_entry_action_precision"] = {
+        action: (
+            sampled_correct_counts[action] / sampled_prediction_counts[action]
+            if sampled_prediction_counts[action] else 0.0
+        )
+        for action in _ENTRY_ACTION_ORDER
     }
     timeouts = int(result["timeouts"])
     result["near_blow_timeout_rate"] = (
@@ -2267,6 +2681,7 @@ def train_agent(
                     info.get("mll_proximity_penalty", 0.0)
                 ),
                 entry_opportunity_priority=entry_opportunity_priority,
+                source_decision_index=decision_index,
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid
@@ -2375,6 +2790,19 @@ def train_agent(
                 "regime_selectivity_low_headroom_wait_mean",
                 "regime_selectivity_dominant_chop_rows",
                 "regime_selectivity_dominant_chop_wait_mean",
+                *(
+                    f"regime_selectivity_{stratum}_{field}"
+                    for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA
+                    for field in _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS
+                ),
+                *(
+                    f"regime_selectivity_transition_positive_{side}_{field}"
+                    for side in _TRANSITION_POSITIVE_SIDE_FIELDS
+                    for field in (
+                        "rows",
+                        "declared_side_probability_sum",
+                    )
+                ),
                 *(
                     f"regime_selectivity_{stratum}_{field}"
                     for stratum in _REGIME_SELECTIVITY_STRATA
@@ -2568,6 +2996,11 @@ def train_agent(
                 )
         if (
             collapse_window_episodes
+            and (
+                short_circuit_minimum_environment_steps is None
+                or progress.environment_steps
+                >= short_circuit_minimum_environment_steps
+            )
             and len(progress.recent_outcomes) == collapse_window_episodes
         ):
             recent_passes = sum(
@@ -2736,6 +3169,14 @@ def train_agent(
                         "ENTER_SHORT_1": "entry_action_prediction_short_rows",
                     }.items()
                 },
+                "sampled_entry_action_correct_counts": {
+                    action: int(round(sum(learner_diagnostics[key])))
+                    for action, key in {
+                        "WAIT": "entry_action_correct_wait_rows",
+                        "ENTER_LONG_1": "entry_action_correct_long_rows",
+                        "ENTER_SHORT_1": "entry_action_correct_short_rows",
+                    }.items()
+                },
                 "sampled_entry_action_recall": {
                     action: (
                         sum(learner_diagnostics[correct_key])
@@ -2764,6 +3205,11 @@ def train_agent(
                 },
                 "regime_selectivity": (
                     _regime_selectivity_episode_diagnostic(learner_diagnostics)
+                ),
+                "persistent_regime_selectivity": (
+                    _persistent_regime_selectivity_diagnostic(
+                        learner_diagnostics
+                    )
                 ),
                 **{
                     f"mean_{key}": (
@@ -2953,6 +3399,7 @@ def evaluate_agent(
     near_blow_timeout_count = 0
     environment_steps = 0
     flat_decision_count = greedy_entry_count = 0
+    long_entry_count = short_entry_count = 0
     entry_advantage_probe_count = 0
     best_entry_advantage_sum = 0.0
     consecutive_zero_trade_episodes = 0
@@ -3009,6 +3456,8 @@ def evaluate_agent(
                 greedy_entry_count += int(
                     action in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
                 )
+                long_entry_count += int(action == Action.ENTER_LONG_1)
+                short_entry_count += int(action == Action.ENTER_SHORT_1)
             if diagnostic_probe:
                 assert action_values is not None
                 values = np.asarray(action_values, dtype=np.float64)
@@ -3165,6 +3614,8 @@ def evaluate_agent(
         near_blow_timeout_count=near_blow_timeout_count,
         flat_decision_count=flat_decision_count,
         greedy_entry_count=greedy_entry_count,
+        long_entry_count=long_entry_count,
+        short_entry_count=short_entry_count,
         best_entry_advantage_sum=best_entry_advantage_sum,
         entry_advantage_probe_count=entry_advantage_probe_count,
         short_circuited=validation_short_circuit_reason is not None,

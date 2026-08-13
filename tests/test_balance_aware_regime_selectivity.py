@@ -9,6 +9,8 @@ import torch
 
 from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
+    PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    STATIC_STATE_SEMANTICS,
 )
 from propevolve.agent import RecurrentC51Agent
 from propevolve.decision import Action
@@ -61,7 +63,22 @@ def _agent(
     selectivity_weight: float,
     n_step_return: int = 1,
     entry_action_weight: float = 0.0,
+    side_balance: str | None = None,
+    selectivity_semantics: str | None = None,
+    persistent_chop_negative_emphasis: float | None = None,
+    device: str = "cpu",
 ) -> RecurrentC51Agent:
+    optional_settings = (
+        {}
+        if side_balance is None
+        else {"regime_selectivity_side_balance": side_balance}
+    )
+    if selectivity_semantics is not None:
+        optional_settings["regime_selectivity_semantics"] = selectivity_semantics
+    if persistent_chop_negative_emphasis is not None:
+        optional_settings[
+            "regime_selectivity_persistent_chop_negative_emphasis"
+        ] = persistent_chop_negative_emphasis
     return RecurrentC51Agent(
         3,
         hidden_dim=24,
@@ -74,7 +91,7 @@ def _agent(
         gradient_clip=10.0,
         target_sync_updates=250,
         n_step_return=n_step_return,
-        device="cpu",
+        device=device,
         seed=seed,
         teacher_channels=len(CHANNELS),
         teacher_channel_names=CHANNELS,
@@ -83,6 +100,7 @@ def _agent(
         entry_action_loss_weight=entry_action_weight,
         regime_selectivity_loss_weight=selectivity_weight,
         regime_selectivity_expansion_centers=(0.10, 0.10),
+        **optional_settings,
     )
 
 
@@ -122,6 +140,38 @@ def _greedy(agent: RecurrentC51Agent, observation: tuple[float, ...]) -> Action:
         epsilon=0.0,
     )
     return action
+
+
+def _transition_teacher_row(
+    *,
+    chop_persistence: float,
+    transition_readiness: float,
+    long_attempt: float = 0.1,
+    long_clean: float = 0.1,
+    short_attempt: float = 0.1,
+    short_clean: float = 0.1,
+) -> torch.Tensor:
+    values = _teacher_row(
+        long_attempt=long_attempt,
+        long_clean=long_clean,
+        short_attempt=short_attempt,
+        short_clean=short_clean,
+        chop=0.1,
+        neutral=0.1,
+        trend=0.8,
+    ).clone()
+    updates = {
+        "structure_chop_persistence_probability": chop_persistence,
+        "structure_trend_onset_probability": transition_readiness,
+        "structure_trend_persistence_probability": transition_readiness,
+        "volatility_expansion_onset_probability": transition_readiness,
+        "volatility_high_persistence_probability": transition_readiness,
+        "kaufman_efficiency": transition_readiness,
+        "volatility_percentile": transition_readiness,
+    }
+    for channel, value in updates.items():
+        values[CHANNELS.index(channel)] = value
+    return values
 
 
 def test_wait_probability_increases_with_chop_and_lower_headroom() -> None:
@@ -293,6 +343,42 @@ def test_channel_lineage_and_tensor_shape_contract_fail_closed() -> None:
 def test_agent_rejects_nonfinite_selectivity_loss_weight() -> None:
     with pytest.raises(ValueError, match="teacher settings"):
         _agent(seed=139, selectivity_weight=float("nan"))
+
+
+def test_agent_rejects_unknown_selectivity_side_balance() -> None:
+    with pytest.raises(ValueError, match="side balance"):
+        _agent(
+            seed=139,
+            selectivity_weight=1.0,
+            side_balance="inverse_frequency",
+        )
+
+
+@pytest.mark.parametrize(
+    ("semantics", "emphasis"),
+    (("static_chop", 1.0), (STATIC_STATE_SEMANTICS, float("nan")), (-1, -1.0)),
+)
+def test_agent_rejects_invalid_selectivity_semantics_or_emphasis(
+    semantics,
+    emphasis: float,
+) -> None:
+    with pytest.raises(ValueError, match="semantics"):
+        _agent(
+            seed=139,
+            selectivity_weight=1.0,
+            selectivity_semantics=semantics,
+            persistent_chop_negative_emphasis=emphasis,
+        )
+
+
+def test_persistent_chop_semantics_requires_equal_action_groups() -> None:
+    with pytest.raises(ValueError, match="equal Long/Short"):
+        _agent(
+            seed=139,
+            selectivity_weight=1.0,
+            side_balance="none",
+            selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        )
 
 
 def test_target_compilation_does_not_synchronize_through_tensor_item(
@@ -621,7 +707,11 @@ def test_selectivity_never_trains_on_the_n_step_tail() -> None:
 
 def test_zero_curriculum_scale_has_exact_rl_update_parity() -> None:
     control = _agent(seed=97, selectivity_weight=0.0)
-    taught = _agent(seed=97, selectivity_weight=20.0)
+    taught = _agent(
+        seed=97,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+    )
     sequence = _sequence(
         (1.0, 0.0, 0.0),
         _teacher_row(
@@ -692,7 +782,11 @@ def test_soft_selectivity_learns_wait_long_short_then_discards_and_round_trips(
             headroom=0.1, target=Action.ENTER_SHORT_1,
         ),
     )
-    agent = _agent(seed=103, selectivity_weight=20.0)
+    agent = _agent(
+        seed=103,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+    )
 
     for _ in range(100):
         agent.train_batch(sequences)
@@ -711,6 +805,11 @@ def test_soft_selectivity_learns_wait_long_short_then_discards_and_round_trips(
     assert agent.last_train_metrics["regime_selectivity_loss"] > 0.0
     assert agent.last_train_metrics["regime_selectivity_supervised_rows"] == 3.0
     before = tuple(_greedy(agent, row) for row in observations)
+    resumable = agent.save(tmp_path / "balanced-stage2a-resume.pt", manifest={})
+    resumed, _ = RecurrentC51Agent.load(resumable, device="cpu")
+
+    assert resumed.regime_selectivity_side_balance == "equal_long_short_v1"
+    assert tuple(_greedy(resumed, row) for row in observations) == before
 
     agent.discard_teacher()
     after = tuple(_greedy(agent, row) for row in observations)
@@ -719,8 +818,475 @@ def test_soft_selectivity_learns_wait_long_short_then_discards_and_round_trips(
 
     assert agent.regime_selectivity is None
     assert agent.regime_selectivity_loss_weight == 0.0
+    assert agent.regime_selectivity_side_balance == "none"
     assert after == before
     assert tuple(_greedy(restored, row) for row in observations) == before
+
+
+def test_equal_side_reduction_prevents_short_from_being_lost_in_long_heavy_rows(
+) -> None:
+    """A sampled side must not lose its gradient merely because Long dominates."""
+    medium_long = _teacher_row(
+        long_attempt=0.4,
+        long_clean=0.4,
+        short_attempt=0.1,
+        short_clean=0.1,
+        chop=0.05,
+        neutral=0.10,
+        trend=0.85,
+    )
+    strong_long = _teacher_row(
+        long_attempt=0.9,
+        long_clean=0.8,
+        short_attempt=0.1,
+        short_clean=0.1,
+        chop=0.05,
+        neutral=0.10,
+        trend=0.85,
+    )
+    strong_short = _teacher_row(
+        long_attempt=0.1,
+        long_clean=0.1,
+        short_attempt=0.9,
+        short_clean=0.8,
+        chop=0.05,
+        neutral=0.10,
+        trend=0.85,
+    )
+    wait = _sequence(
+        (0.0, 1.0, 0.0),
+        medium_long,
+        headroom=0.1,
+        target=Action.ENTER_LONG_1,
+    )
+    enter_long = _sequence(
+        (1.0, 0.0, 0.0),
+        strong_long,
+        headroom=0.1,
+        target=Action.ENTER_LONG_1,
+    )
+    enter_short = _sequence(
+        (-1.0, 0.0, 0.0),
+        strong_short,
+        headroom=0.1,
+        target=Action.ENTER_SHORT_1,
+    )
+    # This literal 56:1 Long:Short fixture reproduces the Stage 2 learning
+    # boundary without stochastic replay sampling.
+    long_heavy_batch = (wait,) * 32 + (enter_long,) * 24 + (enter_short,)
+
+    legacy = _agent(seed=211, selectivity_weight=20.0)
+    for _ in range(10):
+        legacy.train_batch(long_heavy_batch)
+    assert tuple(
+        _greedy(legacy, row)
+        for row in ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+    ) == (Action.WAIT, Action.ENTER_LONG_1, Action.WAIT)
+
+    balanced = _agent(
+        seed=211,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+    )
+    for _ in range(10):
+        balanced.train_batch(long_heavy_batch)
+
+    assert tuple(
+        _greedy(balanced, row)
+        for row in ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+    ) == (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    assert balanced.last_train_metrics["regime_selectivity_positive_long_rows"] == 56.0
+    assert balanced.last_train_metrics["regime_selectivity_positive_short_rows"] == 1.0
+
+
+def test_equal_side_reduction_uses_the_present_side_when_short_is_absent() -> None:
+    teacher = _teacher_row(
+        long_attempt=0.9,
+        long_clean=0.8,
+        short_attempt=0.1,
+        short_clean=0.1,
+        chop=0.05,
+        neutral=0.10,
+        trend=0.85,
+    )
+    batch = (
+        _sequence(
+            (1.0, 0.0, 0.0),
+            teacher,
+            headroom=0.1,
+            target=Action.ENTER_LONG_1,
+        ),
+    ) * 4
+    legacy = _agent(seed=223, selectivity_weight=20.0)
+    balanced = _agent(
+        seed=223,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+    )
+
+    legacy.train_batch(batch)
+    balanced.train_batch(batch)
+
+    assert balanced.last_train_metrics["regime_selectivity_loss"] == pytest.approx(
+        legacy.last_train_metrics["regime_selectivity_loss"]
+    )
+    assert balanced.last_train_metrics["regime_selectivity_positive_long_rows"] == 4.0
+    assert balanced.last_train_metrics["regime_selectivity_positive_short_rows"] == 0.0
+    assert balanced.last_train_metrics["regime_selectivity_positive_long_loss"] > 0.0
+    assert balanced.last_train_metrics["regime_selectivity_positive_short_loss"] == 0.0
+    for name, value in legacy.online.state_dict().items():
+        torch.testing.assert_close(
+            value,
+            balanced.online.state_dict()[name],
+            rtol=0,
+            atol=0,
+        )
+
+
+def test_persistent_chop_objective_learns_wait_and_retains_both_entry_sides(
+    tmp_path: Path,
+) -> None:
+    persistent_chop = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.0,
+    )
+    transition_long = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.95,
+        long_attempt=0.95,
+        long_clean=0.95,
+    )
+    transition_short = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.95,
+        short_attempt=0.95,
+        short_clean=0.95,
+    )
+    rows = (
+        _sequence(
+            (0.0, 1.0, 0.0),
+            persistent_chop,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+        _sequence(
+            (1.0, 0.0, 0.0),
+            transition_long,
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+        ),
+        _sequence(
+            (-1.0, 0.0, 0.0),
+            transition_short,
+            headroom=1.0,
+            target=Action.ENTER_SHORT_1,
+        ),
+    )
+    control = _agent(seed=229, selectivity_weight=0.0)
+    taught = _agent(
+        seed=229,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        persistent_chop_negative_emphasis=4.0,
+    )
+
+    for _ in range(12):
+        control.train_batch(rows)
+        taught.train_batch(rows)
+
+    observations = ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+    expected = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    assert tuple(_greedy(taught, row) for row in observations) == expected
+    assert _greedy(control, observations[0]) != Action.WAIT
+    assert taught.last_train_metrics["regime_selectivity_exact_wait_loss"] > 0.0
+    assert taught.last_train_metrics["regime_selectivity_positive_long_loss"] > 0.0
+    assert taught.last_train_metrics["regime_selectivity_positive_short_loss"] > 0.0
+    assert taught.last_train_metrics[
+        "regime_selectivity_transition_positive_long_declared_side_probability_mean"
+    ] > 0.5
+    assert taught.last_train_metrics[
+        "regime_selectivity_transition_positive_short_declared_side_probability_mean"
+    ] > 0.5
+
+    resumable = taught.save(tmp_path / "persistent-chop-resume.pt", manifest={})
+    resumed, _ = RecurrentC51Agent.load(resumable, device="cpu")
+    assert resumed.regime_selectivity_semantics == (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+    )
+    assert resumed.regime_selectivity_persistent_chop_negative_emphasis == 4.0
+    assert tuple(_greedy(resumed, row) for row in observations) == expected
+
+    taught.discard_teacher()
+    assert taught.regime_selectivity_semantics == STATIC_STATE_SEMANTICS
+    assert tuple(_greedy(taught, row) for row in observations) == expected
+    teacher_free = taught.save(tmp_path / "persistent-chop-free.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(teacher_free, device="cpu")
+    assert tuple(_greedy(restored, row) for row in observations) == expected
+
+
+def test_persistent_chop_diagnostics_are_additive_without_thresholds() -> None:
+    dead_chop = _transition_teacher_row(
+        chop_persistence=0.90,
+        transition_readiness=0.0,
+    )
+    transition_ready = _transition_teacher_row(
+        chop_persistence=0.90,
+        transition_readiness=0.80,
+    )
+    rows = (
+        _sequence(
+            (0.0, 1.0, 0.0),
+            dead_chop,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+        _sequence(
+            (0.0, -1.0, 0.0),
+            transition_ready,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+        _sequence(
+            (1.0, 0.0, 0.0),
+            transition_ready,
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+        ),
+    )
+    agent = _agent(
+        seed=233,
+        selectivity_weight=1.0,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        persistent_chop_negative_emphasis=4.0,
+    )
+
+    agent.train_batch(rows)
+    metrics = agent.last_train_metrics
+
+    # transition_readiness = Kaufman 0.8 * mean(0.8, ..., 0.8) = 0.64.
+    # Effective memberships are continuous formula components, not thresholded
+    # row masses: dead = 0.9 + 0.9*(1-0.64) on exact WAIT rows, while
+    # transition-ready mass = 0.9*0.64 on both a WAIT and positive Entry row.
+    assert metrics["regime_selectivity_exact_wait_rows"] == 2.0
+    assert metrics["regime_selectivity_exact_wait_weight_sum"] == pytest.approx(
+        4.6 + 2.296,
+    )
+    assert metrics["regime_selectivity_exact_wait_weight_mean"] == pytest.approx(
+        (4.6 + 2.296) / 2.0,
+    )
+    assert metrics["regime_selectivity_persistent_chop_weight_sum"] == pytest.approx(
+        metrics["regime_selectivity_exact_wait_weight_sum"]
+    )
+    assert metrics["regime_selectivity_persistent_dead_chop_rows"] == pytest.approx(
+        0.9 + 0.324,
+    )
+    assert metrics[
+        "regime_selectivity_persistent_dead_chop_weight_sum"
+    ] == pytest.approx(0.9 * 4.6 + 0.324 * 2.296)
+    assert metrics["regime_selectivity_transition_ready_rows"] == pytest.approx(
+        0.576,
+    )
+    assert metrics[
+        "regime_selectivity_transition_ready_weight_sum"
+    ] == pytest.approx(0.576 * 2.296)
+    assert metrics["regime_selectivity_transition_positive_long_rows"] == (
+        pytest.approx(0.576)
+    )
+
+
+def test_persistent_chop_objective_learns_same_label_wait_regime_contrast() -> None:
+    dead_chop = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.0,
+    )
+    transition_ready = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.95,
+    )
+    rows = (
+        _sequence(
+            (0.0, 1.0, 0.0),
+            dead_chop,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+        _sequence(
+            (0.0, -1.0, 0.0),
+            transition_ready,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+    )
+    control = _agent(seed=241, selectivity_weight=0.0)
+    taught = _agent(
+        seed=241,
+        selectivity_weight=20.0,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        persistent_chop_negative_emphasis=8.0,
+    )
+
+    for _ in range(8):
+        control.train_batch(rows)
+        taught.train_batch(rows)
+
+    dead_mean = taught.last_train_metrics[
+        "regime_selectivity_persistent_dead_chop_model_wait_probability_mean"
+    ]
+    ready_mean = taught.last_train_metrics[
+        "regime_selectivity_transition_ready_model_wait_probability_mean"
+    ]
+    def observed_wait_probability(
+        policy: RecurrentC51Agent,
+        observation: tuple[float, ...],
+    ) -> tuple[Action, float]:
+        action, _, values = policy.select_action(
+            np.asarray(observation, np.float32),
+            hidden=None,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            epsilon=0.0,
+            return_action_values=True,
+        )
+        assert values is not None
+        flat = values[[
+            int(Action.WAIT),
+            int(Action.ENTER_LONG_1),
+            int(Action.ENTER_SHORT_1),
+        ]]
+        normalized = np.exp(flat - flat.max())
+        return action, float(normalized[0] / normalized.sum())
+
+    control_dead, control_dead_probability = observed_wait_probability(
+        control, (0.0, 1.0, 0.0)
+    )
+    control_ready, control_ready_probability = observed_wait_probability(
+        control, (0.0, -1.0, 0.0)
+    )
+    taught_dead, taught_dead_probability = observed_wait_probability(
+        taught, (0.0, 1.0, 0.0)
+    )
+    taught_ready, taught_ready_probability = observed_wait_probability(
+        taught, (0.0, -1.0, 0.0)
+    )
+
+    assert dead_mean > ready_mean
+    assert taught.last_train_metrics[
+        "regime_selectivity_transition_ready_rows"
+    ] > 0.0
+    assert (control_dead, control_ready) == (
+        Action.ENTER_LONG_1,
+        Action.ENTER_LONG_1,
+    )
+    assert (taught_dead, taught_ready) == (Action.WAIT, Action.WAIT)
+    assert taught_dead_probability - taught_ready_probability > 0.04
+    assert abs(control_dead_probability - control_ready_probability) < 0.01
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="MPS is unavailable",
+)
+def test_persistent_chop_optimizer_update_runs_on_mps() -> None:
+    dead_chop = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.0,
+    )
+    transition_ready = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.95,
+    )
+    agent = _agent(
+        seed=251,
+        selectivity_weight=1.0,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        persistent_chop_negative_emphasis=4.0,
+        device="mps",
+    )
+    rows = (
+        _sequence(
+            (0.0, 1.0, 0.0),
+            dead_chop,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+        _sequence(
+            (1.0, 0.0, 0.0),
+            transition_ready,
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+        ),
+        _sequence(
+            (-1.0, 0.0, 0.0),
+            transition_ready,
+            headroom=1.0,
+            target=Action.ENTER_SHORT_1,
+        ),
+    )
+
+    loss = agent.train_batch(rows)
+
+    assert np.isfinite(loss)
+    assert agent.last_train_metrics["regime_selectivity_exact_wait_rows"] == 1.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_transition_positive_long_rows"
+    ] > 0.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_transition_positive_short_rows"
+    ] > 0.0
+
+
+def test_static_selectivity_reports_zero_persistent_chop_diagnostics() -> None:
+    agent = _agent(seed=239, selectivity_weight=1.0)
+    agent.train_batch((
+        _sequence(
+            (1.0, 0.0, 0.0),
+            _teacher_row(
+                long_attempt=0.9,
+                long_clean=0.8,
+                short_attempt=0.1,
+                short_clean=0.1,
+                chop=0.05,
+                neutral=0.10,
+                trend=0.85,
+            ),
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+        ),
+    ))
+
+    for name in (
+        "regime_selectivity_exact_wait_rows",
+        "regime_selectivity_exact_wait_weight_sum",
+        "regime_selectivity_exact_wait_weight_mean",
+        "regime_selectivity_exact_wait_model_wait_probability_sum",
+        "regime_selectivity_exact_wait_model_wait_probability_mean",
+        "regime_selectivity_persistent_chop_weight_sum",
+        "regime_selectivity_persistent_chop_weight_mean",
+        "regime_selectivity_persistent_dead_chop_rows",
+        "regime_selectivity_persistent_dead_chop_weight_sum",
+        "regime_selectivity_persistent_dead_chop_weight_mean",
+        "regime_selectivity_persistent_dead_chop_model_wait_probability_sum",
+        "regime_selectivity_persistent_dead_chop_model_wait_probability_mean",
+        "regime_selectivity_transition_ready_rows",
+        "regime_selectivity_transition_ready_weight_sum",
+        "regime_selectivity_transition_ready_weight_mean",
+        "regime_selectivity_transition_ready_model_wait_probability_sum",
+        "regime_selectivity_transition_ready_model_wait_probability_mean",
+        "regime_selectivity_transition_positive_long_rows",
+        "regime_selectivity_transition_positive_long_declared_side_probability_sum",
+        "regime_selectivity_transition_positive_long_declared_side_probability_mean",
+        "regime_selectivity_transition_positive_short_rows",
+        "regime_selectivity_transition_positive_short_declared_side_probability_sum",
+        "regime_selectivity_transition_positive_short_declared_side_probability_mean",
+    ):
+        assert agent.last_train_metrics[name] == 0.0
 
 
 def test_episode_and_training_summary_preserve_row_additive_diagnostics(
@@ -802,36 +1368,32 @@ def test_episode_and_training_summary_preserve_row_additive_diagnostics(
 
 
 def test_stage2a_training_gate_requires_rows_side_response_and_wait_deltas() -> None:
-    updates: dict[str, list[float]] = {}
-
-    def add(stratum: str, *, rows: float, target_wait: float) -> None:
-        prefix = f"regime_selectivity_{stratum}_"
-        updates[prefix + "rows"] = [rows]
-        updates[prefix + "target_wait_probability_sum"] = [
-            rows * target_wait
-        ]
-        updates[prefix + "model_wait_probability_sum"] = [rows * 0.5]
-        updates[prefix + "greedy_wait_rows"] = [rows * 0.5]
-        updates[prefix + "declared_side_probability_sum"] = [rows * 0.5]
-        updates[prefix + "greedy_entry_rows"] = [rows * 0.5]
-
-    add("positive_long_short", rows=4.0, target_wait=0.5)
-    add("positive_long", rows=2.0, target_wait=0.5)
-    add("positive_short", rows=2.0, target_wait=0.5)
-    add("dominant_chop", rows=2.0, target_wait=0.7)
-    add("nonchop", rows=2.0, target_wait=0.3)
-    add("low_headroom_le_0_25", rows=2.0, target_wait=0.8)
-    add("safe_headroom_ge_0_75", rows=2.0, target_wait=0.2)
     metrics = {
         "short_circuited": 0.0,
-        **_regime_selectivity_evaluation_metrics(
-            _regime_selectivity_episode_diagnostic(updates)
-        ),
+        "sampled_entry_action_long_rows": 10.0,
+        "sampled_entry_action_short_rows": 10.0,
+        "sampled_entry_action_long_recall": 0.5,
+        "sampled_entry_action_short_recall": 0.5,
+        "regime_selectivity_positive_long_rows": 10.0,
+        "regime_selectivity_positive_short_rows": 10.0,
+        "regime_selectivity_positive_long_declared_side_probability_sum": 5.0,
+        "regime_selectivity_positive_short_declared_side_probability_sum": 5.0,
+        "regime_selectivity_dominant_chop_rows": 10.0,
+        "regime_selectivity_nonchop_rows": 10.0,
+        "final_regime_probe_wait_rows": 32.0,
+        "final_regime_probe_long_rows": 32.0,
+        "final_regime_probe_short_rows": 32.0,
+        "final_regime_probe_long_recall": 0.5,
+        "final_regime_probe_short_recall": 0.5,
+        "final_regime_probe_wait_recall": 0.75,
+        "final_regime_probe_dominant_chop_rows": 16.0,
+        "final_regime_probe_nonchop_rows": 16.0,
+        "final_regime_probe_chop_minus_nonchop_wait": 0.2,
     }
     gates = _training_evaluation_gates(regime_selectivity_active=True)
 
     assert all(gate.passes(metrics) for gate in gates)
-    metrics["regime_selectivity_chop_minus_nonchop_target_wait"] = 0.0
+    metrics["final_regime_probe_chop_minus_nonchop_wait"] = 0.0
     assert not all(gate.passes(metrics) for gate in gates)
 
 

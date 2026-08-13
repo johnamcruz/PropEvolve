@@ -12,7 +12,11 @@ import numpy as np
 import torch
 from torch import nn
 
-from .balance_aware_regime_selectivity import BalanceAwareRegimeSelectivity
+from .balance_aware_regime_selectivity import (
+    BalanceAwareRegimeSelectivity,
+    PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    STATIC_STATE_SEMANTICS,
+)
 from .decision import Action
 from .config import configure_runtime_environment
 from .replay import Transition
@@ -34,6 +38,22 @@ _REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "greedy_wait_rows",
     "declared_side_probability_sum",
     "greedy_entry_rows",
+)
+_REGIME_PERSISTENT_ADDITIVE_METRICS = (
+    "regime_selectivity_exact_wait_rows",
+    "regime_selectivity_exact_wait_weight_sum",
+    "regime_selectivity_exact_wait_model_wait_probability_sum",
+    "regime_selectivity_persistent_chop_weight_sum",
+    "regime_selectivity_persistent_dead_chop_rows",
+    "regime_selectivity_persistent_dead_chop_weight_sum",
+    "regime_selectivity_persistent_dead_chop_model_wait_probability_sum",
+    "regime_selectivity_transition_ready_rows",
+    "regime_selectivity_transition_ready_weight_sum",
+    "regime_selectivity_transition_ready_model_wait_probability_sum",
+    "regime_selectivity_transition_positive_long_rows",
+    "regime_selectivity_transition_positive_long_declared_side_probability_sum",
+    "regime_selectivity_transition_positive_short_rows",
+    "regime_selectivity_transition_positive_short_declared_side_probability_sum",
 )
 
 
@@ -176,6 +196,9 @@ class RecurrentC51Agent:
         regime_selectivity_headroom_pressure: float = 1.0,
         regime_selectivity_dominant_chop_pressure: float = 2.0,
         regime_selectivity_q_temperature: float = 1.0,
+        regime_selectivity_side_balance: str = "none",
+        regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
+        regime_selectivity_persistent_chop_negative_emphasis: float = 0.0,
         policy_retention_loss_weight: float = 0.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
@@ -267,6 +290,31 @@ class RecurrentC51Agent:
             raise ValueError("entry action class weights are invalid")
         if mixed_precision not in {"off", "fp16"}:
             raise ValueError("mixed precision must be off or fp16")
+        if regime_selectivity_side_balance not in {
+            "none",
+            "equal_long_short_v1",
+        }:
+            raise ValueError("Regime selectivity side balance is invalid")
+        if (
+            regime_selectivity_semantics
+            not in {
+                STATIC_STATE_SEMANTICS,
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+            }
+            or not np.isfinite(
+                regime_selectivity_persistent_chop_negative_emphasis
+            )
+            or regime_selectivity_persistent_chop_negative_emphasis < 0.0
+        ):
+            raise ValueError("Regime selectivity semantics are invalid")
+        if (
+            regime_selectivity_semantics
+            == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+            and regime_selectivity_side_balance != "equal_long_short_v1"
+        ):
+            raise ValueError(
+                "persistent-chop Regime selectivity requires equal Long/Short groups"
+            )
         torch.manual_seed(seed)
         self.seed = int(seed)
         self._rng = np.random.default_rng(seed)
@@ -341,6 +389,13 @@ class RecurrentC51Agent:
         self.regime_selectivity_q_temperature = float(
             regime_selectivity_q_temperature
         )
+        self.regime_selectivity_side_balance = str(
+            regime_selectivity_side_balance
+        )
+        self.regime_selectivity_semantics = str(regime_selectivity_semantics)
+        self.regime_selectivity_persistent_chop_negative_emphasis = float(
+            regime_selectivity_persistent_chop_negative_emphasis
+        )
         self.regime_selectivity = (
             BalanceAwareRegimeSelectivity(
                 channel_names=self.teacher_channel_names,
@@ -351,6 +406,10 @@ class RecurrentC51Agent:
                 headroom_pressure=self.regime_selectivity_headroom_pressure,
                 dominant_chop_pressure=(
                     self.regime_selectivity_dominant_chop_pressure
+                ),
+                semantics=self.regime_selectivity_semantics,
+                persistent_chop_negative_emphasis=(
+                    self.regime_selectivity_persistent_chop_negative_emphasis
                 ),
             )
             if self.regime_selectivity_loss_weight
@@ -551,6 +610,57 @@ class RecurrentC51Agent:
                 selected = Action(int(q_values.argmax().item()))
         values = q_values.cpu().numpy() if return_action_values else None
         return selected, next_hidden.detach(), values
+
+    @torch.no_grad()
+    def greedy_sequence_action_values(
+        self,
+        sequences: Sequence[Sequence[Transition]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Score fixed recurrent traces without exploration or state mutation."""
+        if not sequences:
+            raise ValueError("greedy sequence probe cannot be empty")
+        lengths = {len(sequence) for sequence in sequences}
+        if len(lengths) != 1 or next(iter(lengths)) < 1:
+            raise ValueError("greedy sequence probe lengths are inconsistent")
+        observation_rows = np.stack([
+            [transition.observation for transition in sequence]
+            for sequence in sequences
+        ])
+        if not np.isfinite(observation_rows).all():
+            raise ValueError("greedy sequence probe observations are invalid")
+        observations = torch.as_tensor(
+            observation_rows,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        reset_rows = tuple(
+            tuple(transition.recurrent_reset for transition in sequence)
+            for sequence in sequences
+        )
+        valid_masks = torch.as_tensor(
+            [[
+                [action in transition.valid_actions for action in Action]
+                for transition in sequence
+            ] for sequence in sequences],
+            dtype=torch.bool,
+            device=self.device,
+        )
+        if not bool(valid_masks.any(-1).all()):
+            raise ValueError("greedy sequence probe has a row without valid actions")
+        with self._autocast():
+            recurrent, _ = self._recurrent_features_with_resets(
+                self.online,
+                observations,
+                reset_rows,
+            )
+            logits = self.online.distribution_logits(recurrent)
+        values = (logits.float().softmax(-1) * self.support).sum(-1)
+        values = values.masked_fill(~valid_masks, -torch.inf)
+        actions = values.argmax(-1)
+        return (
+            actions.detach().cpu().numpy(),
+            values.detach().cpu().numpy(),
+        )
 
     def train_batch(
         self,
@@ -826,7 +936,14 @@ class RecurrentC51Agent:
         regime_selectivity_low_headroom_wait_mean = teacher_loss
         regime_selectivity_dominant_chop_rows = teacher_loss
         regime_selectivity_dominant_chop_wait_mean = teacher_loss
+        regime_selectivity_positive_long_loss = teacher_loss
+        regime_selectivity_positive_short_loss = teacher_loss
+        regime_selectivity_exact_wait_loss = teacher_loss
         regime_selectivity_additive: dict[str, torch.Tensor] = {}
+        regime_persistent_additive = {
+            name: torch.zeros((), dtype=torch.float32, device=self.device)
+            for name in _REGIME_PERSISTENT_ADDITIVE_METRICS
+        }
         entry_action_supervised_rows = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
@@ -1052,16 +1169,14 @@ class RecurrentC51Agent:
                         :, :training_steps
                     ]
                     selectivity_headroom = headroom_tensor[:, :training_steps]
-                    selectivity_rows = (
+                    exact_flat_rows = (
                         teacher_rows[:, :training_steps]
                         & learnable_rows
                         & torch.isfinite(selectivity_headroom)
+                        & (selectivity_action_targets_tensor >= int(Action.WAIT))
                         & (
-                            (selectivity_action_targets_tensor == int(Action.ENTER_LONG_1))
-                            | (
-                                selectivity_action_targets_tensor
-                                == int(Action.ENTER_SHORT_1)
-                            )
+                            selectivity_action_targets_tensor
+                            <= int(Action.ENTER_SHORT_1)
                         )
                         & valid_masks[
                             :,
@@ -1082,6 +1197,15 @@ class RecurrentC51Agent:
                             int(Action.ENTER_SHORT_1),
                         ]
                     )
+                    positive_rows_mask = exact_flat_rows & (
+                        selectivity_action_targets_tensor != int(Action.WAIT)
+                    )
+                    selectivity_rows = (
+                        exact_flat_rows
+                        if self.regime_selectivity_semantics
+                        == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+                        else positive_rows_mask
+                    )
                     selected_teachers = selectivity_teacher_targets[
                         selectivity_rows
                     ]
@@ -1089,13 +1213,6 @@ class RecurrentC51Agent:
                     selected_actions = selectivity_action_targets_tensor[
                         selectivity_rows
                     ]
-                    selectivity_targets = (
-                        self.regime_selectivity.target_probabilities(
-                            selected_teachers,
-                            selected_headroom,
-                            selected_actions,
-                        )
-                    )
                     q_values = (
                         all_logits[:, :training_steps].float().softmax(-1)
                         * self.support
@@ -1108,9 +1225,183 @@ class RecurrentC51Agent:
                         dim=-1,
                     )
                     positive_rows = selectivity_rows.sum().to(torch.float32)
-                    regime_selectivity_loss = -(
-                        selectivity_targets * model_log_probabilities
-                    ).sum() / positive_rows.clamp_min(1.0)
+                    if (
+                        self.regime_selectivity_semantics
+                        == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+                    ):
+                        compiler = self.regime_selectivity
+                        persistent_evidence = (
+                            compiler.exact_wait_negative_weight_evidence(
+                                selected_teachers,
+                                selected_actions,
+                            )
+                        )
+                        wait_weights = persistent_evidence.exact_wait_weights
+                        exact_losses = nn.functional.nll_loss(
+                            model_log_probabilities,
+                            selected_actions,
+                            reduction="none",
+                        )
+                        wait_rows = (
+                            selected_actions == int(Action.WAIT)
+                        ).to(exact_losses.dtype)
+                        long_rows = (
+                            selected_actions == int(Action.ENTER_LONG_1)
+                        ).to(exact_losses.dtype)
+                        short_rows = (
+                            selected_actions == int(Action.ENTER_SHORT_1)
+                        ).to(exact_losses.dtype)
+                        wait_mass = wait_weights.sum()
+                        long_count = long_rows.sum()
+                        short_count = short_rows.sum()
+                        wait_active = (wait_mass > 0).to(exact_losses.dtype)
+                        long_active = (long_count > 0).to(exact_losses.dtype)
+                        short_active = (short_count > 0).to(exact_losses.dtype)
+                        regime_selectivity_exact_wait_loss = (
+                            exact_losses * wait_weights
+                        ).sum() / wait_mass.clamp_min(1.0)
+                        regime_selectivity_positive_long_loss = (
+                            exact_losses * long_rows
+                        ).sum() / long_count.clamp_min(1.0)
+                        regime_selectivity_positive_short_loss = (
+                            exact_losses * short_rows
+                        ).sum() / short_count.clamp_min(1.0)
+                        regime_selectivity_loss = (
+                            regime_selectivity_exact_wait_loss * wait_active
+                            + regime_selectivity_positive_long_loss * long_active
+                            + regime_selectivity_positive_short_loss * short_active
+                        ) / (
+                            wait_active + long_active + short_active
+                        ).clamp_min(1.0)
+                        selectivity_targets = nn.functional.one_hot(
+                            selected_actions,
+                            num_classes=3,
+                        ).to(model_log_probabilities.dtype)
+                        selectivity_row_losses = exact_losses
+                        model_wait_probability = model_log_probabilities[
+                            :, int(Action.WAIT)
+                        ].exp()
+                        declared_side_probability = model_log_probabilities.gather(
+                            -1, selected_actions[:, None]
+                        ).squeeze(-1).exp()
+                        dead_membership = (
+                            persistent_evidence.persistent_dead_chop_membership
+                        )
+                        ready_membership = (
+                            persistent_evidence.transition_ready_membership
+                        )
+                        ready_long_membership = (
+                            persistent_evidence.transition_positive_long_membership
+                        )
+                        ready_short_membership = (
+                            persistent_evidence.transition_positive_short_membership
+                        )
+                        regime_persistent_additive.update({
+                            "regime_selectivity_exact_wait_rows": (
+                                wait_rows.sum()
+                            ),
+                            "regime_selectivity_exact_wait_weight_sum": (
+                                wait_weights.sum()
+                            ),
+                            "regime_selectivity_exact_wait_"
+                            "model_wait_probability_sum": (
+                                model_wait_probability * wait_rows
+                            ).sum(),
+                            "regime_selectivity_persistent_chop_weight_sum": (
+                                wait_weights.sum()
+                            ),
+                            "regime_selectivity_persistent_dead_chop_rows": (
+                                dead_membership.sum()
+                            ),
+                            "regime_selectivity_persistent_dead_chop_"
+                            "weight_sum": (
+                                dead_membership * wait_weights
+                            ).sum(),
+                            "regime_selectivity_persistent_dead_chop_"
+                            "model_wait_probability_sum": (
+                                dead_membership * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_transition_ready_rows": (
+                                ready_membership.sum()
+                            ),
+                            "regime_selectivity_transition_ready_weight_sum": (
+                                ready_membership * wait_weights
+                            ).sum(),
+                            "regime_selectivity_transition_ready_"
+                            "model_wait_probability_sum": (
+                                ready_membership * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_transition_positive_long_rows": (
+                                ready_long_membership.sum()
+                            ),
+                            "regime_selectivity_transition_positive_long_"
+                            "declared_side_probability_sum": (
+                                ready_long_membership * declared_side_probability
+                            ).sum(),
+                            "regime_selectivity_transition_positive_short_rows": (
+                                ready_short_membership.sum()
+                            ),
+                            "regime_selectivity_transition_positive_short_"
+                            "declared_side_probability_sum": (
+                                ready_short_membership * declared_side_probability
+                            ).sum(),
+                        })
+                    else:
+                        selectivity_targets = (
+                            self.regime_selectivity.target_probabilities(
+                                selected_teachers,
+                                selected_headroom,
+                                selected_actions,
+                            )
+                        )
+                        selectivity_row_losses = -(
+                            selectivity_targets * model_log_probabilities
+                        ).sum(-1)
+                    if (
+                        self.regime_selectivity_semantics == STATIC_STATE_SEMANTICS
+                        and self.regime_selectivity_side_balance
+                        == "equal_long_short_v1"
+                    ):
+                        long_rows = (
+                            selected_actions == int(Action.ENTER_LONG_1)
+                        ).to(selectivity_row_losses.dtype)
+                        short_rows = (
+                            selected_actions == int(Action.ENTER_SHORT_1)
+                        ).to(selectivity_row_losses.dtype)
+                        long_count = long_rows.sum()
+                        short_count = short_rows.sum()
+                        long_active = (long_count > 0).to(long_count.dtype)
+                        short_active = (short_count > 0).to(short_count.dtype)
+                        regime_selectivity_loss = (
+                            (
+                                (selectivity_row_losses * long_rows).sum()
+                                / long_count.clamp_min(1.0)
+                            )
+                            * long_active
+                            + (
+                                (selectivity_row_losses * short_rows).sum()
+                                / short_count.clamp_min(1.0)
+                            )
+                            * short_active
+                        ) / (long_active + short_active).clamp_min(1.0)
+                    elif self.regime_selectivity_semantics == STATIC_STATE_SEMANTICS:
+                        regime_selectivity_loss = (
+                            selectivity_row_losses.sum()
+                            / positive_rows.clamp_min(1.0)
+                        )
+                    long_loss_rows = (
+                        selected_actions == int(Action.ENTER_LONG_1)
+                    ).to(selectivity_row_losses.dtype)
+                    short_loss_rows = (
+                        selected_actions == int(Action.ENTER_SHORT_1)
+                    ).to(selectivity_row_losses.dtype)
+                    if self.regime_selectivity_semantics == STATIC_STATE_SEMANTICS:
+                        regime_selectivity_positive_long_loss = (
+                            selectivity_row_losses * long_loss_rows
+                        ).sum() / long_loss_rows.sum().clamp_min(1.0)
+                        regime_selectivity_positive_short_loss = (
+                            selectivity_row_losses * short_loss_rows
+                        ).sum() / short_loss_rows.sum().clamp_min(1.0)
                     loss = loss + teacher_weight_scale * (
                         self.regime_selectivity_loss_weight
                         * regime_selectivity_loss
@@ -1139,6 +1430,8 @@ class RecurrentC51Agent:
                     stratum_rows = {
                         "positive_long_short": torch.ones_like(
                             selected_actions, dtype=torch.bool
+                        ) & (
+                            selected_actions != int(Action.WAIT)
                         ),
                         "positive_long": (
                             selected_actions == int(Action.ENTER_LONG_1)
@@ -1175,13 +1468,16 @@ class RecurrentC51Agent:
                         )
                     }
 
+                    positive_side_rows = (
+                        selected_actions != int(Action.WAIT)
+                    ).sum().to(torch.float32)
                     regime_selectivity_rows = positive_rows
                     regime_selectivity_target_wait_mean = (
                         regime_selectivity_additive[
                             "regime_selectivity_positive_long_short_"
                             "target_wait_probability_sum"
                         ]
-                        / positive_rows.clamp_min(1.0)
+                        / positive_side_rows.clamp_min(1.0)
                     )
                     regime_selectivity_low_headroom_rows = (
                         regime_selectivity_additive[
@@ -1378,6 +1674,9 @@ class RecurrentC51Agent:
             regime_selectivity_low_headroom_wait_mean,
             regime_selectivity_dominant_chop_rows,
             regime_selectivity_dominant_chop_wait_mean,
+            regime_selectivity_positive_long_loss,
+            regime_selectivity_positive_short_loss,
+            regime_selectivity_exact_wait_loss,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -1405,6 +1704,7 @@ class RecurrentC51Agent:
             (~training_valid).sum().to(torch.float32),
             terminal_truncated_rows.sum().to(torch.float32),
             *regime_selectivity_additive.values(),
+            *regime_persistent_additive.values(),
         ))
         (
             rl_loss_value,
@@ -1418,6 +1718,9 @@ class RecurrentC51Agent:
             regime_selectivity_low_headroom_wait_mean_value,
             regime_selectivity_dominant_chop_rows_value,
             regime_selectivity_dominant_chop_wait_mean_value,
+            regime_selectivity_positive_long_loss_value,
+            regime_selectivity_positive_short_loss_value,
+            regime_selectivity_exact_wait_loss_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -1445,11 +1748,18 @@ class RecurrentC51Agent:
             sampled_valid_learning_rows,
             sampled_padding_rows,
             sampled_terminal_truncated_rows,
-            *regime_selectivity_additive_values,
+            *all_regime_additive_values,
         ) = (
             float(value)
             for value in diagnostic_values.detach().float().cpu().tolist()
         )
+        selectivity_additive_count = len(regime_selectivity_additive)
+        regime_selectivity_additive_values = all_regime_additive_values[
+            :selectivity_additive_count
+        ]
+        regime_persistent_additive_values = all_regime_additive_values[
+            selectivity_additive_count:
+        ]
         regime_selectivity_metric_values = {
             f"regime_selectivity_{stratum}_{field}": 0.0
             for stratum in _REGIME_SELECTIVITY_STRATA
@@ -1460,6 +1770,84 @@ class RecurrentC51Agent:
             regime_selectivity_additive_values,
             strict=True,
         )))
+        regime_persistent_metric_values = dict(zip(
+            regime_persistent_additive,
+            regime_persistent_additive_values,
+            strict=True,
+        ))
+        exact_wait_rows = regime_persistent_metric_values[
+            "regime_selectivity_exact_wait_rows"
+        ]
+        dead_chop_rows = regime_persistent_metric_values[
+            "regime_selectivity_persistent_dead_chop_rows"
+        ]
+        transition_ready_rows = regime_persistent_metric_values[
+            "regime_selectivity_transition_ready_rows"
+        ]
+        for rows, sum_name, mean_name in (
+            (
+                exact_wait_rows,
+                "regime_selectivity_exact_wait_weight_sum",
+                "regime_selectivity_exact_wait_weight_mean",
+            ),
+            (
+                exact_wait_rows,
+                "regime_selectivity_exact_wait_model_wait_probability_sum",
+                "regime_selectivity_exact_wait_model_wait_probability_mean",
+            ),
+            (
+                exact_wait_rows,
+                "regime_selectivity_persistent_chop_weight_sum",
+                "regime_selectivity_persistent_chop_weight_mean",
+            ),
+            (
+                dead_chop_rows,
+                "regime_selectivity_persistent_dead_chop_weight_sum",
+                "regime_selectivity_persistent_dead_chop_weight_mean",
+            ),
+            (
+                dead_chop_rows,
+                "regime_selectivity_persistent_dead_chop_"
+                "model_wait_probability_sum",
+                "regime_selectivity_persistent_dead_chop_"
+                "model_wait_probability_mean",
+            ),
+            (
+                transition_ready_rows,
+                "regime_selectivity_transition_ready_weight_sum",
+                "regime_selectivity_transition_ready_weight_mean",
+            ),
+            (
+                transition_ready_rows,
+                "regime_selectivity_transition_ready_"
+                "model_wait_probability_sum",
+                "regime_selectivity_transition_ready_"
+                "model_wait_probability_mean",
+            ),
+            (
+                regime_persistent_metric_values[
+                    "regime_selectivity_transition_positive_long_rows"
+                ],
+                "regime_selectivity_transition_positive_long_"
+                "declared_side_probability_sum",
+                "regime_selectivity_transition_positive_long_"
+                "declared_side_probability_mean",
+            ),
+            (
+                regime_persistent_metric_values[
+                    "regime_selectivity_transition_positive_short_rows"
+                ],
+                "regime_selectivity_transition_positive_short_"
+                "declared_side_probability_sum",
+                "regime_selectivity_transition_positive_short_"
+                "declared_side_probability_mean",
+            ),
+        ):
+            regime_persistent_metric_values[mean_name] = (
+                regime_persistent_metric_values[sum_name] / rows
+                if rows
+                else 0.0
+            )
         for stratum in _REGIME_SELECTIVITY_STRATA:
             prefix = f"regime_selectivity_{stratum}_"
             rows = regime_selectivity_metric_values[prefix + "rows"]
@@ -1511,7 +1899,17 @@ class RecurrentC51Agent:
             "regime_selectivity_dominant_chop_wait_mean": (
                 regime_selectivity_dominant_chop_wait_mean_value
             ),
+            "regime_selectivity_positive_long_loss": (
+                regime_selectivity_positive_long_loss_value
+            ),
+            "regime_selectivity_positive_short_loss": (
+                regime_selectivity_positive_short_loss_value
+            ),
+            "regime_selectivity_exact_wait_loss": (
+                regime_selectivity_exact_wait_loss_value
+            ),
             **regime_selectivity_metric_values,
+            **regime_persistent_metric_values,
             "entry_action_supervised_rows": entry_action_supervised_rows_value,
             "entry_action_target_wait_rows": entry_target_wait_rows,
             "entry_action_target_long_rows": entry_target_long_rows,
@@ -1601,6 +1999,9 @@ class RecurrentC51Agent:
         """Remove the training-only head while retaining shared learned weights."""
         self.entry_action_loss_weight = 0.0
         self.regime_selectivity_loss_weight = 0.0
+        self.regime_selectivity_side_balance = "none"
+        self.regime_selectivity_semantics = STATIC_STATE_SEMANTICS
+        self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
         self.regime_selectivity = None
         if not self.teacher_channels:
             return
@@ -1733,6 +2134,15 @@ class RecurrentC51Agent:
                 "regime_selectivity_q_temperature": (
                     self.regime_selectivity_q_temperature
                 ),
+                "regime_selectivity_side_balance": (
+                    self.regime_selectivity_side_balance
+                ),
+                "regime_selectivity_semantics": (
+                    self.regime_selectivity_semantics
+                ),
+                "regime_selectivity_persistent_chop_negative_emphasis": (
+                    self.regime_selectivity_persistent_chop_negative_emphasis
+                ),
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
@@ -1829,6 +2239,13 @@ class RecurrentC51Agent:
         config.setdefault("regime_selectivity_headroom_pressure", 1.0)
         config.setdefault("regime_selectivity_dominant_chop_pressure", 2.0)
         config.setdefault("regime_selectivity_q_temperature", 1.0)
+        config.setdefault("regime_selectivity_side_balance", "none")
+        config.setdefault(
+            "regime_selectivity_semantics", STATIC_STATE_SEMANTICS
+        )
+        config.setdefault(
+            "regime_selectivity_persistent_chop_negative_emphasis", 0.0
+        )
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

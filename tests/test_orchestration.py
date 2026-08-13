@@ -18,10 +18,40 @@ from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import (
+    _plan,
     _reasoning_prompt,
     _resolve_codex_executable,
     run_evolution_campaign,
 )
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        ("loss_weight", 0.49),
+        ("q_temperature", 1.7),
+        ("formula", "changed-formula"),
+        ("semantics", "persistent_chop_negative_weight_v1"),
+        ("persistent_chop_negative_emphasis", 1.0),
+    ),
+)
+def test_training_plan_identity_binds_allowlisted_base_recipe_values(
+    path: str,
+    value: object,
+) -> None:
+    from propevolve.config import load_experiment_config
+
+    source = Path(
+        "config/historical_mask_expansion_regime_"
+        "stage2a_learning_repair_v1.json"
+    )
+    baseline = load_experiment_config(source)
+    changed = json.loads(json.dumps(baseline))
+    changed["_root"] = baseline["_root"]
+    changed["_path"] = baseline["_path"]
+    changed["regime_selectivity"][path] = value
+
+    assert _plan(changed).identity != _plan(baseline).identity
 
 
 class ReadySkills:
@@ -124,6 +154,7 @@ class ImproveHiddenDimension:
         assert reference["identity_sha256"] == payload["packet_sha256"]
         assert reference["file_sha256"] == hashlib.sha256(packet.read_bytes()).hexdigest()
         assert "frozen_recipe_sha256" in request.stage.config
+        assert "public_base_recipe_sha256" in request.stage.config
         assert "frozen_contract_sha256" not in request.stage.config
         assert payload["training_diagnostics"]["overall"] == {
             "ratchet_activation_rate": 0.03,
@@ -878,9 +909,203 @@ def test_exact_stage2_campaign_revises_from_selected_parents_and_hands_off_recov
     assert runner.calls[2]["recovery_fraction"] == 0.25
 
 
+def test_stage2a_regime_repair_chains_only_selected_parents_and_atomic_semantics(
+    tmp_path: Path,
+) -> None:
+    source = Path(
+        "config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json"
+    )
+    payload = json.loads(source.read_text())
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    payload["output"] = "runs/stage2a-regime-repair"
+    payload["campaign"]["state_root"] = (
+        "runs/stage2a-regime-repair/ml-loop-state"
+    )
+    payload["campaign"]["reasoning"]["proposer"] = "standard"
+
+    stage1_archive = CandidateArchive(tmp_path / "stage1/archive")
+    parent_model = tmp_path / "stage1-policy.pt"
+    parent_model.write_bytes(b"immutable-selected-stage1")
+    parent = stage1_archive.register_candidate(
+        parent_model,
+        contract={
+            "training_tickers": list(payload["tickers"]),
+            "deployment_tickers": list(payload["deployment_tickers"]),
+            "training_only_tickers": list(payload["training_only_tickers"]),
+            "temporal": dict(payload["temporal"]),
+            "sealed_holdout_touched": False,
+        },
+        recipe=payload,
+        hypothesis="immutable selected Stage 1 fixture",
+    )
+    parent_evaluation = stage1_archive.record_evaluation(
+        parent.candidate_id,
+        evaluator_contract={"name": "stage1-teacher-free"},
+        metrics={
+            "selection.pass_rate": 0.23,
+            "selection.blow_rate": 0.0,
+            "selection.average_win_r": 1.952,
+            "selection.expectancy_r": 0.0013,
+            "selection.two_r_mfe_capture_ratio": 0.736,
+            "selection.near_blow_timeout_rate": 0.6363636363636364,
+        },
+        stages=({"name": "selection", "status": "PASS"},),
+        status="PASS",
+    )
+    payload["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
+    payload["evolution"]["base_parent"] = {
+        "archive_root": str(stage1_archive.root),
+        "candidate_id": parent.candidate_id,
+        "evaluation_id": parent_evaluation.evaluation_id,
+        "model_sha256": parent.manifest["model_sha256"],
+    }
+    config_path = tmp_path / "config" / "stage2a-repair.json"
+    config_path.write_text(json.dumps(payload))
+
+    class RegimeRepairRunner:
+        def __init__(self) -> None:
+            self.archive = CandidateArchive(
+                tmp_path / "runs/stage2a-regime-repair/archive"
+            )
+            self.calls: list[dict] = []
+
+        def run(self, config, *, parent_candidate_ids, hypothesis):
+            stage = Path(config["output"]).parts[-2]
+            attempt = int(Path(config["output"]).name.removeprefix("attempt-"))
+            selectivity = config["regime_selectivity"]
+            self.calls.append({
+                "stage": stage,
+                "attempt": attempt,
+                "parents": tuple(parent_candidate_ids),
+                "warm_start": dict(config["_warm_start_model"]),
+                "loss_weight": selectivity["loss_weight"],
+                "formula": selectivity["formula"],
+                "semantics": selectivity["semantics"],
+                "emphasis": selectivity["persistent_chop_negative_emphasis"],
+                "side_balance": dict(selectivity["side_balance"]),
+            })
+            output = Path(config["_root"]) / config["output"]
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "training-diagnostic-summary.json").write_text(
+                json.dumps({
+                    "schema": "propevolve_training_diagnostic_summary_v1",
+                    "overall": {"stage": stage, "attempt": attempt},
+                })
+            )
+            model = output / "model.pt"
+            model.write_bytes(f"{stage}-{attempt}".encode())
+            candidate = self.archive.register_candidate(
+                model,
+                contract={"stage": stage, "attempt": attempt},
+                recipe=config,
+                parent_candidate_ids=parent_candidate_ids,
+                hypothesis=hypothesis,
+            )
+            pass_rate = (
+                0.19
+                if stage == "regime_side_balance_500k" and attempt == 1
+                else 0.23
+            )
+            near_blow = (
+                0.50 if stage == "regime_side_balance_500k" else 0.48
+            )
+            evaluation = self.archive.record_evaluation(
+                candidate.candidate_id,
+                evaluator_contract={"name": "stage2a-regime-repair-fake"},
+                metrics={
+                    "training.short_circuited": 0.0,
+                    "selection.pass_minus_blow": pass_rate,
+                    "selection.blow_rate": 0.0,
+                    "selection.pass_rate": pass_rate,
+                    "selection.average_win_r": 1.96,
+                    "selection.expectancy_r": 0.02,
+                    "selection.two_r_mfe_capture_ratio": 0.74,
+                    "selection.long_entry_count": 20.0,
+                    "selection.short_entry_count": 18.0,
+                    "selection.near_blow_timeout_rate": near_blow,
+                },
+                stages=({"name": "selection", "status": "PASS"},),
+                status="PASS",
+            )
+            return candidate, evaluation
+
+    class RepairFirstScreen:
+        def revise(self, request):
+            assert request.stage.name == "regime_side_balance_500k"
+            assert request.gate.decision is Decision.REVISE
+            return ReasoningOutcome(
+                Decision.REVISE,
+                "adjust only the bounded side-balanced auxiliary loss",
+                Revision(
+                    stage=request.stage.name,
+                    rationale="repair the failed matched mechanism screen",
+                    config_override={"regime_selectivity.loss_weight": 0.35},
+                ),
+            )
+
+    runner = RegimeRepairRunner()
+    state = run_evolution_campaign(
+        config_path,
+        run_id="stage2a-regime-repair",
+        candidate_runner=runner,
+        reasoning=RepairFirstScreen(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert [(call["stage"], call["attempt"]) for call in runner.calls] == [
+        ("regime_side_balance_500k", 1),
+        ("regime_side_balance_500k", 2),
+        ("persistent_chop_regime_500k", 1),
+    ]
+    for call in runner.calls[:2]:
+        assert call["parents"] == (parent.candidate_id,)
+        assert call["warm_start"]["candidate_id"] == parent.candidate_id
+        assert call["warm_start"]["model_path"] == str(parent.model_path)
+        assert call["semantics"] == "static_state_v1"
+        assert call["emphasis"] == 0.0
+    selected_a1 = runner.calls[2]["parents"][0]
+    assert selected_a1 != parent.candidate_id
+    assert runner.calls[2]["warm_start"]["candidate_id"] == selected_a1
+    assert runner.calls[2]["loss_weight"] == 0.35
+    assert runner.calls[2]["semantics"] == "persistent_chop_negative_weight_v1"
+    assert runner.calls[2]["emphasis"] == 1.0
+    assert runner.calls[2]["formula"] == (
+        "exact_wait*(1+persistent_chop_negative_emphasis*"
+        "chop_persistence*(1-kaufman_efficiency*mean("
+        "trend_onset,trend_persistence,volatility_expansion_onset,"
+        "volatility_high_persistence,volatility_percentile)))"
+    )
+    assert all(call["side_balance"] == {
+        "schema": "equal_long_short_v1",
+        "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+    } for call in runner.calls)
+
+
 @pytest.mark.parametrize(
     ("stage_name", "revision_paths", "required_text"),
     (
+        (
+            "regime_side_balance_500k",
+            (
+                "regime_selectivity.loss_weight",
+                "regime_selectivity.q_temperature",
+            ),
+            "sampled Long and Short Regime rows and global recall",
+        ),
+        (
+            "persistent_chop_regime_500k",
+            (
+                "regime_selectivity.loss_weight",
+                "regime_selectivity.persistent_chop_negative_emphasis",
+            ),
+            "same-label exact-WAIT",
+        ),
         (
             "regime_selectivity_1m",
             ("regime_selectivity.loss_weight",),
@@ -911,6 +1136,59 @@ def test_stage2_reasoning_prompt_names_exact_revision_surface_and_evidence(
     assert json.dumps(revision_paths) in prompt
     assert required_text in prompt
     assert "only one or more paths from that exact list" in prompt
+
+
+@pytest.mark.parametrize(
+    ("stage_name", "revision_paths", "required_evidence", "required_surface"),
+    (
+        (
+            "regime_side_balance_500k",
+            (
+                "regime_selectivity.loss_weight",
+                "regime_selectivity.q_temperature",
+            ),
+            (
+                "teacher-free selection Long and Short entry counts",
+                "sampled Long and Short Regime rows and global recall",
+            ),
+            "revise only loss weight or Q temperature",
+        ),
+        (
+            "persistent_chop_regime_500k",
+            (
+                "regime_selectivity.loss_weight",
+                "regime_selectivity.persistent_chop_negative_emphasis",
+            ),
+            (
+                "regime_selectivity_dead_wait_minus_transition_ready_wait_model_wait",
+                "transition-positive Long and Short",
+                "selection.near_blow_timeout_rate",
+            ),
+            "revise only loss weight or persistent-chop emphasis",
+        ),
+    ),
+)
+def test_stage2a_regime_repair_reasoning_is_mechanism_specific(
+    stage_name: str,
+    revision_paths: tuple[str, ...],
+    required_evidence: tuple[str, ...],
+    required_surface: str,
+) -> None:
+    request = SimpleNamespace(
+        stage=SimpleNamespace(
+            name=stage_name,
+            config={"revision_paths": list(revision_paths)},
+        ),
+        receipt=SimpleNamespace(outputs={"reasoning_packet": {}}),
+    )
+
+    prompt = _reasoning_prompt(request)
+
+    assert all(item in prompt for item in required_evidence)
+    assert required_surface in prompt
+    assert "Never disable or weaken Short chop learning" in prompt
+    assert "never introduce an inference-time teacher gate" in prompt
+    assert "supersede the general reward, risk, and exit-mechanism menu" in prompt
 
 
 def test_parent_retention_gate_rejects_frequency_only_near_blow_lift(
@@ -983,6 +1261,147 @@ def test_parent_retention_gate_rejects_frequency_only_near_blow_lift(
         failure.get("direction") == "retain_upper_bound"
         for failure in evidence["failures"]
     )
+
+
+def test_parent_retention_gate_rejects_regression_in_a_maximized_economic_metric(
+    tmp_path: Path,
+) -> None:
+    archive = CandidateArchive(tmp_path / "archive")
+    parent_model = tmp_path / "parent.pt"
+    parent_model.write_bytes(b"parent")
+    parent = archive.register_candidate(
+        parent_model,
+        contract={"kind": "parent"},
+        recipe={"kind": "parent"},
+        hypothesis="selected Stage 1 parent",
+    )
+    archive.record_evaluation(
+        parent.candidate_id,
+        evaluator_contract={"name": "parent"},
+        metrics={"selection.pass_rate": 0.23},
+        stages=({"name": "selection", "status": "PASS"},),
+        status="PASS",
+    )
+    child_model = tmp_path / "child.pt"
+    child_model.write_bytes(b"child")
+    child = archive.register_candidate(
+        child_model,
+        contract={"kind": "child"},
+        recipe={"kind": "child"},
+        parent_candidate_ids=(parent.candidate_id,),
+        hypothesis="Regime child that forgot Stage 1 economics",
+    )
+    evaluation = archive.record_evaluation(
+        child.candidate_id,
+        evaluator_contract={"name": "child"},
+        metrics={"selection.pass_rate": 0.22},
+        stages=({"name": "selection", "status": "PASS"},),
+        status="PASS",
+    )
+    from propevolve.orchestration import _EconomicEvidenceGate
+
+    evidence = _EconomicEvidenceGate(archive)._evaluate_outputs(
+        {
+            "candidate_id": child.candidate_id,
+            "evaluation_id": evaluation.evaluation_id,
+            "evaluation_path": str(evaluation.path),
+            "evaluation_sha256": hashlib.sha256(
+                evaluation.path.read_bytes()
+            ).hexdigest(),
+            "metrics": evaluation.metrics,
+        },
+        (),
+        parent_ids=(parent.candidate_id,),
+        parent_requirements=(),
+        parent_retention_requirements=({
+            "metric": "selection.pass_rate",
+            "direction": "maximize",
+            "maximum_regression": 0.0,
+        },),
+    )
+
+    assert evidence["parent_improvements"]["retain:selection.pass_rate"] == {
+        "current": 0.22,
+        "parent": 0.23,
+        "direction": "maximize",
+        "regression": pytest.approx(0.01),
+        "maximum_regression": 0.0,
+    }
+    assert evidence["failures"] == [{
+        "metric": "selection.pass_rate",
+        "direction": "retain_maximize",
+        "parent": 0.23,
+        "maximum_regression": 0.0,
+        "actual": 0.22,
+    }]
+
+
+def test_legacy_parent_retention_keeps_its_max_parent_baseline(
+    tmp_path: Path,
+) -> None:
+    archive = CandidateArchive(tmp_path / "archive")
+
+    def candidate_with_metric(name: str, metric: float):
+        model = tmp_path / f"{name}.pt"
+        model.write_bytes(name.encode())
+        candidate = archive.register_candidate(
+            model,
+            contract={"kind": name},
+            recipe={"kind": name},
+            hypothesis=name,
+        )
+        archive.record_evaluation(
+            candidate.candidate_id,
+            evaluator_contract={"name": name},
+            metrics={"selection.greedy_entry_rate": metric},
+            stages=({"name": "selection", "status": "PASS"},),
+            status="PASS",
+        )
+        return candidate
+
+    weak = candidate_with_metric("weak", 0.10)
+    strong = candidate_with_metric("strong", 0.20)
+    child_model = tmp_path / "child.pt"
+    child_model.write_bytes(b"child")
+    child = archive.register_candidate(
+        child_model,
+        contract={"kind": "child"},
+        recipe={"kind": "child"},
+        parent_candidate_ids=(weak.candidate_id, strong.candidate_id),
+        hypothesis="legacy child",
+    )
+    evaluation = archive.record_evaluation(
+        child.candidate_id,
+        evaluator_contract={"name": "child"},
+        metrics={"selection.greedy_entry_rate": 0.15},
+        stages=({"name": "selection", "status": "PASS"},),
+        status="PASS",
+    )
+    from propevolve.orchestration import _EconomicEvidenceGate
+
+    evidence = _EconomicEvidenceGate(archive)._evaluate_outputs(
+        {
+            "candidate_id": child.candidate_id,
+            "evaluation_id": evaluation.evaluation_id,
+            "evaluation_path": str(evaluation.path),
+            "evaluation_sha256": hashlib.sha256(
+                evaluation.path.read_bytes()
+            ).hexdigest(),
+            "metrics": evaluation.metrics,
+        },
+        (),
+        parent_ids=(weak.candidate_id, strong.candidate_id),
+        parent_requirements=(),
+        parent_retention_requirements=({
+            "metric": "selection.greedy_entry_rate",
+            "maximum_regression": 0.0,
+        },),
+    )
+
+    assert evidence["failures"] == []
+    assert evidence["parent_improvements"][
+        "retain:selection.greedy_entry_rate"
+    ]["parent"] == 0.20
 
 
 def test_optional_gepa_proposer_adds_authenticated_actionable_side_information(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 import numpy as np
 import torch
@@ -27,14 +27,43 @@ REGIME_STATE_CHANNELS = (
     "structure_neutral_probability",
     "structure_trend_probability",
 )
+REGIME_TRANSITION_CHANNELS = (
+    "structure_chop_persistence_probability",
+    "structure_trend_onset_probability",
+    "structure_trend_persistence_probability",
+    "volatility_expansion_onset_probability",
+    "volatility_high_persistence_probability",
+    "kaufman_efficiency",
+    "volatility_percentile",
+)
 ACTION_ORDER = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
 SCHEMA = "balance_aware_regime_selectivity_v1"
 TARGET_SOURCE = "post_launch_entry_action_target"
+STATIC_STATE_SEMANTICS = "static_state_v1"
+PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS = (
+    "persistent_chop_negative_weight_v1"
+)
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
     "-headroom_pressure*(1-mll_headroom_fraction)"
     "-dominant_chop_pressure*max(0,chop-max(neutral,trend)))"
 )
+PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA = (
+    "exact_wait*(1+persistent_chop_negative_emphasis*"
+    "chop_persistence*(1-kaufman_efficiency*mean("
+    "trend_onset,trend_persistence,volatility_expansion_onset,"
+    "volatility_high_persistence,volatility_percentile)))"
+)
+
+
+class PersistentChopEvidence(NamedTuple):
+    """Continuous compiler evidence for loss weighting and mechanism gates."""
+
+    exact_wait_weights: torch.Tensor
+    persistent_dead_chop_membership: torch.Tensor
+    transition_ready_membership: torch.Tensor
+    transition_positive_long_membership: torch.Tensor
+    transition_positive_short_membership: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -62,12 +91,16 @@ class BalanceAwareRegimeSelectivity:
     probability_epsilon: float = 1e-6
     headroom_pressure: float = 1.0
     dominant_chop_pressure: float = 2.0
+    semantics: str = STATIC_STATE_SEMANTICS
+    persistent_chop_negative_emphasis: float = 1.0
     _indices: tuple[int, ...] = field(init=False, repr=False)
+    _transition_indices: tuple[int, ...] = field(init=False, repr=False)
     _center_logits: tuple[float, float] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         names = tuple(str(value) for value in self.channel_names)
         centers = tuple(float(value) for value in self.expansion_centers)
+        semantics = str(self.semantics)
         required = (*EXPANSION_CHANNELS, *REGIME_STATE_CHANNELS)
         if (
             len(names) < len(required)
@@ -90,10 +123,24 @@ class BalanceAwareRegimeSelectivity:
             or float(self.headroom_pressure) < 0.0
             or not np.isfinite(self.dominant_chop_pressure)
             or float(self.dominant_chop_pressure) < 0.0
+            or semantics
+            not in (
+                STATIC_STATE_SEMANTICS,
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+            )
+            or not np.isfinite(self.persistent_chop_negative_emphasis)
+            or float(self.persistent_chop_negative_emphasis) < 0.0
         ):
             raise ValueError("balance-aware Regime selectivity contract is invalid")
+        if semantics == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS and any(
+            channel not in names for channel in REGIME_TRANSITION_CHANNELS
+        ):
+            raise ValueError(
+                "transition-aware Regime selectivity channels are incomplete"
+            )
         object.__setattr__(self, "channel_names", names)
         object.__setattr__(self, "expansion_centers", centers)
+        object.__setattr__(self, "semantics", semantics)
         object.__setattr__(
             self,
             "_center_logits",
@@ -104,6 +151,15 @@ class BalanceAwareRegimeSelectivity:
             "_indices",
             tuple(names.index(channel) for channel in required),
         )
+        object.__setattr__(
+            self,
+            "_transition_indices",
+            tuple(
+                names.index(channel)
+                for channel in REGIME_TRANSITION_CHANNELS
+                if channel in names
+            ),
+        )
 
     def target_probabilities(
         self,
@@ -112,6 +168,11 @@ class BalanceAwareRegimeSelectivity:
         entry_action_targets: torch.Tensor,
     ) -> torch.Tensor:
         """Soften exact bar 1-5 labels toward WAIT without inventing entries."""
+        if self.semantics != STATIC_STATE_SEMANTICS:
+            raise ValueError(
+                "persistent-chop semantics compile exact WAIT negative weights; "
+                "they cannot soften positive Entry targets"
+            )
         # Numeric ranges are authenticated once when teacher targets and
         # replay rows are ingested. Repeating reductions here would force an
         # MPS-to-CPU synchronization on every optimizer update.
@@ -177,13 +238,101 @@ class BalanceAwareRegimeSelectivity:
             dim=-1,
         )
 
+    def exact_wait_negative_weights(
+        self,
+        teacher_probabilities: torch.Tensor,
+        entry_action_targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compile persistent-dead-chop emphasis for exact WAIT rows only.
+
+        Transition evidence is the unweighted mean of trend onset, trend
+        persistence, volatility-expansion onset, high-volatility persistence,
+        and volatility percentile. Kaufman efficiency gates that evidence, so
+        volatility without efficient displacement cannot erase persistent-chop
+        emphasis. The result is continuous and bounded in
+        ``[1, 1 + persistent_chop_negative_emphasis]`` on exact WAIT rows.
+        Long and Short rows receive exactly zero mass and therefore cannot be
+        softened or redirected by this compiler. The consumer is responsible
+        for normalizing aggregate WAIT class mass.
+        """
+        evidence = self.exact_wait_negative_weight_evidence(
+            teacher_probabilities,
+            entry_action_targets,
+        )
+        return evidence.exact_wait_weights
+
+    def exact_wait_negative_weight_evidence(
+        self,
+        teacher_probabilities: torch.Tensor,
+        entry_action_targets: torch.Tensor,
+    ) -> PersistentChopEvidence:
+        """Compile WAIT weights and continuous dead/ready membership masses."""
+        if self.semantics != PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS:
+            raise ValueError(
+                "exact WAIT negative weights require persistent-chop semantics"
+            )
+        if (
+            teacher_probabilities.ndim < 1
+            or teacher_probabilities.shape[-1] != len(self.channel_names)
+            or entry_action_targets.shape != teacher_probabilities.shape[:-1]
+        ):
+            raise ValueError(
+                "teacher probabilities or Entry labels violate the "
+                "transition-aware selectivity contract"
+            )
+        if (
+            entry_action_targets.dtype == torch.bool
+            or torch.is_floating_point(entry_action_targets)
+        ):
+            raise ValueError(
+                "transition-aware selectivity requires exact flat-action labels"
+            )
+
+        selected = teacher_probabilities[..., list(self._transition_indices)]
+        chop_persistence = selected[..., 0].clamp(0.0, 1.0)
+        transition_evidence = torch.stack(
+            (
+                selected[..., 1],
+                selected[..., 2],
+                selected[..., 3],
+                selected[..., 4],
+                selected[..., 6],
+            ),
+            dim=-1,
+        ).clamp(0.0, 1.0).mean(dim=-1)
+        kaufman_efficiency = selected[..., 5].clamp(0.0, 1.0)
+        transition_readiness = kaufman_efficiency * transition_evidence
+        persistent_dead_chop = chop_persistence * (1.0 - transition_readiness)
+        transition_ready_chop = chop_persistence * transition_readiness
+        wait_rows = (entry_action_targets == 0).to(teacher_probabilities.dtype)
+        long_rows = (entry_action_targets == 1).to(teacher_probabilities.dtype)
+        short_rows = (entry_action_targets == 2).to(teacher_probabilities.dtype)
+        wait_weight = 1.0 + (
+            float(self.persistent_chop_negative_emphasis)
+            * persistent_dead_chop
+        )
+        return PersistentChopEvidence(
+            exact_wait_weights=wait_rows * wait_weight,
+            persistent_dead_chop_membership=wait_rows * persistent_dead_chop,
+            transition_ready_membership=wait_rows * transition_ready_chop,
+            transition_positive_long_membership=long_rows
+            * transition_ready_chop,
+            transition_positive_short_membership=short_rows
+            * transition_ready_chop,
+        )
+
 
 __all__ = [
     "ACTION_ORDER",
     "BalanceAwareRegimeSelectivity",
     "EXPANSION_CHANNELS",
     "FORMULA",
+    "PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA",
+    "PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS",
+    "PersistentChopEvidence",
     "REGIME_STATE_CHANNELS",
+    "REGIME_TRANSITION_CHANNELS",
     "SCHEMA",
+    "STATIC_STATE_SEMANTICS",
     "TARGET_SOURCE",
 ]

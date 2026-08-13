@@ -28,7 +28,7 @@ AGENT_RUNTIME_FIELDS = (
     "mps_fast_math",
 )
 
-REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
+LEGACY_REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
     "regime_selectivity.schema",
     "regime_selectivity.training_only",
     "regime_selectivity.target_source",
@@ -39,6 +39,26 @@ REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
     "regime_selectivity.expansion_long_center",
     "regime_selectivity.expansion_short_center",
     "regime_selectivity.probability_epsilon",
+)
+REGIME_SELECTIVITY_CORE_FROZEN_IDENTITY_PATHS = (
+    *(
+        path
+        for path in LEGACY_REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS
+        if path != "regime_selectivity.formula"
+    ),
+    "regime_selectivity.side_balance.schema",
+    "regime_selectivity.side_balance.action_order",
+    "regime_selectivity.headroom_pressure",
+    "regime_selectivity.dominant_chop_pressure",
+)
+REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS = (
+    "regime_selectivity.formula",
+    "regime_selectivity.semantics",
+    "regime_selectivity.persistent_chop_negative_emphasis",
+)
+REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
+    *REGIME_SELECTIVITY_CORE_FROZEN_IDENTITY_PATHS,
+    *REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
 )
 RECOVERY_CURRICULUM_FROZEN_PATHS = (
     "recovery_curriculum.schedule_seed",
@@ -365,7 +385,10 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
     from .balance_aware_regime_selectivity import (
         ACTION_ORDER,
         FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
         SCHEMA,
+        STATIC_STATE_SEMANTICS,
         TARGET_SOURCE,
     )
     from .teachers.expansion import (
@@ -374,7 +397,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         ENTRY_CENTER_RECEIPT_SCHEMA,
     )
 
-    required = {
+    legacy_required = {
         "schema",
         "training_only",
         "target_source",
@@ -390,6 +413,35 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         "dominant_chop_pressure",
         "q_temperature",
     }
+    required = {
+        *legacy_required,
+        "semantics",
+        "persistent_chop_negative_emphasis",
+        "side_balance",
+    }
+    legacy_contract = (
+        isinstance(specification, dict)
+        and set(specification) == legacy_required
+    )
+    if legacy_contract:
+        specification["semantics"] = STATIC_STATE_SEMANTICS
+        specification["persistent_chop_negative_emphasis"] = 0.0
+        specification["side_balance"] = None
+    semantics = (
+        specification.get("semantics")
+        if isinstance(specification, dict)
+        else None
+    )
+    side_balance = (
+        specification.get("side_balance")
+        if isinstance(specification, dict)
+        else None
+    )
+    expected_formula = (
+        FORMULA
+        if semantics == STATIC_STATE_SEMANTICS
+        else PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA
+    )
     teachers = tuple(payload.get("teachers") or ())
     numeric = tuple(
         specification.get(field)
@@ -401,6 +453,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             "headroom_pressure",
             "dominant_chop_pressure",
             "q_temperature",
+            "persistent_chop_negative_emphasis",
         )
     ) if isinstance(specification, dict) else ()
     if (
@@ -410,13 +463,28 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         or specification.get("training_only") is not True
         or specification.get("target_source") != TARGET_SOURCE
         or tuple(specification.get("action_order", ())) != ACTION_ORDER
-        or specification.get("formula") != FORMULA
+        or semantics not in {
+            STATIC_STATE_SEMANTICS,
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        }
+        or specification.get("formula") != expected_formula
+        or (
+            side_balance is not None
+            and (
+                not isinstance(side_balance, dict)
+                or set(side_balance) != {"schema", "action_order"}
+                or side_balance.get("schema") != "equal_long_short_v1"
+                or side_balance.get("action_order")
+                != ["ENTER_LONG_1", "ENTER_SHORT_1"]
+            )
+        )
+        or (not legacy_contract and side_balance is None)
         or payload.get("entry_supervision") is None
         or len(teachers) < 2
         or teachers[0].get("kind") != "expansion"
         or not any(teacher.get("kind") == "regime" for teacher in teachers)
         or tuple(teachers[0].get("channels", ())) != EXPANSION_CHANNELS
-        or len(numeric) != 7
+        or len(numeric) != 8
         or any(
             isinstance(value, bool) or not isinstance(value, (int, float))
             for value in numeric
@@ -433,6 +501,14 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         or float(specification["headroom_pressure"]) < 0.0
         or float(specification["dominant_chop_pressure"]) < 0.0
         or float(specification["q_temperature"]) <= 0.0
+        or (
+            semantics == STATIC_STATE_SEMANTICS
+            and float(specification["persistent_chop_negative_emphasis"]) != 0.0
+        )
+        or (
+            semantics == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+            and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
+        )
     ):
         raise ValueError("balance-aware Regime selectivity contract is invalid")
     root = (
@@ -722,6 +798,9 @@ def load_experiment_config(path: str | Path) -> dict:
             or not isinstance(
                 collapse["maximum_average_hold_bars"], (int, float)
             )
+            or not math.isfinite(
+                float(collapse["maximum_average_hold_bars"])
+            )
             or collapse["maximum_average_hold_bars"] <= 0
             or isinstance(collapse["minimum_voluntary_close_rate"], bool)
             or not isinstance(
@@ -947,12 +1026,29 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("evolution allowlist overlaps the frozen contract")
     if payload.get("entry_supervision") is not None and "entry_supervision" not in frozen:
         raise ValueError("entry supervision must be frozen for the campaign")
-    if payload.get("regime_selectivity") is not None and not all(
-        path in frozen for path in REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS
-    ):
-        raise ValueError(
-            "Regime selectivity identity must be frozen for the campaign"
-        )
+    if payload.get("regime_selectivity") is not None:
+        side_balance = payload["regime_selectivity"].get("side_balance")
+        if side_balance is None:
+            valid_regime_identity = all(
+                path in frozen
+                for path in LEGACY_REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS
+            )
+        else:
+            semantics_paths = set(REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS)
+            revisable_semantics = semantics_paths & set(allowed)
+            valid_regime_identity = all(
+                path in frozen
+                for path in REGIME_SELECTIVITY_CORE_FROZEN_IDENTITY_PATHS
+            ) and (
+                all(path in frozen for path in semantics_paths)
+                or revisable_semantics == semantics_paths
+            )
+            if revisable_semantics and revisable_semantics != semantics_paths:
+                valid_regime_identity = False
+        if not valid_regime_identity:
+            raise ValueError(
+                "Regime selectivity identity must be frozen for the campaign"
+            )
     if payload.get("recovery_curriculum") is not None:
         if not all(path in frozen for path in RECOVERY_CURRICULUM_FROZEN_PATHS):
             raise ValueError(
@@ -1137,6 +1233,48 @@ def load_experiment_config(path: str | Path) -> dict:
             for path in curriculum_override
         ):
             raise ValueError("campaign curriculum override is not allowlisted")
+        semantics_override_paths = set(curriculum_override) & set(
+            REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS
+        )
+        if semantics_override_paths:
+            from .balance_aware_regime_selectivity import (
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                STATIC_STATE_SEMANTICS,
+            )
+
+            if semantics_override_paths != set(
+                REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS
+            ):
+                raise ValueError(
+                    "Regime semantics curriculum override must be atomic"
+                )
+            override_semantics = curriculum_override[
+                "regime_selectivity.semantics"
+            ]
+            override_formula = curriculum_override[
+                "regime_selectivity.formula"
+            ]
+            override_emphasis = curriculum_override[
+                "regime_selectivity.persistent_chop_negative_emphasis"
+            ]
+            valid_static = (
+                override_semantics == STATIC_STATE_SEMANTICS
+                and override_formula
+                == payload["regime_selectivity"]["formula"]
+                and float(override_emphasis) == 0.0
+            )
+            valid_persistent = (
+                override_semantics
+                == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+                and override_formula == PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA
+                and isinstance(override_emphasis, (int, float))
+                and not isinstance(override_emphasis, bool)
+                and math.isfinite(float(override_emphasis))
+                and float(override_emphasis) > 0.0
+            )
+            if not (valid_static or valid_persistent):
+                raise ValueError("Regime semantics curriculum override is invalid")
         for override_path, value in curriculum_override.items():
             bounds = revision_bounds.get(override_path)
             if bounds is not None and (
@@ -1216,9 +1354,20 @@ def load_experiment_config(path: str | Path) -> dict:
                 "campaign parent-retention requirements must be a list"
             )
         for requirement in parent_retention_requirements:
+            requirement_keys = (
+                frozenset(requirement)
+                if isinstance(requirement, dict)
+                else frozenset()
+            )
             if (
                 not isinstance(requirement, dict)
-                or set(requirement) != {"metric", "maximum_regression"}
+                or requirement_keys not in {
+                    frozenset({"metric", "maximum_regression"}),
+                    frozenset({"metric", "direction", "maximum_regression"}),
+                }
+                or requirement.get("direction", "minimize") not in {
+                    "maximize", "minimize"
+                }
                 or not str(requirement.get("metric", "")).strip()
                 or isinstance(requirement.get("maximum_regression"), bool)
                 or not isinstance(
