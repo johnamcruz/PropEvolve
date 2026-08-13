@@ -1,5 +1,8 @@
 # PropEvolve
 
+[![Tests](https://github.com/johnamcruz/PropEvolve/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/johnamcruz/PropEvolve/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/johnamcruz/PropEvolve/graph/badge.svg?branch=main)](https://codecov.io/gh/johnamcruz/PropEvolve)
+
 PropEvolve is a self-improving RL trading agent that **learns, remembers,
 adapts, and trades within prop-firm constraints**.
 
