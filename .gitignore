@@ -236,6 +236,9 @@ models/*
 *.ckpt
 *.safetensors
 *.onnx
+!teachers/expansion/expansion.pt
+!teachers/regime/regime_teacher.pt
+!teachers/trend/trend_teacher.pt
 !models/teachers/
 !models/teachers/manifest.json
 !models/teachers/expansion/
