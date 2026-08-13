@@ -9,6 +9,7 @@ import pytest
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
     REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
+    TRAINING_POLICY_HEALTH_FROZEN_PATH,
     agent_runtime_settings,
     load_experiment_config,
 )
@@ -22,6 +23,9 @@ from propevolve.balance_aware_regime_selectivity import (
 
 CURRENT_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v4.json"
+)
+STAGE2_V5_RECIPE = Path(
+    "config/historical_mask_expansion_regime_stage2_v5.json"
 )
 
 
@@ -38,6 +42,58 @@ def _generic_payload() -> dict:
         if not path.startswith("regime_selectivity.")
     ]
     return payload
+
+
+def _episode_budget_payload() -> dict:
+    payload = _generic_payload()
+    payload["training"]["budget_mode"] = "episodes"
+    payload["training"]["episodes"] = 500
+    payload["training"].pop("minimum_environment_steps")
+    payload["evolution"]["frozen_paths"] = [
+        path for path in payload["evolution"]["frozen_paths"]
+        if path != "training.minimum_environment_steps"
+    ]
+    short_circuit = payload["training"]["short_circuit"]
+    short_circuit["minimum_completed_episodes"] = 18
+    short_circuit.pop("minimum_environment_steps")
+    requirements = payload["campaign"]["selection_requirements"]
+    payload["campaign"]["budget_stages"] = [
+        {
+            "name": f"episode_{episodes}",
+            "budget_mode": "episodes",
+            "training_episodes": episodes,
+            "validation_episodes": 200,
+            "short_circuit_minimum_episodes": 18,
+            "allow_revisions": False,
+            "warm_start_parent": True,
+            "revision_paths": [],
+            "selection_requirements": list(requirements),
+        }
+        for episodes in (200, 300, 500)
+    ]
+    return payload
+
+
+def _policy_health_payload() -> dict:
+    return {
+        "schema": "propevolve_training_policy_health_v1",
+        "minimum_completed_episodes": 45,
+        "probe_interval_episodes": 45,
+        "minimum_probe_recall": {
+            "WAIT": 0.35,
+            "ENTER_LONG_1": 0.30,
+            "ENTER_SHORT_1": 0.30,
+        },
+        "entry_mass_fraction": {"minimum": 0.30, "maximum": 0.36},
+        "require_zero_positive_entry_soft_wait_veto": True,
+        "economic_futility": {
+            "minimum_completed_episodes": 45,
+            "maximum_near_blow_timeout_rate": 0.75,
+            "maximum_mean_terminal_pnl": -1500.0,
+            "maximum_expectancy_r": -0.15,
+            "minimum_failed_conditions": 2,
+        },
+    }
 
 
 def _stage2a_config(tmp_path: Path) -> Path:
@@ -414,6 +470,55 @@ def test_stage2_v4_is_one_frozen_two_boundary_matched_screen() -> None:
     } <= set(repaired["evolution"]["frozen_paths"])
 
 
+def test_stage2_v5_is_a_frozen_exact_episode_curriculum() -> None:
+    from propevolve.balance_aware_regime_selectivity import (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    )
+
+    config = load_experiment_config(STAGE2_V5_RECIPE)
+
+    assert config["training"]["budget_mode"] == "episodes"
+    assert "minimum_environment_steps" not in config["training"]
+    assert config["training"]["episodes"] == 500
+    assert config["training"]["validation_episodes"] == 200
+    assert config["training"]["validation_no_trade_patience_episodes"] == 5
+    assert config["training"]["short_circuit"][
+        "minimum_completed_episodes"
+    ] == 18
+    assert config["training"]["short_circuit"]["policy_health"] == (
+        _policy_health_payload()
+    )
+    assert config["regime_selectivity"]["semantics"] == (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+    )
+    assert config["training"][
+        "entry_supervision_autonomy_start_fraction"
+    ] == 0.95
+    assert config["evolution"]["allowed_revision_paths"] == ()
+    assert config["campaign"]["max_revisions_per_stage"] == 0
+    stages = config["campaign"]["budget_stages"]
+    assert [stage["training_episodes"] for stage in stages] == [200, 300, 500]
+    assert all(
+        stage["budget_mode"] == "episodes"
+        and stage["validation_episodes"] == 200
+        and stage["short_circuit_minimum_episodes"] == 18
+        and stage["allow_revisions"] is False
+        and stage["warm_start_parent"] is True
+        and stage["revision_paths"] == ()
+        for stage in stages
+    )
+    assert stages[-1]["episode_coverage"] == {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+    assert TRAINING_POLICY_HEALTH_FROZEN_PATH in config["evolution"][
+        "frozen_paths"
+    ]
+    assert "training.minimum_environment_steps" not in config[
+        "evolution"
+    ]["frozen_paths"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -654,6 +759,261 @@ def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> N
     }
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="collapse detector"):
+        load_experiment_config(path)
+
+
+def test_legacy_step_budget_remains_implicit_without_identity_drift() -> None:
+    config = load_experiment_config(CURRENT_RECIPE)
+
+    assert "budget_mode" not in config["training"]
+    stage = config["campaign"]["budget_stages"][0]
+    assert "budget_mode" not in stage
+    assert stage["minimum_environment_steps"] == 500_000
+    assert "training_episodes" not in stage
+    assert "short_circuit_minimum_episodes" not in stage
+
+
+def test_explicit_step_budget_mode_is_accepted_without_episode_fields(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["training"]["budget_mode"] = "environment_steps"
+    payload["campaign"]["budget_stages"][0][
+        "budget_mode"
+    ] = "environment_steps"
+    path = tmp_path / "explicit-step-budget.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["training"]["budget_mode"] == "environment_steps"
+    assert config["campaign"]["budget_stages"][0][
+        "budget_mode"
+    ] == "environment_steps"
+
+
+def test_episode_budget_declares_exact_training_and_short_circuit_boundaries(
+    tmp_path: Path,
+) -> None:
+    payload = _episode_budget_payload()
+    path = tmp_path / "episode-budget.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["training"]["short_circuit"][
+        "minimum_completed_episodes"
+    ] == 18
+    assert [
+        (stage["budget_mode"], stage["training_episodes"],
+         stage["validation_episodes"], stage["short_circuit_minimum_episodes"])
+        for stage in config["campaign"]["budget_stages"]
+    ] == [
+        ("episodes", 200, 200, 18),
+        ("episodes", 300, 200, 18),
+        ("episodes", 500, 200, 18),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (
+            lambda payload: payload["training"].update(
+                minimum_environment_steps=1
+            ),
+            "episode training budget",
+        ),
+        (
+            lambda payload: payload["campaign"]["budget_stages"][0].update(
+                minimum_environment_steps=1
+            ),
+            "episode budget stage",
+        ),
+        (
+            lambda payload: payload["campaign"]["budget_stages"][0].update(
+                short_circuit_minimum_episodes=201
+            ),
+            "episode budget stage",
+        ),
+        (
+            lambda payload: payload["campaign"]["budget_stages"][1].update(
+                budget_mode="environment_steps",
+                minimum_environment_steps=300,
+            ),
+            "budget stage contract",
+        ),
+        (
+            lambda payload: payload["training"]["short_circuit"].update(
+                minimum_environment_steps=18
+            ),
+            "training short circuit",
+        ),
+    ),
+)
+def test_episode_budget_rejects_mixed_or_ambiguous_boundaries(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    payload = _episode_budget_payload()
+    mutation(payload)
+    path = tmp_path / "invalid-episode-budget.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        load_experiment_config(path)
+
+
+def test_episode_stage_must_reach_each_frozen_policy_health_boundary(
+    tmp_path: Path,
+) -> None:
+    payload = _episode_budget_payload()
+    payload["campaign"]["budget_stages"][0]["training_episodes"] = 40
+    payload["training"]["short_circuit"]["policy_health"] = (
+        _policy_health_payload()
+    )
+    payload["evolution"]["frozen_paths"].append(
+        TRAINING_POLICY_HEALTH_FROZEN_PATH
+    )
+    path = tmp_path / "unreachable-policy-health.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="policy health boundary"):
+        load_experiment_config(path)
+
+
+def test_episode_budget_policy_health_contract_is_exact_finite_and_frozen(
+    tmp_path: Path,
+) -> None:
+    payload = _episode_budget_payload()
+    payload["training"]["short_circuit"]["policy_health"] = (
+        _policy_health_payload()
+    )
+    payload["evolution"]["frozen_paths"].append(
+        "training.short_circuit.policy_health"
+    )
+    path = tmp_path / "policy-health.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["training"]["short_circuit"]["policy_health"] == (
+        _policy_health_payload()
+    )
+
+    payload["training"]["short_circuit"]["policy_health"][
+        "minimum_probe_recall"
+    ]["ENTER_SHORT_1"] = float("nan")
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="policy health"):
+        load_experiment_config(path)
+
+    payload["training"]["short_circuit"]["policy_health"] = (
+        _policy_health_payload()
+    )
+    payload["evolution"]["frozen_paths"].remove(
+        "training.short_circuit.policy_health"
+    )
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="policy health must be frozen"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda health: health.update(extra_threshold=1.0),
+        lambda health: health.update(minimum_completed_episodes=True),
+        lambda health: health["minimum_probe_recall"].pop("WAIT"),
+        lambda health: health["entry_mass_fraction"].update(maximum=0.29),
+        lambda health: health["economic_futility"].update(
+            minimum_failed_conditions=4
+        ),
+    ),
+)
+def test_policy_health_rejects_unknown_missing_or_wrong_typed_thresholds(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    payload = _episode_budget_payload()
+    health = _policy_health_payload()
+    mutation(health)
+    payload["training"]["short_circuit"]["policy_health"] = health
+    payload["evolution"]["frozen_paths"].append(
+        TRAINING_POLICY_HEALTH_FROZEN_PATH
+    )
+    path = tmp_path / "invalid-policy-health.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="policy health"):
+        load_experiment_config(path)
+
+
+def test_final_episode_coverage_is_exact_and_economically_gated(
+    tmp_path: Path,
+) -> None:
+    payload = _episode_budget_payload()
+    final = payload["campaign"]["budget_stages"][-1]
+    final["episode_coverage"] = {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+    final["selection_requirements"].extend([
+        {
+            "metric": "training.minimum_market_episode_coverage",
+            "operator": "==",
+            "value": 1.0,
+        },
+        {
+            "metric": "training.episode_coverage_complete",
+            "operator": "==",
+            "value": 1.0,
+        },
+    ])
+    path = tmp_path / "full-coverage.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["campaign"]["budget_stages"][-1][
+        "episode_coverage"
+    ] == final["episode_coverage"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda payload: payload["campaign"]["budget_stages"][0].update(
+            episode_coverage={
+                "schema": "full_data_episode_coverage_v1",
+                "episode_budget": 200,
+            }
+        ),
+        lambda payload: payload["campaign"]["budget_stages"][-1].update(
+            episode_coverage={
+                "schema": "full_data_episode_coverage_v1",
+                "episode_budget": 499,
+            }
+        ),
+        lambda payload: payload["campaign"]["budget_stages"][-1].update(
+            episode_coverage={
+                "schema": "full_data_episode_coverage_v1",
+                "episode_budget": 500,
+            }
+        ),
+    ),
+)
+def test_episode_coverage_fails_closed_on_wrong_stage_budget_or_missing_gates(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    payload = _episode_budget_payload()
+    mutation(payload)
+    path = tmp_path / "invalid-full-coverage.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="episode coverage contract"):
         load_experiment_config(path)
 
 

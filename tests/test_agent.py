@@ -189,6 +189,28 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert not torch.equal(before, agent.online.output.weight.detach())
 
 
+def test_optimizer_fails_closed_before_update_on_nonfinite_training_loss() -> None:
+    agent = _agent(2, seed=5)
+    sequence = (
+        Transition(
+            observation=np.array([0, 0], np.float32),
+            action=Action.WAIT,
+            reward=float("nan"),
+            next_observation=np.array([1, 0], np.float32),
+            terminated=True,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        ),
+    )
+    before = tuple(parameter.detach().clone() for parameter in agent.online.parameters())
+
+    with pytest.raises(ValueError, match="training loss is non-finite"):
+        agent.train_batch((sequence,))
+
+    for expected, actual in zip(before, agent.online.parameters(), strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
 def test_recurrent_double_dqn_targets_preserve_the_current_state_history() -> None:
     """The next-state target must be the one-step shift of one causal GRU trace."""
     agent = _agent(2, seed=41, learning_rate=1e-12)

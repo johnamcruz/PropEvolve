@@ -73,6 +73,118 @@ RECOVERY_CURRICULUM_FROZEN_PATHS = (
 RECOVERY_CURRICULUM_REVISION_PATHS = (
     "recovery_curriculum.episode_fraction",
 )
+TRAINING_POLICY_HEALTH_FROZEN_PATH = "training.short_circuit.policy_health"
+
+
+def _validate_training_policy_health(
+    policy_health: object,
+    *,
+    training_episodes: int,
+) -> None:
+    """Validate the serialized fail-fast detector against its typed runtime spec."""
+    required = {
+        "schema",
+        "minimum_completed_episodes",
+        "probe_interval_episodes",
+        "minimum_probe_recall",
+        "entry_mass_fraction",
+        "require_zero_positive_entry_soft_wait_veto",
+        "economic_futility",
+    }
+    recall_actions = {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+    economic_fields = {
+        "minimum_completed_episodes",
+        "maximum_near_blow_timeout_rate",
+        "maximum_mean_terminal_pnl",
+        "maximum_expectancy_r",
+        "minimum_failed_conditions",
+    }
+    if not isinstance(policy_health, dict) or set(policy_health) != required:
+        raise ValueError("training short circuit policy health contract is invalid")
+    recalls = policy_health["minimum_probe_recall"]
+    entry_mass = policy_health["entry_mass_fraction"]
+    economic = policy_health["economic_futility"]
+    if (
+        policy_health["schema"] != "propevolve_training_policy_health_v1"
+        or not isinstance(recalls, dict)
+        or set(recalls) != recall_actions
+        or not isinstance(entry_mass, dict)
+        or set(entry_mass) != {"minimum", "maximum"}
+        or not isinstance(economic, dict)
+        or set(economic) != economic_fields
+        or not isinstance(
+            policy_health["require_zero_positive_entry_soft_wait_veto"], bool
+        )
+    ):
+        raise ValueError("training short circuit policy health contract is invalid")
+    integer_values = (
+        policy_health["minimum_completed_episodes"],
+        policy_health["probe_interval_episodes"],
+        economic["minimum_completed_episodes"],
+        economic["minimum_failed_conditions"],
+    )
+    numeric_values = (
+        *recalls.values(),
+        entry_mass["minimum"],
+        entry_mass["maximum"],
+        economic["maximum_near_blow_timeout_rate"],
+        economic["maximum_mean_terminal_pnl"],
+        economic["maximum_expectancy_r"],
+    )
+    if (
+        any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in integer_values
+        )
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in numeric_values
+        )
+        or policy_health["minimum_completed_episodes"] > training_episodes
+        or policy_health["probe_interval_episodes"] > training_episodes
+        or economic["minimum_completed_episodes"] > training_episodes
+    ):
+        raise ValueError("training short circuit policy health contract is invalid")
+    try:
+        from .training_health import TrainingPolicyHealthSpec
+
+        TrainingPolicyHealthSpec(
+            minimum_completed_episodes=int(
+                policy_health["minimum_completed_episodes"]
+            ),
+            probe_interval_episodes=int(policy_health["probe_interval_episodes"]),
+            minimum_wait_recall=float(recalls["WAIT"]),
+            minimum_long_recall=float(recalls["ENTER_LONG_1"]),
+            minimum_short_recall=float(recalls["ENTER_SHORT_1"]),
+            minimum_entry_mass_fraction=float(entry_mass["minimum"]),
+            maximum_entry_mass_fraction=float(entry_mass["maximum"]),
+            require_zero_positive_entry_soft_wait_veto=bool(
+                policy_health["require_zero_positive_entry_soft_wait_veto"]
+            ),
+            economic_futility_minimum_completed_episodes=int(
+                economic["minimum_completed_episodes"]
+            ),
+            economic_futility_maximum_near_blow_timeout_rate=float(
+                economic["maximum_near_blow_timeout_rate"]
+            ),
+            economic_futility_maximum_mean_terminal_pnl=float(
+                economic["maximum_mean_terminal_pnl"]
+            ),
+            economic_futility_maximum_expectancy_r=float(
+                economic["maximum_expectancy_r"]
+            ),
+            economic_futility_minimum_failed_conditions=int(
+                economic["minimum_failed_conditions"]
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "training short circuit policy health contract is invalid"
+        ) from error
 
 
 def agent_runtime_settings(runtime: dict) -> dict:
@@ -140,7 +252,6 @@ REQUIRED_RECIPE_FIELDS = {
     },
     "training": {
         "episodes",
-        "minimum_environment_steps",
         "validation_episodes",
         "replay_capacity_episodes",
         "replay_capacity_transitions",
@@ -166,6 +277,15 @@ def _require_recipe_fields(payload: dict) -> None:
         missing = sorted(required - set(values))
         if missing:
             raise ValueError(f"{section} recipe is missing fields {missing}")
+    training = payload["training"]
+    if (
+        training.get("budget_mode", "environment_steps")
+        == "environment_steps"
+        and "minimum_environment_steps" not in training
+    ):
+        raise ValueError(
+            "training recipe is missing fields ['minimum_environment_steps']"
+        )
 
 
 def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
@@ -723,6 +843,30 @@ def load_experiment_config(path: str | Path) -> dict:
     training.setdefault("management_epsilon_end", training["epsilon_end"])
     training.setdefault("validation_no_trade_patience_episodes", 0)
     training.setdefault("greedy_diagnostic_interval_steps", 256)
+    training_budget_mode = training.get("budget_mode", "environment_steps")
+    if training_budget_mode not in {"environment_steps", "episodes"}:
+        raise ValueError("training budget mode is invalid")
+    if (
+        isinstance(training["episodes"], bool)
+        or not isinstance(training["episodes"], int)
+        or training["episodes"] < 1
+        or isinstance(training["validation_episodes"], bool)
+        or not isinstance(training["validation_episodes"], int)
+        or training["validation_episodes"] < 1
+    ):
+        raise ValueError("training budget contract is invalid")
+    if training_budget_mode == "environment_steps":
+        minimum_environment_steps = training.get("minimum_environment_steps")
+        if (
+            isinstance(minimum_environment_steps, bool)
+            or not isinstance(minimum_environment_steps, int)
+            or minimum_environment_steps < 1
+        ):
+            raise ValueError("training environment-step budget is invalid")
+    elif "minimum_environment_steps" in training:
+        raise ValueError(
+            "episode training budget cannot declare minimum environment steps"
+        )
     if (
         isinstance(training["prefetch_batches"], bool)
         or not isinstance(training["prefetch_batches"], int)
@@ -794,22 +938,32 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("greedy diagnostic interval is invalid")
     short_circuit = training.get("short_circuit")
     if short_circuit is not None:
+        boundary_field = (
+            "minimum_completed_episodes"
+            if training_budget_mode == "episodes"
+            else "minimum_environment_steps"
+        )
         required_short_circuit = {
-            "minimum_environment_steps",
+            boundary_field,
             "minimum_passes",
             "maximum_blow_rate",
         }
         if (
             not isinstance(short_circuit, dict)
-            or frozenset(short_circuit) not in {
-                frozenset(required_short_circuit),
-                frozenset((*required_short_circuit, "collapse")),
-            }
-            or isinstance(short_circuit["minimum_environment_steps"], bool)
-            or not isinstance(short_circuit["minimum_environment_steps"], int)
+            or not required_short_circuit <= set(short_circuit)
+            or set(short_circuit) - required_short_circuit
+            - {"collapse", "policy_health"}
+            or isinstance(short_circuit[boundary_field], bool)
+            or not isinstance(short_circuit[boundary_field], int)
             or not 1
-            <= short_circuit["minimum_environment_steps"]
-            <= int(training["minimum_environment_steps"])
+            <= short_circuit[boundary_field]
+            <= int(
+                training[
+                    "episodes"
+                    if training_budget_mode == "episodes"
+                    else "minimum_environment_steps"
+                ]
+            )
             or isinstance(short_circuit["minimum_passes"], bool)
             or not isinstance(short_circuit["minimum_passes"], int)
             or short_circuit["minimum_passes"] < 0
@@ -818,6 +972,15 @@ def load_experiment_config(path: str | Path) -> dict:
             or not 0 <= float(short_circuit["maximum_blow_rate"]) <= 1
         ):
             raise ValueError("training short circuit contract is invalid")
+        if "policy_health" in short_circuit:
+            if training_budget_mode != "episodes":
+                raise ValueError(
+                    "training short circuit policy health requires episode budget mode"
+                )
+            _validate_training_policy_health(
+                short_circuit["policy_health"],
+                training_episodes=int(training["episodes"]),
+            )
         collapse = short_circuit.get("collapse")
         if collapse is not None and (
             not isinstance(collapse, dict)
@@ -1092,6 +1255,12 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("evolution allowlist overlaps the frozen contract")
     if payload.get("entry_supervision") is not None and "entry_supervision" not in frozen:
         raise ValueError("entry supervision must be frozen for the campaign")
+    if (
+        isinstance(training.get("short_circuit"), dict)
+        and training["short_circuit"].get("policy_health") is not None
+        and TRAINING_POLICY_HEALTH_FROZEN_PATH not in frozen
+    ):
+        raise ValueError("training short circuit policy health must be frozen")
     if payload.get("regime_selectivity") is not None:
         side_balance = payload["regime_selectivity"].get("side_balance")
         if side_balance is None:
@@ -1218,45 +1387,141 @@ def load_experiment_config(path: str | Path) -> dict:
             raise ValueError("campaign selection requirement is invalid")
     budget_stages = campaign.get("budget_stages")
     if budget_stages is None:
-        budget_stages = [{
-            "name": "historical_candidate",
-            "minimum_environment_steps": int(
-                training["minimum_environment_steps"]
-            ),
-            "selection_requirements": requirements,
-        }]
+        if training_budget_mode == "environment_steps":
+            budget_stages = [{
+                "name": "historical_candidate",
+                "minimum_environment_steps": int(
+                    training["minimum_environment_steps"]
+                ),
+                "selection_requirements": requirements,
+            }]
+        else:
+            short_circuit = training.get("short_circuit") or {}
+            budget_stages = [{
+                "name": "historical_candidate",
+                "budget_mode": "episodes",
+                "training_episodes": int(training["episodes"]),
+                "validation_episodes": int(training["validation_episodes"]),
+                "short_circuit_minimum_episodes": int(
+                    short_circuit["minimum_completed_episodes"]
+                ),
+                "selection_requirements": requirements,
+            }]
     if not isinstance(budget_stages, list) or not budget_stages:
         raise ValueError("campaign budget stages must be a nonempty array")
     names = []
     budgets = []
-    for stage in budget_stages:
-        required_stage_fields = {
-            "name", "minimum_environment_steps", "selection_requirements"
-        }
+    for stage_index, stage in enumerate(budget_stages):
+        if not isinstance(stage, dict):
+            raise ValueError("campaign budget stage contract is invalid")
+        required_stage_fields = {"name", "selection_requirements"}
         optional_stage_fields = {
-            "seed", "seeds", "max_parallel", "allow_revisions",
+            "budget_mode", "seed", "seeds", "max_parallel",
+            "allow_revisions",
             "parent_improvement_requirements", "warm_start_parent",
             "parent_improvement_any_requirements", "curriculum_override",
             "parent_retention_requirements", "revision_paths",
+            "minimum_environment_steps", "training_episodes",
+            "validation_episodes", "short_circuit_minimum_episodes",
+            "episode_coverage",
         }
         if (
-            not isinstance(stage, dict)
-            or not required_stage_fields <= set(stage)
+            not required_stage_fields <= set(stage)
             or set(stage) - required_stage_fields - optional_stage_fields
         ):
             raise ValueError("campaign budget stage contract is invalid")
         name = str(stage["name"])
-        budget = stage["minimum_environment_steps"]
+        budget_mode = stage.get("budget_mode", "environment_steps")
         stage_requirements = stage["selection_requirements"]
         if (
             not name
-            or isinstance(budget, bool)
-            or not isinstance(budget, int)
-            or budget < 1
+            or budget_mode not in {"environment_steps", "episodes"}
+            or budget_mode != training_budget_mode
             or not isinstance(stage_requirements, list)
             or not stage_requirements
         ):
             raise ValueError("campaign budget stage contract is invalid")
+        if budget_mode == "environment_steps":
+            if (
+                "training_episodes" in stage
+                or "validation_episodes" in stage
+                or "short_circuit_minimum_episodes" in stage
+                or isinstance(stage.get("minimum_environment_steps"), bool)
+                or not isinstance(stage.get("minimum_environment_steps"), int)
+                or stage["minimum_environment_steps"] < 1
+            ):
+                raise ValueError("campaign step budget stage contract is invalid")
+            budget = stage["minimum_environment_steps"]
+        else:
+            if (
+                "minimum_environment_steps" in stage
+                or isinstance(stage.get("training_episodes"), bool)
+                or not isinstance(stage.get("training_episodes"), int)
+                or stage["training_episodes"] < 1
+                or stage["training_episodes"] > int(training["episodes"])
+                or isinstance(stage.get("validation_episodes"), bool)
+                or not isinstance(stage.get("validation_episodes"), int)
+                or stage["validation_episodes"] < 1
+                or isinstance(
+                    stage.get("short_circuit_minimum_episodes"), bool
+                )
+                or not isinstance(
+                    stage.get("short_circuit_minimum_episodes"), int
+                )
+                or not 1
+                <= stage["short_circuit_minimum_episodes"]
+                <= stage["training_episodes"]
+            ):
+                raise ValueError("campaign episode budget stage contract is invalid")
+            budget = stage["training_episodes"]
+            policy_health = (
+                short_circuit.get("policy_health")
+                if isinstance(short_circuit, dict)
+                else None
+            )
+            if policy_health is not None and any(
+                int(boundary) > budget
+                for boundary in (
+                    policy_health["minimum_completed_episodes"],
+                    policy_health["probe_interval_episodes"],
+                    policy_health["economic_futility"][
+                        "minimum_completed_episodes"
+                    ],
+                )
+            ):
+                raise ValueError(
+                    "campaign episode budget cannot reach policy health boundary"
+                )
+        episode_coverage = stage.get("episode_coverage")
+        if episode_coverage is not None:
+            required_coverage_gates = ({
+                "metric": "training.minimum_market_episode_coverage",
+                "operator": "==",
+                "value": 1.0,
+            }, {
+                "metric": "training.episode_coverage_complete",
+                "operator": "==",
+                "value": 1.0,
+            })
+            if (
+                budget_mode != "episodes"
+                or stage_index != len(budget_stages) - 1
+                or not isinstance(episode_coverage, dict)
+                or set(episode_coverage) != {"schema", "episode_budget"}
+                or episode_coverage.get("schema")
+                != "full_data_episode_coverage_v1"
+                or isinstance(episode_coverage.get("episode_budget"), bool)
+                or not isinstance(episode_coverage.get("episode_budget"), int)
+                or episode_coverage["episode_budget"]
+                != stage["training_episodes"]
+                or any(
+                    gate not in stage_requirements
+                    for gate in required_coverage_gates
+                )
+            ):
+                raise ValueError(
+                    "campaign episode coverage contract is invalid"
+                )
         seed = stage.get("seed")
         if seed is not None and (
             isinstance(seed, bool) or not isinstance(seed, int) or seed < 0

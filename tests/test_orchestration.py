@@ -27,6 +27,7 @@ from propevolve.orchestration import (
 
 
 _V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
+_V5_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v5.json")
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -108,6 +109,35 @@ def test_stage2_v4_matches_authenticated_stage1_causal_recipe() -> None:
     _assert_parent_causal_contract(parent, config)
 
 
+def test_stage2_v5_matches_authenticated_stage1_and_projects_exact_tiers() -> None:
+    from propevolve.config import load_experiment_config
+
+    config = load_experiment_config(_V5_CONFIG)
+    base_parent = config["evolution"]["base_parent"]
+    parent = SimpleNamespace(path=(
+        Path(config["_root"])
+        / base_parent["archive_root"]
+        / "candidates"
+        / base_parent["candidate_id"]
+    ))
+
+    _assert_parent_causal_contract(parent, config)
+    stages = _plan(config).stages
+
+    assert [stage.config["training_episodes"] for stage in stages] == [
+        200,
+        300,
+        500,
+    ]
+    assert all(stage.config["validation_episodes"] == 200 for stage in stages)
+    assert "episode_coverage" not in stages[0].config
+    assert "episode_coverage" not in stages[1].config
+    assert stages[2].config["episode_coverage"] == {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+
+
 def test_stage2_v4_plan_enforces_the_near_blow_improvement_gate() -> None:
     """The stage adapter, not only top-level JSON, must enforce the target."""
     from propevolve.config import load_experiment_config
@@ -118,6 +148,7 @@ def test_stage2_v4_plan_enforces_the_near_blow_improvement_gate() -> None:
     plan = _plan(config)
     requirements = plan.stages[0].config["selection_requirements"]
 
+    assert "budget_mode" not in plan.stages[0].config
     assert {
         "metric": "selection.near_blow_timeout_rate",
         "operator": "<=",
@@ -200,6 +231,8 @@ class FakeCandidateRunner:
                 "selection.two_r_mfe_capture_ratio": (
                     0.55 if delta > 0 else 0.20
                 ),
+                "training.minimum_market_episode_coverage": 1.0,
+                "training.episode_coverage_complete": 1.0,
             },
             stages=({"name": "selection", "status": "PASS" if delta > 0 else "FAIL"},),
             status="PASS" if delta > 0 else "FAIL",
@@ -898,6 +931,137 @@ def test_campaign_advances_through_screen_confirm_and_final_budgets(
         (tmp_path / "runs/evolution-test/registry/champion.json").read_text()
     )
     assert champion["candidate_id"] == report["selected_candidate_id"]
+
+
+def test_campaign_projects_exact_episode_budgets_and_short_circuit_boundaries(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["training"]["budget_mode"] = "episodes"
+    payload["training"]["episodes"] = 500
+    payload["challenge"]["mll_proximity_penalty_coefficient"] = 0.0002
+    payload["training"].pop("minimum_environment_steps")
+    payload["evolution"]["frozen_paths"] = [
+        path for path in payload["evolution"]["frozen_paths"]
+        if path != "training.minimum_environment_steps"
+    ]
+    short_circuit = payload["training"]["short_circuit"]
+    short_circuit["minimum_completed_episodes"] = 18
+    short_circuit.pop("minimum_environment_steps")
+    requirements = [
+        *payload["campaign"]["selection_requirements"],
+        {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0.0,
+        },
+    ]
+    payload["campaign"]["selection_requirements"] = requirements
+    payload["campaign"]["budget_stages"] = [
+        {
+            "name": f"episode_{episodes}",
+            "budget_mode": "episodes",
+            "training_episodes": episodes,
+            "validation_episodes": 200,
+            "short_circuit_minimum_episodes": 18,
+            "selection_requirements": requirements,
+            "warm_start_parent": index > 0,
+        }
+        for index, episodes in enumerate((200, 300, 500))
+    ]
+    coverage = {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+    final_stage = payload["campaign"]["budget_stages"][-1]
+    final_stage["episode_coverage"] = coverage
+    final_stage["selection_requirements"] = [
+        *requirements,
+        {
+            "metric": "training.minimum_market_episode_coverage",
+            "operator": "==",
+            "value": 1.0,
+        },
+        {
+            "metric": "training.episode_coverage_complete",
+            "operator": "==",
+            "value": 1.0,
+        },
+    ]
+    config_path.write_text(json.dumps(payload))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="episode-budget-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert [config["training"]["episodes"] for config in runner.configs] == [
+        200,
+        300,
+        500,
+    ]
+    assert all(
+        config["training"]["budget_mode"] == "episodes"
+        and config["training"]["validation_episodes"] == 200
+        and config["training"]["short_circuit"][
+            "minimum_completed_episodes"
+        ] == 18
+        for config in runner.configs
+    )
+    assert all(
+        config["_validation_stop_on_blow"] is True
+        and config["training"]["validation_no_trade_patience_episodes"] == 5
+        for config in runner.configs
+    )
+    assert all(
+        "episode_coverage" not in config["training"]
+        for config in runner.configs[:-1]
+    )
+    assert runner.configs[-1]["training"]["episode_coverage"] == coverage
+
+
+def test_episode_stage_plan_preserves_budget_units_without_step_aliases(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["training"]["budget_mode"] = "episodes"
+    payload["training"]["episodes"] = 200
+    payload["training"].pop("minimum_environment_steps")
+    payload["evolution"]["frozen_paths"] = [
+        path for path in payload["evolution"]["frozen_paths"]
+        if path != "training.minimum_environment_steps"
+    ]
+    short_circuit = payload["training"]["short_circuit"]
+    short_circuit["minimum_completed_episodes"] = 18
+    short_circuit.pop("minimum_environment_steps")
+    payload["campaign"]["budget_stages"] = [{
+        "name": "episode_200",
+        "budget_mode": "episodes",
+        "training_episodes": 200,
+        "validation_episodes": 200,
+        "short_circuit_minimum_episodes": 18,
+        "selection_requirements": payload["campaign"][
+            "selection_requirements"
+        ],
+    }]
+    config_path.write_text(json.dumps(payload))
+
+    from propevolve.config import load_experiment_config
+
+    stage = _plan(load_experiment_config(config_path)).stages[0]
+
+    assert stage.config["budget_mode"] == "episodes"
+    assert stage.config["training_episodes"] == 200
+    assert stage.config["validation_episodes"] == 200
+    assert stage.config["short_circuit_minimum_episodes"] == 18
+    assert "minimum_environment_steps" not in stage.config
 
 
 def test_v4_reasoning_prompt_names_current_stage_and_empty_revision_surface() -> None:

@@ -1831,9 +1831,17 @@ class RecurrentC51Agent:
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        gradient_norm = nn.utils.clip_grad_norm_(
-            self.online.parameters(), max_norm=self.gradient_clip
-        )
+        try:
+            gradient_norm = nn.utils.clip_grad_norm_(
+                self.online.parameters(),
+                max_norm=self.gradient_clip,
+                error_if_nonfinite=True,
+            )
+        except RuntimeError as error:
+            if "non-finite" not in str(error):
+                raise
+            self.optimizer.zero_grad(set_to_none=True)
+            raise ValueError("training loss is non-finite") from error
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self._updates += 1

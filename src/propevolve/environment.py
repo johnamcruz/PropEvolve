@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from .decision import Action, ActionMasker, PositionSide, RecoveryEntryPermit
+from .episode_coverage import (
+    DeterministicEpisodeCoverage,
+    FullDataEpisodeCoverageSpec,
+)
 from .observation import (
     AccountState,
     ObservationAssembler,
@@ -305,6 +309,7 @@ class HistoricalChallengeEnv:
         round_trip_fees: dict[str, float],
         observation_spec: TradeManagementObservationSpec | None = None,
         seed: int,
+        episode_coverage: FullDataEpisodeCoverageSpec | None = None,
     ) -> None:
         if not markets:
             raise ValueError("at least one market is required")
@@ -330,6 +335,19 @@ class HistoricalChallengeEnv:
             ticker: _cme_session_keys(market.timestamps)
             for ticker, market in self.markets.items()
         }
+        self._episode_coverage = (
+            DeterministicEpisodeCoverage(
+                {
+                    ticker: market.timestamps
+                    for ticker, market in self.markets.items()
+                },
+                self._session_keys,
+                episode_days=self.spec.episode_days,
+                spec=episode_coverage,
+            )
+            if episode_coverage is not None
+            else None
+        )
         self._rng = np.random.default_rng(seed)
         self._assembler = ObservationAssembler(
             next(iter(embedding_dims)),
@@ -364,13 +382,40 @@ class HistoricalChallengeEnv:
 
     def rng_state(self) -> dict:
         """Return the episode-sampling RNG state for exact boundary recovery."""
-        return copy.deepcopy(self._rng.bit_generator.state)
+        rng = copy.deepcopy(self._rng.bit_generator.state)
+        if self._episode_coverage is None:
+            return rng
+        return {
+            "schema": "propevolve_coverage_environment_state_v1",
+            "episode_sampling_rng": rng,
+            "episode_coverage": self._episode_coverage.state_dict(),
+        }
 
     def restore_rng_state(self, state: dict) -> None:
         """Restore episode sampling only while no episode is active."""
         if not self._terminated:
             raise RuntimeError("environment RNG can only be restored between episodes")
-        self._rng.bit_generator.state = copy.deepcopy(state)
+        if self._episode_coverage is None:
+            if state.get("schema") == "propevolve_coverage_environment_state_v1":
+                raise ValueError("episode coverage recovery mode drifted")
+            self._rng.bit_generator.state = copy.deepcopy(state)
+            return
+        if state.get("schema") != "propevolve_coverage_environment_state_v1":
+            raise ValueError("episode coverage recovery state is missing")
+        self._episode_coverage.load_state_dict(state["episode_coverage"])
+        self._rng.bit_generator.state = copy.deepcopy(
+            state["episode_sampling_rng"]
+        )
+
+    def episode_coverage_receipt(
+        self,
+        *,
+        require_complete: bool = False,
+    ) -> dict[str, object]:
+        """Return an authenticated receipt for actually visited decision rows."""
+        if self._episode_coverage is None:
+            raise RuntimeError("deterministic episode coverage is not configured")
+        return self._episode_coverage.receipt(require_complete=require_complete)
 
     def reset(self, *, options: dict | None = None) -> tuple[np.ndarray, dict]:
         options = options or {}
@@ -387,7 +432,18 @@ class HistoricalChallengeEnv:
             len(market.close) - 2,
             int(np.searchsorted(session_keys, last_start_session, side="right") - 1),
         )
-        start = int(options.get("start", self._rng.integers(0, max(1, maximum_start + 1))))
+        explicit_start = options.get("start")
+        if self._episode_coverage is not None:
+            start = self._episode_coverage.begin_episode(
+                ticker,
+                explicit_start=explicit_start,
+            )
+        else:
+            start = int(
+                explicit_start
+                if explicit_start is not None
+                else self._rng.integers(0, max(1, maximum_start + 1))
+            )
         if start < 0 or start > maximum_start:
             raise ValueError("episode start cannot fit the challenge window")
         start_session_index = int(np.searchsorted(unique_sessions, session_keys[start]))
@@ -497,6 +553,8 @@ class HistoricalChallengeEnv:
         action = Action(int(action))
         if action not in self.valid_actions():
             raise ValueError(f"action {action.name} is invalid in the current state")
+        if self._episode_coverage is not None:
+            self._episode_coverage.record_decision(self._ticker, self._index)
         previous_equity = self._equity(self._market.close[self._index])
         closed_trade_count = len(self._closed_trade_pnls)
         next_index = self._index + 1

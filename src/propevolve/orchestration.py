@@ -124,6 +124,30 @@ def _public_config(config: Mapping) -> dict:
     }
 
 
+def _budget_stage_fields(stage: Mapping) -> dict[str, object]:
+    """Project one validated budget without mixing episode and step units."""
+    mode = str(stage.get("budget_mode", "environment_steps"))
+    if mode == "environment_steps":
+        return {
+            "minimum_environment_steps": int(
+                stage["minimum_environment_steps"]
+            ),
+        }
+    if mode == "episodes":
+        fields: dict[str, object] = {
+            "budget_mode": mode,
+            "training_episodes": int(stage["training_episodes"]),
+            "validation_episodes": int(stage["validation_episodes"]),
+            "short_circuit_minimum_episodes": int(
+                stage["short_circuit_minimum_episodes"]
+            ),
+        }
+        if stage.get("episode_coverage") is not None:
+            fields["episode_coverage"] = dict(stage["episode_coverage"])
+        return fields
+    raise ValueError(f"unsupported campaign budget mode: {mode}")
+
+
 def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
     parent_contract = json.loads((candidate.path / "contract.json").read_text())
     parent_recipe = json.loads((candidate.path / "recipe.json").read_text())
@@ -295,9 +319,38 @@ class _CandidateStageAdapter:
                 ]
             )
             seed_config["training"] = dict(seed_config["training"])
-            seed_config["training"]["minimum_environment_steps"] = int(
-                request.stage.config["minimum_environment_steps"]
+            budget_mode = str(
+                request.stage.config.get("budget_mode", "environment_steps")
             )
+            if budget_mode == "environment_steps":
+                seed_config["training"]["minimum_environment_steps"] = int(
+                    request.stage.config["minimum_environment_steps"]
+                )
+            elif budget_mode == "episodes":
+                seed_config["training"]["budget_mode"] = budget_mode
+                seed_config["training"]["episodes"] = int(
+                    request.stage.config["training_episodes"]
+                )
+                seed_config["training"]["validation_episodes"] = int(
+                    request.stage.config["validation_episodes"]
+                )
+                short_circuit = dict(seed_config["training"]["short_circuit"])
+                short_circuit.pop("minimum_environment_steps", None)
+                short_circuit["minimum_completed_episodes"] = int(
+                    request.stage.config["short_circuit_minimum_episodes"]
+                )
+                seed_config["training"]["short_circuit"] = short_circuit
+                episode_coverage = request.stage.config.get("episode_coverage")
+                if episode_coverage is None:
+                    seed_config["training"].pop("episode_coverage", None)
+                else:
+                    seed_config["training"]["episode_coverage"] = dict(
+                        episode_coverage
+                    )
+            else:
+                raise ValueError(
+                    f"unsupported campaign budget mode: {budget_mode}"
+                )
             if seed is not None:
                 seed_config["training"]["seed"] = int(seed)
             seed_path = "" if seed is None else f"seed-{seed}"
@@ -978,9 +1031,7 @@ def _plan(config: Mapping) -> TrainingPlan:
             gate_adapter=_GATE_ADAPTER,
             config={
                 "schema": "propevolve_evolution_stage_v2",
-                "minimum_environment_steps": int(
-                    budget_stage["minimum_environment_steps"]
-                ),
+                **_budget_stage_fields(budget_stage),
                 "seed": budget_stage.get("seed"),
                 "seeds": budget_stage.get("seeds"),
                 "max_parallel": budget_stage.get("max_parallel"),

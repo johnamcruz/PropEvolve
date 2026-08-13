@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import pickle
 import shutil
 import tempfile
 import time
@@ -33,6 +34,7 @@ from .environment import (
     HistoricalChallengeEnv,
     MarketSeries,
 )
+from .episode_coverage import FullDataEpisodeCoverageSpec
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
@@ -46,6 +48,11 @@ from .final_regime_probe import (
 from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
 from .teachers import agent_teacher_settings
+from .training_health import (
+    TrainingHealthDetector,
+    TrainingHealthMonitor,
+    TrainingPolicyHealthSpec,
+)
 
 if TYPE_CHECKING:
     from .agent import RecurrentC51Agent
@@ -1920,7 +1927,15 @@ class HistoricalCandidateRunner:
             )
             * challenge.max_loss
         )
-        seed = int(config["training"]["seed"])
+        training_config = config["training"]
+        seed = int(training_config["seed"])
+        episode_coverage_spec = (
+            FullDataEpisodeCoverageSpec.from_config(
+                training_config["episode_coverage"]
+            )
+            if training_config.get("episode_coverage") is not None
+            else None
+        )
         train_environment = HistoricalChallengeEnv(
             train_markets,
             tick_values=config["point_values"],
@@ -1928,6 +1943,7 @@ class HistoricalCandidateRunner:
             spec=challenge,
             observation_spec=observation_spec,
             seed=seed,
+            episode_coverage=episode_coverage_spec,
         )
         validation_environment = HistoricalChallengeEnv(
             validation_markets,
@@ -1990,8 +2006,15 @@ class HistoricalCandidateRunner:
         recovery_path = output / "training-recovery.pt"
         retained_policy_path = output / "retained-pass-policy.pt"
         diagnostics_path = output / "training-diagnostics.jsonl"
+        policy_health_path = output / "training-policy-health.jsonl"
+        policy_health_probe_path = output / "training-policy-health-probe.pkl"
         validation_diagnostics_path = output / "validation-diagnostics.jsonl"
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
+        policy_health_config = (
+            training_config.get("short_circuit", {}).get("policy_health")
+            if training_config.get("short_circuit") is not None
+            else None
+        )
         resume = None
         replay_state = None
         if recovery_path.is_file():
@@ -2001,6 +2024,39 @@ class HistoricalCandidateRunner:
             if manifest.get("resume_identity") != resume_identity:
                 raise ValueError("training recovery identity drifted")
             resume = TrainingProgress(**manifest["progress"])
+            _truncate_episode_jsonl(
+                diagnostics_path,
+                completed_episodes=resume.completed_episodes,
+                episode_field="episode",
+                required=True,
+            )
+            _truncate_episode_jsonl(
+                policy_health_path,
+                completed_episodes=resume.completed_episodes,
+                episode_field="completed_episodes",
+                required=policy_health_config is not None,
+            )
+            _reconcile_policy_health_probe_corpus(
+                policy_health_probe_path,
+                resume_identity=resume_identity,
+                completed_episodes=resume.completed_episodes,
+                checkpoint_contract=manifest.get(
+                    "policy_health_probe_corpus"
+                ),
+            )
+            def load_retained_manifest(candidate_path: Path) -> Mapping[str, object]:
+                _, retained_manifest = RecurrentC51Agent.load(
+                    candidate_path,
+                    device="cpu",
+                )
+                return retained_manifest
+
+            _reconcile_retained_pass_policies(
+                retained_policy_path,
+                resume_identity=resume_identity,
+                completed_episodes=resume.completed_episodes,
+                manifest_loader=load_retained_manifest,
+            )
             train_environment.restore_rng_state(manifest["environment_rng_state"])
             replay_state = manifest.get("replay_state")
             if not manifest.get("replay_restored", False) or replay_state is None:
@@ -2009,8 +2065,14 @@ class HistoricalCandidateRunner:
             _assert_recovery_regime_selectivity(loaded, agent_settings)
             agent = loaded
         else:
-            if diagnostics_path.exists():
-                raise ValueError("training diagnostics exist without resumable recovery")
+            if (
+                diagnostics_path.exists()
+                or policy_health_path.exists()
+                or policy_health_probe_path.exists()
+                or retained_policy_path.exists()
+                or (output / "retained-pass-policies").exists()
+            ):
+                raise ValueError("training artifacts exist without resumable recovery")
             warm_start = config.get("_warm_start_model")
             if warm_start is None:
                 agent = RecurrentC51Agent(
@@ -2042,7 +2104,6 @@ class HistoricalCandidateRunner:
                     for field, expected in expected_parent.items()
                 ):
                     raise ValueError("warm-start causal contract drifted")
-        training_config = config["training"]
         recovery_curriculum, recovery_stress_episodes = (
             _recovery_curriculum_from_config(config.get("recovery_curriculum"))
         )
@@ -2068,12 +2129,80 @@ class HistoricalCandidateRunner:
         )
         if replay_state is not None:
             replay.load_state_dict(replay_state)
+        policy_health_monitor = None
+        if policy_health_config is not None:
+            if teacher_targets is None or regime_selectivity_spec is None:
+                raise ValueError(
+                    "training policy-health probe requires Regime target lineage"
+                )
+            policy_health_spec = TrainingPolicyHealthSpec.from_config(
+                policy_health_config
+            )
+            fixed_health_samples = None
+
+            def policy_health_probe(
+                completed_episodes: int,
+            ) -> Mapping[str, float]:
+                nonlocal fixed_health_samples
+                if fixed_health_samples is None:
+                    if policy_health_probe_path.is_file():
+                        payload = _load_policy_health_probe_corpus(
+                            policy_health_probe_path,
+                            resume_identity=resume_identity,
+                        )
+                        if int(payload["completed_episodes"]) > completed_episodes:
+                            raise ValueError(
+                                "training policy-health probe corpus drifted"
+                            )
+                        fixed_health_samples = payload["samples"]
+                    else:
+                        fixed_health_samples = replay.final_regime_probe_sequences(
+                            samples_per_action=(
+                                FINAL_REGIME_PROBE_SAMPLES_PER_ACTION
+                            ),
+                        )
+                        temporary = policy_health_probe_path.with_suffix(
+                            policy_health_probe_path.suffix + ".tmp"
+                        )
+                        with temporary.open("wb") as stream:
+                            pickle.dump({
+                                "schema": (
+                                    "propevolve_training_policy_health_probe_corpus_v1"
+                                ),
+                                "resume_identity": resume_identity,
+                                "completed_episodes": completed_episodes,
+                                "samples": fixed_health_samples,
+                            }, stream, protocol=pickle.HIGHEST_PROTOCOL)
+                        os.replace(temporary, policy_health_probe_path)
+                return evaluate_final_regime_probe(
+                    agent,
+                    fixed_health_samples,
+                    teacher_channel_names=teacher_targets.channels,
+                    q_temperature=float(
+                        regime_selectivity_spec["q_temperature"]
+                    ),
+                    source_period=(
+                        str(temporal["train_start"]),
+                        str(temporal["train_end"]),
+                    ),
+                ).metrics
+
+            policy_health_monitor = TrainingHealthMonitor(
+                TrainingHealthDetector(policy_health_spec),
+                probe=policy_health_probe,
+                receipt_callback=lambda payload: _append_jsonl(
+                    policy_health_path, payload
+                ),
+            )
         training = train_agent(
             agent,
             train_environment,
             episodes=int(training_config["episodes"]),
             minimum_environment_steps=int(
-                training_config["minimum_environment_steps"]
+                training_config.get("minimum_environment_steps", 1)
+            ),
+            budget_mode=str(
+                training_config.get("budget_mode", "environment_steps")
             ),
             replay=replay,
             warmup_episodes=int(training_config["warmup_episodes"]),
@@ -2109,6 +2238,11 @@ class HistoricalCandidateRunner:
                 progress=progress,
                 environment_rng_state=train_environment.rng_state(),
                 replay_state=replay.state_dict(),
+                policy_health_probe_path=(
+                    policy_health_probe_path
+                    if policy_health_config is not None
+                    else None
+                ),
             ),
             retention_checkpoint_callback=lambda evidence: _save_retained_policy(
                 agent,
@@ -2147,7 +2281,26 @@ class HistoricalCandidateRunner:
             ),
             short_circuit_minimum_environment_steps=(
                 int(training_config["short_circuit"]["minimum_environment_steps"])
-                if training_config.get("short_circuit") is not None
+                if (
+                    training_config.get("short_circuit") is not None
+                    and training_config.get(
+                        "budget_mode", "environment_steps"
+                    ) == "environment_steps"
+                )
+                else None
+            ),
+            short_circuit_minimum_episodes=(
+                int(
+                    training_config["short_circuit"][
+                        "minimum_completed_episodes"
+                    ]
+                )
+                if (
+                    training_config.get("short_circuit") is not None
+                    and training_config.get(
+                        "budget_mode", "environment_steps"
+                    ) == "episodes"
+                )
                 else None
             ),
             short_circuit_minimum_passes=(
@@ -2188,9 +2341,23 @@ class HistoricalCandidateRunner:
             episode_diagnostic_callback=lambda payload: _append_jsonl(
                 diagnostics_path, payload
             ),
+            training_health_callback=policy_health_monitor,
             near_blow_loss_threshold=near_blow_loss_threshold,
             recovery_curriculum=recovery_curriculum,
         )
+        episode_coverage_receipt = None
+        episode_coverage_path = output / "episode-coverage-receipt.json"
+        if episode_coverage_spec is not None:
+            episode_coverage_receipt = train_environment.episode_coverage_receipt(
+                require_complete=not training.short_circuited,
+            )
+            temporary = episode_coverage_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(
+                episode_coverage_receipt,
+                indent=2,
+                sort_keys=True,
+            ) + "\n")
+            os.replace(temporary, episode_coverage_path)
         diagnostic_summary_path = output / "training-diagnostic-summary.json"
         _write_training_diagnostic_summary(
             diagnostics_path,
@@ -2205,6 +2372,14 @@ class HistoricalCandidateRunner:
             )
             if retention_manifest.get("resume_identity") != resume_identity:
                 raise ValueError("retained pass policy identity drifted")
+            retained_episode, _ = _retained_pass_identity(
+                retention_manifest,
+                resume_identity=resume_identity,
+            )
+            if retained_episode > training.episodes:
+                raise ValueError(
+                    "retained pass policy exceeds the durable training boundary"
+                )
             agent = retained_agent
             retained_policy_restored = True
         agent.discard_retention_anchor()
@@ -2213,28 +2388,38 @@ class HistoricalCandidateRunner:
         if regime_selectivity_spec is not None:
             if teacher_targets is None:
                 raise ValueError("final Regime probe requires training label lineage")
-            final_regime_probe = evaluate_final_regime_probe(
-                agent,
-                replay.final_regime_probe_sequences(
+            try:
+                final_regime_probe_samples = replay.final_regime_probe_sequences(
                     samples_per_action=FINAL_REGIME_PROBE_SAMPLES_PER_ACTION,
-                ),
-                teacher_channel_names=teacher_targets.channels,
-                q_temperature=float(regime_selectivity_spec["q_temperature"]),
-                source_period=(
-                    str(temporal["train_start"]),
-                    str(temporal["train_end"]),
-                ),
-            )
-            probe_path = output / "final-regime-probe.json"
-            probe_temporary = probe_path.with_suffix(".json.tmp")
-            probe_temporary.write_text(
-                json.dumps(
-                    final_regime_probe.as_dict(),
-                    indent=2,
-                    sort_keys=True,
-                ) + "\n"
-            )
-            os.replace(probe_temporary, probe_path)
+                )
+            except ValueError as error:
+                if (
+                    not training.short_circuited
+                    or str(error)
+                    != "final Regime probe lacks exact balanced authentic rows"
+                ):
+                    raise
+            else:
+                final_regime_probe = evaluate_final_regime_probe(
+                    agent,
+                    final_regime_probe_samples,
+                    teacher_channel_names=teacher_targets.channels,
+                    q_temperature=float(regime_selectivity_spec["q_temperature"]),
+                    source_period=(
+                        str(temporal["train_start"]),
+                        str(temporal["train_end"]),
+                    ),
+                )
+                probe_path = output / "final-regime-probe.json"
+                probe_temporary = probe_path.with_suffix(".json.tmp")
+                probe_temporary.write_text(
+                    json.dumps(
+                        final_regime_probe.as_dict(),
+                        indent=2,
+                        sort_keys=True,
+                    ) + "\n"
+                )
+                os.replace(probe_temporary, probe_path)
         validation = None
         recovery_stress = None
         if not training.short_circuited:
@@ -2345,6 +2530,36 @@ class HistoricalCandidateRunner:
                     ),
                 }
             ),
+            "training_policy_health": (
+                None
+                if policy_health_config is None
+                else {
+                    "schema": "propevolve_training_policy_health_v1",
+                    "path": str(policy_health_path),
+                    "file_sha256": _path_sha256(policy_health_path),
+                    "fixed_probe_corpus": (
+                        None
+                        if not policy_health_probe_path.is_file()
+                        else {
+                            "path": str(policy_health_probe_path),
+                            "file_sha256": _path_sha256(
+                                policy_health_probe_path
+                            ),
+                        }
+                    ),
+                }
+            ),
+            "episode_coverage": (
+                None
+                if episode_coverage_receipt is None
+                else {
+                    "receipt": _plain_contract_value(
+                        episode_coverage_receipt
+                    ),
+                    "path": str(episode_coverage_path),
+                    "file_sha256": _path_sha256(episode_coverage_path),
+                }
+            ),
             "validation_diagnostics": (
                 None
                 if validation is None
@@ -2382,6 +2597,7 @@ class HistoricalCandidateRunner:
                 "pass_rate": training.passes / training.episodes,
                 "blow_rate": training.blows / training.episodes,
                 "mean_reward": training.mean_reward,
+                "episodes": float(training.episodes),
                 "environment_steps": float(training.environment_steps),
                 "trade_win_rate": training.trade_win_rate,
                 "average_win_r": training.average_win_r,
@@ -2419,8 +2635,18 @@ class HistoricalCandidateRunner:
                     retained_policy_restored
                 ),
             }
-            if regime_selectivity_spec is not None:
-                assert final_regime_probe is not None
+            if episode_coverage_receipt is not None:
+                coverage_markets = episode_coverage_receipt["markets"]
+                metrics.update({
+                    "episode_coverage_complete": float(
+                        bool(episode_coverage_receipt["complete"])
+                    ),
+                    "minimum_market_episode_coverage": min(
+                        float(item["coverage_fraction"])
+                        for item in coverage_markets.values()
+                    ),
+                })
+            if final_regime_probe is not None:
                 metrics.update(final_regime_probe.metrics)
                 overall_diagnostics = diagnostic_summary["overall"]
                 metrics["latest_teacher_weight_scale"] = float(
@@ -2689,7 +2915,23 @@ def _save_training_recovery(
     progress: TrainingProgress,
     environment_rng_state: dict,
     replay_state: dict[str, object],
+    policy_health_probe_path: Path | None = None,
 ) -> None:
+    policy_health_probe_corpus = None
+    if policy_health_probe_path is not None and policy_health_probe_path.exists():
+        payload = _load_policy_health_probe_corpus(
+            policy_health_probe_path,
+            resume_identity=resume_identity,
+        )
+        corpus_episode = int(payload["completed_episodes"])
+        if corpus_episode > progress.completed_episodes:
+            raise ValueError(
+                "policy-health probe corpus exceeds the recovery checkpoint"
+            )
+        policy_health_probe_corpus = {
+            "completed_episodes": corpus_episode,
+            "file_sha256": _path_sha256(policy_health_probe_path),
+        }
     temporary = path.with_suffix(path.suffix + ".tmp")
     agent.save(
         temporary,
@@ -2699,6 +2941,7 @@ def _save_training_recovery(
             "environment_rng_state": environment_rng_state,
             "replay_state": replay_state,
             "replay_restored": True,
+            "policy_health_probe_corpus": policy_health_probe_corpus,
         },
     )
     os.replace(temporary, path)
@@ -2735,10 +2978,266 @@ def _save_retained_policy(
     os.replace(alias_temporary, path)
 
 
+def _retained_pass_identity(
+    manifest: Mapping[str, object],
+    *,
+    resume_identity: str,
+) -> tuple[int, str]:
+    if manifest.get("resume_identity") != resume_identity:
+        raise ValueError("retained pass policy identity drifted")
+    evidence = manifest.get("retention_evidence")
+    if not isinstance(evidence, Mapping):
+        raise ValueError("retained pass evidence is malformed")
+    episode = evidence.get("episode")
+    ticker = evidence.get("ticker")
+    if (
+        isinstance(episode, bool)
+        or not isinstance(episode, int)
+        or episode < 1
+        or not isinstance(ticker, str)
+        or not ticker.isalnum()
+        or evidence.get("outcome") != "pass"
+    ):
+        raise ValueError("retained pass evidence identity is invalid")
+    return episode, ticker
+
+
+def _reconcile_retained_pass_policies(
+    path: Path,
+    *,
+    resume_identity: str,
+    completed_episodes: int,
+    manifest_loader: Callable[[Path], Mapping[str, object]],
+) -> None:
+    """Keep the retained-pass alias at or behind the durable recovery point."""
+    if completed_episodes < 0 or not callable(manifest_loader):
+        raise ValueError("retained pass recovery contract is invalid")
+    archive = path.parent / "retained-pass-policies"
+    if not archive.exists() and not path.exists():
+        return
+    if archive.exists() and not archive.is_dir():
+        raise ValueError("retained pass archive is malformed")
+    archive.mkdir(parents=True, exist_ok=True)
+    partial = archive / "partial"
+
+    def preserve(source: Path, *, label: str) -> None:
+        partial.mkdir(parents=True, exist_ok=True)
+        source_sha256 = _path_sha256(source)
+        destination = partial / (
+            f"{label}.after-episode-{completed_episodes:06d}."
+            f"{source_sha256}{source.suffix}"
+        )
+        if destination.exists():
+            if (
+                not destination.is_file()
+                or _path_sha256(destination) != source_sha256
+            ):
+                raise ValueError("retained pass partial evidence drifted")
+            source.unlink()
+            return
+        os.replace(source, destination)
+
+    durable: list[tuple[int, str, Path]] = []
+    for retained in sorted(archive.glob("*.pt")):
+        parts = retained.stem.split("-", 2)
+        if (
+            len(parts) != 3
+            or parts[0] != "episode"
+            or len(parts[1]) != 6
+            or not parts[1].isdigit()
+            or not parts[2].isalnum()
+        ):
+            raise ValueError("retained pass checkpoint name is malformed")
+        episode, ticker = _retained_pass_identity(
+            manifest_loader(retained),
+            resume_identity=resume_identity,
+        )
+        if episode != int(parts[1]) or ticker != parts[2]:
+            raise ValueError("retained pass filename drifted from its evidence")
+        if episode > completed_episodes:
+            preserve(retained, label=retained.stem)
+        else:
+            durable.append((episode, ticker, retained))
+
+    alias_identity: tuple[int, str] | None = None
+    if path.exists():
+        if not path.is_file():
+            raise ValueError("retained pass alias is malformed")
+        alias_identity = _retained_pass_identity(
+            manifest_loader(path),
+            resume_identity=resume_identity,
+        )
+        alias_episode, alias_ticker = alias_identity
+        if alias_episode <= completed_episodes and not any(
+            (episode, ticker) == alias_identity
+            for episode, ticker, _ in durable
+        ):
+            recovered = archive / (
+                f"episode-{alias_episode:06d}-{alias_ticker}.pt"
+            )
+            shutil.copyfile(path, recovered)
+            durable.append((alias_episode, alias_ticker, recovered))
+        if alias_episode > completed_episodes:
+            preserve(path, label="latest-alias")
+
+    if durable:
+        _, _, latest = max(durable, key=lambda item: (item[0], item[1]))
+        temporary = path.with_suffix(path.suffix + ".recovery.tmp")
+        shutil.copyfile(latest, temporary)
+        os.replace(temporary, path)
+    elif path.exists():
+        # This can only be an alias without a durable archive counterpart.
+        preserve(path, label="latest-alias")
+
+
+def _load_policy_health_probe_corpus(
+    path: Path,
+    *,
+    resume_identity: str,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise ValueError("training policy-health probe corpus is unavailable")
+    with path.open("rb") as stream:
+        payload = pickle.load(stream)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {
+            "schema",
+            "resume_identity",
+            "completed_episodes",
+            "samples",
+        }
+        or payload.get("schema")
+        != "propevolve_training_policy_health_probe_corpus_v1"
+        or payload.get("resume_identity") != resume_identity
+        or isinstance(payload.get("completed_episodes"), bool)
+        or not isinstance(payload.get("completed_episodes"), int)
+        or int(payload["completed_episodes"]) < 1
+        or not isinstance(payload.get("samples"), tuple)
+        or not payload["samples"]
+    ):
+        raise ValueError("training policy-health probe corpus drifted")
+    return payload
+
+
+def _reconcile_policy_health_probe_corpus(
+    path: Path,
+    *,
+    resume_identity: str,
+    completed_episodes: int,
+    checkpoint_contract: Mapping[str, object] | None,
+) -> None:
+    """Bind a fixed health corpus to the exact durable recovery checkpoint."""
+    if completed_episodes < 0:
+        raise ValueError("policy-health probe recovery boundary is invalid")
+    if checkpoint_contract is not None and (
+        not isinstance(checkpoint_contract, Mapping)
+        or set(checkpoint_contract) != {"completed_episodes", "file_sha256"}
+        or isinstance(checkpoint_contract.get("completed_episodes"), bool)
+        or not isinstance(checkpoint_contract.get("completed_episodes"), int)
+        or not isinstance(checkpoint_contract.get("file_sha256"), str)
+        or len(str(checkpoint_contract["file_sha256"])) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(checkpoint_contract["file_sha256"])
+        )
+    ):
+        raise ValueError("policy-health probe checkpoint contract is invalid")
+    if not path.exists():
+        if checkpoint_contract is not None:
+            raise ValueError("policy-health probe checkpoint corpus is missing")
+        return
+    payload = _load_policy_health_probe_corpus(
+        path,
+        resume_identity=resume_identity,
+    )
+    corpus_episode = int(payload["completed_episodes"])
+    corpus_sha256 = _path_sha256(path)
+    if checkpoint_contract is not None:
+        if (
+            int(checkpoint_contract["completed_episodes"]) != corpus_episode
+            or str(checkpoint_contract["file_sha256"]) != corpus_sha256
+            or corpus_episode > completed_episodes
+        ):
+            raise ValueError("policy-health probe checkpoint identity drifted")
+        return
+    if corpus_episode <= completed_episodes:
+        raise ValueError(
+            "durable recovery does not authenticate its policy-health probe corpus"
+        )
+    preserved = path.with_name(
+        f"{path.stem}.partial-episode-{corpus_episode:06d}-"
+        f"{corpus_sha256}{path.suffix}"
+    )
+    if preserved.exists():
+        if not preserved.is_file() or _path_sha256(preserved) != corpus_sha256:
+            raise ValueError("preserved policy-health probe evidence drifted")
+        path.unlink()
+    else:
+        os.replace(path, preserved)
+
+
 def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         stream.write("\n")
+
+
+def _truncate_episode_jsonl(
+    path: Path,
+    *,
+    completed_episodes: int,
+    episode_field: str,
+    required: bool,
+) -> None:
+    """Reconcile evidence written after the last durable episode checkpoint."""
+    if (
+        completed_episodes < 0
+        or not episode_field
+        or not isinstance(required, bool)
+    ):
+        raise ValueError("episode evidence recovery contract is invalid")
+    if not path.exists():
+        if required and completed_episodes:
+            raise ValueError("required episode evidence stream is missing")
+        return
+    if not path.is_file():
+        raise ValueError("episode evidence recovery contract is invalid")
+    kept: list[str] = []
+    previous = 0
+    dropped = False
+    lines = path.read_text().splitlines()
+    last_nonempty = next(
+        (index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()),
+        -1,
+    )
+    for index, line in enumerate(lines):
+        try:
+            payload = json.loads(line)
+            episode = payload[episode_field]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            if index == last_nonempty and previous == completed_episodes:
+                dropped = True
+                break
+            raise ValueError("episode evidence stream is malformed") from error
+        if (
+            isinstance(episode, bool)
+            or not isinstance(episode, int)
+            or episode != previous + 1
+        ):
+            raise ValueError("episode evidence order is invalid")
+        previous = episode
+        if episode <= completed_episodes:
+            kept.append(line)
+        else:
+            dropped = True
+    if previous < completed_episodes:
+        raise ValueError("episode evidence stream lags durable recovery")
+    if not dropped:
+        return
+    temporary = path.with_suffix(path.suffix + ".recovery.tmp")
+    temporary.write_text("".join(f"{line}\n" for line in kept))
+    os.replace(temporary, path)
 
 
 def _preserve_partial_validation_diagnostics(path: Path) -> Path | None:
@@ -3229,6 +3728,7 @@ def train_agent(
     *,
     episodes: int,
     minimum_environment_steps: int,
+    budget_mode: str = "environment_steps",
     replay: BalancedSequenceReplay,
     warmup_episodes: int,
     updates_per_episode: int,
@@ -3255,8 +3755,12 @@ def train_agent(
     teacher_autonomy_start_fraction: float = 1.0,
     entry_supervision_autonomy_start_fraction: float | None = None,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
+    training_health_callback: Callable[
+        [TrainingProgress, dict[str, object]], str | None
+    ] | None = None,
     near_blow_loss_threshold: float | None = None,
     short_circuit_minimum_environment_steps: int | None = None,
+    short_circuit_minimum_episodes: int | None = None,
     short_circuit_minimum_passes: int = 0,
     short_circuit_maximum_blow_rate: float = 1.0,
     collapse_window_episodes: int = 0,
@@ -3268,6 +3772,8 @@ def train_agent(
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
+    if budget_mode not in {"environment_steps", "episodes"}:
+        raise ValueError("training budget mode is invalid")
     if (
         replay.recurrent_burn_in != int(getattr(agent, "recurrent_burn_in", 0))
         or replay.n_step_return != int(getattr(agent, "n_step_return", 1))
@@ -3304,6 +3810,28 @@ def train_agent(
         )
     ):
         raise ValueError("training short-circuit step boundary is invalid")
+    if (
+        short_circuit_minimum_episodes is not None
+        and (
+            isinstance(short_circuit_minimum_episodes, bool)
+            or not 1 <= short_circuit_minimum_episodes <= episodes
+        )
+    ):
+        raise ValueError("training short-circuit episode boundary is invalid")
+    if (
+        budget_mode == "environment_steps"
+        and short_circuit_minimum_episodes is not None
+    ):
+        raise ValueError(
+            "episode short-circuit boundary requires episode budget mode"
+        )
+    if (
+        budget_mode == "episodes"
+        and short_circuit_minimum_environment_steps is not None
+    ):
+        raise ValueError(
+            "step short-circuit boundary requires environment-step budget mode"
+        )
     if (
         isinstance(short_circuit_minimum_passes, bool)
         or short_circuit_minimum_passes < 0
@@ -3374,10 +3902,17 @@ def train_agent(
         raise ValueError("checkpoint interval cannot be negative")
     if checkpoint_every_episodes and checkpoint_callback is None:
         raise ValueError("checkpoint callback is required when checkpointing is enabled")
+    if training_health_callback is not None and checkpoint_callback is None:
+        raise ValueError(
+            "checkpoint callback is required for training health stops"
+        )
     progress = resume or TrainingProgress()
     if progress.completed_episodes > episodes:
         raise ValueError("resume progress exceeds the episode ceiling")
-    if progress.environment_steps > minimum_environment_steps:
+    if (
+        budget_mode == "environment_steps"
+        and progress.environment_steps > minimum_environment_steps
+    ):
         raise ValueError("resume progress exceeds the environment-step budget")
     if progress.short_circuit_reason is not None:
         return progress.result()
@@ -3397,6 +3932,18 @@ def train_agent(
             )
         valid = tuple(reset_info["valid_actions"])
         decision_index = int(reset_info.get("start", 0))
+        episode_start_index = decision_index
+        episode_end_index = reset_info.get("end")
+        if budget_mode == "episodes":
+            if (
+                isinstance(episode_end_index, bool)
+                or not isinstance(episode_end_index, (int, np.integer))
+                or int(episode_end_index) <= episode_start_index
+            ):
+                raise ValueError(
+                    "episode-budget schedules require causal start/end boundaries"
+                )
+            episode_end_index = int(episode_end_index)
         episode_ticker = str(reset_info.get("ticker", ""))
         hidden = None
         transitions = []
@@ -3416,11 +3963,13 @@ def train_agent(
         }
         recovery_entries_used = 0
         total_reward = 0.0
-        # Decay exploration against actual market interaction, not the
-        # emergency episode ceiling. Early pass/blow episodes vary greatly in
-        # length, so episode-index decay would not represent equal experience.
-        step_progress = min(
-            1.0, progress.environment_steps / minimum_environment_steps
+        # Legacy recipes decay against market interaction. Explicit episode
+        # budgets instead use the declared challenge count and causal position
+        # within each challenge, independent of variable episode length.
+        step_progress = (
+            episode_index / episodes
+            if budget_mode == "episodes"
+            else min(1.0, progress.environment_steps / minimum_environment_steps)
         )
         teacher_schedule_progress = min(
             1.0, step_progress / teacher_autonomy_start_fraction
@@ -3444,6 +3993,49 @@ def train_agent(
         terminal_info = reset_info
         step_index = 0
         while True:
+            if budget_mode == "episodes":
+                assert isinstance(episode_end_index, int)
+                within_episode_progress = min(
+                    1.0,
+                    max(
+                        0.0,
+                        (decision_index - episode_start_index)
+                        / (episode_end_index - episode_start_index),
+                    ),
+                )
+                decision_progress = min(
+                    1.0,
+                    (episode_index + within_episode_progress) / episodes,
+                )
+                epsilon = epsilon_start + (
+                    epsilon_end - epsilon_start
+                ) * decision_progress
+                management_epsilon = management_epsilon_start + (
+                    management_epsilon_end - management_epsilon_start
+                ) * decision_progress
+                teacher_schedule_progress = min(
+                    1.0,
+                    decision_progress / teacher_autonomy_start_fraction,
+                )
+                entry_action_schedule_progress = min(
+                    1.0,
+                    decision_progress
+                    / entry_supervision_autonomy_start_fraction,
+                )
+                teacher_weight_scale = 1.0 + (
+                    teacher_loss_end_scale - 1.0
+                ) * teacher_schedule_progress
+                entry_action_weight_scale = 1.0 + (
+                    teacher_loss_end_scale - 1.0
+                ) * entry_action_schedule_progress
+                teacher_guidance_dropout_probability = (
+                    teacher_guidance_dropout_start
+                    + (
+                        teacher_guidance_dropout_end
+                        - teacher_guidance_dropout_start
+                    )
+                    * teacher_schedule_progress
+                )
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
             action_epsilon = (
@@ -3486,22 +4078,23 @@ def train_agent(
             if recovery_episode and recovery_entries_used > 1:
                 raise ValueError("recovery episode violated its one-entry contract")
             next_valid = tuple(info["valid_actions"])
-            decision_progress = min(
-                1.0,
-                (progress.environment_steps + step_index)
-                / minimum_environment_steps,
-            )
-            decision_teacher_progress = min(
-                1.0, decision_progress / teacher_autonomy_start_fraction
-            )
-            teacher_guidance_dropout_probability = (
-                teacher_guidance_dropout_start
-                + (
-                    teacher_guidance_dropout_end
-                    - teacher_guidance_dropout_start
+            if budget_mode == "environment_steps":
+                decision_progress = min(
+                    1.0,
+                    (progress.environment_steps + step_index)
+                    / minimum_environment_steps,
                 )
-                * decision_teacher_progress
-            )
+                decision_teacher_progress = min(
+                    1.0, decision_progress / teacher_autonomy_start_fraction
+                )
+                teacher_guidance_dropout_probability = (
+                    teacher_guidance_dropout_start
+                    + (
+                        teacher_guidance_dropout_end
+                        - teacher_guidance_dropout_start
+                    )
+                    * decision_teacher_progress
+                )
             teacher_visible = _teacher_guidance_is_visible(
                 seed=ticker_seed,
                 episode_index=episode_index,
@@ -3647,10 +4240,14 @@ def train_agent(
             episode_steps = step_index
             if terminated:
                 break
-        update_progress = min(
-            1.0,
-            (progress.environment_steps + episode_steps)
-            / minimum_environment_steps,
+        update_progress = (
+            (episode_index + 1) / episodes
+            if budget_mode == "episodes"
+            else min(
+                1.0,
+                (progress.environment_steps + episode_steps)
+                / minimum_environment_steps,
+            )
         )
         teacher_schedule_progress = min(
             1.0, update_progress / teacher_autonomy_start_fraction
@@ -3979,10 +4576,16 @@ def train_agent(
             ),
         )
         reasons = []
-        if (
-            short_circuit_minimum_environment_steps is not None
+        outcome_short_circuit_boundary_reached = (
+            budget_mode == "environment_steps"
+            and short_circuit_minimum_environment_steps is not None
             and progress.environment_steps >= short_circuit_minimum_environment_steps
-        ):
+        ) or (
+            budget_mode == "episodes"
+            and short_circuit_minimum_episodes is not None
+            and progress.completed_episodes >= short_circuit_minimum_episodes
+        )
+        if outcome_short_circuit_boundary_reached:
             if progress.passes < short_circuit_minimum_passes:
                 reasons.append(
                     f"passes {progress.passes} < {short_circuit_minimum_passes}"
@@ -3993,13 +4596,27 @@ def train_agent(
                     f"blow rate {blow_rate:.6f} > "
                     f"{short_circuit_maximum_blow_rate:.6f}"
                 )
+        collapse_short_circuit_boundary_reached = (
+            (
+                budget_mode == "environment_steps"
+                and (
+                    short_circuit_minimum_environment_steps is None
+                    or progress.environment_steps
+                    >= short_circuit_minimum_environment_steps
+                )
+            )
+            or (
+                budget_mode == "episodes"
+                and (
+                    short_circuit_minimum_episodes is None
+                    or progress.completed_episodes
+                    >= short_circuit_minimum_episodes
+                )
+            )
+        )
         if (
             collapse_window_episodes
-            and (
-                short_circuit_minimum_environment_steps is None
-                or progress.environment_steps
-                >= short_circuit_minimum_environment_steps
-            )
+            and collapse_short_circuit_boundary_reached
             and len(progress.recent_outcomes) == collapse_window_episodes
         ):
             recent_passes = sum(
@@ -4035,7 +4652,10 @@ def train_agent(
         cumulative_average_balance = (
             progress.terminal_pnl_sum / progress.terminal_pnl_count
         )
-        if episode_diagnostic_callback is not None:
+        if (
+            episode_diagnostic_callback is not None
+            or training_health_callback is not None
+        ):
             diagnostic = {
                 "schema": "propevolve_episode_diagnostic_v1",
                 "episode": progress.completed_episodes,
@@ -4044,6 +4664,8 @@ def train_agent(
                 "episode_kind": "recovery" if recovery_episode else "ordinary",
                 "reward": total_reward,
                 "environment_steps": progress.environment_steps,
+                "budget_mode": budget_mode,
+                "budget_progress": update_progress,
                 "trade_count": int(terminal_info.get("trade_count", 0)),
                 "win_rate": float(terminal_info.get("win_rate", 0.0)),
                 "avg_win_r": float(terminal_info.get("avg_win_r", 0.0)),
@@ -4317,7 +4939,41 @@ def train_agent(
                     diagnostic[f"{prefix}_{suffix}"] = terminal_info.get(
                         f"{prefix}_{suffix}", 0
                     )
-            episode_diagnostic_callback(diagnostic)
+            if training_health_callback is not None:
+                health_reason = training_health_callback(progress, diagnostic)
+                if health_reason is not None and (
+                    not isinstance(health_reason, str) or not health_reason.strip()
+                ):
+                    raise ValueError(
+                        "training health callback must return a nonempty reason"
+                    )
+                if health_reason is not None:
+                    reasons = [
+                        value
+                        for value in (
+                            progress.short_circuit_reason,
+                            health_reason.strip(),
+                        )
+                        if value
+                    ]
+                    progress = replace(
+                        progress,
+                        short_circuit_reason="; ".join(dict.fromkeys(reasons)),
+                    )
+                    diagnostic["training_short_circuited"] = True
+                    diagnostic["training_short_circuit_reason"] = (
+                        progress.short_circuit_reason
+                    )
+            if episode_diagnostic_callback is not None:
+                episode_diagnostic_callback(diagnostic)
+        budget_status = (
+            f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}"
+            if budget_mode == "environment_steps"
+            else (
+                f"steps={progress.environment_steps:,} "
+                f"episodes={progress.completed_episodes}/{episodes}"
+            )
+        )
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "
             f"outcome={outcome} reward={total_reward:.4f} replay={len(replay)} "
@@ -4325,27 +4981,42 @@ def train_agent(
             f"WR={float(terminal_info.get('win_rate', 0.0)):.1%} "
             f"winR={float(terminal_info.get('avg_win_r', 0.0)):+.3f}R "
             f"balance={terminal_pnl:+.2f} "
-            f"avg_balance={cumulative_average_balance:+.2f} "
-            f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}",
+            f"avg_balance={cumulative_average_balance:+.2f} {budget_status}",
             flush=True,
         )
-        if (
+        periodic_checkpoint_due = bool(
             checkpoint_every_episodes
             and (
                 progress.completed_episodes % checkpoint_every_episodes == 0
-                or progress.short_circuit_reason is not None
-                or progress.environment_steps >= minimum_environment_steps
+                or (
+                    budget_mode == "environment_steps"
+                    and progress.environment_steps >= minimum_environment_steps
+                )
+                or (
+                    budget_mode == "episodes"
+                    and progress.completed_episodes >= episodes
+                )
             )
+        )
+        if checkpoint_callback is not None and (
+            periodic_checkpoint_due or progress.short_circuit_reason is not None
         ):
-            assert checkpoint_callback is not None
             checkpoint_callback(progress)
         if (
             progress.short_circuit_reason is not None
-            or progress.environment_steps >= minimum_environment_steps
+            or (
+                budget_mode == "environment_steps"
+                and progress.environment_steps >= minimum_environment_steps
+            )
+            or (
+                budget_mode == "episodes"
+                and progress.completed_episodes >= episodes
+            )
         ):
             break
     if (
         progress.short_circuit_reason is None
+        and budget_mode == "environment_steps"
         and progress.environment_steps < minimum_environment_steps
     ):
         raise RuntimeError(

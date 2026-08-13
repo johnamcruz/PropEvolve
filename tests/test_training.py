@@ -4,6 +4,7 @@ from collections import Counter
 import hashlib
 import json
 from pathlib import Path
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -797,8 +798,9 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
             spec,
             observation_spec,
             seed,
+            episode_coverage=None,
         ):
-            captured.append((spec, observation_spec))
+            captured.append((spec, observation_spec, episode_coverage))
             raise ReachedEnvironment
 
     monkeypatch.setattr(
@@ -864,6 +866,7 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
     assert len(captured) == 1
     assert isinstance(captured[0][0], ChallengeSpec)
     assert captured[0][1] == TradeManagementObservationSpec()
+    assert captured[0][2] is None
 
 
 def test_historical_candidate_runs_the_complete_real_training_flow(
@@ -1008,7 +1011,11 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         },
         "training": {
             "episodes": 2,
-            "minimum_environment_steps": 2,
+            "budget_mode": "episodes",
+            "episode_coverage": {
+                "schema": "full_data_episode_coverage_v1",
+                "episode_budget": 2,
+            },
             "validation_episodes": 1,
             "replay_capacity_episodes": 2,
             "replay_capacity_transitions": 8,
@@ -1040,6 +1047,16 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         == "equal_present_class_mean_v1"
     )
     assert contract["recovery_curriculum"] == config["recovery_curriculum"]
+    coverage_path = tmp_path / "run" / "episode-coverage-receipt.json"
+    assert coverage_path.is_file()
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage["complete"] is True
+    assert coverage["episodes_consumed"] == 2
+    assert coverage["markets"]["NQ"]["coverage_fraction"] == 1.0
+    assert contract["episode_coverage"]["receipt"] == coverage
+    assert contract["episode_coverage"]["file_sha256"] == hashlib.sha256(
+        coverage_path.read_bytes()
+    ).hexdigest()
     assert contract["training_resume_identity"]
     assert set(contract["runtime_source_modules_sha256"]) >= {
         "training.py",
@@ -1123,6 +1140,8 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert evaluation.status in {"PASS", "FAIL", "REVISE"}
     assert set(evaluation.metrics) >= {
         "training.pass_rate",
+        "training.episode_coverage_complete",
+        "training.minimum_market_episode_coverage",
         "selection.pass_rate",
         "selection.blow_rate",
         "selection.pass_minus_blow",
@@ -1179,6 +1198,266 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     assert resumed_contract["validation_diagnostics"]["file_sha256"] == (
         hashlib.sha256(validation_diagnostic_path.read_bytes()).hexdigest()
     )
+
+
+@pytest.mark.parametrize(
+    ("stop_kind", "health_probe_milestone", "minimum_passes"),
+    (
+        ("health", 1, 0),
+        ("outcome", 3, 1),
+        (None, 3, 0),
+    ),
+)
+def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_kind: str | None,
+    health_probe_milestone: int,
+    minimum_passes: int,
+) -> None:
+    class Assets:
+        checkpoint_sha256 = "a" * 64
+
+    class Targets:
+        channels: tuple[str, ...] = ()
+
+        @staticmethod
+        def target(ticker: str, row: int) -> np.ndarray:
+            del ticker, row
+            return np.zeros(len(Targets.channels), dtype=np.float32)
+
+    class TinyEnvironment:
+        observation_dim = 1
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def reset(self, *, options=None):
+            ticker = "NQ" if options is None else options.get("ticker", "NQ")
+            return np.zeros(1, dtype=np.float32), {
+                "ticker": ticker,
+                "start": 0,
+                "end": 1,
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            assert action == Action.WAIT
+            return np.ones(1, dtype=np.float32), 0.0, True, False, {
+                "ticker": "NQ",
+                "outcome": "timeout",
+                "primary_side": "flat",
+                "equity_pnl": 0.0,
+                "valid_actions": (),
+            }
+
+        @staticmethod
+        def rng_state() -> dict[str, object]:
+            return {"state": "tiny"}
+
+    class TinyAgent:
+        recurrent_burn_in = 0
+        n_step_return = 1
+
+        def __init__(self, observation_dim: int, **settings) -> None:
+            assert observation_dim == 1
+            self.entry_action_loss_reduction = settings[
+                "entry_action_loss_reduction"
+            ]
+            self.entry_action_class_weights = (1.0, 1.0, 1.0)
+            self.regime_selectivity_loss_weight = settings[
+                "regime_selectivity_loss_weight"
+            ]
+
+        def select_action(self, observation, **kwargs):
+            del observation, kwargs
+            return Action.WAIT, None, None
+
+        def train_batch(self, sequences, **kwargs) -> float:
+            del sequences, kwargs
+            self.last_train_metrics = {
+                "rl_loss": 0.5,
+                "gradient_norm": 1.0,
+                **{
+                    f"entry_balance_{action}_{field}": value
+                    for action in ("wait", "long", "short")
+                    for field, value in {
+                        "rows": 1.0,
+                        "weighted_mass": 1.0,
+                        "unweighted_ce_sum": 1.0,
+                        "weighted_ce_sum": 1.0,
+                    }.items()
+                },
+            }
+            return 0.5
+
+        @staticmethod
+        def save(path: Path, *, manifest) -> None:
+            del manifest
+            path.write_bytes(b"tiny-health-stop-policy")
+
+        @staticmethod
+        def discard_retention_anchor() -> None:
+            return None
+
+        @staticmethod
+        def discard_teacher() -> None:
+            return None
+
+    recipe_path = Path(__file__).parents[1] / "config" / (
+        "historical_mask_expansion_regime_stage2_v5.json"
+    )
+    config = json.loads(recipe_path.read_text())
+    Targets.channels = tuple(
+        channel
+        for teacher in config["teachers"]
+        for channel in teacher["channels"]
+    )
+    experiment_path = tmp_path / "experiment.json"
+    experiment_path.write_text("{}\n")
+    config.update({
+        "_root": str(tmp_path),
+        "_path": str(experiment_path),
+        "assets": "assets.json",
+        "cache_root": "cache",
+        "output": "run",
+        "tickers": ["NQ"],
+        "deployment_tickers": ["NQ"],
+        "training_only_tickers": [],
+        "recovery_curriculum": None,
+        "entry_supervision": None,
+    })
+    config["temporal"] = {
+        "train_start": "2021-01-01",
+        "train_end": "2025-01-01",
+        "validation_start": "2025-01-01",
+        "validation_end": "2026-01-01",
+        "sealed_start": "2026-01-01",
+    }
+    config["challenge"].update({"episode_days": 1, "bars_per_day": 1})
+    config["agent"].update({"device": "cpu", "hidden_dim": 8, "atoms": 11})
+    config["training"].update({
+        "episodes": 2,
+        "budget_mode": "episodes",
+        "validation_episodes": 1,
+        "replay_capacity_episodes": 4,
+        "replay_capacity_transitions": 8,
+        "sequence_length": 1,
+        "warmup_episodes": 1,
+        "updates_per_episode": 1,
+        "batch_sequences": 1,
+        "recurrent_horizon": 1,
+        "epsilon_start": 0.0,
+        "epsilon_end": 0.0,
+        "management_epsilon_start": 0.0,
+        "management_epsilon_end": 0.0,
+        "checkpoint_every_episodes": 0,
+        "prefetch_batches": 0,
+        "episode_coverage": None,
+        "short_circuit": {
+            "minimum_passes": minimum_passes,
+            "maximum_blow_rate": 1.0,
+            "minimum_completed_episodes": 1,
+            "policy_health": {
+                "schema": "propevolve_training_policy_health_v1",
+                "minimum_completed_episodes": health_probe_milestone,
+                "probe_interval_episodes": health_probe_milestone,
+                "minimum_probe_recall": {
+                    "WAIT": 0.35,
+                    "ENTER_LONG_1": 0.3,
+                    "ENTER_SHORT_1": 0.3,
+                },
+                "entry_mass_fraction": {"minimum": 0.3, "maximum": 0.36},
+                "require_zero_positive_entry_soft_wait_veto": True,
+                "economic_futility": {
+                    "minimum_completed_episodes": 2,
+                    "maximum_near_blow_timeout_rate": 1.0,
+                    "maximum_mean_terminal_pnl": -1_500.0,
+                    "maximum_expectancy_r": -0.15,
+                    "minimum_failed_conditions": 2,
+                },
+            },
+        },
+    })
+    for teacher in config["teachers"]:
+        teacher["cache_root"] = "teacher-cache"
+    for relative in ("cache/NQ", "teacher-cache/NQ"):
+        directory = tmp_path / relative
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "manifest.json").write_text("{}\n")
+
+    import propevolve.agent as agent_module
+    import propevolve.teachers as teachers_module
+    import propevolve.teachers.expansion as expansion_module
+
+    monkeypatch.setattr(agent_module, "RecurrentC51Agent", TinyAgent)
+    monkeypatch.setattr(
+        training_module.AssetContract,
+        "load",
+        classmethod(lambda cls, path: Assets()),
+    )
+    monkeypatch.setattr(
+        training_module,
+        "load_markets",
+        lambda **kwargs: {"NQ": object()},
+    )
+    monkeypatch.setattr(
+        training_module,
+        "assert_temporal_role",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(training_module, "HistoricalChallengeEnv", TinyEnvironment)
+    monkeypatch.setattr(
+        teachers_module,
+        "load_teacher_targets",
+        lambda *args, **kwargs: Targets(),
+    )
+    monkeypatch.setattr(
+        expansion_module,
+        "verify_expansion_entry_center_receipt",
+        lambda *args, **kwargs: None,
+    )
+
+    if stop_kind is None:
+        with pytest.raises(
+            ValueError,
+            match="final Regime probe lacks exact balanced authentic rows",
+        ):
+            HistoricalCandidateRunner().run(
+                config,
+                parent_candidate_ids=(),
+                hypothesis="insufficient non-health probe finalization",
+            )
+        return
+
+    candidate, evaluation = HistoricalCandidateRunner().run(
+        config,
+        parent_candidate_ids=(),
+        hypothesis="insufficient health probe finalization",
+    )
+
+    health_path = tmp_path / "run" / "training-policy-health.jsonl"
+    health = json.loads(health_path.read_text().splitlines()[-1])
+    contract = json.loads((candidate.path / "contract.json").read_text())
+    if stop_kind == "health":
+        assert health["stop"] is True
+        assert health["probe_error"] == (
+            "final Regime probe lacks exact balanced authentic rows"
+        )
+    else:
+        assert health["stop"] is False
+        assert health["probe_error"] is None
+    assert evaluation.status == "FAIL"
+    assert evaluation.metrics["training.short_circuited"] == 1.0
+    assert [stage["name"] for stage in evaluation.stages] == ["training"]
+    assert (tmp_path / "run" / "training-recovery.pt").is_file()
+    assert (tmp_path / "run" / "training-diagnostic-summary.json").is_file()
+    assert contract["training_policy_health"]["file_sha256"] == hashlib.sha256(
+        health_path.read_bytes()
+    ).hexdigest()
+    assert contract["final_regime_probe"] is None
+    assert not any("final_regime_probe" in key for key in evaluation.metrics)
+    assert not (tmp_path / "run" / "final-regime-probe.json").exists()
 
 
 def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) -> None:
@@ -1262,6 +1541,122 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
         in capsys.readouterr().out
     )
+
+
+def test_episode_budget_completes_exact_episode_count_independent_of_step_floor() -> None:
+    class BoundedEnvironment(Environment):
+        def reset(self):
+            observation, info = super().reset()
+            return observation, {**info, "start": 0, "end": 4, "ticker": "NQ"}
+
+    result = train_agent(
+        Agent(),
+        BoundedEnvironment(),
+        episodes=3,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=2,
+            seed=41,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=41,
+    )
+
+    assert result.episodes == 3
+    assert result.environment_steps == 12
+
+
+def test_episode_budget_drives_learning_schedules_by_episode_position() -> None:
+    class RecordingAgent(Agent):
+        def select_action(
+            self,
+            observation,
+            *,
+            hidden,
+            valid_actions,
+            epsilon,
+            return_action_values=False,
+        ):
+            self.epsilons = getattr(self, "epsilons", [])
+            self.epsilons.append(epsilon)
+            return super().select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=valid_actions,
+                epsilon=epsilon,
+                return_action_values=return_action_values,
+            )
+
+    class TwoStepEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 10,
+                "end": 12,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == 2
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.WAIT,),
+                "fill_index": 10 + self.index,
+                "outcome": "timeout" if terminated else None,
+                "ticker": "NQ",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    agent = RecordingAgent()
+    diagnostics = []
+    train_agent(
+        agent,
+        TwoStepEnvironment(),
+        episodes=2,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=1,
+            seed=43,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=1.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=43,
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=1.0,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert agent.epsilons == pytest.approx([1.0, 0.75, 0.5, 0.25])
+    assert agent.teacher_weight_scales == pytest.approx([0.5, 0.0])
+    assert agent.entry_action_weight_scales == pytest.approx([0.5, 0.0])
+    assert [row["teacher_schedule_progress"] for row in diagnostics] == [0.5, 1.0]
+    assert [
+        row["teacher_guidance_dropout_probability"] for row in diagnostics
+    ] == pytest.approx([0.25, 0.75])
 
 
 def test_training_deterministically_mixes_complete_recovery_starts_and_keeps_short_traces() -> None:
@@ -2242,6 +2637,106 @@ def test_training_short_circuits_only_when_blow_rate_exceeds_ceiling() -> None:
     assert result.short_circuit_reason == "blow rate 0.500000 > 0.100000"
 
 
+def test_episode_budget_activates_safety_short_circuit_at_completed_episode_boundary(
+) -> None:
+    class BlowEnvironment:
+        def reset(self):
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 0,
+                "end": 1,
+            }
+
+        def step(self, action):
+            return np.array([1.0], np.float32), -1.0, True, False, {
+                "valid_actions": (),
+                "fill_index": 1,
+                "outcome": "blow",
+                "ticker": "NQ",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": -3_000.0,
+            }
+
+    result = train_agent(
+        Agent(),
+        BlowEnvironment(),
+        episodes=5,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=8,
+            sequence_length=1,
+            seed=47,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=47,
+        short_circuit_minimum_episodes=3,
+        short_circuit_minimum_passes=1,
+        short_circuit_maximum_blow_rate=0.1,
+    )
+
+    assert result.episodes == 3
+    assert result.blows == 3
+    assert result.short_circuit_reason == (
+        "passes 0 < 1; blow rate 1.000000 > 0.100000"
+    )
+
+
+def test_training_health_callback_short_circuits_and_checkpoints_episode_boundary(
+) -> None:
+    class BoundedEnvironment(Environment):
+        def reset(self):
+            observation, info = super().reset()
+            return observation, {**info, "ticker": "NQ", "start": 0, "end": 4}
+
+    observed = []
+    checkpoints = []
+
+    def health(progress, diagnostic):
+        observed.append((progress.completed_episodes, diagnostic["outcome"]))
+        return "policy health: entry collapse" if progress.completed_episodes == 2 else None
+
+    result = train_agent(
+        Agent(),
+        BoundedEnvironment(),
+        episodes=5,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=8,
+            sequence_length=2,
+            seed=53,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=53,
+        checkpoint_every_episodes=0,
+        checkpoint_callback=checkpoints.append,
+        training_health_callback=health,
+    )
+
+    assert observed == [(1, "pass"), (2, "pass")]
+    assert result.episodes == 2
+    assert result.short_circuit_reason == "policy health: entry collapse"
+    assert checkpoints[-1].completed_episodes == 2
+    assert checkpoints[-1].short_circuit_reason == "policy health: entry collapse"
+
+
 def test_training_waits_for_the_evidence_boundary_before_collapse_detection() -> None:
     class CollapseEnvironment:
         def __init__(self) -> None:
@@ -2299,6 +2794,71 @@ def test_training_waits_for_the_evidence_boundary_before_collapse_detection() ->
 
     assert result.episodes == 10
     assert result.short_circuited is True
+    assert result.short_circuit_reason == (
+        "policy collapse: prior passes 1; recent passes 0/2; "
+        "recent average hold 1.500000 <= 4.000000; "
+        "recent voluntary-close rate 0.900000 >= 0.800000"
+    )
+
+
+def test_episode_budget_activates_rapid_close_collapse_at_episode_boundary() -> None:
+    class CollapseEnvironment:
+        def __init__(self) -> None:
+            self.episode = 0
+
+        def reset(self):
+            self.episode += 1
+            return np.array([0.0], np.float32), {
+                "ticker": "NQ",
+                "start": 0,
+                "end": 1,
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            passed = self.episode == 1
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "fill_index": 1,
+                "ticker": "NQ",
+                "primary_side": "long",
+                "outcome": "pass" if passed else "timeout",
+                "trade_count": 10,
+                "win_count": 4,
+                "winning_r_sum": 2.0,
+                "equity_pnl": 6_000.0 if passed else -1_000.0,
+                "avg_hold_bars": 1.5,
+                "voluntary_close_count": 9,
+            }
+
+    result = train_agent(
+        Agent(),
+        CollapseEnvironment(),
+        episodes=8,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=8,
+            sequence_length=1,
+            seed=61,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=61,
+        short_circuit_minimum_episodes=4,
+        collapse_window_episodes=2,
+        collapse_minimum_prior_passes=1,
+        collapse_maximum_recent_passes=0,
+        collapse_maximum_average_hold_bars=4.0,
+        collapse_minimum_voluntary_close_rate=0.8,
+    )
+
+    assert result.episodes == 4
     assert result.short_circuit_reason == (
         "policy collapse: prior passes 1; recent passes 0/2; "
         "recent average hold 1.500000 <= 4.000000; "
@@ -2368,6 +2928,543 @@ def test_retained_pass_checkpoints_are_immutable_per_episode(tmp_path: Path) -> 
         "episode-000009-ZB.pt",
     ]
     assert json.loads(alias.read_text())["retention_evidence"]["episode"] == 9
+
+
+def test_recovery_reconciles_retained_passes_to_durable_episode(
+    tmp_path: Path,
+) -> None:
+    class SavingAgent:
+        def save(self, path, *, manifest):
+            Path(path).write_text(json.dumps(manifest, sort_keys=True))
+
+    alias = tmp_path / "retained-pass-policy.pt"
+    agent = SavingAgent()
+    for episode, ticker in ((3, "SI"), (7, "CL")):
+        training_module._save_retained_policy(
+            agent,
+            alias,
+            resume_identity="recipe-1",
+            evidence={
+                "episode": episode,
+                "ticker": ticker,
+                "outcome": "pass",
+                "terminal_pnl": 6_000.0,
+            },
+        )
+
+    training_module._reconcile_retained_pass_policies(
+        alias,
+        resume_identity="recipe-1",
+        completed_episodes=5,
+        manifest_loader=lambda path: json.loads(path.read_text()),
+    )
+
+    retained = sorted((tmp_path / "retained-pass-policies").glob("*.pt"))
+    assert [path.name for path in retained] == ["episode-000003-SI.pt"]
+    assert json.loads(alias.read_text())["retention_evidence"]["episode"] == 3
+    partial = sorted(
+        (tmp_path / "retained-pass-policies" / "partial").glob("*.pt")
+    )
+    assert len(partial) == 2
+    assert any("episode-000007-CL" in path.name for path in partial)
+    assert any("latest-alias" in path.name for path in partial)
+
+    # Episode seven is replayed after recovery and can create fresh evidence.
+    training_module._save_retained_policy(
+        agent,
+        alias,
+        resume_identity="recipe-1",
+        evidence={
+            "episode": 7,
+            "ticker": "CL",
+            "outcome": "pass",
+            "terminal_pnl": 6_000.0,
+        },
+    )
+    assert json.loads(alias.read_text())["retention_evidence"]["episode"] == 7
+
+
+def test_historical_candidate_recovery_reconciles_the_same_replayed_pass_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second crash in one checkpoint interval remains exactly resumable."""
+
+    class DurableRecoveryReached(RuntimeError):
+        pass
+
+    class LoadedAgent:
+        entry_action_class_weights = (1.0, 1.0, 1.0)
+
+    class LoadingAgent:
+        @classmethod
+        def load(cls, path, *, device):
+            del device
+            path = Path(path)
+            if path.name == "training-recovery.pt":
+                return LoadedAgent(), {
+                    "resume_identity": "recipe-1",
+                    "progress": {"completed_episodes": 5},
+                    "environment_rng_state": {},
+                    "replay_state": {},
+                    "replay_restored": True,
+                    "policy_health_probe_corpus": None,
+                }
+            return LoadedAgent(), json.loads(path.read_text())
+
+    class RecoveringEnvironment:
+        observation_dim = 1
+
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def restore_rng_state(self, state):
+            del state
+            raise DurableRecoveryReached
+
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "training-recovery.pt").write_bytes(b"durable recovery")
+    (output / "training-diagnostics.jsonl").write_text("".join(
+        json.dumps({"episode": episode}) + "\n" for episode in range(1, 6)
+    ))
+    archive = output / "retained-pass-policies"
+    partial = archive / "partial"
+    partial.mkdir(parents=True)
+    replayed = archive / "episode-000007-CL.pt"
+    alias = output / "retained-pass-policy.pt"
+    manifest = {
+        "resume_identity": "recipe-1",
+        "retention_evidence": {
+            "episode": 7,
+            "ticker": "CL",
+            "outcome": "pass",
+            "terminal_pnl": 6_000.0,
+        },
+    }
+    replayed.write_text(json.dumps(manifest, sort_keys=True))
+    alias.write_bytes(replayed.read_bytes())
+    replayed_sha256 = hashlib.sha256(replayed.read_bytes()).hexdigest()
+    for label in ("episode-000007-CL", "latest-alias"):
+        (partial / (
+            f"{label}.after-episode-000005.{replayed_sha256}.pt"
+        )).write_bytes(replayed.read_bytes())
+
+    import propevolve.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "RecurrentC51Agent", LoadingAgent)
+    monkeypatch.setattr(
+        training_module.AssetContract,
+        "load",
+        classmethod(lambda cls, path: object()),
+    )
+    monkeypatch.setattr(
+        training_module,
+        "load_markets",
+        lambda **kwargs: {"NQ": object()},
+    )
+    monkeypatch.setattr(training_module, "assert_temporal_role", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        training_module,
+        "HistoricalChallengeEnv",
+        RecoveringEnvironment,
+    )
+    monkeypatch.setattr(
+        training_module,
+        "_training_resume_identity",
+        lambda *args, **kwargs: "recipe-1",
+    )
+    config = {
+        "_root": str(tmp_path),
+        "assets": "assets.json",
+        "cache_root": "cache",
+        "output": str(output),
+        "tickers": ("NQ",),
+        "deployment_tickers": ("NQ",),
+        "training_only_tickers": (),
+        "timeframe_minutes": 3,
+        "temporal": {
+            "train_start": "2021-01-01",
+            "train_end": "2025-01-01",
+            "validation_start": "2025-01-01",
+            "validation_end": "2026-01-01",
+            "sealed_start": "2026-01-01",
+        },
+        "challenge": {
+            "profit_target": 6_000.0,
+            "max_loss": 3_000.0,
+            "episode_days": 1,
+            "bars_per_day": 2,
+            "max_position_size": 1,
+            "minimum_mll_headroom": 500.0,
+            "trailing_mll_lock": True,
+            "terminal_pass_reward": 250.0,
+            "terminal_blow_reward": -1_500.0,
+            "terminal_timeout_reward": -2.0,
+            "terminal_pass_speed_reward_per_day": 20.0,
+            "reward_scale": 1_000.0,
+        },
+        "point_values": {"NQ": 20.0},
+        "round_trip_fees": {"NQ": 3.84},
+        "agent": {"device": "cpu"},
+        "training": {"seed": 7},
+    }
+
+    with pytest.raises(DurableRecoveryReached):
+        HistoricalCandidateRunner().run(
+            config,
+            parent_candidate_ids=(),
+            hypothesis="twice-crashed retained pass recovery",
+        )
+
+    assert not replayed.exists()
+    assert not alias.exists()
+
+
+class _ResumeEvidenceBoundaryReached(RuntimeError):
+    pass
+
+
+def _run_to_resume_evidence_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    diagnostic_episodes: tuple[int, ...] | None,
+    policy_health_episodes: tuple[int, ...] | None,
+    policy_health_enabled: bool,
+    diagnostic_partial_tail: str | None = None,
+) -> Path:
+    class LoadedAgent:
+        pass
+
+    class LoadingAgent:
+        @classmethod
+        def load(cls, path, *, device):
+            del path, device
+            return LoadedAgent(), {
+                "resume_identity": "recipe-1",
+                "progress": {"completed_episodes": 5},
+                "environment_rng_state": {},
+                "replay_state": {},
+                "replay_restored": True,
+                "policy_health_probe_corpus": None,
+            }
+
+    class RecoveringEnvironment:
+        observation_dim = 1
+
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def restore_rng_state(self, state):
+            del state
+            raise _ResumeEvidenceBoundaryReached
+
+    class Challenge:
+        max_loss = 3_000.0
+
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "training-recovery.pt").write_bytes(b"durable recovery")
+    streams = (
+        ("training-diagnostics.jsonl", "episode", diagnostic_episodes),
+        (
+            "training-policy-health.jsonl",
+            "completed_episodes",
+            policy_health_episodes,
+        ),
+    )
+    for name, field, episodes in streams:
+        if episodes is not None:
+            (output / name).write_text("".join(
+                json.dumps({field: episode}) + "\n" for episode in episodes
+            ))
+    if diagnostic_partial_tail is not None:
+        with (output / "training-diagnostics.jsonl").open("a") as stream:
+            stream.write(diagnostic_partial_tail)
+
+    import propevolve.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "RecurrentC51Agent", LoadingAgent)
+    monkeypatch.setattr(
+        training_module.AssetContract,
+        "load",
+        classmethod(lambda cls, path: object()),
+    )
+    monkeypatch.setattr(training_module, "ChallengeSpec", lambda **kwargs: Challenge())
+    monkeypatch.setattr(
+        training_module, "load_markets", lambda **kwargs: {"NQ": object()}
+    )
+    monkeypatch.setattr(
+        training_module, "assert_temporal_role", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        training_module, "HistoricalChallengeEnv", RecoveringEnvironment
+    )
+    monkeypatch.setattr(
+        training_module,
+        "_training_resume_identity",
+        lambda *args, **kwargs: "recipe-1",
+    )
+    training = {"seed": 7}
+    if policy_health_enabled:
+        training["short_circuit"] = {"policy_health": {}}
+    config = {
+        "_root": str(tmp_path),
+        "assets": "assets.json",
+        "cache_root": "cache",
+        "output": str(output),
+        "tickers": ("NQ",),
+        "deployment_tickers": ("NQ",),
+        "training_only_tickers": (),
+        "timeframe_minutes": 3,
+        "temporal": {
+            "train_start": "2021-01-01",
+            "train_end": "2025-01-01",
+            "validation_start": "2025-01-01",
+            "validation_end": "2026-01-01",
+            "sealed_start": "2026-01-01",
+        },
+        "challenge": {},
+        "point_values": {"NQ": 20.0},
+        "round_trip_fees": {"NQ": 3.84},
+        "agent": {"device": "cpu"},
+        "training": training,
+    }
+    HistoricalCandidateRunner().run(
+        config,
+        parent_candidate_ids=(),
+        hypothesis="durable resume evidence reconciliation",
+    )
+    return output
+
+
+@pytest.mark.parametrize(
+    ("stream", "episodes"),
+    (
+        ("diagnostics", None),
+        ("diagnostics", (1, 2, 3, 4)),
+        ("diagnostics", (1, 2, 2, 3, 4, 5)),
+        ("diagnostics", (1, 2, 4, 5)),
+        ("policy_health", None),
+        ("policy_health", (1, 2, 3, 4)),
+        ("policy_health", (1, 2, 2, 3, 4, 5)),
+        ("policy_health", (1, 2, 4, 5)),
+    ),
+)
+def test_historical_candidate_resume_rejects_incomplete_episode_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: str,
+    episodes: tuple[int, ...] | None,
+) -> None:
+    diagnostics = (1, 2, 3, 4, 5)
+    health = None
+    if stream == "diagnostics":
+        diagnostics = episodes
+    else:
+        health = episodes
+    with pytest.raises(ValueError, match="episode evidence"):
+        _run_to_resume_evidence_boundary(
+            tmp_path,
+            monkeypatch,
+            diagnostic_episodes=diagnostics,
+            policy_health_episodes=health,
+            policy_health_enabled=stream == "policy_health",
+        )
+
+
+@pytest.mark.parametrize("policy_health_enabled", (False, True))
+def test_historical_candidate_resume_truncates_only_future_episode_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_health_enabled: bool,
+) -> None:
+    health = (1, 2, 3, 4, 5, 6, 7) if policy_health_enabled else None
+    with pytest.raises(_ResumeEvidenceBoundaryReached):
+        _run_to_resume_evidence_boundary(
+            tmp_path,
+            monkeypatch,
+            diagnostic_episodes=(1, 2, 3, 4, 5, 6, 7),
+            policy_health_episodes=health,
+            policy_health_enabled=policy_health_enabled,
+        )
+    output = tmp_path / "run"
+    assert [json.loads(line)["episode"] for line in (
+        output / "training-diagnostics.jsonl"
+    ).read_text().splitlines()] == [1, 2, 3, 4, 5]
+    health_path = output / "training-policy-health.jsonl"
+    if policy_health_enabled:
+        assert [json.loads(line)["completed_episodes"] for line in (
+            health_path.read_text().splitlines()
+        )] == [1, 2, 3, 4, 5]
+    else:
+        assert not health_path.exists()
+
+
+def test_historical_candidate_resume_drops_partial_final_future_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(_ResumeEvidenceBoundaryReached):
+        _run_to_resume_evidence_boundary(
+            tmp_path,
+            monkeypatch,
+            diagnostic_episodes=(1, 2, 3, 4, 5),
+            policy_health_episodes=None,
+            policy_health_enabled=False,
+            diagnostic_partial_tail='{"episode":',
+        )
+    rows = (tmp_path / "run" / "training-diagnostics.jsonl").read_text()
+    assert [json.loads(line)["episode"] for line in rows.splitlines()] == [
+        1, 2, 3, 4, 5,
+    ]
+    assert rows.endswith("\n")
+
+
+def test_historical_candidate_resume_rejects_partial_durable_episode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="episode evidence stream is malformed"):
+        _run_to_resume_evidence_boundary(
+            tmp_path,
+            monkeypatch,
+            diagnostic_episodes=(1, 2, 3, 4),
+            policy_health_episodes=None,
+            policy_health_enabled=False,
+            diagnostic_partial_tail='{"episode":',
+        )
+
+
+def test_recovery_rejects_conflicting_replayed_pass_partial_evidence(
+    tmp_path: Path,
+) -> None:
+    class SavingAgent:
+        def save(self, path, *, manifest):
+            Path(path).write_text(json.dumps(manifest, sort_keys=True))
+
+    alias = tmp_path / "retained-pass-policy.pt"
+    training_module._save_retained_policy(
+        SavingAgent(),
+        alias,
+        resume_identity="recipe-1",
+        evidence={
+            "episode": 7,
+            "ticker": "CL",
+            "outcome": "pass",
+            "terminal_pnl": 6_000.0,
+        },
+    )
+    replayed = tmp_path / "retained-pass-policies" / "episode-000007-CL.pt"
+    replayed_sha256 = hashlib.sha256(replayed.read_bytes()).hexdigest()
+    partial = replayed.parent / "partial"
+    partial.mkdir()
+    (partial / (
+        "episode-000007-CL.after-episode-000005."
+        f"{replayed_sha256}.pt"
+    )).write_bytes(b"conflicting forensic evidence")
+
+    with pytest.raises(ValueError, match="partial evidence drifted"):
+        training_module._reconcile_retained_pass_policies(
+            alias,
+            resume_identity="recipe-1",
+            completed_episodes=5,
+            manifest_loader=lambda path: json.loads(path.read_text()),
+        )
+
+    assert replayed.is_file()
+    assert alias.is_file()
+
+
+def test_recovery_reconciles_health_probe_to_durable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "training-policy-health-probe.pkl"
+
+    def write_probe(episode: int) -> str:
+        with probe.open("wb") as stream:
+            pickle.dump({
+                "schema": "propevolve_training_policy_health_probe_corpus_v1",
+                "resume_identity": "recipe-1",
+                "completed_episodes": episode,
+                "samples": ("fixed-row",),
+            }, stream)
+        return hashlib.sha256(probe.read_bytes()).hexdigest()
+
+    abandoned_sha256 = write_probe(45)
+    training_module._reconcile_policy_health_probe_corpus(
+        probe,
+        resume_identity="recipe-1",
+        completed_episodes=40,
+        checkpoint_contract=None,
+    )
+
+    assert not probe.exists()
+    partial = tmp_path / (
+        "training-policy-health-probe.partial-episode-000045-"
+        f"{abandoned_sha256}.pkl"
+    )
+    assert partial.is_file()
+
+    durable_sha256 = write_probe(45)
+    training_module._reconcile_policy_health_probe_corpus(
+        probe,
+        resume_identity="recipe-1",
+        completed_episodes=45,
+        checkpoint_contract={
+            "completed_episodes": 45,
+            "file_sha256": durable_sha256,
+        },
+    )
+    assert probe.is_file()
+
+    with pytest.raises(ValueError, match="checkpoint identity drifted"):
+        training_module._reconcile_policy_health_probe_corpus(
+            probe,
+            resume_identity="recipe-1",
+            completed_episodes=45,
+            checkpoint_contract={
+                "completed_episodes": 45,
+                "file_sha256": "0" * 64,
+            },
+        )
+
+
+def test_recovery_checkpoint_authenticates_fixed_health_probe(
+    tmp_path: Path,
+) -> None:
+    class SavingAgent:
+        manifest = None
+
+        def save(self, path, *, manifest):
+            self.manifest = manifest
+            Path(path).write_bytes(b"checkpoint")
+
+    probe = tmp_path / "training-policy-health-probe.pkl"
+    with probe.open("wb") as stream:
+        pickle.dump({
+            "schema": "propevolve_training_policy_health_probe_corpus_v1",
+            "resume_identity": "recipe-1",
+            "completed_episodes": 45,
+            "samples": ("fixed-row",),
+        }, stream)
+    agent = SavingAgent()
+
+    training_module._save_training_recovery(
+        agent,
+        tmp_path / "training-recovery.pt",
+        resume_identity="recipe-1",
+        progress=TrainingProgress(completed_episodes=45),
+        environment_rng_state={},
+        replay_state={},
+        policy_health_probe_path=probe,
+    )
+
+    assert agent.manifest["policy_health_probe_corpus"] == {
+        "completed_episodes": 45,
+        "file_sha256": hashlib.sha256(probe.read_bytes()).hexdigest(),
+    }
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:
@@ -2488,6 +3585,83 @@ def test_training_resumes_from_an_episode_boundary() -> None:
     assert resumed.episodes == 2
     assert resumed.environment_steps == 8
     assert resumed.passes == 2
+
+
+def test_episode_budget_resume_does_not_repeat_completed_episodes() -> None:
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    class BoundedEnvironment(Environment):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reset_count = 0
+
+        def reset(self):
+            self.reset_count += 1
+            observation, info = super().reset()
+            return observation, {**info, "ticker": "NQ", "start": 0, "end": 4}
+
+    checkpoints: list[TrainingProgress] = []
+    first_environment = BoundedEnvironment()
+
+    def interrupt_after_second_episode(progress):
+        checkpoints.append(progress)
+        if progress.completed_episodes == 2:
+            raise SimulatedCrash
+
+    with pytest.raises(SimulatedCrash):
+        train_agent(
+            Agent(),
+            first_environment,
+            episodes=4,
+            minimum_environment_steps=1,
+            budget_mode="episodes",
+            replay=BalancedSequenceReplay(
+                capacity_episodes=8,
+                capacity_transitions=32,
+                sequence_length=2,
+                seed=59,
+            ),
+            warmup_episodes=1,
+            updates_per_episode=1,
+            batch_sequences=1,
+            recurrent_horizon=2,
+            epsilon_start=0.25,
+            epsilon_end=0.02,
+            episode_tickers=None,
+            ticker_seed=59,
+            checkpoint_every_episodes=1,
+            checkpoint_callback=interrupt_after_second_episode,
+        )
+
+    resumed_environment = BoundedEnvironment()
+    resumed = train_agent(
+        Agent(),
+        resumed_environment,
+        episodes=4,
+        minimum_environment_steps=1,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=8,
+            capacity_transitions=32,
+            sequence_length=2,
+            seed=59,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.25,
+        epsilon_end=0.02,
+        episode_tickers=None,
+        ticker_seed=59,
+        resume=checkpoints[-1],
+    )
+
+    assert first_environment.reset_count == 2
+    assert resumed.episodes == 4
+    assert resumed.environment_steps == 16
+    assert resumed_environment.reset_count == 2
 
 
 def test_training_never_clears_a_resumed_terminal_collapse() -> None:
