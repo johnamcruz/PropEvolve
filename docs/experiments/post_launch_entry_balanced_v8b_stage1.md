@@ -2,18 +2,22 @@
 
 ## Status
 
-`post-launch-entry-balanced-v8b-r1` is an active research run. This record
-freezes the evidence observed through teacher-free chronological selection
-episode 171 of 200. It is not a final selection decision, sealed confirmation,
-or production promotion.
+`post-launch-entry-balanced-v8b-r1` is the completed Stage 1 research baseline.
+This record includes an interim evidence snapshot; the immutable selected
+candidate and evaluation below are the authoritative parent lineage. It is not
+a sealed confirmation or production promotion.
 
-The exact training recovery checkpoint is:
+The exact promoted model is:
 
-`runs/historical_mask_expansion_regime_post_launch_entry_balanced_v8b/campaign-runs/post-launch-entry-balanced-v8b-r1/safety_foundation_1m/attempt-2/training-recovery.pt`
+`runs/historical_mask_expansion_regime_post_launch_entry_balanced_v8b/archive/candidates/1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0/model.pt`
 
-The frozen recipe is:
+Its selected evaluation is:
 
-`config/historical_mask_expansion_regime_post_launch_entry_balanced_v8b.json`
+`runs/historical_mask_expansion_regime_post_launch_entry_balanced_v8b/archive/evaluations/c49852955655b705e376e057dfe2bf58784481175363b970bab063d8c42f981b.json`
+
+The frozen recipe is preserved inside the selected candidate's immutable
+archive contract. Its superseded top-level copy was removed after Stage 2 v4
+bound the exact candidate, evaluation, and model hashes.
 
 The implementation was committed as `c7794e4` (`Balance post-launch entry
 supervision`) after 279 tests passed.

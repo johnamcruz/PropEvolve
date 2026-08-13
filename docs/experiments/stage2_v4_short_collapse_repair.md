@@ -303,10 +303,14 @@ config validation, exact-parent preflight, and MPS behavior test pass:
   --run-id stage2-v4
 ```
 
-Expected durable artifacts:
+Durable artifacts present while training is active:
 
 - `runs/historical_mask_expansion_regime_stage2_v4/ml-loop-state/stage2-v4/state.json`
 - `runs/historical_mask_expansion_regime_stage2_v4/campaign-runs/stage2-v4/persistent_chop_negative_500k/attempt-1/training-diagnostics.jsonl`
+
+Artifacts expected only after their corresponding training or validation
+boundary completes:
+
 - `runs/historical_mask_expansion_regime_stage2_v4/campaign-runs/stage2-v4/persistent_chop_negative_500k/attempt-1/training-diagnostic-summary.json`
 - `runs/historical_mask_expansion_regime_stage2_v4/campaign-runs/stage2-v4/persistent_chop_negative_500k/attempt-1/final-regime-probe.json`
 - `runs/historical_mask_expansion_regime_stage2_v4/campaign-runs/stage2-v4/persistent_chop_negative_500k/attempt-1/validation-diagnostics.jsonl`

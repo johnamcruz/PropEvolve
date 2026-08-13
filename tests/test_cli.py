@@ -34,16 +34,27 @@ def test_setup_assets_command_creates_links_without_copying(tmp_path: Path) -> N
 
 
 def test_validate_config_command_accepts_promoted_recipe() -> None:
-    assert main(["validate-config", "--config", "config/historical_mask_v1.json"]) == 0
+    assert main([
+        "validate-config", "--config",
+        "config/historical_mask_expansion_regime_stage2_v4.json",
+    ]) == 0
 
 
 def test_evolve_status_reads_durable_state_without_running_training(
     tmp_path: Path,
     capsys,
 ) -> None:
-    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_stage2_v4.json"
+    ).read_text())
     payload["campaign"]["state_root"] = "runs/status-test/ml-loop-state"
     config_path = tmp_path / "experiment.json"
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
     config_path.write_text(json.dumps(payload))
     store = JsonRunStore(tmp_path / "runs/status-test/ml-loop-state")
     store.save(RunState("status-run", "plan", Phase.NEEDS_REASONING))
@@ -76,12 +87,16 @@ def test_evolve_command_dispatches_the_shared_training_loop(
 
     code = main([
         "evolve",
-        "--config", "config/historical_mask_v1.json",
+        "--config", "config/historical_mask_expansion_regime_stage2_v4.json",
         "--run-id", "fake-e2e",
     ])
 
     assert code == 0
-    assert calls == [("config/historical_mask_v1.json", "fake-e2e", False)]
+    assert calls == [(
+        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "fake-e2e",
+        False,
+    )]
     assert json.loads(capsys.readouterr().out)["phase"] == "COMPLETE"
 
 
@@ -102,11 +117,15 @@ def test_evolve_command_can_recover_the_last_reasoning_checkpoint(
 
     assert main([
         "evolve",
-        "--config", "config/historical_mask_v1.json",
+        "--config", "config/historical_mask_expansion_regime_stage2_v4.json",
         "--run-id", "recover-e2e",
         "--recover-reasoning",
     ]) == 0
-    assert calls == [("config/historical_mask_v1.json", "recover-e2e", True)]
+    assert calls == [(
+        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "recover-e2e",
+        True,
+    )]
 
 
 def test_expansion_teacher_cache_command_dispatches_requested_tickers(

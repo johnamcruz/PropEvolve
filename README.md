@@ -107,7 +107,7 @@ before changing a training recipe:
 
 ```bash
 propevolve benchmark-runtime \
-  --config config/historical_mask_expansion_regime_curriculum_v8.json \
+  --config config/historical_mask_expansion_regime_stage2_v4.json \
   --warmup-updates 5 \
   --measured-updates 20 \
   --output runs/runtime-benchmark.json
@@ -237,7 +237,7 @@ stride, temporal boundary, and all other recipe fields unchanged. Then
 validate the recipe and build one market as a quick integrity check:
 
 ```bash
-cp config/historical_mask_expansion_entry_search_curriculum_v7.json \
+cp config/historical_mask_expansion_regime_stage2_v4.json \
   config/local-experiment.json
 # Edit config/local-experiment.json: set cache.format to "native".
 
@@ -274,9 +274,9 @@ Keep `cache.format` as `ffm_frozen_representation_v2`, validate, and import:
 
 ```bash
 propevolve validate-config \
-  --config config/historical_mask_expansion_entry_search_curriculum_v7.json
+  --config config/historical_mask_expansion_regime_stage2_v4.json
 propevolve build-cache \
-  --config config/historical_mask_expansion_entry_search_curriculum_v7.json
+  --config config/historical_mask_expansion_regime_stage2_v4.json
 ```
 
 This path authenticates the FFM checkpoint, source rows, row map, embedding
@@ -302,12 +302,12 @@ propevolve build-expansion-teacher-cache \
   --config config/expansion_teacher_cache_v1.json
 ```
 
-Then start or resume the complete reasoning-guided curriculum:
+Then start or resume the current frozen Stage 2 campaign:
 
 ```bash
 propevolve evolve \
-  --config config/historical_mask_expansion_entry_search_curriculum_v7.json \
-  --run-id expansion-entry-curriculum-v7r1
+  --config config/historical_mask_expansion_regime_stage2_v4.json \
+  --run-id stage2-v4
 ```
 
 The development recipe trains on 2021–2024 and uses 2025 for selection. After
@@ -365,16 +365,16 @@ append-only receipt. Start or interruption-safely resume a campaign with:
 
 ```bash
 propevolve evolve \
-  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
-  --run-id expansion-curriculum-v6r1
+  --config config/historical_mask_expansion_regime_stage2_v4.json \
+  --run-id stage2-v4
 ```
 
 Inspect durable state without launching work with:
 
 ```bash
 propevolve evolve-status \
-  --config config/historical_mask_expansion_teacher_curriculum_v6.json \
-  --run-id expansion-curriculum-v6r1
+  --config config/historical_mask_expansion_regime_stage2_v4.json \
+  --run-id stage2-v4
 ```
 
 Reasoning remains the campaign controller. The shared loop's optional

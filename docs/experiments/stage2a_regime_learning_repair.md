@@ -2,15 +2,13 @@
 
 ## Status
 
-This is a frozen two-screen research contract. It is ready to run but has not
-produced evidence. Nothing in this document is a promotion claim.
+This is an archived research record. Its superseded root recipe was removed
+after Stage 2 v4 became the only active experiment recipe. Nothing in this
+document is a promotion claim.
 
-The runnable recipe is:
-
-`config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json`
-
-It has a new output root and campaign-state root. It cannot resume the failed
-Stage 2 campaign or inherit one of its candidates.
+The exact historical recipe remains recoverable from Git history, while this
+document preserves its research contract and failed-boundary summary. It is
+not runnable from `config/`; active work uses Stage 2 v4.
 
 ## Failed boundary
 
@@ -172,12 +170,8 @@ does not produce the declared near-blow improvement while retaining Stage 1
 economics. Deficit recovery, Trend, Pivot, sizing, and reward changes are out of
 scope for this campaign.
 
-## Launch after review
+## Archived launch
 
-Use a new run identifier; do not reuse a failed Stage 2 run ID:
-
-```bash
-propevolve evolve \
-  --config config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json \
-  --run-id stage2a-regime-learning-repair-v1
-```
+Do not relaunch this superseded experiment. Its recipe is recoverable from Git
+history and this document retains its evidence summary; active work uses Stage
+2 v4.

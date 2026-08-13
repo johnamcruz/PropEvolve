@@ -26,23 +26,68 @@ from propevolve.orchestration import (
 )
 
 
-def test_entry_balance_repair_matches_authenticated_stage1_causal_recipe() -> None:
-    """The committed launch recipe must preflight its actual Stage 1 parent."""
-    from propevolve.config import load_experiment_config
+_V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
+_ENTRY_CENTER_RECEIPT = Path(
+    "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+)
+_GENERIC_REVISION_PATHS = (
+    "agent.hidden_dim",
+    "challenge.mll_proximity_penalty_coefficient",
+    "training.terminal_sequence_fraction",
+)
 
-    config = load_experiment_config(
-        "config/historical_mask_expansion_regime_"
-        "stage2a_entry_balance_repair_v1.json"
-    )
-    base_parent = config["evolution"]["base_parent"]
-    parent = SimpleNamespace(path=(
-        Path(config["_root"])
-        / base_parent["archive_root"]
-        / "candidates"
-        / base_parent["candidate_id"]
-    ))
 
-    _assert_parent_causal_contract(parent, config)
+def _generic_v4_payload() -> dict:
+    """Derive a revisable orchestration fixture from the retained v4 recipe."""
+    payload = json.loads(_V4_CONFIG.read_text())
+    challenge_frozen_paths = [
+        f"challenge.{field}"
+        for field in payload["challenge"]
+        if f"challenge.{field}" not in _GENERIC_REVISION_PATHS
+    ]
+    payload["evolution"] = {
+        "hypothesis": "A bounded challenger can improve matched OOS economics.",
+        "parent_candidate_ids": [],
+        "allowed_revision_paths": list(_GENERIC_REVISION_PATHS),
+        "frozen_paths": [
+            path
+            for path in payload["evolution"]["frozen_paths"]
+            if path != "challenge" and path not in _GENERIC_REVISION_PATHS
+        ] + challenge_frozen_paths,
+        "revision_bounds": {
+            "agent.hidden_dim": {"minimum": 64, "maximum": 512},
+            "challenge.mll_proximity_penalty_coefficient": {
+                "minimum": 0,
+                "maximum": 0.01,
+            },
+            "training.terminal_sequence_fraction": {
+                "minimum": 0,
+                "maximum": 1,
+            },
+        },
+    }
+    requirements = [{
+        "metric": "selection.pass_minus_blow",
+        "operator": ">",
+        "value": 0,
+    }]
+    payload["campaign"]["max_revisions_per_stage"] = 24
+    payload["campaign"]["budget_stages"] = [{
+        "name": "historical_candidate",
+        "minimum_environment_steps": payload["training"][
+            "minimum_environment_steps"
+        ],
+        "selection_requirements": requirements,
+    }]
+    payload["campaign"]["selection_requirements"] = requirements
+    payload["campaign"]["reasoning"]["proposer"] = "standard"
+    return payload
+
+
+def _write_entry_center_receipt(root: Path) -> None:
+    destination = root / "config" / "receipts" / _ENTRY_CENTER_RECEIPT.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(_ENTRY_CENTER_RECEIPT.read_bytes())
 
 
 def test_stage2_v4_matches_authenticated_stage1_causal_recipe() -> None:
@@ -86,21 +131,17 @@ def test_stage2_v4_plan_enforces_the_near_blow_improvement_gate() -> None:
         ("loss_weight", 0.49),
         ("q_temperature", 1.7),
         ("formula", "changed-formula"),
-        ("semantics", "persistent_chop_negative_weight_v1"),
-        ("persistent_chop_negative_emphasis", 1.0),
+        ("semantics", "static_state_v1"),
+        ("persistent_chop_negative_emphasis", 0.5),
     ),
 )
-def test_training_plan_identity_binds_allowlisted_base_recipe_values(
+def test_training_plan_identity_binds_retained_v4_recipe_values(
     path: str,
     value: object,
 ) -> None:
     from propevolve.config import load_experiment_config
 
-    source = Path(
-        "config/historical_mask_expansion_regime_"
-        "stage2a_learning_repair_v1.json"
-    )
-    baseline = load_experiment_config(source)
+    baseline = load_experiment_config(_V4_CONFIG)
     changed = json.loads(json.dumps(baseline))
     changed["_root"] = baseline["_root"]
     changed["_path"] = baseline["_path"]
@@ -310,9 +351,10 @@ class ReasoningRejectsSurrogateProposal(ImproveHiddenDimension):
 
 
 def _config(tmp_path: Path) -> Path:
-    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload = _generic_v4_payload()
     payload["output"] = "runs/evolution-test"
     payload["campaign"]["state_root"] = "runs/evolution-test/ml-loop-state"
+    _write_entry_center_receipt(tmp_path)
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
     return path
@@ -618,6 +660,103 @@ def test_same_stage_revision_does_not_promote_failed_attempt_to_parent(
     assert reasoning.packet_paths
 
 
+def test_multistage_retry_hands_selected_child_to_next_warm_start(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    requirements = payload["campaign"]["selection_requirements"]
+    payload["campaign"]["budget_stages"] = [
+        {
+            "name": "matched_screen",
+            "minimum_environment_steps": 500_000,
+            "selection_requirements": requirements,
+            "warm_start_parent": True,
+        },
+        {
+            "name": "matched_confirmation",
+            "minimum_environment_steps": 1_000_000,
+            "selection_requirements": requirements,
+            "warm_start_parent": True,
+            "allow_revisions": False,
+            "revision_paths": [],
+        },
+    ]
+
+    external_archive = CandidateArchive(tmp_path / "stage-1-output/archive")
+    parent, evaluation = _register_external_stage1_parent(
+        external_archive,
+        payload,
+    )
+    payload["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
+    payload["evolution"]["base_parent"] = {
+        "archive_root": str(external_archive.root),
+        "candidate_id": parent.candidate_id,
+        "evaluation_id": evaluation.evaluation_id,
+        "model_sha256": parent.manifest["model_sha256"],
+    }
+    config_path.write_text(json.dumps(payload))
+
+    class LineageRunner(FakeCandidateRunner):
+        def __init__(self, output_root: Path) -> None:
+            super().__init__(output_root)
+            self.lineage: list[dict] = []
+
+        def run(self, config, *, parent_candidate_ids, hypothesis):
+            candidate, candidate_evaluation = super().run(
+                config,
+                parent_candidate_ids=parent_candidate_ids,
+                hypothesis=hypothesis,
+            )
+            output = Path(config["output"])
+            self.lineage.append({
+                "stage": output.parts[-2],
+                "attempt": int(output.name.removeprefix("attempt-")),
+                "parent_candidate_ids": tuple(parent_candidate_ids),
+                "warm_start": dict(config["_warm_start_model"]),
+                "candidate_id": candidate.candidate_id,
+            })
+            return candidate, candidate_evaluation
+
+    runner = LineageRunner(tmp_path / "runs/evolution-test")
+    state = run_evolution_campaign(
+        config_path,
+        run_id="multistage-parent-handoff-test",
+        candidate_runner=runner,
+        reasoning=ImproveHiddenDimension(),
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert [
+        (call["stage"], call["attempt"])
+        for call in runner.lineage
+    ] == [
+        ("matched_screen", 1),
+        ("matched_screen", 2),
+        ("matched_confirmation", 1),
+    ]
+    first_attempt, passing_retry, confirmation = runner.lineage
+    for call in (first_attempt, passing_retry):
+        assert call["parent_candidate_ids"] == (parent.candidate_id,)
+        assert call["warm_start"]["candidate_id"] == parent.candidate_id
+
+    selected_child = runner.archive.load_candidate(
+        passing_retry["candidate_id"]
+    )
+    assert confirmation["parent_candidate_ids"] == (
+        selected_child.candidate_id,
+    )
+    assert confirmation["warm_start"] == {
+        "candidate_id": selected_child.candidate_id,
+        "model_path": str(selected_child.model_path),
+        "model_sha256": selected_child.manifest["model_sha256"],
+    }
+    assert confirmation["parent_candidate_ids"] != (
+        first_attempt["candidate_id"],
+    )
+
+
 def test_training_short_circuit_hands_off_to_reasoning_without_selection_metrics(
     tmp_path: Path,
 ) -> None:
@@ -761,489 +900,21 @@ def test_campaign_advances_through_screen_confirm_and_final_budgets(
     assert champion["candidate_id"] == report["selected_candidate_id"]
 
 
-def test_exact_stage2_campaign_revises_from_selected_parents_and_hands_off_recovery(
-    tmp_path: Path,
-) -> None:
-    source = Path(
-        "config/historical_mask_expansion_regime_stage2_selectivity_recovery_v1.json"
-    )
-    payload = json.loads(source.read_text())
-    receipt_source = Path(
-        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
-    )
-    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
-    receipt_path.parent.mkdir(parents=True)
-    receipt_path.write_bytes(receipt_source.read_bytes())
-    payload["output"] = "runs/exact-stage2-flow"
-    payload["campaign"]["state_root"] = (
-        "runs/exact-stage2-flow/ml-loop-state"
-    )
-    payload["campaign"]["reasoning"]["proposer"] = "standard"
-
-    stage1_archive = CandidateArchive(tmp_path / "stage1/archive")
-    parent_model = tmp_path / "stage1-policy.pt"
-    parent_model.write_bytes(b"selected-stage1")
-    parent = stage1_archive.register_candidate(
-        parent_model,
-        contract={
-            "checkpoint_sha256": "test-checkpoint",
-            "training_tickers": list(payload["tickers"]),
-            "deployment_tickers": list(payload["deployment_tickers"]),
-            "training_only_tickers": list(payload["training_only_tickers"]),
-            "temporal": dict(payload["temporal"]),
-            "sealed_holdout_touched": False,
-        },
-        recipe=payload,
-        hypothesis="selected autonomous Stage 1 fixture",
-    )
-    parent_evaluation = stage1_archive.record_evaluation(
-        parent.candidate_id,
-        evaluator_contract={"name": "stage1-teacher-free"},
-        metrics={
-            "selection.pass_rate": 0.23,
-            "selection.blow_rate": 0.0,
-            "selection.average_win_r": 1.952,
-            "selection.near_blow_timeout_rate": 0.6363636363636364,
-            "recovery_stress.recovery_success_rate": 0.0,
-            "recovery_stress.mean_terminal_pnl": -2_700.0,
-        },
-        stages=({"name": "selection", "status": "PASS"},),
-        status="PASS",
-    )
-    payload["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
-    payload["evolution"]["base_parent"] = {
-        "archive_root": str(stage1_archive.root),
-        "candidate_id": parent.candidate_id,
-        "evaluation_id": parent_evaluation.evaluation_id,
-        "model_sha256": parent.manifest["model_sha256"],
-    }
-    config_path = tmp_path / "config" / "stage2.json"
-    config_path.write_text(json.dumps(payload))
-
-    class ExactStage2Runner:
-        def __init__(self) -> None:
-            self.archive = CandidateArchive(
-                tmp_path / "runs/exact-stage2-flow/archive"
-            )
-            self.calls: list[dict] = []
-
-        def run(self, config, *, parent_candidate_ids, hypothesis):
-            stage = Path(config["output"]).parts[-2]
-            attempt = int(Path(config["output"]).name.removeprefix("attempt-"))
-            self.calls.append({
-                "stage": stage,
-                "attempt": attempt,
-                "parents": tuple(parent_candidate_ids),
-                "warm_start": dict(config["_warm_start_model"]),
-                "regime_loss": config["regime_selectivity"]["loss_weight"],
-                "recovery_fraction": config["recovery_curriculum"][
-                    "episode_fraction"
-                ],
-            })
-            output = Path(config["_root"]) / config["output"]
-            output.mkdir(parents=True, exist_ok=True)
-            (output / "training-diagnostic-summary.json").write_text(json.dumps({
-                "schema": "propevolve_training_diagnostic_summary_v1",
-                "overall": {"stage": stage, "attempt": attempt},
-            }))
-            model = output / "model.pt"
-            model.write_bytes(f"{stage}-{attempt}".encode())
-            candidate = self.archive.register_candidate(
-                model,
-                contract={"stage": stage, "attempt": attempt},
-                recipe=config,
-                parent_candidate_ids=parent_candidate_ids,
-                hypothesis=hypothesis,
-            )
-            failed_first_stage2a = stage == "regime_selectivity_1m" and attempt == 1
-            if failed_first_stage2a:
-                training_metrics = {
-                    "short_circuited": 0.0,
-                    "regime_selectivity_positive_long_rows": 100.0,
-                    "regime_selectivity_positive_short_rows": 100.0,
-                    "regime_selectivity_chop_minus_nonchop_target_wait": 0.0,
-                }
-                metrics = {
-                    f"training.{metric}": value
-                    for metric, value in training_metrics.items()
-                }
-                stages = ({
-                    "name": "training",
-                    "status": "FAIL",
-                    "metrics": training_metrics,
-                },)
-            else:
-                metrics = {
-                    "training.short_circuited": 0.0,
-                    "selection.blow_rate": 0.0,
-                    "selection.pass_rate": 0.24,
-                    "selection.average_win_r": 1.90,
-                    "selection.expectancy_r": 0.05,
-                    "selection.two_r_mfe_capture_ratio": 0.72,
-                    "selection.greedy_entry_rate": 0.09,
-                    "selection.near_blow_timeout_rate": (
-                        0.50 if stage == "regime_selectivity_1m" else 0.45
-                    ),
-                    "recovery_stress.blow_rate": (
-                        0.10 if stage == "regime_selectivity_1m" else 0.0
-                    ),
-                    "recovery_stress.recovery_success_rate": (
-                        0.05 if stage == "regime_selectivity_1m" else 0.20
-                    ),
-                    "recovery_stress.mean_terminal_pnl": (
-                        -2_650.0
-                        if stage == "regime_selectivity_1m"
-                        else -2_500.0
-                    ),
-                    "recovery_stress.entries_used": 10.0,
-                    "recovery_stress.one_entry_violations": 0.0,
-                }
-                stages = ({"name": "selection", "status": "PASS"},)
-            passed = not failed_first_stage2a
-            evaluation = self.archive.record_evaluation(
-                candidate.candidate_id,
-                evaluator_contract={"name": "exact-stage2-fake"},
-                metrics=metrics,
-                stages=stages,
-                status="PASS" if passed else "FAIL",
-            )
-            return candidate, evaluation
-
-    class ReviseSelectivity:
-        def revise(self, request):
-            assert request.stage.name == "regime_selectivity_1m"
-            assert request.gate.decision is Decision.REVISE
-            assert request.gate.evidence["evaluation_status"] == "FAIL"
-            assert request.gate.evidence["values"] == {}
-            assert request.gate.evidence["selection_economics_available"] is False
-            assert all(
-                not metric.startswith("selection.")
-                for metric in request.gate.evidence["available_metrics"]
-            )
-            assert request.gate.evidence["failures"] == [{
-                "metric": "evaluator_stage.training",
-                "expected": "PASS",
-                "actual": "FAIL",
-            }]
-            return ReasoningOutcome(
-                Decision.REVISE,
-                "increase the bounded Regime-selectivity auxiliary weight",
-                Revision(
-                    stage=request.stage.name,
-                    rationale="strengthen the failed selectivity boundary",
-                    config_override={"regime_selectivity.loss_weight": 0.35},
-                ),
-            )
-
-    runner = ExactStage2Runner()
-    state = run_evolution_campaign(
-        config_path,
-        run_id="exact-stage2-flow",
-        candidate_runner=runner,
-        reasoning=ReviseSelectivity(),
-        skills=ReadySkills(),
-    )
-
-    assert state.phase is Phase.COMPLETE
-    assert [(call["stage"], call["attempt"]) for call in runner.calls] == [
-        ("regime_selectivity_1m", 1),
-        ("regime_selectivity_1m", 2),
-        ("deficit_recovery_1m", 1),
-    ]
-    assert runner.calls[0]["parents"] == (parent.candidate_id,)
-    assert runner.calls[1]["parents"] == (parent.candidate_id,)
-    assert runner.calls[0]["warm_start"]["candidate_id"] == parent.candidate_id
-    assert runner.calls[1]["warm_start"]["candidate_id"] == parent.candidate_id
-    selected_stage2a = runner.calls[2]["parents"][0]
-    assert selected_stage2a not in {
-        parent.candidate_id,
-        runner.calls[0]["warm_start"]["candidate_id"],
-    }
-    assert runner.calls[2]["warm_start"]["candidate_id"] == selected_stage2a
-    assert runner.calls[2]["regime_loss"] == 0.35
-    assert runner.calls[2]["recovery_fraction"] == 0.25
-
-
-def test_stage2a_regime_repair_chains_only_selected_parents_and_atomic_semantics(
-    tmp_path: Path,
-) -> None:
-    source = Path(
-        "config/historical_mask_expansion_regime_stage2a_learning_repair_v1.json"
-    )
-    payload = json.loads(source.read_text())
-    receipt_source = Path(
-        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
-    )
-    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
-    receipt_path.parent.mkdir(parents=True)
-    receipt_path.write_bytes(receipt_source.read_bytes())
-    payload["output"] = "runs/stage2a-regime-repair"
-    payload["campaign"]["state_root"] = (
-        "runs/stage2a-regime-repair/ml-loop-state"
-    )
-    payload["campaign"]["reasoning"]["proposer"] = "standard"
-
-    stage1_archive = CandidateArchive(tmp_path / "stage1/archive")
-    parent_model = tmp_path / "stage1-policy.pt"
-    parent_model.write_bytes(b"immutable-selected-stage1")
-    parent = stage1_archive.register_candidate(
-        parent_model,
-        contract={
-            "training_tickers": list(payload["tickers"]),
-            "deployment_tickers": list(payload["deployment_tickers"]),
-            "training_only_tickers": list(payload["training_only_tickers"]),
-            "temporal": dict(payload["temporal"]),
-            "sealed_holdout_touched": False,
-        },
-        recipe=payload,
-        hypothesis="immutable selected Stage 1 fixture",
-    )
-    parent_evaluation = stage1_archive.record_evaluation(
-        parent.candidate_id,
-        evaluator_contract={"name": "stage1-teacher-free"},
-        metrics={
-            "selection.pass_rate": 0.23,
-            "selection.blow_rate": 0.0,
-            "selection.average_win_r": 1.952,
-            "selection.expectancy_r": 0.0013,
-            "selection.two_r_mfe_capture_ratio": 0.736,
-            "selection.near_blow_timeout_rate": 0.6363636363636364,
-        },
-        stages=({"name": "selection", "status": "PASS"},),
-        status="PASS",
-    )
-    payload["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
-    payload["evolution"]["base_parent"] = {
-        "archive_root": str(stage1_archive.root),
-        "candidate_id": parent.candidate_id,
-        "evaluation_id": parent_evaluation.evaluation_id,
-        "model_sha256": parent.manifest["model_sha256"],
-    }
-    config_path = tmp_path / "config" / "stage2a-repair.json"
-    config_path.write_text(json.dumps(payload))
-
-    class RegimeRepairRunner:
-        def __init__(self) -> None:
-            self.archive = CandidateArchive(
-                tmp_path / "runs/stage2a-regime-repair/archive"
-            )
-            self.calls: list[dict] = []
-
-        def run(self, config, *, parent_candidate_ids, hypothesis):
-            stage = Path(config["output"]).parts[-2]
-            attempt = int(Path(config["output"]).name.removeprefix("attempt-"))
-            selectivity = config["regime_selectivity"]
-            self.calls.append({
-                "stage": stage,
-                "attempt": attempt,
-                "parents": tuple(parent_candidate_ids),
-                "warm_start": dict(config["_warm_start_model"]),
-                "loss_weight": selectivity["loss_weight"],
-                "formula": selectivity["formula"],
-                "semantics": selectivity["semantics"],
-                "emphasis": selectivity["persistent_chop_negative_emphasis"],
-                "side_balance": dict(selectivity["side_balance"]),
-            })
-            output = Path(config["_root"]) / config["output"]
-            output.mkdir(parents=True, exist_ok=True)
-            (output / "training-diagnostic-summary.json").write_text(
-                json.dumps({
-                    "schema": "propevolve_training_diagnostic_summary_v1",
-                    "overall": {"stage": stage, "attempt": attempt},
-                })
-            )
-            model = output / "model.pt"
-            model.write_bytes(f"{stage}-{attempt}".encode())
-            candidate = self.archive.register_candidate(
-                model,
-                contract={"stage": stage, "attempt": attempt},
-                recipe=config,
-                parent_candidate_ids=parent_candidate_ids,
-                hypothesis=hypothesis,
-            )
-            pass_rate = (
-                0.19
-                if stage == "regime_side_balance_500k" and attempt == 1
-                else 0.23
-            )
-            near_blow = (
-                0.50 if stage == "regime_side_balance_500k" else 0.48
-            )
-            evaluation = self.archive.record_evaluation(
-                candidate.candidate_id,
-                evaluator_contract={"name": "stage2a-regime-repair-fake"},
-                metrics={
-                    "training.short_circuited": 0.0,
-                    "selection.pass_minus_blow": pass_rate,
-                    "selection.blow_rate": 0.0,
-                    "selection.pass_rate": pass_rate,
-                    "selection.average_win_r": 1.96,
-                    "selection.expectancy_r": 0.02,
-                    "selection.two_r_mfe_capture_ratio": 0.74,
-                    "selection.long_entry_count": 20.0,
-                    "selection.short_entry_count": 18.0,
-                    "selection.near_blow_timeout_rate": near_blow,
-                },
-                stages=({"name": "selection", "status": "PASS"},),
-                status="PASS",
-            )
-            return candidate, evaluation
-
-    class RepairFirstScreen:
-        def revise(self, request):
-            assert request.stage.name == "regime_side_balance_500k"
-            assert request.gate.decision is Decision.REVISE
-            return ReasoningOutcome(
-                Decision.REVISE,
-                "adjust only the bounded side-balanced auxiliary loss",
-                Revision(
-                    stage=request.stage.name,
-                    rationale="repair the failed matched mechanism screen",
-                    config_override={"regime_selectivity.loss_weight": 0.35},
-                ),
-            )
-
-    runner = RegimeRepairRunner()
-    state = run_evolution_campaign(
-        config_path,
-        run_id="stage2a-regime-repair",
-        candidate_runner=runner,
-        reasoning=RepairFirstScreen(),
-        skills=ReadySkills(),
-    )
-
-    assert state.phase is Phase.COMPLETE
-    assert [(call["stage"], call["attempt"]) for call in runner.calls] == [
-        ("regime_side_balance_500k", 1),
-        ("regime_side_balance_500k", 2),
-        ("persistent_chop_regime_500k", 1),
-    ]
-    for call in runner.calls[:2]:
-        assert call["parents"] == (parent.candidate_id,)
-        assert call["warm_start"]["candidate_id"] == parent.candidate_id
-        assert call["warm_start"]["model_path"] == str(parent.model_path)
-        assert call["semantics"] == "static_state_v1"
-        assert call["emphasis"] == 0.0
-    selected_a1 = runner.calls[2]["parents"][0]
-    assert selected_a1 != parent.candidate_id
-    assert runner.calls[2]["warm_start"]["candidate_id"] == selected_a1
-    assert runner.calls[2]["loss_weight"] == 0.35
-    assert runner.calls[2]["semantics"] == "persistent_chop_negative_weight_v1"
-    assert runner.calls[2]["emphasis"] == 1.0
-    assert runner.calls[2]["formula"] == (
-        "exact_wait*(1+persistent_chop_negative_emphasis*"
-        "chop_persistence*(1-kaufman_efficiency*mean("
-        "trend_onset,trend_persistence,volatility_expansion_onset,"
-        "volatility_high_persistence,volatility_percentile)))"
-    )
-    assert all(call["side_balance"] == {
-        "schema": "equal_long_short_v1",
-        "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
-    } for call in runner.calls)
-
-
-@pytest.mark.parametrize(
-    ("stage_name", "revision_paths", "required_text"),
-    (
-        (
-            "regime_side_balance_500k",
-            (
-                "regime_selectivity.loss_weight",
-                "regime_selectivity.q_temperature",
-            ),
-            "sampled Long and Short Regime rows and global recall",
-        ),
-        (
-            "persistent_chop_regime_500k",
-            (
-                "regime_selectivity.loss_weight",
-                "regime_selectivity.persistent_chop_negative_emphasis",
-            ),
-            "same-label exact-WAIT",
-        ),
-        (
-            "regime_selectivity_1m",
-            ("regime_selectivity.loss_weight",),
-            "dominant-chop versus non-chop",
-        ),
-        (
-            "deficit_recovery_1m",
-            ("recovery_curriculum.episode_fraction",),
-            "one-entry, $300-risk, -$2,700 start",
-        ),
-    ),
-)
-def test_stage2_reasoning_prompt_names_exact_revision_surface_and_evidence(
-    stage_name: str,
-    revision_paths: tuple[str, ...],
-    required_text: str,
-) -> None:
+def test_v4_reasoning_prompt_names_current_stage_and_empty_revision_surface() -> None:
     request = SimpleNamespace(
         stage=SimpleNamespace(
-            name=stage_name,
-            config={"revision_paths": list(revision_paths)},
+            name="persistent_chop_negative_500k",
+            config={"revision_paths": []},
         ),
         receipt=SimpleNamespace(outputs={"reasoning_packet": {}}),
     )
 
     prompt = _reasoning_prompt(request)
 
-    assert json.dumps(revision_paths) in prompt
-    assert required_text in prompt
+    assert "The current stage is persistent_chop_negative_500k" in prompt
+    assert "complete revision allowlist is []" in prompt
     assert "only one or more paths from that exact list" in prompt
-
-
-@pytest.mark.parametrize(
-    ("stage_name", "revision_paths", "required_evidence", "required_surface"),
-    (
-        (
-            "regime_side_balance_500k",
-            (
-                "regime_selectivity.loss_weight",
-                "regime_selectivity.q_temperature",
-            ),
-            (
-                "teacher-free selection Long and Short entry counts",
-                "sampled Long and Short Regime rows and global recall",
-            ),
-            "revise only loss weight or Q temperature",
-        ),
-        (
-            "persistent_chop_regime_500k",
-            (
-                "regime_selectivity.loss_weight",
-                "regime_selectivity.persistent_chop_negative_emphasis",
-            ),
-            (
-                "regime_selectivity_dead_wait_minus_transition_ready_wait_model_wait",
-                "transition-positive Long and Short",
-                "selection.near_blow_timeout_rate",
-            ),
-            "revise only loss weight or persistent-chop emphasis",
-        ),
-    ),
-)
-def test_stage2a_regime_repair_reasoning_is_mechanism_specific(
-    stage_name: str,
-    revision_paths: tuple[str, ...],
-    required_evidence: tuple[str, ...],
-    required_surface: str,
-) -> None:
-    request = SimpleNamespace(
-        stage=SimpleNamespace(
-            name=stage_name,
-            config={"revision_paths": list(revision_paths)},
-        ),
-        receipt=SimpleNamespace(outputs={"reasoning_packet": {}}),
-    )
-
-    prompt = _reasoning_prompt(request)
-
-    assert all(item in prompt for item in required_evidence)
-    assert required_surface in prompt
-    assert "Never disable or weaken Short chop learning" in prompt
-    assert "never introduce an inference-time teacher gate" in prompt
-    assert "supersede the general reward, risk, and exit-mechanism menu" in prompt
+    assert "Never change data, FFM lineage, temporal roles" in prompt
 
 
 def test_parent_retention_gate_rejects_frequency_only_near_blow_lift(
@@ -1523,13 +1194,12 @@ def test_campaign_blocks_reasoning_that_changes_frozen_temporal_contract(
 def test_campaign_reasoning_can_revise_bounded_reward_and_replay_fields(
     tmp_path: Path,
 ) -> None:
-    payload = json.loads(
-        Path("config/historical_mask_safety_replay_v1.json").read_text()
-    )
+    payload = _generic_v4_payload()
     payload["output"] = "runs/reward-revision-test"
     payload["campaign"]["state_root"] = (
         "runs/reward-revision-test/ml-loop-state"
     )
+    _write_entry_center_receipt(tmp_path)
     config_path = tmp_path / "reward-config.json"
     config_path.write_text(json.dumps(payload))
     runner = FakeCandidateRunner(tmp_path / "runs/reward-revision-test")
@@ -1544,7 +1214,10 @@ def test_campaign_reasoning_can_revise_bounded_reward_and_replay_fields(
 
     assert state.phase is Phase.COMPLETE
     assert len(runner.configs) == 2
-    assert all(config["_validation_stop_on_blow"] for config in runner.configs)
+    assert all(
+        config["_validation_stop_on_blow"] is False
+        for config in runner.configs
+    )
     assert (
         runner.configs[-1]["challenge"]["mll_proximity_penalty_coefficient"]
         == 0.0002

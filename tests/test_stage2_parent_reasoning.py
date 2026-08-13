@@ -11,6 +11,12 @@ from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import run_evolution_campaign
 
 
+_V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
+_ENTRY_CENTER_RECEIPT = Path(
+    "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+)
+
+
 class _ReadySkills:
     def ensure(self, required):
         return SkillBootstrapReceipt(tuple(
@@ -32,7 +38,7 @@ class _FailThenPassRunner:
             "overall": {"attempt": attempt},
         }))
         model = output / "model.pt"
-        model.write_bytes(f"stage2a-attempt-{attempt}".encode())
+        model.write_bytes(f"v4-child-attempt-{attempt}".encode())
         candidate = self.archive.register_candidate(
             model,
             contract={"temporal": dict(config["temporal"])},
@@ -43,7 +49,7 @@ class _FailThenPassRunner:
         passed = attempt == 2
         evaluation = self.archive.record_evaluation(
             candidate.candidate_id,
-            evaluator_contract={"name": "stage2a-selection-test-v1"},
+            evaluator_contract={"name": "v4-child-selection-test-v1"},
             metrics={
                 "selection.pass_minus_blow": 0.1 if passed else -0.1,
                 "selection.pass_rate": 0.25 if passed else 0.05,
@@ -70,7 +76,7 @@ class _CaptureFirstReasoningPacket:
         self.payload = json.loads(Path(self.reference["path"]).read_text())
         return ReasoningOutcome(
             Decision.REVISE,
-            "increase capacity after the failed Stage2A challenger",
+            "increase capacity after the failed v4-derived challenger",
             Revision(
                 stage=request.stage.name,
                 rationale="increase capacity",
@@ -80,20 +86,43 @@ class _CaptureFirstReasoningPacket:
 
 
 def _stage2_config_with_external_stage1_parent(tmp_path: Path):
-    payload = json.loads(Path("config/historical_mask_v1.json").read_text())
+    payload = json.loads(_V4_CONFIG.read_text())
     payload["output"] = "runs/stage2-parent-evidence"
     payload["campaign"]["state_root"] = (
         "runs/stage2-parent-evidence/ml-loop-state"
     )
     payload["challenge"]["ratchet_lock_floor_r"] = 0.0
-    payload["campaign"]["budget_stages"] = [{
-        "name": "regime_selectivity_1m",
-        "minimum_environment_steps": 1_000_000,
-        "selection_requirements": payload["campaign"][
-            "selection_requirements"
+    payload["evolution"] = {
+        "hypothesis": "A bounded child can improve its authenticated parent.",
+        "parent_candidate_ids": [],
+        "allowed_revision_paths": ["agent.hidden_dim"],
+        "frozen_paths": [
+            path
+            for path in payload["evolution"]["frozen_paths"]
+            if path != "agent.hidden_dim"
         ],
+        "revision_bounds": {
+            "agent.hidden_dim": {"minimum": 64, "maximum": 512},
+        },
+    }
+    requirements = [{
+        "metric": "selection.pass_minus_blow",
+        "operator": ">",
+        "value": 0,
+    }]
+    payload["campaign"]["max_revisions_per_stage"] = 1
+    payload["campaign"]["selection_requirements"] = requirements
+    payload["campaign"]["reasoning"]["proposer"] = "standard"
+    payload["campaign"]["budget_stages"] = [{
+        "name": "persistent_chop_negative_500k",
+        "minimum_environment_steps": 1_000_000,
+        "selection_requirements": requirements,
         "warm_start_parent": True,
     }]
+
+    receipt = tmp_path / "config" / "receipts" / _ENTRY_CENTER_RECEIPT.name
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_bytes(_ENTRY_CENTER_RECEIPT.read_bytes())
 
     source = CandidateArchive(tmp_path / "immutable-stage1/archive")
     model = tmp_path / "immutable-stage1.pt"
@@ -137,7 +166,7 @@ def _stage2_config_with_external_stage1_parent(tmp_path: Path):
     return config_path, source, parent, parent_evaluation
 
 
-def test_first_stage2a_reasoning_packet_contains_authenticated_stage1_parent(
+def test_first_v4_child_reasoning_packet_contains_authenticated_parent(
     tmp_path: Path,
 ) -> None:
     config_path, source, parent, parent_evaluation = (
