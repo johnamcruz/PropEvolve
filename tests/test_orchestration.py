@@ -18,11 +18,31 @@ from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import (
+    _assert_parent_causal_contract,
     _plan,
     _reasoning_prompt,
     _resolve_codex_executable,
     run_evolution_campaign,
 )
+
+
+def test_entry_balance_repair_matches_authenticated_stage1_causal_recipe() -> None:
+    """The committed launch recipe must preflight its actual Stage 1 parent."""
+    from propevolve.config import load_experiment_config
+
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_"
+        "stage2a_entry_balance_repair_v1.json"
+    )
+    base_parent = config["evolution"]["base_parent"]
+    parent = SimpleNamespace(path=(
+        Path(config["_root"])
+        / base_parent["archive_root"]
+        / "candidates"
+        / base_parent["candidate_id"]
+    ))
+
+    _assert_parent_causal_contract(parent, config)
 
 
 @pytest.mark.parametrize(

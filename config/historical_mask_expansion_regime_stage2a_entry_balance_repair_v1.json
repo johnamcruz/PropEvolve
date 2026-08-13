@@ -44,13 +44,13 @@
         "short_clean_retained_given_attempt_probability"
       ],
       "loss_weight": 0.2,
-      "entry_search_loss_weight": 0,
+      "entry_search_loss_weight": 0.0,
       "entry_search_objective": "raw_probability",
       "entry_search_long_center": 0.5,
       "entry_search_short_center": 0.5,
       "entry_search_probability_epsilon": 0.000001,
-      "entry_search_teacher_temperature": 1,
-      "entry_search_q_temperature": 1,
+      "entry_search_teacher_temperature": 1.0,
+      "entry_search_q_temperature": 1.0,
       "entry_search_center_receipt": "",
       "entry_search_center_receipt_sha256": ""
     },
@@ -78,7 +78,7 @@
         "volatility_percentile"
       ],
       "loss_weight": 0.1,
-      "entry_search_loss_weight": 0
+      "entry_search_loss_weight": 0.0
     }
   ],
   "entry_supervision": {
@@ -104,8 +104,8 @@
       "adverse_r": 0.25,
       "horizon_bars": 3
     },
-    "target_r": 2,
-    "stop_r": 1,
+    "target_r": 2.0,
+    "stop_r": 1.0,
     "horizon_bars": 150,
     "collision": "stop_first",
     "loss_weight": 0.3,
@@ -229,8 +229,8 @@
     "teacher_free": true,
     "minimum_pass_rate": 0.5,
     "minimum_per_market_pass_rate": 0.5,
-    "maximum_blow_rate": 0,
-    "minimum_expectancy_r": 0
+    "maximum_blow_rate": 0.0,
+    "minimum_expectancy_r": 0.0
   },
   "agent": {
     "hidden_dim": 128,
