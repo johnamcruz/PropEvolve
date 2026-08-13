@@ -1296,6 +1296,39 @@ def _training_evaluation_gates(
                     "final_regime_probe_chop_minus_nonchop_wait", ">", 0.0
                 ))
         elif regime_selectivity_semantics == "persistent_chop_negative_weight_v1":
+            gates.extend((
+                EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
+                EvaluationGate(
+                    "latest_entry_action_weight_scale", "==", 0.0
+                ),
+            ))
+            for side in ("long", "short"):
+                gates.extend((
+                    EvaluationGate(
+                        f"regime_entry_conflict_{side}_rows", ">", 0.0
+                    ),
+                    EvaluationGate(
+                        "regime_entry_conflict_"
+                        f"{side}_target_wait_probability_mean",
+                        "==",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "regime_entry_conflict_"
+                        f"{side}_target_declared_side_probability_mean",
+                        "==",
+                        1.0,
+                    ),
+                    EvaluationGate(
+                        "regime_entry_conflict_"
+                        f"{side}_soft_wait_disagreement_rows",
+                        "==",
+                        0.0,
+                    ),
+                ))
+            gates.append(EvaluationGate(
+                "regime_selectivity_exact_wait_weight_mean", ">", 1.0
+            ))
             gates.extend(
                 EvaluationGate(metric, ">", 0.0)
                 for metric in (
@@ -1312,9 +1345,6 @@ def _training_evaluation_gates(
                     "final_regime_probe_transition_ready_wait_mass",
                     "final_regime_probe_transition_positive_long_mass",
                     "final_regime_probe_transition_positive_short_mass",
-                    "final_regime_probe_dead_wait_minus_transition_ready_wait",
-                    "final_regime_probe_transition_positive_long_response",
-                    "final_regime_probe_transition_positive_short_response",
                 )
             )
         else:
@@ -2109,6 +2139,12 @@ class HistoricalCandidateRunner:
             teacher_autonomy_start_fraction=float(
                 training_config.get("teacher_autonomy_start_fraction", 1.0)
             ),
+            entry_supervision_autonomy_start_fraction=float(
+                training_config.get(
+                    "entry_supervision_autonomy_start_fraction",
+                    training_config.get("teacher_autonomy_start_fraction", 1.0),
+                )
+            ),
             short_circuit_minimum_environment_steps=(
                 int(training_config["short_circuit"]["minimum_environment_steps"])
                 if training_config.get("short_circuit") is not None
@@ -2387,6 +2423,12 @@ class HistoricalCandidateRunner:
                 assert final_regime_probe is not None
                 metrics.update(final_regime_probe.metrics)
                 overall_diagnostics = diagnostic_summary["overall"]
+                metrics["latest_teacher_weight_scale"] = float(
+                    overall_diagnostics["latest_teacher_weight_scale"]
+                )
+                metrics["latest_entry_action_weight_scale"] = float(
+                    overall_diagnostics["latest_entry_action_weight_scale"]
+                )
                 metrics.update(_regime_selectivity_evaluation_metrics(
                     overall_diagnostics["regime_selectivity"]
                 ))
@@ -2846,6 +2888,27 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "latest_management_epsilon": (
             float(rows[-1].get("management_epsilon", 0.0)) if rows else 0.0
         ),
+        "latest_teacher_weight_scale": (
+            float(rows[-1].get("teacher_weight_scale", 0.0)) if rows else 0.0
+        ),
+        "latest_entry_action_weight_scale": (
+            float(rows[-1].get("entry_action_weight_scale", 0.0))
+            if rows else 0.0
+        ),
+        "latest_teacher_schedule_progress": (
+            float(rows[-1].get("teacher_schedule_progress", 0.0))
+            if rows else 0.0
+        ),
+        "latest_entry_action_schedule_progress": (
+            float(rows[-1].get("entry_action_schedule_progress", 0.0))
+            if rows else 0.0
+        ),
+        "mean_teacher_weight_scale": weighted(
+            "teacher_weight_scale", update_weights
+        ),
+        "mean_entry_action_weight_scale": weighted(
+            "entry_action_weight_scale", update_weights
+        ),
         "guidance_phase": (
             str(rows[0].get("guidance_phase", "unknown"))
             if rows
@@ -3190,6 +3253,7 @@ def train_agent(
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
     teacher_autonomy_start_fraction: float = 1.0,
+    entry_supervision_autonomy_start_fraction: float | None = None,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     near_blow_loss_threshold: float | None = None,
     short_circuit_minimum_environment_steps: int | None = None,
@@ -3277,6 +3341,26 @@ def train_agent(
         raise ValueError("teacher guidance dropout schedule is invalid")
     if not 0 < teacher_autonomy_start_fraction <= 1:
         raise ValueError("teacher autonomy start fraction is invalid")
+    if entry_supervision_autonomy_start_fraction is None:
+        entry_supervision_autonomy_start_fraction = (
+            teacher_autonomy_start_fraction
+        )
+    if (
+        isinstance(entry_supervision_autonomy_start_fraction, bool)
+        or not isinstance(
+            entry_supervision_autonomy_start_fraction,
+            (int, float),
+        )
+        or not teacher_autonomy_start_fraction
+        <= float(entry_supervision_autonomy_start_fraction)
+        <= 1.0
+    ):
+        raise ValueError(
+            "entry supervision autonomy start fraction is invalid"
+        )
+    entry_supervision_autonomy_start_fraction = float(
+        entry_supervision_autonomy_start_fraction
+    )
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -3341,6 +3425,10 @@ def train_agent(
         teacher_schedule_progress = min(
             1.0, step_progress / teacher_autonomy_start_fraction
         )
+        entry_action_schedule_progress = min(
+            1.0,
+            step_progress / entry_supervision_autonomy_start_fraction,
+        )
         epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
         management_epsilon = (
             management_epsilon_start
@@ -3349,6 +3437,9 @@ def train_agent(
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0
         ) * teacher_schedule_progress
+        entry_action_weight_scale = 1.0 + (
+            teacher_loss_end_scale - 1.0
+        ) * entry_action_schedule_progress
         teacher_guidance_dropout_probability = teacher_guidance_dropout_start
         terminal_info = reset_info
         step_index = 0
@@ -3564,9 +3655,16 @@ def train_agent(
         teacher_schedule_progress = min(
             1.0, update_progress / teacher_autonomy_start_fraction
         )
+        entry_action_schedule_progress = min(
+            1.0,
+            update_progress / entry_supervision_autonomy_start_fraction,
+        )
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0
         ) * teacher_schedule_progress
+        entry_action_weight_scale = 1.0 + (
+            teacher_loss_end_scale - 1.0
+        ) * entry_action_schedule_progress
         outcome = str(terminal_info["outcome"])
         ordinary_outcomes = {"pass", "blow", "timeout"}
         recovery_outcomes = {
@@ -3716,7 +3814,7 @@ def train_agent(
                 episode_losses.append(agent.train_batch(
                     batch,
                     teacher_weight_scale=teacher_weight_scale,
-                    entry_action_weight_scale=teacher_weight_scale,
+                    entry_action_weight_scale=entry_action_weight_scale,
                 ))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
@@ -4018,8 +4116,11 @@ def train_agent(
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
                 "teacher_weight_scale": teacher_weight_scale,
-                "entry_action_weight_scale": teacher_weight_scale,
+                "entry_action_weight_scale": entry_action_weight_scale,
                 "teacher_schedule_progress": teacher_schedule_progress,
+                "entry_action_schedule_progress": (
+                    entry_action_schedule_progress
+                ),
                 "guidance_phase": (
                     "autonomy" if teacher_weight_scale <= 0.0 else "guidance"
                 ),

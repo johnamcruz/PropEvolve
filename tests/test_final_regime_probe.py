@@ -218,6 +218,8 @@ def _evaluate(policy: ScriptedFinalPolicy, replay: BalancedSequenceReplay):
 
 def _aggregate_learning_exposure() -> dict[str, float]:
     return {
+        "latest_teacher_weight_scale": 0.0,
+        "latest_entry_action_weight_scale": 0.0,
         "sampled_entry_action_long_rows": 100.0,
         "sampled_entry_action_short_rows": 100.0,
         "sampled_entry_action_long_recall": 0.8,
@@ -226,7 +228,16 @@ def _aggregate_learning_exposure() -> dict[str, float]:
         "regime_selectivity_positive_short_rows": 100.0,
         "regime_selectivity_positive_long_declared_side_probability_sum": 50.0,
         "regime_selectivity_positive_short_declared_side_probability_sum": 50.0,
+        "regime_entry_conflict_long_rows": 100.0,
+        "regime_entry_conflict_short_rows": 100.0,
+        "regime_entry_conflict_long_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_short_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_long_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_short_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_long_soft_wait_disagreement_rows": 0.0,
+        "regime_entry_conflict_short_soft_wait_disagreement_rows": 0.0,
         "regime_selectivity_exact_wait_rows": 100.0,
+        "regime_selectivity_exact_wait_weight_mean": 1.5,
         "regime_selectivity_persistent_dead_chop_weight_sum": 50.0,
         "regime_selectivity_transition_ready_weight_sum": 50.0,
         "regime_selectivity_transition_positive_long_rows": 50.0,

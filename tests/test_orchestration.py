@@ -45,6 +45,41 @@ def test_entry_balance_repair_matches_authenticated_stage1_causal_recipe() -> No
     _assert_parent_causal_contract(parent, config)
 
 
+def test_stage2_v4_matches_authenticated_stage1_causal_recipe() -> None:
+    """The new campaign must preflight the real immutable Stage 1 bundle."""
+    from propevolve.config import load_experiment_config
+
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2_v4.json"
+    )
+    base_parent = config["evolution"]["base_parent"]
+    parent = SimpleNamespace(path=(
+        Path(config["_root"])
+        / base_parent["archive_root"]
+        / "candidates"
+        / base_parent["candidate_id"]
+    ))
+
+    _assert_parent_causal_contract(parent, config)
+
+
+def test_stage2_v4_plan_enforces_the_near_blow_improvement_gate() -> None:
+    """The stage adapter, not only top-level JSON, must enforce the target."""
+    from propevolve.config import load_experiment_config
+
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2_v4.json"
+    )
+    plan = _plan(config)
+    requirements = plan.stages[0].config["selection_requirements"]
+
+    assert {
+        "metric": "selection.near_blow_timeout_rate",
+        "operator": "<=",
+        "value": 0.6263636363636363,
+    } in requirements
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     (

@@ -461,7 +461,7 @@ def test_training_summary_separates_guidance_and_autonomy_regime_learning(
     assert conflict["short"]["soft_wait_disagreement_rate"] == 0.0
 
 
-def test_persistent_regime_gate_requires_learned_wait_separation(
+def test_persistent_regime_gate_requires_negative_only_coverage(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "training-diagnostics.jsonl"
@@ -508,6 +508,8 @@ def test_persistent_regime_gate_requires_learned_wait_separation(
     )
     metrics = {
         "short_circuited": 0.0,
+        "latest_teacher_weight_scale": 0.0,
+        "latest_entry_action_weight_scale": 0.0,
         **optimizer_metrics,
         "sampled_entry_action_long_rows": 10.0,
         "sampled_entry_action_short_rows": 10.0,
@@ -517,6 +519,14 @@ def test_persistent_regime_gate_requires_learned_wait_separation(
         "regime_selectivity_positive_short_rows": 10.0,
         "regime_selectivity_positive_long_declared_side_probability_sum": 5.0,
         "regime_selectivity_positive_short_declared_side_probability_sum": 5.0,
+        "regime_entry_conflict_long_rows": 10.0,
+        "regime_entry_conflict_short_rows": 10.0,
+        "regime_entry_conflict_long_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_short_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_long_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_short_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_long_soft_wait_disagreement_rows": 0.0,
+        "regime_entry_conflict_short_soft_wait_disagreement_rows": 0.0,
         "final_regime_probe_wait_rows": 32.0,
         "final_regime_probe_long_rows": 32.0,
         "final_regime_probe_short_rows": 32.0,
@@ -541,7 +551,76 @@ def test_persistent_regime_gate_requires_learned_wait_separation(
     ] == pytest.approx(0.6)
     assert all(gate.passes(metrics) for gate in gates)
 
+    # The completed data audit found these score contrasts near chance.  They
+    # remain diagnostic evidence; this repair selects only on authenticated
+    # negative-only coverage and teacher-free action recall.
     metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = 0.0
+    metrics["final_regime_probe_transition_positive_long_response"] = 0.0
+    metrics["final_regime_probe_transition_positive_short_response"] = 0.0
+    assert all(gate.passes(metrics) for gate in gates)
+
+    metrics["latest_entry_action_weight_scale"] = 0.01
+    assert not all(gate.passes(metrics) for gate in gates)
+    metrics["latest_entry_action_weight_scale"] = 0.0
+    metrics["regime_selectivity_exact_wait_weight_mean"] = 1.0
+    assert not all(gate.passes(metrics) for gate in gates)
+    metrics["regime_selectivity_exact_wait_weight_mean"] = 1.4
+    metrics["regime_selectivity_exact_wait_rows"] = 0.0
+    assert not all(gate.passes(metrics) for gate in gates)
+
+
+def test_persistent_regime_gate_rejects_any_positive_entry_soft_wait_veto() -> None:
+    """Economic Long/Short truth must never be softened back toward WAIT."""
+    metrics = {
+        "short_circuited": 0.0,
+        "latest_teacher_weight_scale": 0.0,
+        "latest_entry_action_weight_scale": 0.0,
+        "sampled_entry_action_long_rows": 10.0,
+        "sampled_entry_action_short_rows": 10.0,
+        "sampled_entry_action_long_recall": 0.5,
+        "sampled_entry_action_short_recall": 0.5,
+        "regime_selectivity_positive_long_rows": 10.0,
+        "regime_selectivity_positive_short_rows": 10.0,
+        "regime_selectivity_positive_long_declared_side_probability_sum": 5.0,
+        "regime_selectivity_positive_short_declared_side_probability_sum": 5.0,
+        "regime_selectivity_exact_wait_rows": 10.0,
+        "regime_selectivity_exact_wait_weight_mean": 1.2,
+        "regime_selectivity_persistent_dead_chop_weight_sum": 10.0,
+        "regime_selectivity_transition_ready_weight_sum": 1.0,
+        "regime_selectivity_transition_positive_long_rows": 1.0,
+        "regime_selectivity_transition_positive_short_rows": 1.0,
+        "regime_selectivity_transition_positive_long_declared_side_probability_sum": 1.0,
+        "regime_selectivity_transition_positive_short_declared_side_probability_sum": 1.0,
+        "regime_entry_conflict_long_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_short_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_long_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_short_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_long_rows": 10.0,
+        "regime_entry_conflict_short_rows": 10.0,
+        "regime_entry_conflict_long_soft_wait_disagreement_rows": 0.0,
+        "regime_entry_conflict_short_soft_wait_disagreement_rows": 0.0,
+        "final_regime_probe_wait_rows": 32.0,
+        "final_regime_probe_long_rows": 32.0,
+        "final_regime_probe_short_rows": 32.0,
+        "final_regime_probe_long_recall": 0.5,
+        "final_regime_probe_short_recall": 0.5,
+        "final_regime_probe_wait_recall": 0.75,
+        "final_regime_probe_persistent_dead_wait_mass": 12.0,
+        "final_regime_probe_transition_ready_wait_mass": 8.0,
+        "final_regime_probe_transition_positive_long_mass": 8.0,
+        "final_regime_probe_transition_positive_short_mass": 8.0,
+        "final_regime_probe_dead_wait_minus_transition_ready_wait": 0.2,
+        "final_regime_probe_transition_positive_long_response": 0.2,
+        "final_regime_probe_transition_positive_short_response": 0.2,
+    }
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics="persistent_chop_negative_weight_v1",
+    )
+
+    assert all(gate.passes(metrics) for gate in gates)
+    metrics["regime_entry_conflict_short_target_wait_probability_mean"] = 0.01
+    metrics["regime_entry_conflict_short_soft_wait_disagreement_rows"] = 1.0
     assert not all(gate.passes(metrics) for gate in gates)
 
 
@@ -1480,7 +1559,7 @@ def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
     assert observed[8:] == [None, None]
 
 
-def test_entry_action_supervision_is_separate_and_shares_autonomy_boundary() -> None:
+def test_entry_supervision_keeps_the_legacy_label_visibility_boundary() -> None:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -1525,8 +1604,9 @@ def test_entry_action_supervision_is_separate_and_shares_autonomy_boundary() -> 
             )
             super().add(episode)
 
+    agent = Agent()
     train_agent(
-        Agent(),
+        agent,
         LongFlatEnvironment(),
         episodes=1,
         minimum_environment_steps=10,
@@ -1546,22 +1626,159 @@ def test_entry_action_supervision_is_separate_and_shares_autonomy_boundary() -> 
         teacher_guidance_dropout_start=0.0,
         teacher_guidance_dropout_end=1.0,
         teacher_autonomy_start_fraction=0.8,
+        entry_supervision_autonomy_start_fraction=0.95,
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    # The soft semantic teacher and sparse economic action target remain
-    # independent fields, but share one deterministic visibility curriculum.
+    # The extended optimizer schedule must not expose new labels beyond the
+    # existing teacher visibility boundary or feed labels into select_action.
     assert any(
         semantic is not None and action == Action.ENTER_LONG_1
         for semantic, action in observed[:8]
     )
-    assert all(
-        (semantic is None) == (action is None)
-        for semantic, action in observed
-    )
     assert observed[8:] == [(None, None), (None, None)]
+    assert agent.teacher_weight_scales[0] == 0.0
+    assert agent.entry_action_weight_scales[0] == 0.0
+    assert diagnostics[0]["teacher_weight_scale"] == 0.0
+    assert diagnostics[0]["entry_action_weight_scale"] == 0.0
+    assert diagnostics[0]["teacher_schedule_progress"] == 1.0
+    assert diagnostics[0]["entry_action_schedule_progress"] == 1.0
     assert diagnostics[0]["entry_action_target_counts"]["ENTER_LONG_1"] > 0
     assert diagnostics[0]["entry_action_target_counts"]["WAIT"] == 0
+
+
+def test_entry_supervision_has_a_distinct_teacher_free_replay_phase() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class OneStepFlatEnvironment:
+        def reset(self):
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+            }
+
+        def step(self, action):
+            assert action == Action.WAIT
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "fill_index": 1,
+                "outcome": "timeout",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    class ReplayInspectingAgent(Agent):
+        def train_batch(
+            self,
+            sequences,
+            *,
+            teacher_weight_scale=1.0,
+            entry_action_weight_scale=1.0,
+        ):
+            self.replayed_entry_rows = getattr(self, "replayed_entry_rows", [])
+            self.replayed_entry_rows.append(sum(
+                transition.entry_action_target is not None
+                for sequence in sequences
+                for transition in sequence
+            ))
+            return super().train_batch(
+                sequences,
+                teacher_weight_scale=teacher_weight_scale,
+                entry_action_weight_scale=entry_action_weight_scale,
+            )
+
+    agent = ReplayInspectingAgent()
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        agent,
+        OneStepFlatEnvironment(),
+        episodes=10,
+        minimum_environment_steps=10,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=20,
+            sequence_length=1,
+            seed=11,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
+        entry_action_lookup=lambda ticker, index: Action.ENTER_SHORT_1,
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=0.0,
+        teacher_guidance_dropout_end=0.0,
+        teacher_autonomy_start_fraction=0.8,
+        entry_supervision_autonomy_start_fraction=0.95,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    # Episode nine updates at 90%: the generic teacher is fully autonomous,
+    # while exact Entry labels still consolidate through replay.  Episode ten
+    # is the final 5% autonomy check with both objectives disabled.
+    assert diagnostics[8]["teacher_weight_scale"] == 0.0
+    assert diagnostics[8]["entry_action_weight_scale"] == pytest.approx(1 / 19)
+    assert agent.teacher_weight_scales[8] == 0.0
+    assert agent.entry_action_weight_scales[8] == pytest.approx(1 / 19)
+    assert agent.replayed_entry_rows[8] > 0
+    assert diagnostics[9]["teacher_weight_scale"] == 0.0
+    assert diagnostics[9]["entry_action_weight_scale"] == 0.0
+    assert agent.teacher_weight_scales[9] == 0.0
+    assert agent.entry_action_weight_scales[9] == 0.0
+    summary = training_module._diagnostic_aggregate(diagnostics)
+    assert summary["latest_teacher_weight_scale"] == 0.0
+    assert summary["latest_entry_action_weight_scale"] == 0.0
+    assert summary["latest_teacher_schedule_progress"] == 1.0
+    assert summary["latest_entry_action_schedule_progress"] == 1.0
+    consolidation_summary = training_module._diagnostic_aggregate(
+        diagnostics[8:]
+    )
+    assert consolidation_summary["mean_teacher_weight_scale"] == 0.0
+    assert consolidation_summary[
+        "mean_entry_action_weight_scale"
+    ] == pytest.approx(1 / 38)
+
+
+@pytest.mark.parametrize("invalid", (True, "0.95", 0.79, 1.01))
+def test_entry_supervision_runtime_schedule_fails_closed(invalid: object) -> None:
+    with pytest.raises(
+        ValueError,
+        match="entry supervision autonomy start fraction",
+    ):
+        train_agent(
+            Agent(),
+            Environment(),
+            episodes=1,
+            minimum_environment_steps=1,
+            replay=BalancedSequenceReplay(
+                capacity_episodes=2,
+                sequence_length=1,
+                seed=1,
+            ),
+            warmup_episodes=99,
+            updates_per_episode=1,
+            batch_sequences=1,
+            recurrent_horizon=1,
+            epsilon_start=0.0,
+            epsilon_end=0.0,
+            episode_tickers=None,
+            ticker_seed=1,
+            teacher_autonomy_start_fraction=0.8,
+            entry_supervision_autonomy_start_fraction=invalid,  # type: ignore[arg-type]
+        )
 
 
 def test_entry_action_lookup_is_not_used_after_exploration_enters() -> None:

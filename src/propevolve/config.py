@@ -258,8 +258,35 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         or float(training.get("teacher_autonomy_start_fraction", -1.0)) != 0.8
     ):
         raise ValueError(
-            "entry supervision requires a final twenty-percent autonomy tail"
+            "entry supervision requires semantic-teacher autonomy for the "
+            "final twenty percent"
         )
+    entry_schedule_field = "entry_supervision_autonomy_start_fraction"
+    entry_schedule_path = f"training.{entry_schedule_field}"
+    explicitly_declared_entry_schedule = entry_schedule_field in training
+    teacher_autonomy_start_fraction = float(
+        training["teacher_autonomy_start_fraction"]
+    )
+    training.setdefault(
+        entry_schedule_field,
+        teacher_autonomy_start_fraction,
+    )
+    entry_autonomy_start_fraction = training[entry_schedule_field]
+    if (
+        isinstance(entry_autonomy_start_fraction, bool)
+        or not isinstance(entry_autonomy_start_fraction, (int, float))
+        or not teacher_autonomy_start_fraction
+        <= float(entry_autonomy_start_fraction)
+        <= 1.0
+    ):
+        raise ValueError(
+            "entry supervision autonomy start fraction must be between "
+            "the teacher boundary and one"
+        )
+    if explicitly_declared_entry_schedule and entry_schedule_path not in (
+        payload.get("evolution", {}).get("frozen_paths", ())
+    ):
+        raise ValueError("entry supervision schedule must be frozen")
 
 
 def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:

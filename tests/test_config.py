@@ -542,12 +542,143 @@ def test_stage2a_entry_balance_repair_is_one_matched_nonrevisable_screen() -> No
     expected["campaign"]["budget_stages"][0]["name"] = actual["campaign"][
         "budget_stages"
     ][0]["name"]
+    expected["campaign"]["budget_stages"][0][
+        "selection_requirements"
+    ] = actual["campaign"]["budget_stages"][0]["selection_requirements"]
     expected["campaign"]["budget_stages"][0]["allow_revisions"] = False
     expected["campaign"]["budget_stages"][0]["revision_paths"] = []
     expected["output"] = actual["output"]
     expected["_path"] = actual["_path"]
 
     assert actual == expected
+
+
+def test_stage2_v4_is_one_frozen_two_boundary_matched_screen() -> None:
+    from propevolve.balance_aware_regime_selectivity import (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    )
+
+    source = load_experiment_config(
+        "config/historical_mask_expansion_regime_"
+        "stage2a_entry_balance_repair_v1.json"
+    )
+    repaired = load_experiment_config(
+        "config/historical_mask_expansion_regime_stage2_v4.json"
+    )
+
+    assert repaired["regime_selectivity"] == {
+        **source["regime_selectivity"],
+        "formula": PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        "semantics": PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        "persistent_chop_negative_emphasis": 1.0,
+    }
+    assert repaired["agent"]["entry_action_loss_reduction"] == (
+        "equal_present_class_mean_v1"
+    )
+    assert repaired["evolution"]["base_parent"] == source["evolution"][
+        "base_parent"
+    ]
+    assert repaired["evolution"]["parent_candidate_ids"] == source[
+        "evolution"
+    ]["parent_candidate_ids"]
+    assert repaired["evolution"]["allowed_revision_paths"] == ()
+    assert repaired["evolution"]["revision_bounds"] == {}
+    assert repaired["campaign"]["max_revisions_per_stage"] == 0
+    assert len(repaired["campaign"]["budget_stages"]) == 1
+    assert repaired["campaign"]["budget_stages"][0][
+        "minimum_environment_steps"
+    ] == 500_000
+    assert repaired["campaign"]["budget_stages"][0][
+        "allow_revisions"
+    ] is False
+    assert repaired["campaign"]["budget_stages"][0]["revision_paths"] == ()
+    assert repaired["campaign"]["budget_stages"][0][
+        "curriculum_override"
+    ] == {}
+    assert repaired["training"][
+        "entry_supervision_autonomy_start_fraction"
+    ] == 0.95
+    assert "training.entry_supervision_autonomy_start_fraction" in repaired[
+        "evolution"
+    ]["frozen_paths"]
+    near_blow_gate = {
+        "metric": "selection.near_blow_timeout_rate",
+        "operator": "<=",
+        "value": 0.6263636363636363,
+    }
+    assert repaired["campaign"]["budget_stages"][0][
+        "selection_requirements"
+    ] == [
+        *source["campaign"]["budget_stages"][0][
+            "selection_requirements"
+        ],
+        near_blow_gate,
+    ]
+
+    # Full-recipe equality is the matched-experiment guard.  Build the expected
+    # child from the normalized loaded parent and permit only the declared
+    # identity fields, atomic semantics switch, and entry-consolidation
+    # boundary to differ.
+    expected = json.loads(json.dumps(source))
+    actual = json.loads(json.dumps(repaired))
+    expected["regime_selectivity"].update({
+        "formula": PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
+        "semantics": PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        "persistent_chop_negative_emphasis": 1.0,
+    })
+    expected["training"]["entry_supervision_autonomy_start_fraction"] = 0.95
+    expected_frozen_paths = list(source["evolution"]["frozen_paths"])
+    expected_frozen_paths.insert(
+        expected_frozen_paths.index("training.greedy_diagnostic_interval_steps"),
+        "training.entry_supervision_autonomy_start_fraction",
+    )
+    expected["evolution"]["frozen_paths"] = expected_frozen_paths
+    expected["evolution"]["hypothesis"] = actual["evolution"]["hypothesis"]
+    expected["campaign"]["state_root"] = actual["campaign"]["state_root"]
+    expected["campaign"]["budget_stages"][0]["name"] = actual["campaign"][
+        "budget_stages"
+    ][0]["name"]
+    expected["campaign"]["budget_stages"][0][
+        "selection_requirements"
+    ] = actual["campaign"]["budget_stages"][0]["selection_requirements"]
+    expected["output"] = actual["output"]
+    expected["_path"] = actual["_path"]
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("formula", REGIME_SELECTIVITY_FORMULA),
+        ("semantics", "static_state_v1"),
+        ("persistent_chop_negative_emphasis", 0.0),
+    ),
+)
+def test_stage2_v4_persistent_chop_switch_cannot_partially_revert(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    payload = json.loads(Path(
+        "config/historical_mask_expansion_regime_stage2_v4.json"
+    ).read_text())
+    payload["regime_selectivity"][field] = value
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path = tmp_path / "config" / "partial-stage2-v4.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="balance-aware Regime selectivity contract is invalid",
+    ):
+        load_experiment_config(path)
 
 
 def test_fresh_entry_action_reduction_contract_rejects_missing_field(
@@ -665,6 +796,56 @@ def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="teacher guidance dropout"):
         load_experiment_config(path)
+
+
+def test_entry_supervision_schedule_defaults_to_legacy_teacher_boundary() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    )
+
+    assert config["training"][
+        "entry_supervision_autonomy_start_fraction"
+    ] == config["training"]["teacher_autonomy_start_fraction"]
+
+
+def test_distinct_entry_supervision_schedule_must_be_valid_and_frozen(
+    tmp_path: Path,
+) -> None:
+    source = Path(
+        "config/historical_mask_expansion_regime_post_launch_entry_v8.json"
+    )
+    payload = json.loads(source.read_text())
+    schedule_path = "training.entry_supervision_autonomy_start_fraction"
+    payload["training"]["entry_supervision_autonomy_start_fraction"] = 0.95
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path = tmp_path / "config" / "entry-consolidation.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="entry supervision schedule must be frozen"):
+        load_experiment_config(path)
+
+    payload["evolution"]["frozen_paths"].append(schedule_path)
+    path.write_text(json.dumps(payload))
+    config = load_experiment_config(path)
+    assert config["training"][
+        "entry_supervision_autonomy_start_fraction"
+    ] == 0.95
+
+    for invalid in (True, 0.79, 1.01):
+        payload["training"][
+            "entry_supervision_autonomy_start_fraction"
+        ] = invalid
+        path.write_text(json.dumps(payload))
+        with pytest.raises(
+            ValueError,
+            match="entry supervision autonomy start fraction",
+        ):
+            load_experiment_config(path)
 
 
 def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> None:

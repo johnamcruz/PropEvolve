@@ -64,9 +64,11 @@ def _agent(
     selectivity_weight: float,
     n_step_return: int = 1,
     entry_action_weight: float = 0.0,
+    entry_action_loss_reduction: str = "population_weighted_mean_v1",
     side_balance: str | None = None,
     selectivity_semantics: str | None = None,
     persistent_chop_negative_emphasis: float | None = None,
+    expansion_centers: tuple[float, float] = (0.10, 0.10),
     device: str = "cpu",
 ) -> RecurrentC51Agent:
     optional_settings = (
@@ -97,10 +99,11 @@ def _agent(
         teacher_channels=len(CHANNELS),
         teacher_channel_names=CHANNELS,
         teacher_loss_weight=1e-6,
-        teacher_entry_search_centers=(0.10, 0.10),
+        teacher_entry_search_centers=expansion_centers,
         entry_action_loss_weight=entry_action_weight,
+        entry_action_loss_reduction=entry_action_loss_reduction,
         regime_selectivity_loss_weight=selectivity_weight,
-        regime_selectivity_expansion_centers=(0.10, 0.10),
+        regime_selectivity_expansion_centers=expansion_centers,
         **optional_settings,
     )
 
@@ -1100,6 +1103,158 @@ def test_persistent_chop_objective_learns_wait_and_retains_both_entry_sides(
     teacher_free = taught.save(tmp_path / "persistent-chop-free.pt", manifest={})
     restored, _ = RecurrentC51Agent.load(teacher_free, device="cpu")
     assert tuple(_greedy(restored, row) for row in observations) == expected
+
+
+def _hostile_stage2_v2_entry_rows() -> tuple[
+    tuple[float, float],
+    tuple[tuple[Transition, ...], ...],
+]:
+    centers = (0.10249102659218842, 0.10399580328775007)
+    hostile = _transition_teacher_row(
+        chop_persistence=0.95,
+        transition_readiness=0.0,
+        long_attempt=0.3391180487263731,
+        long_clean=0.3391180487263731,
+        short_attempt=0.20604401637062572,
+        short_clean=0.20604401637062572,
+    )
+    rows = (
+        *(
+            _sequence(
+                (0.0, 1.0, 0.0),
+                hostile,
+                headroom=1.0,
+                target=Action.WAIT,
+            )
+            for _ in range(10)
+        ),
+        *(
+            _sequence(
+                (1.0, 0.0, 0.0),
+                hostile,
+                headroom=1.0,
+                target=Action.ENTER_LONG_1,
+            )
+            for _ in range(10)
+        ),
+        *(
+            _sequence(
+                (-1.0, 0.0, 0.0),
+                hostile,
+                headroom=1.0,
+                target=Action.ENTER_SHORT_1,
+            )
+            for _ in range(10)
+        ),
+    )
+    return centers, rows
+
+
+def test_static_regime_objective_reproduces_hostile_short_soft_veto() -> None:
+    centers, rows = _hostile_stage2_v2_entry_rows()
+    policy = _agent(
+        seed=271,
+        selectivity_weight=0.3,
+        entry_action_weight=0.3,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+        side_balance="equal_long_short_v1",
+        expansion_centers=centers,
+    )
+
+    for _ in range(6):
+        policy.train_batch(rows)
+
+    assert policy.entry_action_loss_weight == 0.3
+    assert policy.regime_selectivity_loss_weight == 0.3
+    for side in ("wait", "long", "short"):
+        assert policy.last_train_metrics[
+            f"entry_balance_{side}_weighted_mass"
+        ] == pytest.approx(1.0 / 3.0)
+    assert policy.last_train_metrics[
+        "regime_entry_conflict_long_target_wait_probability_mean"
+    ] == pytest.approx(0.4677441891910523, abs=1e-6)
+    assert policy.last_train_metrics[
+        "regime_entry_conflict_short_target_wait_probability_mean"
+    ] == pytest.approx(0.7235930097360516, abs=1e-6)
+    observations = ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+    assert tuple(_greedy(policy, row) for row in observations) == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.WAIT,
+    )
+
+
+def test_negative_only_regime_objective_survives_hostile_short_teacher(
+    tmp_path: Path,
+) -> None:
+    """Regime evidence may strengthen WAIT but never relabel a true Entry."""
+    centers, rows = _hostile_stage2_v2_entry_rows()
+    policy = _agent(
+        seed=271,
+        selectivity_weight=0.3,
+        entry_action_weight=0.3,
+        entry_action_loss_reduction="equal_present_class_mean_v1",
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        persistent_chop_negative_emphasis=1.0,
+        expansion_centers=centers,
+    )
+
+    for _ in range(6):
+        policy.train_batch(rows)
+
+    for side in ("long", "short"):
+        assert policy.last_train_metrics[
+            f"regime_entry_conflict_{side}_target_wait_probability_mean"
+        ] == 0.0
+        assert policy.last_train_metrics[
+            f"regime_entry_conflict_{side}_target_declared_side_probability_mean"
+        ] == 1.0
+        assert policy.last_train_metrics[
+            f"regime_entry_conflict_{side}_soft_wait_disagreement_rows"
+        ] == 0.0
+
+    observations = ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
+    expected = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    assert tuple(_greedy(policy, row) for row in observations) == expected
+
+    guided = policy.save(tmp_path / "hostile-short-guided.pt", manifest={})
+    resumed, _ = RecurrentC51Agent.load(guided, device="cpu")
+    assert resumed.regime_selectivity_semantics == (
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+    )
+    assert tuple(_greedy(resumed, row) for row in observations) == expected
+
+    zero_entry_updates = 0
+    for update in range(1, 289):
+        progress = 0.80 + 0.20 * update / 288.0
+        entry_action_weight_scale = max(0.0, 1.0 - progress / 0.95)
+        zero_entry_updates += int(entry_action_weight_scale == 0.0)
+        resumed.train_batch(
+            rows,
+            teacher_weight_scale=0.0,
+            entry_action_weight_scale=entry_action_weight_scale,
+        )
+        assert tuple(
+            _greedy(resumed, row) for row in observations
+        ) == expected
+    # Inclusive sampling hits the 95% boundary on update 216, so 73 of these
+    # 288 tail updates exercise the fully autonomous contract.
+    assert zero_entry_updates == 73
+
+    resumed.discard_teacher()
+    assert resumed.teacher_channels == 0
+    assert tuple(
+        _greedy(resumed, row) for row in observations
+    ) == expected
+    teacher_free = resumed.save(
+        tmp_path / "hostile-short-teacher-free.pt",
+        manifest={},
+    )
+    restored, _ = RecurrentC51Agent.load(teacher_free, device="cpu")
+    assert tuple(
+        _greedy(restored, row) for row in observations
+    ) == expected
 
 
 def test_persistent_chop_diagnostics_are_additive_without_thresholds() -> None:
