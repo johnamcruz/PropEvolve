@@ -1543,7 +1543,7 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     )
 
 
-def test_episode_budget_completes_exact_episode_count_independent_of_step_floor() -> None:
+def test_episode_budget_prints_the_episode_progress_counter_once(capsys) -> None:
     class BoundedEnvironment(Environment):
         def reset(self):
             observation, info = super().reset()
@@ -1572,6 +1572,14 @@ def test_episode_budget_completes_exact_episode_count_independent_of_step_floor(
 
     assert result.episodes == 3
     assert result.environment_steps == 12
+    train_lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[train] ")
+    ]
+    assert len(train_lines) == 3
+    assert all(" episodes=" not in line for line in train_lines)
+    assert train_lines[-1].startswith("[train] episode=3/3 ")
 
 
 def test_episode_budget_drives_learning_schedules_by_episode_position() -> None:

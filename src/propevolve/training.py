@@ -4969,10 +4969,7 @@ def train_agent(
         budget_status = (
             f"steps={progress.environment_steps:,}/{minimum_environment_steps:,}"
             if budget_mode == "environment_steps"
-            else (
-                f"steps={progress.environment_steps:,} "
-                f"episodes={progress.completed_episodes}/{episodes}"
-            )
+            else f"steps={progress.environment_steps:,}"
         )
         print(
             f"[train] episode={episode_index + 1}/{episodes} ticker={terminal_info['ticker']} "

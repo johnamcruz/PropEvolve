@@ -767,8 +767,14 @@ class RecurrentC51Agent:
             dtype=torch.long,
             device=self.device,
         )
-        all_rewards = torch.as_tensor(
+        reward_rows = np.asarray(
             [[item.reward for item in sequence] for sequence in sequences],
+            dtype=np.float32,
+        )
+        if not np.isfinite(reward_rows).all():
+            raise ValueError("training loss is non-finite")
+        all_rewards = torch.as_tensor(
+            reward_rows,
             dtype=torch.float32,
             device=self.device,
         )

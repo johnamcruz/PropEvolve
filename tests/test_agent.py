@@ -189,13 +189,16 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert not torch.equal(before, agent.online.output.weight.detach())
 
 
-def test_optimizer_fails_closed_before_update_on_nonfinite_training_loss() -> None:
+@pytest.mark.parametrize("reward", [float("nan"), float("inf")])
+def test_optimizer_fails_closed_before_update_on_nonfinite_training_loss(
+    reward: float,
+) -> None:
     agent = _agent(2, seed=5)
     sequence = (
         Transition(
             observation=np.array([0, 0], np.float32),
             action=Action.WAIT,
-            reward=float("nan"),
+            reward=reward,
             next_observation=np.array([1, 0], np.float32),
             terminated=True,
             valid_actions=(Action.WAIT, Action.ENTER_LONG_1),

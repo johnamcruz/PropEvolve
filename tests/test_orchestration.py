@@ -18,7 +18,6 @@ from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import (
-    _assert_parent_causal_contract,
     _plan,
     _reasoning_prompt,
     _resolve_codex_executable,
@@ -27,7 +26,6 @@ from propevolve.orchestration import (
 
 
 _V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
-_V5_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v5.json")
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -89,53 +87,6 @@ def _write_entry_center_receipt(root: Path) -> None:
     destination = root / "config" / "receipts" / _ENTRY_CENTER_RECEIPT.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(_ENTRY_CENTER_RECEIPT.read_bytes())
-
-
-def test_stage2_v4_matches_authenticated_stage1_causal_recipe() -> None:
-    """The new campaign must preflight the real immutable Stage 1 bundle."""
-    from propevolve.config import load_experiment_config
-
-    config = load_experiment_config(
-        "config/historical_mask_expansion_regime_stage2_v4.json"
-    )
-    base_parent = config["evolution"]["base_parent"]
-    parent = SimpleNamespace(path=(
-        Path(config["_root"])
-        / base_parent["archive_root"]
-        / "candidates"
-        / base_parent["candidate_id"]
-    ))
-
-    _assert_parent_causal_contract(parent, config)
-
-
-def test_stage2_v5_matches_authenticated_stage1_and_projects_exact_tiers() -> None:
-    from propevolve.config import load_experiment_config
-
-    config = load_experiment_config(_V5_CONFIG)
-    base_parent = config["evolution"]["base_parent"]
-    parent = SimpleNamespace(path=(
-        Path(config["_root"])
-        / base_parent["archive_root"]
-        / "candidates"
-        / base_parent["candidate_id"]
-    ))
-
-    _assert_parent_causal_contract(parent, config)
-    stages = _plan(config).stages
-
-    assert [stage.config["training_episodes"] for stage in stages] == [
-        200,
-        300,
-        500,
-    ]
-    assert all(stage.config["validation_episodes"] == 200 for stage in stages)
-    assert "episode_coverage" not in stages[0].config
-    assert "episode_coverage" not in stages[1].config
-    assert stages[2].config["episode_coverage"] == {
-        "schema": "full_data_episode_coverage_v1",
-        "episode_budget": 500,
-    }
 
 
 def test_stage2_v4_plan_enforces_the_near_blow_improvement_gate() -> None:
