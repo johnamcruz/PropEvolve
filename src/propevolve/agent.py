@@ -14,6 +14,7 @@ from torch import nn
 
 from .balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
+    PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     STATIC_STATE_SEMANTICS,
     REGIME_TEACHER_CHANNELS,
@@ -93,6 +94,12 @@ _REGIME_PERSISTENT_ADDITIVE_METRICS = (
     "regime_selectivity_transition_positive_long_declared_side_probability_sum",
     "regime_selectivity_transition_positive_short_rows",
     "regime_selectivity_transition_positive_short_declared_side_probability_sum",
+    "regime_selectivity_association_dead_wait_rows",
+    "regime_selectivity_association_dead_wait_model_wait_probability_sum",
+    "regime_selectivity_association_transition_positive_long_rows",
+    "regime_selectivity_association_transition_positive_long_model_wait_probability_sum",
+    "regime_selectivity_association_transition_positive_short_rows",
+    "regime_selectivity_association_transition_positive_short_model_wait_probability_sum",
 )
 
 
@@ -136,6 +143,73 @@ def centered_entry_search_target(
         torch.logit(bounded) - math.log(center / (1.0 - center))
     ) / teacher_temperature
     return torch.sigmoid(centered_log_odds)
+
+
+def persistent_chop_association_rank_loss(
+    flat_action_values: torch.Tensor,
+    *,
+    dead_membership: torch.Tensor,
+    transition_positive_long_membership: torch.Tensor,
+    transition_positive_short_membership: torch.Tensor,
+    q_temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rank dead-chop WAIT above exact transition-positive WAIT preference.
+
+    Long and Short values form a detached reference, so this auxiliary can
+    only move the WAIT coordinate. Long and Short cohorts are normalized
+    separately before their equal-present-side mean.
+    """
+    memberships = (
+        dead_membership,
+        transition_positive_long_membership,
+        transition_positive_short_membership,
+    )
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or any(value.shape != flat_action_values.shape[:-1] for value in memberships)
+        or isinstance(q_temperature, bool)
+        or not math.isfinite(float(q_temperature))
+        or float(q_temperature) <= 0.0
+    ):
+        raise ValueError("persistent-chop association loss contract is invalid")
+    dead_mass = dead_membership.sum()
+    ready_long_mass = transition_positive_long_membership.sum()
+    ready_short_mass = transition_positive_short_membership.sum()
+    dead_active = (dead_mass > 0).to(flat_action_values.dtype)
+    ready_long_active = (ready_long_mass > 0).to(flat_action_values.dtype)
+    ready_short_active = (ready_short_mass > 0).to(flat_action_values.dtype)
+    ready_side_count = ready_long_active + ready_short_active
+    active = dead_active * (ready_side_count > 0).to(flat_action_values.dtype)
+    temperature = float(q_temperature)
+    wait_preference = flat_action_values[:, int(Action.WAIT)] - (
+        torch.logsumexp(
+            flat_action_values[:, 1:].detach() / temperature,
+            dim=-1,
+        )
+        * temperature
+    )
+    tiny = torch.finfo(flat_action_values.dtype).tiny
+    dead_wait_preference = (
+        wait_preference * dead_membership
+    ).sum() / dead_mass.clamp_min(tiny)
+    ready_long_wait_preference = (
+        wait_preference * transition_positive_long_membership
+    ).sum() / ready_long_mass.clamp_min(tiny)
+    ready_short_wait_preference = (
+        wait_preference * transition_positive_short_membership
+    ).sum() / ready_short_mass.clamp_min(tiny)
+    ready_wait_preference = (
+        ready_long_wait_preference * ready_long_active
+        + ready_short_wait_preference * ready_short_active
+    ) / ready_side_count.clamp_min(1.0)
+    return (
+        nn.functional.softplus(
+            ready_wait_preference - dead_wait_preference
+        ) * active,
+        active,
+    )
 
 
 class RecurrentC51Network(nn.Module):
@@ -342,6 +416,7 @@ class RecurrentC51Agent:
             not in {
                 STATIC_STATE_SEMANTICS,
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -351,7 +426,10 @@ class RecurrentC51Agent:
             raise ValueError("Regime selectivity semantics are invalid")
         if (
             regime_selectivity_semantics
-            == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+            in {
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+            }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
             raise ValueError(
@@ -635,7 +713,7 @@ class RecurrentC51Agent:
     ) -> tuple[Action, torch.Tensor, np.ndarray | None]:
         if not valid_actions:
             raise ValueError("at least one action must be valid")
-        explore = self._rng.random() < epsilon
+        explore = epsilon > 0.0 and self._rng.random() < epsilon
         selected = (
             valid_actions[int(self._rng.integers(len(valid_actions)))]
             if explore else None
@@ -1001,6 +1079,9 @@ class RecurrentC51Agent:
         regime_selectivity_positive_long_loss = teacher_loss
         regime_selectivity_positive_short_loss = teacher_loss
         regime_selectivity_exact_wait_loss = teacher_loss
+        regime_selectivity_association_loss = teacher_loss
+        regime_selectivity_association_active = teacher_loss
+        regime_selectivity_association_skipped = teacher_loss
         regime_selectivity_additive: dict[str, torch.Tensor] = {}
         regime_channel_names = self.regime_teacher_channel_names
         regime_channel_additive = torch.zeros(
@@ -1306,7 +1387,10 @@ class RecurrentC51Agent:
                     selectivity_rows = (
                         exact_flat_rows
                         if self.regime_selectivity_semantics
-                        == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+                        in {
+                            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                        }
                         else positive_rows_mask
                     )
                     selected_teachers = selectivity_teacher_targets[
@@ -1330,7 +1414,10 @@ class RecurrentC51Agent:
                     positive_rows = selectivity_rows.sum().to(torch.float32)
                     if (
                         self.regime_selectivity_semantics
-                        == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+                        in {
+                            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                        }
                     ):
                         compiler = self.regime_selectivity
                         persistent_evidence = (
@@ -1369,13 +1456,6 @@ class RecurrentC51Agent:
                         regime_selectivity_positive_short_loss = (
                             exact_losses * short_rows
                         ).sum() / short_count.clamp_min(1.0)
-                        regime_selectivity_loss = (
-                            regime_selectivity_exact_wait_loss * wait_active
-                            + regime_selectivity_positive_long_loss * long_active
-                            + regime_selectivity_positive_short_loss * short_active
-                        ) / (
-                            wait_active + long_active + short_active
-                        ).clamp_min(1.0)
                         selectivity_targets = nn.functional.one_hot(
                             selected_actions,
                             num_classes=3,
@@ -1399,6 +1479,44 @@ class RecurrentC51Agent:
                         ready_short_membership = (
                             persistent_evidence.transition_positive_short_membership
                         )
+                        association_group_active = torch.zeros_like(wait_active)
+                        if (
+                            self.regime_selectivity_semantics
+                            == PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+                        ):
+                            (
+                                regime_selectivity_association_loss,
+                                association_group_active,
+                            ) = persistent_chop_association_rank_loss(
+                                flat_q,
+                                dead_membership=dead_membership,
+                                transition_positive_long_membership=(
+                                    ready_long_membership
+                                ),
+                                transition_positive_short_membership=(
+                                    ready_short_membership
+                                ),
+                                q_temperature=(
+                                    self.regime_selectivity_q_temperature
+                                ),
+                            )
+                            regime_selectivity_association_active = (
+                                association_group_active
+                            )
+                            regime_selectivity_association_skipped = (
+                                1.0 - association_group_active
+                            )
+                        regime_selectivity_loss = (
+                            regime_selectivity_exact_wait_loss * wait_active
+                            + regime_selectivity_positive_long_loss * long_active
+                            + regime_selectivity_positive_short_loss * short_active
+                            + regime_selectivity_association_loss
+                        ) / (
+                            wait_active
+                            + long_active
+                            + short_active
+                            + association_group_active
+                        ).clamp_min(1.0)
                         regime_persistent_additive.update({
                             "regime_selectivity_exact_wait_rows": (
                                 wait_rows.sum()
@@ -1447,6 +1565,31 @@ class RecurrentC51Agent:
                             "regime_selectivity_transition_positive_short_"
                             "declared_side_probability_sum": (
                                 ready_short_membership * declared_side_probability
+                            ).sum(),
+                            "regime_selectivity_association_dead_wait_rows": (
+                                dead_membership.sum()
+                            ),
+                            "regime_selectivity_association_dead_wait_"
+                            "model_wait_probability_sum": (
+                                dead_membership * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_association_"
+                            "transition_positive_long_rows": (
+                                ready_long_membership.sum()
+                            ),
+                            "regime_selectivity_association_"
+                            "transition_positive_long_"
+                            "model_wait_probability_sum": (
+                                ready_long_membership * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_association_"
+                            "transition_positive_short_rows": (
+                                ready_short_membership.sum()
+                            ),
+                            "regime_selectivity_association_"
+                            "transition_positive_short_"
+                            "model_wait_probability_sum": (
+                                ready_short_membership * model_wait_probability
                             ).sum(),
                         })
                     else:
@@ -1900,6 +2043,9 @@ class RecurrentC51Agent:
             regime_selectivity_positive_long_loss,
             regime_selectivity_positive_short_loss,
             regime_selectivity_exact_wait_loss,
+            regime_selectivity_association_loss,
+            regime_selectivity_association_active,
+            regime_selectivity_association_skipped,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -1947,6 +2093,9 @@ class RecurrentC51Agent:
             regime_selectivity_positive_long_loss_value,
             regime_selectivity_positive_short_loss_value,
             regime_selectivity_exact_wait_loss_value,
+            regime_selectivity_association_loss_value,
+            regime_selectivity_association_active_value,
+            regime_selectivity_association_skipped_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -2180,6 +2329,40 @@ class RecurrentC51Agent:
                 if rows
                 else 0.0
             )
+        association_dead_rows = regime_persistent_metric_values[
+            "regime_selectivity_association_dead_wait_rows"
+        ]
+        association_dead_wait = (
+            regime_persistent_metric_values[
+                "regime_selectivity_association_dead_wait_"
+                "model_wait_probability_sum"
+            ]
+            / association_dead_rows
+            if association_dead_rows
+            else 0.0
+        )
+        association_ready_means = []
+        for side in ("long", "short"):
+            prefix = (
+                "regime_selectivity_association_transition_positive_"
+                f"{side}_"
+            )
+            rows = regime_persistent_metric_values[prefix + "rows"]
+            if rows:
+                association_ready_means.append(
+                    regime_persistent_metric_values[
+                        prefix + "model_wait_probability_sum"
+                    ] / rows
+                )
+        regime_persistent_metric_values[
+            "regime_selectivity_dead_wait_minus_"
+            "transition_positive_model_wait"
+        ] = (
+            association_dead_wait
+            - sum(association_ready_means) / len(association_ready_means)
+            if association_dead_rows and association_ready_means
+            else 0.0
+        )
         for stratum in _REGIME_SELECTIVITY_STRATA:
             prefix = f"regime_selectivity_{stratum}_"
             rows = regime_selectivity_metric_values[prefix + "rows"]
@@ -2259,6 +2442,15 @@ class RecurrentC51Agent:
             ),
             "regime_selectivity_exact_wait_loss": (
                 regime_selectivity_exact_wait_loss_value
+            ),
+            "regime_selectivity_association_loss": (
+                regime_selectivity_association_loss_value
+            ),
+            "regime_selectivity_association_active": (
+                regime_selectivity_association_active_value
+            ),
+            "regime_selectivity_association_skipped": (
+                regime_selectivity_association_skipped_value
             ),
             **regime_selectivity_metric_values,
             **regime_channel_metric_values,
@@ -2353,11 +2545,29 @@ class RecurrentC51Agent:
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
         self.entry_action_loss_weight = 0.0
+        self.teacher_loss_weight = 0.0
+        self.teacher_entry_search_loss_weight = 0.0
+        self.teacher_entry_search_objective = "raw_probability"
+        self.teacher_entry_search_centers = (0.5, 0.5)
         self.regime_selectivity_loss_weight = 0.0
         self.regime_selectivity_side_balance = "none"
         self.regime_selectivity_semantics = STATIC_STATE_SEMANTICS
         self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
         self.regime_selectivity = None
+        self.last_train_metrics = {}
+        self.teacher_channel_names = ()
+        self.teacher_channel_loss_weights = ()
+        self._teacher_channel_loss_weights_tensor = torch.empty(
+            0,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.regime_teacher_channel_names = ()
+        self._regime_teacher_channel_indices_tensor = torch.empty(
+            0,
+            dtype=torch.long,
+            device=self.device,
+        )
         if not self.teacher_channels:
             return
         online = RecurrentC51Network(
@@ -2377,12 +2587,6 @@ class RecurrentC51Agent:
         self.online = online
         self.target = target
         self.teacher_channels = 0
-        self.teacher_channel_names = ()
-        self.teacher_loss_weight = 0.0
-        self.teacher_channel_loss_weights = ()
-        self.teacher_entry_search_loss_weight = 0.0
-        self.teacher_entry_search_objective = "raw_probability"
-        self.teacher_entry_search_centers = (0.5, 0.5)
         self.optimizer = torch.optim.AdamW(
             self.online.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
         )
@@ -2391,6 +2595,28 @@ class RecurrentC51Agent:
             enabled=self.mixed_precision == "fp16",
         )
         self._configure_execution()
+
+    def assert_teacher_free(self) -> None:
+        """Fail closed unless this policy is safe for validation or shipping."""
+        if (
+            self.teacher_channels != 0
+            or self.teacher_channel_names
+            or self.teacher_channel_loss_weights
+            or self.teacher_loss_weight != 0.0
+            or self.teacher_entry_search_loss_weight != 0.0
+            or self.entry_action_loss_weight != 0.0
+            or self.regime_selectivity_loss_weight != 0.0
+            or self.regime_selectivity is not None
+            or self.retention_anchor is not None
+            or self.online.teacher_output is not None
+            or self.target.teacher_output is not None
+            or self._teacher_channel_loss_weights_tensor.numel() != 0
+            or self.regime_teacher_channel_names
+            or self._regime_teacher_channel_indices_tensor.numel() != 0
+        ):
+            raise ValueError(
+                "validation policy still contains training-only teacher state"
+            )
 
     def _project_distribution(
         self,

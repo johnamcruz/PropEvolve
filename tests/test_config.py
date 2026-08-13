@@ -27,6 +27,15 @@ CURRENT_RECIPE = Path(
 STAGE2_V5_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v5.json"
 )
+STAGE2_V6_RECIPE = Path(
+    "config/historical_mask_expansion_regime_stage2_v6.json"
+)
+
+STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
+STAGE2_V6_ASSOCIATION_FORMULA = (
+    "equal_present_group_mean(exact_wait_weighted_ce,exact_long_ce,"
+    "exact_short_ce,zero_margin_dead_vs_transition_positive_wait_rank)"
+)
 
 
 def _current_payload() -> dict:
@@ -74,8 +83,11 @@ def _episode_budget_payload() -> dict:
     return payload
 
 
-def _policy_health_payload() -> dict:
-    return {
+def _policy_health_payload(
+    *,
+    require_positive_persistent_regime_association: bool = False,
+) -> dict:
+    payload = {
         "schema": "propevolve_training_policy_health_v1",
         "minimum_completed_episodes": 45,
         "probe_interval_episodes": 45,
@@ -94,6 +106,9 @@ def _policy_health_payload() -> dict:
             "minimum_failed_conditions": 2,
         },
     }
+    if require_positive_persistent_regime_association:
+        payload["require_positive_persistent_regime_association"] = True
+    return payload
 
 
 def _stage2a_config(tmp_path: Path) -> Path:
@@ -517,6 +532,120 @@ def test_stage2_v5_is_a_frozen_exact_episode_curriculum() -> None:
     assert "training.minimum_environment_steps" not in config[
         "evolution"
     ]["frozen_paths"]
+
+
+def test_stage2_v6_is_one_frozen_association_change_from_stage1() -> None:
+    stage1_matched_fields = (
+        "assets",
+        "tickers",
+        "deployment_tickers",
+        "training_only_tickers",
+        "timeframe_minutes",
+        "cache_root",
+        "cache",
+        "teachers",
+        "entry_supervision",
+        "observation",
+        "challenge",
+        "point_values",
+        "round_trip_fees",
+        "temporal",
+        "sealed_confirmation",
+        "agent",
+        "runtime",
+    )
+
+    v5 = load_experiment_config(STAGE2_V5_RECIPE)
+    v6 = load_experiment_config(STAGE2_V6_RECIPE)
+
+    assert all(v6[field] == v5[field] for field in stage1_matched_fields)
+    assert v6["training"] == {
+        **v5["training"],
+        "short_circuit": {
+            **v5["training"]["short_circuit"],
+            "policy_health": _policy_health_payload(
+                require_positive_persistent_regime_association=True
+            ),
+        },
+    }
+    assert v6["evolution"]["base_parent"] == v5["evolution"]["base_parent"]
+    assert v6["evolution"]["parent_candidate_ids"] == (
+        "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0",
+    )
+    assert v6["regime_selectivity"] == {
+        **v5["regime_selectivity"],
+        "semantics": STAGE2_V6_ASSOCIATION_SEMANTICS,
+        "formula": STAGE2_V6_ASSOCIATION_FORMULA,
+    }
+    assert v6["regime_selectivity"]["loss_weight"] == pytest.approx(0.3)
+    assert v6["regime_selectivity"]["q_temperature"] == pytest.approx(1.0)
+    assert v6["regime_selectivity"][
+        "persistent_chop_negative_emphasis"
+    ] == pytest.approx(1.0)
+    assert "margin" not in v6["regime_selectivity"]
+    assert "association_objective" not in v6
+    assert v6["evolution"]["allowed_revision_paths"] == ()
+    assert v6["campaign"]["max_revisions_per_stage"] == 0
+    expected_parent_improvements = [
+        {
+            "metric": "selection.pass_rate",
+            "direction": "maximize",
+            "minimum_delta": 0.0,
+        },
+        {
+            "metric": "selection.near_blow_timeout_rate",
+            "direction": "minimize",
+            "minimum_delta": 0.0,
+        },
+    ]
+    assert all(
+        stage["parent_improvement_requirements"]
+        == expected_parent_improvements
+        for stage in v6["campaign"]["budget_stages"]
+    )
+    assert v6["output"] != v5["output"]
+    assert v6["campaign"]["state_root"] != v5["campaign"]["state_root"]
+    assert "Stage 2 v5 stopped with negative evidence" in v6["evolution"][
+        "hypothesis"
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda payload: payload["regime_selectivity"].update(
+            semantics="persistent_chop_negative_weight_v1"
+        ),
+        lambda payload: payload["regime_selectivity"].update(
+            formula=(
+                "equal_present_group_mean(exact_wait_weighted_ce,"
+                "exact_long_ce,exact_short_ce,margin_rank)"
+            )
+        ),
+        lambda payload: payload["regime_selectivity"].update(margin=0.1),
+        lambda payload: payload["training"]["short_circuit"][
+            "policy_health"
+        ].update(require_positive_persistent_regime_association=False),
+    ),
+)
+def test_stage2_v6_association_contract_fails_closed_on_partial_drift(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    payload = json.loads(STAGE2_V6_RECIPE.read_text())
+    mutate(payload)
+    path = tmp_path / "config" / "invalid-stage2-v6.json"
+    path.parent.mkdir(parents=True)
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = path.parent / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="association contract"):
+        load_experiment_config(path)
 
 
 @pytest.mark.parametrize(

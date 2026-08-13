@@ -9,6 +9,7 @@ import torch
 
 from propevolve.agent import RecurrentC51Agent
 from propevolve.balance_aware_regime_selectivity import (
+    PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
 )
 from propevolve.decision import Action
@@ -38,8 +39,16 @@ def _teacher_row(
     trend: float,
     chop_persistence: float,
     transition_readiness: float,
+    long_expansion_score: float = 0.01,
+    short_expansion_score: float = 0.01,
 ) -> np.ndarray:
     values = np.full(len(CHANNELS), 0.1, dtype=np.float32)
+    values[:4] = (
+        np.sqrt(long_expansion_score),
+        np.sqrt(long_expansion_score),
+        np.sqrt(short_expansion_score),
+        np.sqrt(short_expansion_score),
+    )
     updates = {
         "structure_chop_probability": chop,
         "structure_neutral_probability": 0.1,
@@ -62,10 +71,11 @@ def _transition(
     target: Action | None,
     teacher: np.ndarray,
     *,
+    regime_context: float = 0.0,
     reset: bool = False,
     source_decision_index: int,
 ) -> Transition:
-    observation = np.asarray((code, 0.0, 0.0), dtype=np.float32)
+    observation = np.asarray((code, regime_context, 0.0), dtype=np.float32)
     return Transition(
         observation=observation,
         action=Action.WAIT,
@@ -92,6 +102,8 @@ def _episode(
     target: Action,
     teacher: np.ndarray,
     source_decision_index: int,
+    *,
+    regime_context: float = 0.0,
 ) -> Episode:
     # The anchor is at index one, after one authentic recurrent burn-in row.
     first = _transition(
@@ -105,9 +117,13 @@ def _episode(
         code,
         target,
         teacher,
+        regime_context=regime_context,
         source_decision_index=source_decision_index,
     )
-    final_observation = np.asarray((code + 0.25, 0.0, 0.0), np.float32)
+    final_observation = np.asarray(
+        (code + 0.25, regime_context, 0.0),
+        np.float32,
+    )
     anchor = Transition(
         **{
             **anchor.__dict__,
@@ -171,12 +187,16 @@ def _probe_replay() -> BalancedSequenceReplay:
         rows.append((f"long-ready-{index}", 2.0, Action.ENTER_LONG_1, ready))
         rows.append((f"short-ready-{index}", 3.0, Action.ENTER_SHORT_1, ready))
     for source_index, (episode_id, code, target, teacher) in enumerate(rows, 100):
+        chop = teacher[CHANNELS.index("structure_chop_probability")]
+        neutral = teacher[CHANNELS.index("structure_neutral_probability")]
+        trend = teacher[CHANNELS.index("structure_trend_probability")]
         replay.add(_episode(
             episode_id,
             code,
             target,
             teacher,
             source_decision_index=source_index,
+            regime_context=float(chop > max(neutral, trend)),
         ))
     return replay
 
@@ -280,6 +300,36 @@ def test_final_probe_is_fixed_balanced_and_does_not_advance_replay_rng() -> None
     )
     assert len(report.rows) == 96
     assert all(row["source_decision_index"] >= 100 for row in report.rows)
+
+
+def test_final_probe_policy_view_is_label_blind() -> None:
+    class LabelBlindSpyPolicy(ScriptedFinalPolicy):
+        def greedy_sequence_action_values(self, sequences):
+            for sequence in sequences:
+                for transition in sequence:
+                    assert set(vars(transition)) == {
+                        "observation",
+                        "valid_actions",
+                        "recurrent_reset",
+                    }
+                    assert not hasattr(transition, "teacher_target")
+                    assert not hasattr(transition, "entry_action_target")
+                    assert not hasattr(
+                        transition,
+                        "regime_selectivity_headroom_fraction",
+                    )
+            return super().greedy_sequence_action_values(sequences)
+
+    report = _evaluate(LabelBlindSpyPolicy({
+        0: (3.0, 0.0, 0.0),
+        1: (1.0, 0.0, 0.0),
+        2: (0.0, 3.0, 0.0),
+        3: (0.0, 0.0, 3.0),
+    }), _probe_replay())
+
+    assert report.metrics["final_regime_probe_wait_rows"] == 32.0
+    assert report.metrics["final_regime_probe_long_rows"] == 32.0
+    assert report.metrics["final_regime_probe_short_rows"] == 32.0
 
 
 def test_final_probe_fails_closed_when_any_class_has_fewer_than_32_rows() -> None:
@@ -525,13 +575,12 @@ def test_static_probe_detects_positive_entry_wait_suppression_in_chop() -> None:
         def greedy_sequence_action_values(self, sequences):
             actions, values = super().greedy_sequence_action_values(sequences)
             for row_index, sequence in enumerate(sequences):
-                teacher = sequence[1].teacher_target
-                assert teacher is not None
-                chop = teacher[CHANNELS.index("structure_chop_probability")]
-                target = sequence[1].entry_action_target
-                if target in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1} and chop > 0.5:
+                observation = sequence[1].observation
+                code = int(observation[0])
+                if code in {2, 3} and observation[1] > 0.5:
                     values[row_index, 1, int(Action.WAIT)] = 3.0
-                    values[row_index, 1, int(target)] = 0.0
+                    values[row_index, 1, int(Action.ENTER_LONG_1)] = 0.0
+                    values[row_index, 1, int(Action.ENTER_SHORT_1)] = 0.0
                     actions[row_index, 1] = int(Action.WAIT)
             return actions, values
 
@@ -582,6 +631,133 @@ def test_final_probe_rows_explain_predictions_with_regime_channels_and_strata() 
         for prediction in ("wait", "long", "short")
     )
     assert confusion_total == 96.0
+
+
+def test_v2_probe_uses_authenticated_centers_and_exact_positive_sides() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=96,
+        sequence_length=2,
+        recurrent_burn_in=1,
+        seed=53,
+    )
+    source_index = 100
+    for action, code in (
+        (Action.WAIT, 0.0),
+        (Action.ENTER_LONG_1, 2.0),
+        (Action.ENTER_SHORT_1, 3.0),
+    ):
+        for index in range(32):
+            long_score = 0.01 if index < 16 else 0.81
+            teacher = _teacher_row(
+                chop=0.1,
+                trend=0.9,
+                chop_persistence=0.95,
+                transition_readiness=0.95,
+                long_expansion_score=long_score,
+                short_expansion_score=0.81,
+            )
+            replay.add(_episode(
+                f"{action.name}-{index}",
+                code,
+                action,
+                teacher,
+                source_decision_index=source_index,
+            ))
+            source_index += 1
+    samples = replay.final_regime_probe_sequences(samples_per_action=32)
+    policy = ScriptedFinalPolicy({
+        0: (3.0, 0.0, 0.0),
+        2: (0.0, 3.0, 0.0),
+        3: (0.0, 0.0, 3.0),
+    })
+
+    report = evaluate_final_regime_probe(
+        policy,
+        samples,
+        teacher_channel_names=CHANNELS,
+        q_temperature=1.0,
+        regime_selectivity_semantics=PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+        regime_selectivity_expansion_centers=(0.1, 0.1),
+        source_period=("2021-01-01", "2025-01-01"),
+    )
+
+    wait_rows = [row for row in report.rows if row["target_action"] == "WAIT"]
+    long_rows = sorted(
+        (row for row in report.rows if row["target_action"] == "ENTER_LONG_1"),
+        key=lambda row: row["source_decision_index"],
+    )
+    short_rows = [
+        row for row in report.rows
+        if row["target_action"] == "ENTER_SHORT_1"
+    ]
+    low_mass = sum(
+        row["persistent_regime_strata"][
+            "transition_positive_long_membership"
+        ]
+        for row in long_rows[:16]
+    )
+    high_mass = sum(
+        row["persistent_regime_strata"][
+            "transition_positive_long_membership"
+        ]
+        for row in long_rows[16:]
+    )
+
+    assert high_mass / (low_mass + high_mass) > 0.5
+    assert all(
+        row["persistent_regime_strata"][
+            "transition_positive_long_membership"
+        ] == 0.0
+        for row in (*wait_rows, *short_rows)
+    )
+    assert all(
+        row["persistent_regime_strata"][
+            "transition_positive_short_membership"
+        ] > 0.0
+        for row in short_rows
+    )
+    assert report.regime_selectivity_semantics == (
+        PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+    )
+    assert report.regime_selectivity_expansion_centers == (0.1, 0.1)
+    dead_wait_probability = np.mean([
+        row["flat_action_probabilities"]["WAIT"]
+        for row in wait_rows
+    ])
+    long_wait_probability = np.average(
+        [row["flat_action_probabilities"]["WAIT"] for row in long_rows],
+        weights=[
+            row["persistent_regime_strata"][
+                "transition_positive_long_membership"
+            ]
+            for row in long_rows
+        ],
+    )
+    short_wait_probability = np.average(
+        [row["flat_action_probabilities"]["WAIT"] for row in short_rows],
+        weights=[
+            row["persistent_regime_strata"][
+                "transition_positive_short_membership"
+            ]
+            for row in short_rows
+        ],
+    )
+    assert report.metrics[
+        "final_regime_probe_dead_wait_minus_transition_positive_wait"
+    ] == pytest.approx(
+        dead_wait_probability
+        - (long_wait_probability + short_wait_probability) / 2.0
+    )
+    other_centers = evaluate_final_regime_probe(
+        policy,
+        samples,
+        teacher_channel_names=CHANNELS,
+        q_temperature=1.0,
+        regime_selectivity_semantics=PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+        regime_selectivity_expansion_centers=(0.2, 0.1),
+        source_period=("2021-01-01", "2025-01-01"),
+    )
+    assert other_centers.sample_identity_sha256 != report.sample_identity_sha256
 
 
 def _real_agent(seed: int = 71) -> RecurrentC51Agent:

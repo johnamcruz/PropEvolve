@@ -10,7 +10,19 @@ from propevolve.training_health import (
 )
 
 
-def _spec() -> TrainingPolicyHealthSpec:
+def _spec(
+    *,
+    require_positive_persistent_regime_association: bool | None = None,
+) -> TrainingPolicyHealthSpec:
+    association = (
+        {}
+        if require_positive_persistent_regime_association is None
+        else {
+            "require_positive_persistent_regime_association": (
+                require_positive_persistent_regime_association
+            )
+        }
+    )
     return TrainingPolicyHealthSpec(
         minimum_completed_episodes=45,
         probe_interval_episodes=45,
@@ -25,6 +37,7 @@ def _spec() -> TrainingPolicyHealthSpec:
         economic_futility_maximum_mean_terminal_pnl=-1_500.0,
         economic_futility_maximum_expectancy_r=-0.15,
         economic_futility_minimum_failed_conditions=2,
+        **association,
     )
 
 
@@ -56,6 +69,10 @@ def _snapshot(**overrides: object) -> TrainingHealthSnapshot:
             "final_regime_probe_wait_recall": 0.60,
             "final_regime_probe_long_recall": 0.50,
             "final_regime_probe_short_recall": 0.50,
+            "final_regime_probe_dead_wait_minus_transition_ready_wait": -0.05,
+            "final_regime_probe_dead_wait_minus_transition_positive_wait": 0.05,
+            "final_regime_probe_transition_positive_long_response": 0.05,
+            "final_regime_probe_transition_positive_short_response": 0.05,
         },
     }
     values.update(overrides)
@@ -92,6 +109,55 @@ def test_policy_health_stops_direction_or_wait_collapse(
 
     assert verdict.stop is True
     assert any(expected in reason for reason in verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "final_regime_probe_dead_wait_minus_transition_positive_wait",
+        "final_regime_probe_transition_positive_long_response",
+        "final_regime_probe_transition_positive_short_response",
+    ),
+)
+@pytest.mark.parametrize("association", (-0.013164, 0.0))
+def test_v6_policy_health_stops_nonpositive_persistent_regime_association(
+    metric: str,
+    association: float,
+) -> None:
+    probe = dict(_snapshot().probe_metrics or {})
+    probe[metric] = association
+
+    verdict = TrainingHealthDetector(_spec(
+        require_positive_persistent_regime_association=True,
+    )).evaluate(_snapshot(probe_metrics=probe))
+
+    assert verdict.stop is True
+    assert len(verdict.reasons) == 1
+    assert f"{association:.6f} <= 0.000000" in verdict.reasons[0]
+
+
+def test_v6_policy_health_does_not_gate_transition_ready_wait_contrast() -> None:
+    verdict = TrainingHealthDetector(_spec(
+        require_positive_persistent_regime_association=True,
+    )).evaluate(_snapshot())
+
+    assert verdict.stop is False
+    assert verdict.reasons == ()
+
+
+def test_legacy_policy_health_does_not_retroactively_gate_association() -> None:
+    probe = dict(_snapshot().probe_metrics or {})
+    probe["final_regime_probe_dead_wait_minus_transition_ready_wait"] = -0.05
+    probe["final_regime_probe_dead_wait_minus_transition_positive_wait"] = -0.05
+    probe["final_regime_probe_transition_positive_long_response"] = -0.05
+    probe["final_regime_probe_transition_positive_short_response"] = -0.05
+
+    verdict = TrainingHealthDetector(_spec()).evaluate(
+        _snapshot(probe_metrics=probe)
+    )
+
+    assert verdict.stop is False
+    assert verdict.reasons == ()
 
 
 def test_policy_health_stops_missing_or_skewed_optimizer_class_mass() -> None:

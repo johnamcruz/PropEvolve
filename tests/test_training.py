@@ -157,6 +157,20 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
     }) == {"entry_opportunity_side_balance": "equal_long_short_v1"}
 
 
+def test_final_regime_probe_uses_frozen_selectivity_identity() -> None:
+    assert training_module._regime_selectivity_probe_settings({
+        "semantics": "persistent_chop_association_v2",
+        "expansion_long_center": 0.10249102659218842,
+        "expansion_short_center": 0.10399580328775007,
+    }) == {
+        "regime_selectivity_semantics": "persistent_chop_association_v2",
+        "regime_selectivity_expansion_centers": (
+            0.10249102659218842,
+            0.10399580328775007,
+        ),
+    }
+
+
 def test_runner_balance_seam_passes_authenticated_weights_and_archives_receipt() -> None:
     class Targets:
         manifest = {
@@ -567,6 +581,73 @@ def test_persistent_regime_gate_requires_negative_only_coverage(
     assert not all(gate.passes(metrics) for gate in gates)
     metrics["regime_selectivity_exact_wait_weight_mean"] = 1.4
     metrics["regime_selectivity_exact_wait_rows"] = 0.0
+    assert not all(gate.passes(metrics) for gate in gates)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "final_regime_probe_dead_wait_minus_transition_positive_wait",
+        "final_regime_probe_transition_positive_long_response",
+        "final_regime_probe_transition_positive_short_response",
+    ),
+)
+@pytest.mark.parametrize("association", (-0.01, 0.0))
+def test_v6_persistent_regime_gate_requires_positive_final_association(
+    metric: str,
+    association: float,
+) -> None:
+    metrics = {
+        "short_circuited": 0.0,
+        "latest_teacher_weight_scale": 0.0,
+        "latest_entry_action_weight_scale": 0.0,
+        "sampled_entry_action_long_rows": 10.0,
+        "sampled_entry_action_short_rows": 10.0,
+        "sampled_entry_action_long_recall": 0.5,
+        "sampled_entry_action_short_recall": 0.5,
+        "regime_selectivity_positive_long_rows": 10.0,
+        "regime_selectivity_positive_short_rows": 10.0,
+        "regime_selectivity_positive_long_declared_side_probability_sum": 5.0,
+        "regime_selectivity_positive_short_declared_side_probability_sum": 5.0,
+        "regime_selectivity_exact_wait_rows": 10.0,
+        "regime_selectivity_exact_wait_weight_mean": 1.2,
+        "regime_selectivity_persistent_dead_chop_weight_sum": 10.0,
+        "regime_selectivity_transition_ready_weight_sum": 1.0,
+        "regime_selectivity_transition_positive_long_rows": 1.0,
+        "regime_selectivity_transition_positive_short_rows": 1.0,
+        "regime_selectivity_transition_positive_long_declared_side_probability_sum": 1.0,
+        "regime_selectivity_transition_positive_short_declared_side_probability_sum": 1.0,
+        "regime_entry_conflict_long_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_short_target_wait_probability_mean": 0.0,
+        "regime_entry_conflict_long_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_short_target_declared_side_probability_mean": 1.0,
+        "regime_entry_conflict_long_rows": 10.0,
+        "regime_entry_conflict_short_rows": 10.0,
+        "regime_entry_conflict_long_soft_wait_disagreement_rows": 0.0,
+        "regime_entry_conflict_short_soft_wait_disagreement_rows": 0.0,
+        "final_regime_probe_wait_rows": 32.0,
+        "final_regime_probe_long_rows": 32.0,
+        "final_regime_probe_short_rows": 32.0,
+        "final_regime_probe_long_recall": 0.5,
+        "final_regime_probe_short_recall": 0.5,
+        "final_regime_probe_wait_recall": 0.75,
+        "final_regime_probe_persistent_dead_wait_mass": 12.0,
+        "final_regime_probe_transition_ready_wait_mass": 8.0,
+        "final_regime_probe_transition_positive_long_mass": 8.0,
+        "final_regime_probe_transition_positive_short_mass": 8.0,
+        "final_regime_probe_dead_wait_minus_transition_ready_wait": -0.2,
+        "final_regime_probe_dead_wait_minus_transition_positive_wait": 0.2,
+        "final_regime_probe_transition_positive_long_response": 0.2,
+        "final_regime_probe_transition_positive_short_response": 0.2,
+    }
+
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics="persistent_chop_association_v2",
+    )
+
+    assert all(gate.passes(metrics) for gate in gates)
+    metrics[metric] = association
     assert not all(gate.passes(metrics) for gate in gates)
 
 
@@ -1040,6 +1121,29 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
     )
 
     assert candidate.model_path.is_file()
+    from propevolve.agent import RecurrentC51Agent
+
+    archived_agent, archived_manifest = RecurrentC51Agent.load(
+        candidate.model_path,
+        device="cpu",
+    )
+    archived_agent.assert_teacher_free()
+    archived_payload = torch.load(
+        candidate.model_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert archived_agent.retention_anchor is None
+    assert archived_payload["retention_anchor"] is None
+    assert not any(
+        key.startswith("teacher_output.")
+        for network in ("online", "target")
+        for key in archived_payload[network]
+    )
+    assert "replay_state" not in archived_payload
+    assert "teacher_targets" not in archived_payload
+    assert "replay_state" not in archived_manifest
+    assert "teacher_targets" not in archived_manifest
     assert evaluation.path.is_file()
     contract = json.loads((candidate.path / "contract.json").read_text())
     assert (
@@ -1541,6 +1645,109 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
         in capsys.readouterr().out
     )
+
+
+def test_v2_association_telemetry_survives_episode_summary_and_evaluation(
+    tmp_path: Path,
+) -> None:
+    class AssociationAgent(Agent):
+        def train_batch(self, sequences, **kwargs) -> float:
+            loss = super().train_batch(sequences, **kwargs)
+            self.last_train_metrics.update({
+                "regime_selectivity_association_loss": 0.4,
+                "regime_selectivity_association_active": 1.0,
+                "regime_selectivity_association_skipped": 0.0,
+                "regime_selectivity_association_dead_wait_rows": 2.0,
+                "regime_selectivity_association_dead_wait_"
+                "model_wait_probability_sum": 1.6,
+                "regime_selectivity_association_transition_positive_long_rows": 1.0,
+                "regime_selectivity_association_transition_positive_long_"
+                "model_wait_probability_sum": 0.2,
+                "regime_selectivity_association_transition_positive_short_rows": 3.0,
+                "regime_selectivity_association_transition_positive_short_"
+                "model_wait_probability_sum": 0.9,
+                "regime_selectivity_dead_wait_minus_"
+                "transition_positive_model_wait": 0.55,
+            })
+            return loss
+
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        AssociationAgent(),
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=2,
+            seed=61,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=61,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    episode_association = diagnostics[-1]["persistent_regime_selectivity"][
+        "association"
+    ]
+    assert diagnostics[-1][
+        "mean_regime_selectivity_dead_wait_minus_transition_positive_model_wait"
+    ] == pytest.approx(0.55)
+    assert episode_association == pytest.approx({
+        "loss_sum": 0.4,
+        "loss_mean": 0.4,
+        "update_count": 1.0,
+        "active_updates": 1.0,
+        "skipped_updates": 0.0,
+        "dead_wait_rows": 2.0,
+        "dead_wait_model_wait_probability_sum": 1.6,
+        "dead_wait_model_wait_probability_mean": 0.8,
+        "transition_positive_long_rows": 1.0,
+        "transition_positive_long_model_wait_probability_sum": 0.2,
+        "transition_positive_long_model_wait_probability_mean": 0.2,
+        "transition_positive_short_rows": 3.0,
+        "transition_positive_short_model_wait_probability_sum": 0.9,
+        "transition_positive_short_model_wait_probability_mean": 0.3,
+        "dead_wait_minus_transition_positive_model_wait": 0.55,
+    })
+    source = tmp_path / "training-diagnostics.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in diagnostics))
+    destination = tmp_path / "training-diagnostic-summary.json"
+
+    training_module._write_training_diagnostic_summary(source, destination)
+
+    overall = json.loads(destination.read_text())["overall"]
+    summary_association = overall["persistent_regime_selectivity"][
+        "association"
+    ]
+    assert summary_association["loss_sum"] == pytest.approx(0.8)
+    assert summary_association["active_updates"] == pytest.approx(2.0)
+    assert summary_association["dead_wait_rows"] == pytest.approx(4.0)
+    assert summary_association[
+        "transition_positive_long_model_wait_probability_sum"
+    ] == pytest.approx(0.4)
+    assert summary_association[
+        "transition_positive_short_model_wait_probability_sum"
+    ] == pytest.approx(1.8)
+    evaluation = training_module._persistent_regime_selectivity_evaluation_metrics(
+        overall["persistent_regime_selectivity"]
+    )
+    assert evaluation["regime_selectivity_association_loss"] == pytest.approx(0.4)
+    assert evaluation[
+        "regime_selectivity_association_active_updates"
+    ] == pytest.approx(2.0)
+    assert evaluation[
+        "regime_selectivity_association_dead_wait_rows"
+    ] == pytest.approx(4.0)
+    assert evaluation[
+        "regime_selectivity_dead_wait_minus_transition_positive_model_wait"
+    ] == pytest.approx(0.55)
 
 
 def test_episode_budget_prints_the_episode_progress_counter_once(capsys) -> None:
@@ -3794,6 +4001,80 @@ def test_evaluation_never_updates_agent() -> None:
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
     assert result.passes == 2
     assert agent.updates == 0
+
+
+def test_greedy_evaluation_preserves_serialized_agent_state(
+    tmp_path: Path,
+) -> None:
+    from propevolve.agent import RecurrentC51Agent
+
+    agent = RecurrentC51Agent(
+        1,
+        hidden_dim=8,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=1e-4,
+        weight_decay=1e-5,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        device="cpu",
+        seed=71,
+    )
+    before_path = agent.save(tmp_path / "before.pt", manifest={})
+
+    result = evaluate_agent(
+        agent,
+        Environment(),
+        episodes=2,
+        recurrent_horizon=2,
+    )
+    after_path = agent.save(tmp_path / "after.pt", manifest={})
+    before = torch.load(before_path, map_location="cpu", weights_only=False)
+    after = torch.load(after_path, map_location="cpu", weights_only=False)
+
+    assert result.passes == 2
+    assert all(
+        torch.equal(before[network][key], after[network][key])
+        for network in ("online", "target")
+        for key in before[network]
+    )
+    assert before["optimizer"] == after["optimizer"]
+    assert before["updates"] == after["updates"]
+    assert before["rng_state"] == after["rng_state"]
+
+
+def test_validation_rejects_a_policy_that_still_contains_training_teachers() -> None:
+    from propevolve.agent import RecurrentC51Agent
+
+    agent = RecurrentC51Agent(
+        1,
+        hidden_dim=8,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=1e-4,
+        weight_decay=1e-5,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        device="cpu",
+        seed=73,
+        teacher_channels=1,
+        teacher_channel_names=("training_only_example",),
+        teacher_loss_weight=0.1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="validation policy still contains training-only teacher state",
+    ):
+        evaluate_agent(agent, Environment(), episodes=1, recurrent_horizon=2)
+
+    agent.discard_teacher()
+    result = evaluate_agent(agent, Environment(), episodes=1, recurrent_horizon=2)
+    assert result.passes == 1
 
 
 def test_teacher_free_evaluation_reports_both_entry_sides() -> None:

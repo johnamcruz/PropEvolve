@@ -63,6 +63,7 @@ STATIC_STATE_SEMANTICS = "static_state_v1"
 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS = (
     "persistent_chop_negative_weight_v1"
 )
+PERSISTENT_CHOP_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
     "-headroom_pressure*(1-mll_headroom_fraction)"
@@ -73,6 +74,10 @@ PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA = (
     "chop_persistence*(1-kaufman_efficiency*mean("
     "trend_onset,trend_persistence,volatility_expansion_onset,"
     "volatility_high_persistence,volatility_percentile)))"
+)
+PERSISTENT_CHOP_ASSOCIATION_FORMULA = (
+    "equal_present_group_mean(exact_wait_weighted_ce,exact_long_ce,"
+    "exact_short_ce,zero_margin_dead_vs_transition_positive_wait_rank)"
 )
 
 
@@ -147,12 +152,16 @@ class BalanceAwareRegimeSelectivity:
             not in (
                 STATIC_STATE_SEMANTICS,
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             )
             or not np.isfinite(self.persistent_chop_negative_emphasis)
             or float(self.persistent_chop_negative_emphasis) < 0.0
         ):
             raise ValueError("balance-aware Regime selectivity contract is invalid")
-        if semantics == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS and any(
+        if semantics in {
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+        } and any(
             channel not in names for channel in REGIME_TRANSITION_CHANNELS
         ):
             raise ValueError(
@@ -287,7 +296,10 @@ class BalanceAwareRegimeSelectivity:
         entry_action_targets: torch.Tensor,
     ) -> PersistentChopEvidence:
         """Compile WAIT weights and continuous dead/ready membership masses."""
-        if self.semantics != PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS:
+        if self.semantics not in {
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+        }:
             raise ValueError(
                 "exact WAIT negative weights require persistent-chop semantics"
             )
@@ -331,14 +343,44 @@ class BalanceAwareRegimeSelectivity:
             float(self.persistent_chop_negative_emphasis)
             * persistent_dead_chop
         )
+        transition_positive_long = long_rows * transition_ready_chop
+        transition_positive_short = short_rows * transition_ready_chop
+        if self.semantics == PERSISTENT_CHOP_ASSOCIATION_SEMANTICS:
+            epsilon = float(self.probability_epsilon)
+            long_score = (
+                teacher_probabilities[..., self.channel_names.index(
+                    "long_attempt_probability"
+                )]
+                * teacher_probabilities[..., self.channel_names.index(
+                    "long_clean_retained_given_attempt_probability"
+                )]
+            ).clamp(epsilon, 1.0 - epsilon)
+            short_score = (
+                teacher_probabilities[..., self.channel_names.index(
+                    "short_attempt_probability"
+                )]
+                * teacher_probabilities[..., self.channel_names.index(
+                    "short_clean_retained_given_attempt_probability"
+                )]
+            ).clamp(epsilon, 1.0 - epsilon)
+            long_expansion_evidence = torch.sigmoid(
+                torch.logit(long_score) - self._center_logits[0]
+            )
+            short_expansion_evidence = torch.sigmoid(
+                torch.logit(short_score) - self._center_logits[1]
+            )
+            transition_positive_long = (
+                transition_positive_long * long_expansion_evidence
+            )
+            transition_positive_short = (
+                transition_positive_short * short_expansion_evidence
+            )
         return PersistentChopEvidence(
             exact_wait_weights=wait_rows * wait_weight,
             persistent_dead_chop_membership=wait_rows * persistent_dead_chop,
             transition_ready_membership=wait_rows * transition_ready_chop,
-            transition_positive_long_membership=long_rows
-            * transition_ready_chop,
-            transition_positive_short_membership=short_rows
-            * transition_ready_chop,
+            transition_positive_long_membership=transition_positive_long,
+            transition_positive_short_membership=transition_positive_short,
         )
 
 
@@ -347,6 +389,8 @@ __all__ = [
     "BalanceAwareRegimeSelectivity",
     "EXPANSION_CHANNELS",
     "FORMULA",
+    "PERSISTENT_CHOP_ASSOCIATION_FORMULA",
+    "PERSISTENT_CHOP_ASSOCIATION_SEMANTICS",
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA",
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS",
     "PersistentChopEvidence",

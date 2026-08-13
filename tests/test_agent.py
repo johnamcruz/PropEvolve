@@ -876,6 +876,20 @@ def test_training_only_expansion_teacher_updates_shared_memory_and_is_discarded(
     assert not torch.equal(before, agent.online.input[1].weight.detach())
     assert agent.teacher_channels == restored.teacher_channels == 0
     assert agent.online.teacher_output is None
+    assert agent.target.teacher_output is None
+    assert agent.teacher_channel_names == ()
+    assert agent.regime_teacher_channel_names == ()
+    assert agent._teacher_channel_loss_weights_tensor.numel() == 0
+    assert agent._regime_teacher_channel_indices_tensor.numel() == 0
+    assert agent.last_train_metrics == {}
+    agent.assert_teacher_free()
+    restored.assert_teacher_free()
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert not any("teacher_output" in key for key in payload["online"])
+    assert not any("teacher_output" in key for key in payload["target"])
+    assert "replay_state" not in payload
+    assert "teacher_targets" not in payload
 
 
 def test_hidden_teacher_guidance_cannot_change_the_rl_update() -> None:

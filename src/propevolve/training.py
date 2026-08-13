@@ -124,6 +124,15 @@ _TRANSITION_POSITIVE_SIDE_FIELDS = (
     "long",
     "short",
 )
+_REGIME_ASSOCIATION_COHORTS = (
+    "dead_wait",
+    "transition_positive_long",
+    "transition_positive_short",
+)
+_REGIME_ASSOCIATION_ADDITIVE_FIELDS = (
+    "rows",
+    "model_wait_probability_sum",
+)
 
 
 def _entry_action_balance(
@@ -263,6 +272,19 @@ def _regime_selectivity_replay_settings(
             if side_balance is None
             else str(side_balance["schema"])
         )
+    }
+
+
+def _regime_selectivity_probe_settings(
+    specification: Mapping[str, object],
+) -> dict[str, object]:
+    """Project the authenticated learner identity onto policy probes."""
+    return {
+        "regime_selectivity_semantics": str(specification["semantics"]),
+        "regime_selectivity_expansion_centers": (
+            float(specification["expansion_long_center"]),
+            float(specification["expansion_short_center"]),
+        ),
     }
 
 
@@ -939,6 +961,57 @@ def _persistent_regime_selectivity_diagnostic(
                 probability_sum / rows if rows else 0.0
             ),
         }
+    raw_losses = tuple(update_metrics.get(
+        "regime_selectivity_association_loss", ()
+    ))
+    loss_sum = float(sum(raw_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_association_loss_sum", ()
+    )))
+    update_count = float(len(raw_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_association_update_count", ()
+    )))
+    association = {
+        "loss_sum": loss_sum,
+        "loss_mean": loss_sum / update_count if update_count else 0.0,
+        "update_count": update_count,
+        "active_updates": float(sum(update_metrics.get(
+            "regime_selectivity_association_active", ()
+        ))) + float(sum(update_metrics.get(
+            "regime_selectivity_association_active_updates", ()
+        ))),
+        "skipped_updates": float(sum(update_metrics.get(
+            "regime_selectivity_association_skipped", ()
+        ))) + float(sum(update_metrics.get(
+            "regime_selectivity_association_skipped_updates", ()
+        ))),
+    }
+    for cohort in _REGIME_ASSOCIATION_COHORTS:
+        prefix = f"regime_selectivity_association_{cohort}_"
+        rows = float(sum(update_metrics.get(prefix + "rows", ())))
+        probability_sum = float(sum(update_metrics.get(
+            prefix + "model_wait_probability_sum", ()
+        )))
+        association.update({
+            f"{cohort}_rows": rows,
+            f"{cohort}_model_wait_probability_sum": probability_sum,
+            f"{cohort}_model_wait_probability_mean": (
+                probability_sum / rows if rows else 0.0
+            ),
+        })
+    transition_positive_means = [
+        association[
+            f"transition_positive_{side}_model_wait_probability_mean"
+        ]
+        for side in _TRANSITION_POSITIVE_SIDE_FIELDS
+        if association[f"transition_positive_{side}_rows"] > 0.0
+    ]
+    association["dead_wait_minus_transition_positive_model_wait"] = (
+        association["dead_wait_model_wait_probability_mean"]
+        - sum(transition_positive_means) / len(transition_positive_means)
+        if association["dead_wait_rows"] > 0.0 and transition_positive_means
+        else 0.0
+    )
+    result["association"] = association
     return result
 
 
@@ -957,6 +1030,20 @@ def _persistent_regime_selectivity_summary(
             f"regime_selectivity_transition_positive_{side}_"
             "declared_side_probability_sum": [],
         })
+    update_metrics.update({
+        f"regime_selectivity_association_{field}": []
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_updates",
+            "skipped_updates",
+            *(
+                f"{cohort}_{field}"
+                for cohort in _REGIME_ASSOCIATION_COHORTS
+                for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
+            ),
+        )
+    })
     for row in rows:
         diagnostics = row.get("persistent_regime_selectivity")
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -974,6 +1061,22 @@ def _persistent_regime_selectivity_summary(
                 update_metrics[
                     f"regime_selectivity_transition_positive_{side}_{field}"
                 ].append(float(values.get(field, 0.0) or 0.0))
+        association = diagnostics.get("association")
+        association = association if isinstance(association, Mapping) else {}
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_updates",
+            "skipped_updates",
+            *(
+                f"{cohort}_{field}"
+                for cohort in _REGIME_ASSOCIATION_COHORTS
+                for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
+            ),
+        ):
+            update_metrics[f"regime_selectivity_association_{field}"].append(
+                float(association.get(field, 0.0) or 0.0)
+            )
     return _persistent_regime_selectivity_diagnostic(update_metrics)
 
 
@@ -1083,6 +1186,34 @@ def _persistent_regime_selectivity_evaluation_metrics(
             "model_wait_probability_mean"
         ]
     )
+    association = diagnostics.get("association", {})
+    for field in (
+        "loss_sum",
+        "loss_mean",
+        "update_count",
+        "active_updates",
+        "skipped_updates",
+        *(
+            f"{cohort}_{field}"
+            for cohort in _REGIME_ASSOCIATION_COHORTS
+            for field in (
+                *_REGIME_ASSOCIATION_ADDITIVE_FIELDS,
+                "model_wait_probability_mean",
+            )
+        ),
+    ):
+        metrics[f"regime_selectivity_association_{field}"] = float(
+            association.get(field, 0.0)
+        )
+    metrics["regime_selectivity_association_loss"] = metrics[
+        "regime_selectivity_association_loss_mean"
+    ]
+    metrics[
+        "regime_selectivity_dead_wait_minus_"
+        "transition_positive_model_wait"
+    ] = float(association.get(
+        "dead_wait_minus_transition_positive_model_wait", 0.0
+    ))
     return metrics
 
 
@@ -1302,7 +1433,10 @@ def _training_evaluation_gates(
                 gates.append(EvaluationGate(
                     "final_regime_probe_chop_minus_nonchop_wait", ">", 0.0
                 ))
-        elif regime_selectivity_semantics == "persistent_chop_negative_weight_v1":
+        elif regime_selectivity_semantics in {
+            "persistent_chop_negative_weight_v1",
+            "persistent_chop_association_v2",
+        }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
                 EvaluationGate(
@@ -1354,6 +1488,15 @@ def _training_evaluation_gates(
                     "final_regime_probe_transition_positive_short_mass",
                 )
             )
+            if regime_selectivity_semantics == "persistent_chop_association_v2":
+                gates.extend(
+                    EvaluationGate(metric, ">", 0.0)
+                    for metric in (
+                        "final_regime_probe_dead_wait_minus_transition_positive_wait",
+                        "final_regime_probe_transition_positive_long_response",
+                        "final_regime_probe_transition_positive_short_response",
+                    )
+                )
         else:
             raise ValueError("Regime selectivity gate semantics are invalid")
     return tuple(gates)
@@ -2181,6 +2324,9 @@ class HistoricalCandidateRunner:
                     q_temperature=float(
                         regime_selectivity_spec["q_temperature"]
                     ),
+                    **_regime_selectivity_probe_settings(
+                        regime_selectivity_spec
+                    ),
                     source_period=(
                         str(temporal["train_start"]),
                         str(temporal["train_end"]),
@@ -2405,6 +2551,9 @@ class HistoricalCandidateRunner:
                     final_regime_probe_samples,
                     teacher_channel_names=teacher_targets.channels,
                     q_temperature=float(regime_selectivity_spec["q_temperature"]),
+                    **_regime_selectivity_probe_settings(
+                        regime_selectivity_spec
+                    ),
                     source_period=(
                         str(temporal["train_start"]),
                         str(temporal["train_end"]),
@@ -4358,6 +4507,16 @@ def train_agent(
                 "regime_selectivity_low_headroom_wait_mean",
                 "regime_selectivity_dominant_chop_rows",
                 "regime_selectivity_dominant_chop_wait_mean",
+                "regime_selectivity_association_loss",
+                "regime_selectivity_association_active",
+                "regime_selectivity_association_skipped",
+                "regime_selectivity_dead_wait_minus_"
+                "transition_positive_model_wait",
+                *(
+                    f"regime_selectivity_association_{cohort}_{field}"
+                    for cohort in _REGIME_ASSOCIATION_COHORTS
+                    for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
+                ),
                 *(
                     f"regime_selectivity_{stratum}_{field}"
                     for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA
@@ -5073,6 +5232,9 @@ def evaluate_agent(
     greedy_diagnostic_interval_steps: int = 256,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> TrainingResult:
+    assert_teacher_free = getattr(agent, "assert_teacher_free", None)
+    if assert_teacher_free is not None:
+        assert_teacher_free()
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
     if (

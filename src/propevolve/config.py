@@ -99,7 +99,12 @@ def _validate_training_policy_health(
         "maximum_expectancy_r",
         "minimum_failed_conditions",
     }
-    if not isinstance(policy_health, dict) or set(policy_health) != required:
+    optional = {"require_positive_persistent_regime_association"}
+    if (
+        not isinstance(policy_health, dict)
+        or not required <= set(policy_health)
+        or set(policy_health) - required - optional
+    ):
         raise ValueError("training short circuit policy health contract is invalid")
     recalls = policy_health["minimum_probe_recall"]
     entry_mass = policy_health["entry_mass_fraction"]
@@ -114,6 +119,12 @@ def _validate_training_policy_health(
         or set(economic) != economic_fields
         or not isinstance(
             policy_health["require_zero_positive_entry_soft_wait_veto"], bool
+        )
+        or not isinstance(
+            policy_health.get(
+                "require_positive_persistent_regime_association", False
+            ),
+            bool,
         )
     ):
         raise ValueError("training short circuit policy health contract is invalid")
@@ -164,6 +175,11 @@ def _validate_training_policy_health(
             maximum_entry_mass_fraction=float(entry_mass["maximum"]),
             require_zero_positive_entry_soft_wait_veto=bool(
                 policy_health["require_zero_positive_entry_soft_wait_veto"]
+            ),
+            require_positive_persistent_regime_association=bool(
+                policy_health.get(
+                    "require_positive_persistent_regime_association", False
+                )
             ),
             economic_futility_minimum_completed_episodes=int(
                 economic["minimum_completed_episodes"]
@@ -536,6 +552,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
     from .balance_aware_regime_selectivity import (
         ACTION_ORDER,
         FORMULA,
+        PERSISTENT_CHOP_ASSOCIATION_FORMULA,
+        PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
         SCHEMA,
@@ -588,11 +606,46 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         if isinstance(specification, dict)
         else None
     )
-    expected_formula = (
-        FORMULA
-        if semantics == STATIC_STATE_SEMANTICS
-        else PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA
+    expected_formulas = {
+        STATIC_STATE_SEMANTICS: FORMULA,
+        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS: (
+            PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA
+        ),
+        PERSISTENT_CHOP_ASSOCIATION_SEMANTICS: (
+            PERSISTENT_CHOP_ASSOCIATION_FORMULA
+        ),
+    }
+    expected_formula = expected_formulas.get(semantics)
+    policy_health = (
+        payload.get("training", {})
+        .get("short_circuit", {})
+        .get("policy_health", {})
     )
+    require_positive_association = (
+        policy_health.get(
+            "require_positive_persistent_regime_association", False
+        )
+        if isinstance(policy_health, dict)
+        else False
+    )
+    association_declared = (
+        semantics == PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+        or (
+            isinstance(specification, dict)
+            and specification.get("formula")
+            == PERSISTENT_CHOP_ASSOCIATION_FORMULA
+        )
+        or require_positive_association is True
+    )
+    if association_declared and (
+        semantics != PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+        or not isinstance(specification, dict)
+        or set(specification) != required
+        or specification.get("formula")
+        != PERSISTENT_CHOP_ASSOCIATION_FORMULA
+        or require_positive_association is not True
+    ):
+        raise ValueError("persistent-chop association contract is invalid")
     teachers = tuple(payload.get("teachers") or ())
     numeric = tuple(
         specification.get(field)
@@ -617,6 +670,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         or semantics not in {
             STATIC_STATE_SEMANTICS,
             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
         }
         or specification.get("formula") != expected_formula
         or (
@@ -657,7 +711,10 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             and float(specification["persistent_chop_negative_emphasis"]) != 0.0
         )
         or (
-            semantics == PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
+            semantics in {
+                PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+                PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+            }
             and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
         )
     ):

@@ -38,6 +38,7 @@ class TrainingPolicyHealthSpec:
     economic_futility_maximum_mean_terminal_pnl: float
     economic_futility_maximum_expectancy_r: float
     economic_futility_minimum_failed_conditions: int
+    require_positive_persistent_regime_association: bool = False
 
     def __post_init__(self) -> None:
         integer_values = (
@@ -82,6 +83,10 @@ class TrainingPolicyHealthSpec:
             raise ValueError("policy-health threshold ranges are invalid")
         if not isinstance(self.require_zero_positive_entry_soft_wait_veto, bool):
             raise TypeError("policy-health veto contract must be boolean")
+        if not isinstance(
+            self.require_positive_persistent_regime_association, bool
+        ):
+            raise TypeError("policy-health association contract must be boolean")
 
     @classmethod
     def from_config(
@@ -119,6 +124,9 @@ class TrainingPolicyHealthSpec:
             ),
             economic_futility_minimum_failed_conditions=(
                 economic["minimum_failed_conditions"]
+            ),
+            require_positive_persistent_regime_association=config.get(
+                "require_positive_persistent_regime_association", False
             ),
         )
 
@@ -334,6 +342,29 @@ class TrainingHealthDetector:
                     f"teacher-free policy-health {display} recall "
                     f"{float(recall):.6f} < {thresholds[action]:.6f}"
                 )
+        if self.spec.require_positive_persistent_regime_association:
+            associations = {
+                "persistent-dead minus transition-positive WAIT probability": (
+                    "final_regime_probe_dead_wait_minus_transition_positive_wait"
+                ),
+                "transition-positive Long response": (
+                    "final_regime_probe_transition_positive_long_response"
+                ),
+                "transition-positive Short response": (
+                    "final_regime_probe_transition_positive_short_response"
+                ),
+            }
+            for display, metric in associations.items():
+                value = metrics.get(metric)
+                if value is None or not math.isfinite(float(value)):
+                    reasons.append(
+                        f"teacher-free policy-health {display} is missing or non-finite"
+                    )
+                elif float(value) <= 0.0:
+                    reasons.append(
+                        f"teacher-free policy-health {display} "
+                        f"{float(value):.6f} <= 0.000000"
+                    )
 
 
 class TrainingHealthMonitor:
