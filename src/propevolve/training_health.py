@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
 
 
@@ -19,6 +20,7 @@ _PROBE_NAMES = {
     "ENTER_LONG_1": "long",
     "ENTER_SHORT_1": "short",
 }
+HIERARCHICAL_ENTRY_MASS_ABS_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class TrainingPolicyHealthSpec:
     economic_futility_maximum_expectancy_r: float
     economic_futility_minimum_failed_conditions: int
     require_positive_persistent_regime_association: bool = False
+    hierarchical_entry_mass_fractions: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         integer_values = (
@@ -87,6 +90,32 @@ class TrainingPolicyHealthSpec:
             self.require_positive_persistent_regime_association, bool
         ):
             raise TypeError("policy-health association contract must be boolean")
+        if self.hierarchical_entry_mass_fractions is not None:
+            expected = {
+                "timing_wait",
+                "timing_enter",
+                "direction_long",
+                "direction_short",
+            }
+            if (
+                not isinstance(self.hierarchical_entry_mass_fractions, Mapping)
+                or set(self.hierarchical_entry_mass_fractions) != expected
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or float(value) != 0.5
+                    for value in self.hierarchical_entry_mass_fractions.values()
+                )
+            ):
+                raise ValueError(
+                    "hierarchical policy-health mass contract must be exact"
+                )
+            object.__setattr__(
+                self,
+                "hierarchical_entry_mass_fractions",
+                MappingProxyType(dict(self.hierarchical_entry_mass_fractions)),
+            )
 
     @classmethod
     def from_config(
@@ -95,7 +124,12 @@ class TrainingPolicyHealthSpec:
     ) -> "TrainingPolicyHealthSpec":
         """Compile the already fail-closed public JSON contract."""
         recalls = config["minimum_probe_recall"]
-        mass = config["entry_mass_fraction"]
+        hierarchical_mass = config.get("hierarchical_entry_mass_fraction")
+        mass = (
+            {"minimum": 0.0, "maximum": 0.0}
+            if hierarchical_mass is not None
+            else config["entry_mass_fraction"]
+        )
         economic = config["economic_futility"]
         if not all(isinstance(value, Mapping) for value in (recalls, mass, economic)):
             raise ValueError("policy-health nested contracts are invalid")
@@ -128,6 +162,20 @@ class TrainingPolicyHealthSpec:
             require_positive_persistent_regime_association=config.get(
                 "require_positive_persistent_regime_association", False
             ),
+            hierarchical_entry_mass_fractions=(
+                {
+                    "timing_wait": hierarchical_mass["timing"]["WAIT"],
+                    "timing_enter": hierarchical_mass["timing"]["ENTER"],
+                    "direction_long": hierarchical_mass[
+                        "conditional_direction"
+                    ]["ENTER_LONG_1"],
+                    "direction_short": hierarchical_mass[
+                        "conditional_direction"
+                    ]["ENTER_SHORT_1"],
+                }
+                if isinstance(hierarchical_mass, Mapping)
+                else None
+            ),
         )
 
 
@@ -148,6 +196,7 @@ class TrainingHealthSnapshot:
     entry_mass_fractions: Mapping[str, float]
     positive_entry_soft_wait_disagreement_rows: Mapping[str, int]
     probe_metrics: Mapping[str, float] | None
+    hierarchical_entry_mass_fractions: Mapping[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -200,7 +249,10 @@ class TrainingHealthDetector:
             snapshot.optimizer_updates > 0
             and snapshot.entry_action_weight_scale > 0.0
         ):
-            self._entry_objective_reasons(snapshot, reasons)
+            if self.spec.hierarchical_entry_mass_fractions is None:
+                self._entry_objective_reasons(snapshot, reasons)
+            else:
+                self._hierarchical_entry_objective_reasons(snapshot, reasons)
         if (
             not math.isfinite(float(snapshot.teacher_weight_scale))
             or snapshot.teacher_weight_scale < 0.0
@@ -292,6 +344,38 @@ class TrainingHealthDetector:
                     f"entry optimizer {action} mass fraction {float(value):.6f} "
                     f"outside [{self.spec.minimum_entry_mass_fraction:.6f}, "
                     f"{self.spec.maximum_entry_mass_fraction:.6f}]"
+                )
+
+    def _hierarchical_entry_objective_reasons(
+        self,
+        snapshot: TrainingHealthSnapshot,
+        reasons: list[str],
+    ) -> None:
+        actual = snapshot.hierarchical_entry_mass_fractions
+        actual = actual if isinstance(actual, Mapping) else {}
+        expected = self.spec.hierarchical_entry_mass_fractions or {}
+        displays = {
+            "timing_wait": "timing WAIT",
+            "timing_enter": "timing ENTER",
+            "direction_long": "conditional direction Long",
+            "direction_short": "conditional direction Short",
+        }
+        for cohort, display in displays.items():
+            value = actual.get(cohort)
+            target = expected[cohort]
+            if value is None or not math.isfinite(float(value)):
+                reasons.append(
+                    f"entry optimizer {display} mass fraction is missing or non-finite"
+                )
+            elif not math.isclose(
+                float(value),
+                float(target),
+                rel_tol=0.0,
+                abs_tol=HIERARCHICAL_ENTRY_MASS_ABS_TOLERANCE,
+            ):
+                reasons.append(
+                    f"entry optimizer {display} mass fraction "
+                    f"{float(value):.6f} != {float(target):.6f}"
                 )
 
     @staticmethod
@@ -434,6 +518,33 @@ class TrainingHealthMonitor:
                 ("ENTER_SHORT_1", "short"),
             )
         }
+        hierarchical_balance = diagnostic.get(
+            "hierarchical_entry_balance"
+        ) or {}
+        hierarchical_balance = (
+            hierarchical_balance
+            if isinstance(hierarchical_balance, Mapping)
+            else {}
+        )
+        hierarchical_mass = None
+        if self.detector.spec.hierarchical_entry_mass_fractions is not None:
+            hierarchical_mass = {}
+            for output, task, cohort in (
+                ("timing_wait", "timing", "wait"),
+                ("timing_enter", "timing", "enter"),
+                ("direction_long", "direction", "long"),
+                ("direction_short", "direction", "short"),
+            ):
+                task_values = hierarchical_balance.get(task)
+                task_values = (
+                    task_values if isinstance(task_values, Mapping) else {}
+                )
+                hierarchical_mass[output] = self._nested_number(
+                    task_values,
+                    cohort,
+                    "weighted_mass_fraction",
+                    default=float("nan"),
+                )
         snapshot = TrainingHealthSnapshot(
             completed_episodes=completed,
             passes=int(progress.passes),
@@ -463,6 +574,7 @@ class TrainingHealthMonitor:
             entry_mass_fractions=mass,
             positive_entry_soft_wait_disagreement_rows=disagreements,
             probe_metrics=probe_metrics,
+            hierarchical_entry_mass_fractions=hierarchical_mass,
         )
         verdict = self.detector.evaluate(snapshot)
         body: dict[str, object] = {
@@ -472,6 +584,7 @@ class TrainingHealthMonitor:
             "reasons": list(verdict.reasons),
             "evidence": dict(verdict.evidence),
             "entry_mass_fractions": mass,
+            "hierarchical_entry_mass_fractions": hierarchical_mass,
             "entry_action_weight_scale": snapshot.entry_action_weight_scale,
             "teacher_weight_scale": snapshot.teacher_weight_scale,
             "entry_objective_active": bool(

@@ -29,6 +29,7 @@ _V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
 _V5_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v5.json")
 _V6_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v6.json")
 _V7_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v7.json")
+_V8_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v8.json")
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -190,6 +191,56 @@ def test_stage2_v7_projects_100_250_500_episode_tiers() -> None:
         and stage.config["revision_paths"] == []
         for stage in plan.stages
     )
+    assert plan.stages[-1].config["episode_coverage"] == {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+
+
+def test_stage2_v8_projects_the_frozen_hierarchical_entry_campaign() -> None:
+    from propevolve.config import load_experiment_config
+
+    v7 = load_experiment_config(_V7_CONFIG)
+    v8 = load_experiment_config(_V8_CONFIG)
+    plan = _plan(v8)
+
+    assert plan.identity != _plan(v7).identity
+    assert [stage.name for stage in plan.stages] == [
+        "hierarchical_entry_regime_association_100ep",
+        "hierarchical_entry_regime_association_250ep",
+        "hierarchical_entry_regime_association_500ep_full_coverage",
+    ]
+    assert [stage.config["training_episodes"] for stage in plan.stages] == [
+        100,
+        250,
+        500,
+    ]
+    assert all(
+        stage.config["budget_mode"] == "episodes"
+        and stage.config["validation_episodes"] == 200
+        and stage.config["short_circuit_minimum_episodes"] == 18
+        and stage.config["allow_revisions"] is False
+        and stage.config["revision_paths"] == []
+        and stage.config["parent_improvement_requirements"] == [
+            {
+                "metric": "selection.pass_rate",
+                "direction": "maximize",
+                "minimum_delta": 0.0,
+            },
+            {
+                "metric": "selection.near_blow_timeout_rate",
+                "direction": "minimize",
+                "minimum_delta": 0.0,
+            },
+        ]
+        for stage in plan.stages
+    )
+    assert v8["agent"]["entry_action_loss_reduction"] == (
+        "hierarchical_enter_wait_direction_v1"
+    )
+    assert v8["training"]["short_circuit"]["policy_health"][
+        "require_positive_persistent_regime_association"
+    ] is True
     assert plan.stages[-1].config["episode_coverage"] == {
         "schema": "full_data_episode_coverage_v1",
         "episode_budget": 500,

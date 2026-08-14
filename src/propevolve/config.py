@@ -30,7 +30,11 @@ AGENT_RUNTIME_FIELDS = (
 ENTRY_ACTION_LOSS_REDUCTIONS = {
     "population_weighted_mean_v1",
     "equal_present_class_mean_v1",
+    "hierarchical_enter_wait_direction_v1",
 }
+HIERARCHICAL_ENTRY_ACTION_LOSS_REDUCTION = (
+    "hierarchical_enter_wait_direction_v1"
+)
 
 LEGACY_REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS = (
     "regime_selectivity.schema",
@@ -80,6 +84,7 @@ def _validate_training_policy_health(
     policy_health: object,
     *,
     training_episodes: int,
+    entry_action_loss_reduction: str,
 ) -> None:
     """Validate the serialized fail-fast detector against its typed runtime spec."""
     required = {
@@ -87,7 +92,6 @@ def _validate_training_policy_health(
         "minimum_completed_episodes",
         "probe_interval_episodes",
         "minimum_probe_recall",
-        "entry_mass_fraction",
         "require_zero_positive_entry_soft_wait_veto",
         "economic_futility",
     }
@@ -99,6 +103,16 @@ def _validate_training_policy_health(
         "maximum_expectancy_r",
         "minimum_failed_conditions",
     }
+    hierarchical = (
+        entry_action_loss_reduction
+        == HIERARCHICAL_ENTRY_ACTION_LOSS_REDUCTION
+    )
+    mass_field = (
+        "hierarchical_entry_mass_fraction"
+        if hierarchical
+        else "entry_mass_fraction"
+    )
+    required.add(mass_field)
     optional = {"require_positive_persistent_regime_association"}
     if (
         not isinstance(policy_health, dict)
@@ -107,14 +121,52 @@ def _validate_training_policy_health(
     ):
         raise ValueError("training short circuit policy health contract is invalid")
     recalls = policy_health["minimum_probe_recall"]
-    entry_mass = policy_health["entry_mass_fraction"]
+    entry_mass = policy_health[mass_field]
     economic = policy_health["economic_futility"]
+    valid_entry_mass = False
+    entry_mass_values: tuple[object, ...] = ()
+    if hierarchical and isinstance(entry_mass, dict):
+        timing = entry_mass.get("timing")
+        direction = entry_mass.get("conditional_direction")
+        valid_entry_mass = (
+            set(entry_mass) == {
+                "schema",
+                "timing",
+                "conditional_direction",
+            }
+            and entry_mass.get("schema")
+            == HIERARCHICAL_ENTRY_ACTION_LOSS_REDUCTION
+            and isinstance(timing, dict)
+            and set(timing) == {"WAIT", "ENTER"}
+            and isinstance(direction, dict)
+            and set(direction) == {"ENTER_LONG_1", "ENTER_SHORT_1"}
+        )
+        if valid_entry_mass:
+            entry_mass_values = (
+                timing["WAIT"],
+                timing["ENTER"],
+                direction["ENTER_LONG_1"],
+                direction["ENTER_SHORT_1"],
+            )
+            valid_entry_mass = all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and float(value) == 0.5
+                for value in entry_mass_values
+            )
+    elif not hierarchical and isinstance(entry_mass, dict):
+        valid_entry_mass = set(entry_mass) == {"minimum", "maximum"}
+        if valid_entry_mass:
+            entry_mass_values = (
+                entry_mass["minimum"],
+                entry_mass["maximum"],
+            )
     if (
         policy_health["schema"] != "propevolve_training_policy_health_v1"
         or not isinstance(recalls, dict)
         or set(recalls) != recall_actions
-        or not isinstance(entry_mass, dict)
-        or set(entry_mass) != {"minimum", "maximum"}
+        or not valid_entry_mass
         or not isinstance(economic, dict)
         or set(economic) != economic_fields
         or not isinstance(
@@ -136,8 +188,7 @@ def _validate_training_policy_health(
     )
     numeric_values = (
         *recalls.values(),
-        entry_mass["minimum"],
-        entry_mass["maximum"],
+        *entry_mass_values,
         economic["maximum_near_blow_timeout_rate"],
         economic["maximum_mean_terminal_pnl"],
         economic["maximum_expectancy_r"],
@@ -171,8 +222,12 @@ def _validate_training_policy_health(
             minimum_wait_recall=float(recalls["WAIT"]),
             minimum_long_recall=float(recalls["ENTER_LONG_1"]),
             minimum_short_recall=float(recalls["ENTER_SHORT_1"]),
-            minimum_entry_mass_fraction=float(entry_mass["minimum"]),
-            maximum_entry_mass_fraction=float(entry_mass["maximum"]),
+            minimum_entry_mass_fraction=(
+                0.0 if hierarchical else float(entry_mass["minimum"])
+            ),
+            maximum_entry_mass_fraction=(
+                0.0 if hierarchical else float(entry_mass["maximum"])
+            ),
             require_zero_positive_entry_soft_wait_veto=bool(
                 policy_health["require_zero_positive_entry_soft_wait_veto"]
             ),
@@ -195,6 +250,20 @@ def _validate_training_policy_health(
             ),
             economic_futility_minimum_failed_conditions=int(
                 economic["minimum_failed_conditions"]
+            ),
+            hierarchical_entry_mass_fractions=(
+                {
+                    "timing_wait": float(entry_mass["timing"]["WAIT"]),
+                    "timing_enter": float(entry_mass["timing"]["ENTER"]),
+                    "direction_long": float(
+                        entry_mass["conditional_direction"]["ENTER_LONG_1"]
+                    ),
+                    "direction_short": float(
+                        entry_mass["conditional_direction"]["ENTER_SHORT_1"]
+                    ),
+                }
+                if hierarchical
+                else None
             ),
         )
     except (TypeError, ValueError) as error:
@@ -1037,6 +1106,9 @@ def load_experiment_config(path: str | Path) -> dict:
             _validate_training_policy_health(
                 short_circuit["policy_health"],
                 training_episodes=int(training["episodes"]),
+                entry_action_loss_reduction=str(
+                    agent["entry_action_loss_reduction"]
+                ),
             )
         collapse = short_circuit.get("collapse")
         if collapse is not None and (

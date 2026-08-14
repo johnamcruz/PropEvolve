@@ -33,6 +33,9 @@ STAGE2_V6_RECIPE = Path(
 STAGE2_V7_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v7.json"
 )
+STAGE2_V8_RECIPE = Path(
+    "config/historical_mask_expansion_regime_stage2_v8.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -666,6 +669,113 @@ def test_stage2_v7_changes_only_the_episode_evidence_horizon_from_v6() -> None:
     assert "episode 45" in v7["evolution"]["hypothesis"]
     assert v7["output"] != v6["output"]
     assert v7["campaign"]["state_root"] != v6["campaign"]["state_root"]
+
+
+def test_stage2_v8_changes_only_the_frozen_hierarchical_entry_loss_from_v7() -> None:
+    v7 = load_experiment_config(STAGE2_V7_RECIPE)
+    v8 = load_experiment_config(STAGE2_V8_RECIPE)
+
+    matched_fields = (
+        "assets",
+        "cache",
+        "cache_root",
+        "challenge",
+        "deployment_tickers",
+        "entry_supervision",
+        "observation",
+        "point_values",
+        "regime_selectivity",
+        "round_trip_fees",
+        "runtime",
+        "sealed_confirmation",
+        "teachers",
+        "temporal",
+        "tickers",
+        "timeframe_minutes",
+        "training_only_tickers",
+    )
+    assert all(v8[field] == v7[field] for field in matched_fields)
+    assert v8["evolution"]["base_parent"] == v7["evolution"]["base_parent"]
+    assert v8["evolution"]["parent_candidate_ids"] == v7["evolution"][
+        "parent_candidate_ids"
+    ]
+    assert v8["agent"] == {
+        **v7["agent"],
+        "entry_action_loss_reduction": "hierarchical_enter_wait_direction_v1",
+    }
+    assert v8["training"] == {
+        **v7["training"],
+        "short_circuit": {
+            **v7["training"]["short_circuit"],
+            "policy_health": {
+                key: value
+                for key, value in v7["training"]["short_circuit"][
+                    "policy_health"
+                ].items()
+                if key != "entry_mass_fraction"
+            } | {
+                "hierarchical_entry_mass_fraction": {
+                    "schema": "hierarchical_enter_wait_direction_v1",
+                    "timing": {"WAIT": 0.5, "ENTER": 0.5},
+                    "conditional_direction": {
+                        "ENTER_LONG_1": 0.5,
+                        "ENTER_SHORT_1": 0.5,
+                    },
+                }
+            },
+        },
+    }
+    assert [
+        stage["training_episodes"]
+        for stage in v8["campaign"]["budget_stages"]
+    ] == [100, 250, 500]
+    assert all(
+        stage["parent_improvement_requirements"] == [
+            {
+                "metric": "selection.pass_rate",
+                "direction": "maximize",
+                "minimum_delta": 0.0,
+            },
+            {
+                "metric": "selection.near_blow_timeout_rate",
+                "direction": "minimize",
+                "minimum_delta": 0.0,
+            },
+        ]
+        and {
+            "metric": "selection.blow_rate",
+            "operator": "==",
+            "value": 0,
+        } in stage["selection_requirements"]
+        for stage in v8["campaign"]["budget_stages"]
+    )
+    assert "agent.entry_action_loss_reduction" in v8["evolution"][
+        "frozen_paths"
+    ]
+    assert v8["evolution"]["allowed_revision_paths"] == ()
+    assert v8["campaign"]["max_revisions_per_stage"] == 0
+    assert v8["output"] != v7["output"]
+    assert v8["campaign"]["state_root"] != v7["campaign"]["state_root"]
+
+
+def test_hierarchical_entry_loss_requires_its_exact_frozen_health_contract(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(STAGE2_V8_RECIPE.read_text())
+    payload["training"]["short_circuit"]["policy_health"][
+        "hierarchical_entry_mass_fraction"
+    ]["timing"]["ENTER"] = 1.0 / 3.0
+    receipt_source = Path(
+        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
+    )
+    receipt_path = tmp_path / "config" / "receipts" / receipt_source.name
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_bytes(receipt_source.read_bytes())
+    path = tmp_path / "config" / "invalid-stage2-v8.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="policy health"):
+        load_experiment_config(path)
 
 
 @pytest.mark.parametrize(

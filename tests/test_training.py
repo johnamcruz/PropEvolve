@@ -474,6 +474,69 @@ def test_training_summary_separates_guidance_and_autonomy_regime_learning(
     assert conflict["long"]["target_wait_probability_mean"] == pytest.approx(0.7)
     assert conflict["long"]["soft_wait_disagreement_rate"] == 1.0
     assert conflict["short"]["soft_wait_disagreement_rate"] == 0.0
+    assert "hierarchical_entry_balance" not in summary["overall"]
+
+
+def test_training_summary_preserves_hierarchical_entry_mass_for_evaluation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "training-diagnostics.jsonl"
+    source.write_text(json.dumps({
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "updates": 1,
+        "entry_action_loss_reduction": (
+            "hierarchical_enter_wait_direction_v1"
+        ),
+        "hierarchical_entry_balance": {
+            "timing": {
+                "wait": {
+                    "rows": 4,
+                    "weighted_mass": 2.0,
+                    "unweighted_ce_sum": 3.0,
+                    "weighted_ce_sum": 1.5,
+                },
+                "enter": {
+                    "rows": 6,
+                    "weighted_mass": 2.0,
+                    "unweighted_ce_sum": 5.0,
+                    "weighted_ce_sum": 1.7,
+                },
+            },
+            "direction": {
+                "long": {
+                    "rows": 3,
+                    "weighted_mass": 1.0,
+                    "unweighted_ce_sum": 2.0,
+                    "weighted_ce_sum": 0.8,
+                },
+                "short": {
+                    "rows": 3,
+                    "weighted_mass": 1.0,
+                    "unweighted_ce_sum": 2.5,
+                    "weighted_ce_sum": 0.9,
+                },
+            },
+        },
+    }) + "\n")
+    destination = tmp_path / "summary.json"
+
+    training_module._write_training_diagnostic_summary(source, destination)
+
+    overall = json.loads(destination.read_text())["overall"]
+    metrics = training_module._hierarchical_entry_evaluation_metrics(
+        overall["hierarchical_entry_balance"]
+    )
+    assert metrics == {
+        "entry_timing_wait_rows": 4.0,
+        "entry_timing_wait_weighted_mass_fraction": 0.5,
+        "entry_timing_enter_rows": 6.0,
+        "entry_timing_enter_weighted_mass_fraction": 0.5,
+        "entry_direction_long_rows": 3.0,
+        "entry_direction_long_weighted_mass_fraction": 0.5,
+        "entry_direction_short_rows": 3.0,
+        "entry_direction_short_weighted_mass_fraction": 0.5,
+    }
 
 
 def test_persistent_regime_gate_requires_negative_only_coverage(
@@ -730,6 +793,263 @@ def test_equal_present_class_reduction_gate_requires_all_three_equal_loss_masses
 
     metrics["entry_balance_wait_weighted_mass_fraction"] = 0.11
     assert not all(gate.passes(metrics) for gate in gates)
+
+
+def test_hierarchical_entry_reduction_gate_requires_exact_two_level_mass() -> None:
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=False,
+        entry_action_loss_reduction="hierarchical_enter_wait_direction_v1",
+        entry_action_supervision_active=True,
+    )
+    metrics = {
+        "short_circuited": 0.0,
+        **{
+            f"{task}_{cohort}_rows": 100.0
+            for task, cohorts in (
+                ("entry_timing", ("wait", "enter")),
+                ("entry_direction", ("long", "short")),
+            )
+            for cohort in cohorts
+        },
+        **{
+            f"{task}_{cohort}_weighted_mass_fraction": 0.5
+            for task, cohorts in (
+                ("entry_timing", ("wait", "enter")),
+                ("entry_direction", ("long", "short")),
+            )
+            for cohort in cohorts
+        },
+    }
+
+    assert all(gate.passes(metrics) for gate in gates)
+
+    metrics.update({
+        "entry_timing_wait_weighted_mass_fraction": 0.49999998509883836,
+        "entry_timing_enter_weighted_mass_fraction": 0.5000000149011616,
+        "entry_direction_long_weighted_mass_fraction": 0.5000000149011616,
+        "entry_direction_short_weighted_mass_fraction": 0.49999998509883836,
+    })
+    assert all(gate.passes(metrics) for gate in gates)
+
+    metrics["entry_direction_short_weighted_mass_fraction"] = 0.49
+    assert not all(gate.passes(metrics) for gate in gates)
+
+
+def test_hierarchical_entry_without_regime_records_an_evaluation_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Assets:
+        checkpoint_sha256 = "a" * 64
+
+    class EntryTargets:
+        manifest = {"identity_sha256": "b" * 64}
+
+        @staticmethod
+        def target(ticker: str, row: int) -> Action:
+            del ticker, row
+            return Action.WAIT
+
+    class TinyEnvironment:
+        observation_dim = 1
+
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+    class TinyAgent:
+        recurrent_burn_in = 0
+        n_step_return = 1
+        entry_action_class_weights = (1.0, 1.0, 1.0)
+
+        def __init__(self, observation_dim: int, **settings) -> None:
+            assert observation_dim == 1
+            self.entry_action_loss_reduction = settings[
+                "entry_action_loss_reduction"
+            ]
+
+        @staticmethod
+        def discard_retention_anchor() -> None:
+            return None
+
+        @staticmethod
+        def discard_teacher() -> None:
+            return None
+
+        @staticmethod
+        def save(path: Path, *, manifest) -> None:
+            del manifest
+            path.write_bytes(b"hierarchical-entry-without-regime")
+
+    def result() -> TrainingResult:
+        return TrainingResult(
+            episodes=1,
+            environment_steps=1,
+            passes=0,
+            blows=0,
+            timeouts=1,
+            trade_count=0,
+            win_count=0,
+            winning_r_sum=0.0,
+            worst_pnl=0.0,
+            mean_terminal_pnl=0.0,
+            mean_reward=0.0,
+            mean_loss=0.5,
+        )
+
+    def fake_train_agent(*args, **kwargs) -> TrainingResult:
+        del args
+        kwargs["episode_diagnostic_callback"]({
+            "schema": "propevolve_episode_diagnostic_v1",
+            "episode": 1,
+            "ticker": "NQ",
+            "outcome": "timeout",
+            "updates": 1,
+            "entry_action_loss_reduction": (
+                "hierarchical_enter_wait_direction_v1"
+            ),
+            "hierarchical_entry_balance": {
+                task: {
+                    cohort: {
+                        "rows": 1,
+                        "weighted_mass": 0.5,
+                        "unweighted_ce_sum": 1.0,
+                        "weighted_ce_sum": 0.5,
+                    }
+                    for cohort in cohorts
+                }
+                for task, cohorts in (
+                    ("timing", ("wait", "enter")),
+                    ("direction", ("long", "short")),
+                )
+            },
+        })
+        return result()
+
+    def fake_evaluate_agent(*args, **kwargs) -> TrainingResult:
+        del args
+        kwargs["episode_diagnostic_callback"]({
+            "schema": "propevolve_validation_episode_diagnostic_v1",
+            "episode": 1,
+            "ticker": "NQ",
+            "outcome": "timeout",
+        })
+        return result()
+
+    experiment_path = tmp_path / "experiment.json"
+    experiment_path.write_text("{}\n")
+    cache_manifest = tmp_path / "cache" / "NQ" / "manifest.json"
+    cache_manifest.parent.mkdir(parents=True)
+    cache_manifest.write_text("{}\n")
+    config = {
+        "_root": str(tmp_path),
+        "_path": str(experiment_path),
+        "assets": "assets.json",
+        "cache_root": "cache",
+        "output": "run",
+        "tickers": ("NQ",),
+        "deployment_tickers": ("NQ",),
+        "training_only_tickers": (),
+        "timeframe_minutes": 3,
+        "temporal": {
+            "train_start": "2021-01-01",
+            "train_end": "2025-01-01",
+            "validation_start": "2025-01-01",
+            "validation_end": "2026-01-01",
+            "sealed_start": "2026-01-01",
+        },
+        "challenge": {
+            "profit_target": 6_000.0,
+            "max_loss": 3_000.0,
+            "episode_days": 1,
+            "bars_per_day": 1,
+            "max_position_size": 1,
+            "minimum_mll_headroom": 500.0,
+            "trailing_mll_lock": True,
+            "terminal_pass_reward": 250.0,
+            "terminal_blow_reward": -1_500.0,
+            "terminal_timeout_reward": -2.0,
+            "terminal_pass_speed_reward_per_day": 20.0,
+            "reward_scale": 1_000.0,
+        },
+        "point_values": {"NQ": 20.0},
+        "round_trip_fees": {"NQ": 3.84},
+        "agent": {
+            "device": "cpu",
+            "entry_action_loss_reduction": (
+                "hierarchical_enter_wait_direction_v1"
+            ),
+        },
+        "entry_supervision": {
+            "loss_weight": 1.0,
+            "action_class_balance": None,
+        },
+        "training": {
+            "episodes": 1,
+            "budget_mode": "episodes",
+            "validation_episodes": 1,
+            "replay_capacity_episodes": 1,
+            "replay_capacity_transitions": 1,
+            "sequence_length": 1,
+            "terminal_sequence_fraction": 0.0,
+            "warmup_episodes": 1,
+            "updates_per_episode": 1,
+            "batch_sequences": 1,
+            "recurrent_horizon": 1,
+            "epsilon_start": 0.0,
+            "epsilon_end": 0.0,
+            "seed": 7,
+            "checkpoint_every_episodes": 0,
+            "prefetch_batches": 0,
+        },
+    }
+
+    import propevolve.agent as agent_module
+    import propevolve.entry_supervision as entry_supervision_module
+
+    monkeypatch.setattr(agent_module, "RecurrentC51Agent", TinyAgent)
+    monkeypatch.setattr(
+        training_module.AssetContract,
+        "load",
+        classmethod(lambda cls, path: Assets()),
+    )
+    monkeypatch.setattr(
+        training_module,
+        "load_markets",
+        lambda **kwargs: {"NQ": object()},
+    )
+    monkeypatch.setattr(
+        training_module,
+        "assert_temporal_role",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        training_module,
+        "HistoricalChallengeEnv",
+        TinyEnvironment,
+    )
+    monkeypatch.setattr(training_module, "train_agent", fake_train_agent)
+    monkeypatch.setattr(training_module, "evaluate_agent", fake_evaluate_agent)
+    monkeypatch.setattr(
+        entry_supervision_module,
+        "build_entry_action_targets",
+        lambda *args, **kwargs: EntryTargets(),
+    )
+
+    candidate, evaluation = HistoricalCandidateRunner().run(
+        config,
+        parent_candidate_ids=(),
+        hypothesis="hierarchical entry without Regime remains receipt-safe",
+    )
+
+    assert candidate.model_path.is_file()
+    assert evaluation.status == "FAIL"
+    assert evaluation.stages[0]["status"] == "PASS"
+    assert evaluation.metrics[
+        "training.entry_timing_wait_weighted_mass_fraction"
+    ] == pytest.approx(0.5)
+    assert evaluation.metrics[
+        "training.entry_direction_short_weighted_mass_fraction"
+    ] == pytest.approx(0.5)
 
 
 class Agent:
@@ -1612,6 +1932,10 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert result.average_win_r == 2.5
     assert len(diagnostics) == 2
     assert diagnostics[-1]["schema"] == "propevolve_episode_diagnostic_v1"
+    assert diagnostics[-1]["entry_action_loss_reduction"] == (
+        "population_weighted_mean_v1"
+    )
+    assert "hierarchical_entry_balance" not in diagnostics[-1]
     assert diagnostics[-1]["episode"] == 2
     assert diagnostics[-1]["outcome"] == "pass"
     assert diagnostics[-1]["expectancy_r"] == 0.0
@@ -1645,6 +1969,85 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
         "winR=+0.000R balance=+6000.00 avg_balance=+6000.00 steps=4/8"
         in capsys.readouterr().out
     )
+
+
+def test_training_receipts_hierarchical_entry_metrics_for_health() -> None:
+    class HierarchicalAgent(Agent):
+        entry_action_loss_reduction = (
+            "hierarchical_enter_wait_direction_v1"
+        )
+
+        def train_batch(self, sequences, **kwargs) -> float:
+            loss = super().train_batch(sequences, **kwargs)
+            self.last_train_metrics.update({
+                "entry_timing_loss": 0.4,
+                "entry_direction_loss": 0.2,
+                **{
+                    f"entry_{task}_{cohort}_{field}": value
+                    for task, cohorts in (
+                        ("timing", ("wait", "enter")),
+                        ("direction", ("long", "short")),
+                    )
+                    for cohort in cohorts
+                    for field, value in {
+                        "rows": 2.0,
+                        "weighted_mass": 1.0,
+                        "weighted_mass_fraction": 0.5,
+                        "unweighted_ce_sum": 1.0,
+                        "weighted_ce_sum": 0.5,
+                    }.items()
+                },
+            })
+            return loss
+
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        HierarchicalAgent(),
+        Environment(),
+        episodes=1,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=2,
+            seed=101,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=101,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert diagnostics[0]["mean_entry_timing_loss"] == 0.4
+    assert diagnostics[0]["mean_entry_direction_loss"] == 0.2
+    assert diagnostics[0][
+        "mean_entry_timing_wait_weighted_mass_fraction"
+    ] == 0.5
+    assert diagnostics[0][
+        "mean_entry_direction_short_weighted_mass_fraction"
+    ] == 0.5
+    assert diagnostics[0]["hierarchical_entry_balance"] == {
+        task: {
+            cohort: {
+                "rows": 2,
+                "weighted_mass": 1.0,
+                "weighted_mass_fraction": 0.5,
+                "unweighted_ce_sum": 1.0,
+                "unweighted_ce_mean": 0.5,
+                "weighted_ce_sum": 0.5,
+                "weighted_loss_contribution": 0.25,
+            }
+            for cohort in cohorts
+        }
+        for task, cohorts in (
+            ("timing", ("wait", "enter")),
+            ("direction", ("long", "short")),
+        )
+    }
 
 
 def test_v2_association_telemetry_survives_episode_summary_and_evaluation(

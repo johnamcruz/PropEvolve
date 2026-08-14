@@ -90,6 +90,146 @@ def test_policy_health_accepts_noisy_balanced_learning() -> None:
     assert verdict.evidence["probe_due"] is True
 
 
+def _hierarchical_spec() -> TrainingPolicyHealthSpec:
+    values = dict(_spec(
+        require_positive_persistent_regime_association=True,
+    ).__dict__)
+    values.update({
+        "minimum_entry_mass_fraction": 0.0,
+        "maximum_entry_mass_fraction": 0.0,
+        "hierarchical_entry_mass_fractions": {
+            "timing_wait": 0.5,
+            "timing_enter": 0.5,
+            "direction_long": 0.5,
+            "direction_short": 0.5,
+        },
+    })
+    return TrainingPolicyHealthSpec(**values)
+
+
+def test_hierarchical_policy_health_accepts_exact_two_level_loss_mass() -> None:
+    verdict = TrainingHealthDetector(_hierarchical_spec()).evaluate(_snapshot(
+        entry_mass_fractions={},
+        hierarchical_entry_mass_fractions={
+            "timing_wait": 0.5,
+            "timing_enter": 0.5,
+            "direction_long": 0.5,
+            "direction_short": 0.5,
+        },
+    ))
+
+    assert verdict.stop is False
+
+
+def test_hierarchical_policy_health_accepts_float32_balancing_roundoff() -> None:
+    verdict = TrainingHealthDetector(_hierarchical_spec()).evaluate(_snapshot(
+        entry_mass_fractions={},
+        hierarchical_entry_mass_fractions={
+            "timing_wait": 0.49999998509883836,
+            "timing_enter": 0.5000000149011616,
+            "direction_long": 0.5000000149011616,
+            "direction_short": 0.49999998509883836,
+        },
+    ))
+
+    assert verdict.stop is False
+    assert verdict.reasons == ()
+
+
+def test_hierarchical_policy_health_stops_skewed_conditional_direction_mass() -> None:
+    verdict = TrainingHealthDetector(_hierarchical_spec()).evaluate(_snapshot(
+        entry_mass_fractions={},
+        hierarchical_entry_mass_fractions={
+            "timing_wait": 0.5,
+            "timing_enter": 0.5,
+            "direction_long": 0.9,
+            "direction_short": 0.1,
+        },
+    ))
+
+    assert verdict.reasons == (
+        "entry optimizer conditional direction Long mass fraction "
+        "0.900000 != 0.500000",
+        "entry optimizer conditional direction Short mass fraction "
+        "0.100000 != 0.500000",
+    )
+
+
+def test_hierarchical_policy_health_freezes_a_defensive_mass_copy() -> None:
+    source = {
+        "timing_wait": 0.5,
+        "timing_enter": 0.5,
+        "direction_long": 0.5,
+        "direction_short": 0.5,
+    }
+    values = dict(_spec().__dict__)
+    values.update({
+        "minimum_entry_mass_fraction": 0.0,
+        "maximum_entry_mass_fraction": 0.0,
+        "hierarchical_entry_mass_fractions": source,
+    })
+    spec = TrainingPolicyHealthSpec(**values)
+
+    source["timing_wait"] = 0.25
+
+    assert spec.hierarchical_entry_mass_fractions == {
+        "timing_wait": 0.5,
+        "timing_enter": 0.5,
+        "direction_long": 0.5,
+        "direction_short": 0.5,
+    }
+    with pytest.raises(TypeError):
+        spec.hierarchical_entry_mass_fractions["timing_wait"] = 0.25  # type: ignore[index]
+
+
+def test_hierarchical_health_monitor_consumes_the_frozen_learner_metrics() -> None:
+    class Progress:
+        completed_episodes = 45
+        passes = 5
+        blows = 0
+        timeouts = 40
+        near_blow_timeout_count = 10
+        terminal_pnl_sum = -4_500.0
+        terminal_pnl_count = 45
+        trade_r_sum = 2.0
+        trade_count = 200
+
+    receipts: list[dict[str, object]] = []
+    monitor = TrainingHealthMonitor(
+        TrainingHealthDetector(_hierarchical_spec()),
+        probe=lambda completed: dict(_snapshot().probe_metrics or {}),
+        receipt_callback=receipts.append,
+    )
+    diagnostic = {
+        "updates": 32,
+        "entry_action_weight_scale": 1.0,
+        "teacher_weight_scale": 1.0,
+        "entry_action_balance": {},
+        "regime_entry_conflict": {
+            side: {"soft_wait_disagreement_rows": 0}
+            for side in ("long", "short")
+        },
+        "hierarchical_entry_balance": {
+            "timing": {
+                cohort: {"weighted_mass_fraction": 0.5}
+                for cohort in ("wait", "enter")
+            },
+            "direction": {
+                cohort: {"weighted_mass_fraction": 0.5}
+                for cohort in ("long", "short")
+            },
+        },
+    }
+
+    assert monitor(Progress(), diagnostic) is None
+    assert receipts[0]["hierarchical_entry_mass_fractions"] == {
+        "timing_wait": 0.5,
+        "timing_enter": 0.5,
+        "direction_long": 0.5,
+        "direction_short": 0.5,
+    }
+
+
 def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
     config = load_experiment_config(Path(
         "config/historical_mask_expansion_regime_stage2_v7.json"

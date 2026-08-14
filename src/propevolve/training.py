@@ -49,6 +49,7 @@ from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
 from .teachers import agent_teacher_settings
 from .training_health import (
+    HIERARCHICAL_ENTRY_MASS_ABS_TOLERANCE,
     TrainingHealthDetector,
     TrainingHealthMonitor,
     TrainingPolicyHealthSpec,
@@ -102,6 +103,22 @@ _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "weighted_mass",
     "unweighted_ce_sum",
     "weighted_ce_sum",
+)
+_HIERARCHICAL_ENTRY_TASK_COHORTS = {
+    "timing": ("wait", "enter"),
+    "direction": ("long", "short"),
+}
+_HIERARCHICAL_ENTRY_ADDITIVE_FIELDS = (
+    "rows",
+    "weighted_mass",
+    "unweighted_ce_sum",
+    "weighted_ce_sum",
+)
+_HIERARCHICAL_ENTRY_REPORT_FIELDS = (
+    *_HIERARCHICAL_ENTRY_ADDITIVE_FIELDS,
+    "weighted_mass_fraction",
+    "unweighted_ce_mean",
+    "weighted_loss_contribution",
 )
 _REGIME_ENTRY_CONFLICT_FIELDS = (
     "rows",
@@ -570,6 +587,93 @@ def _entry_balance_summary(
                     float(values.get(field, 0.0) or 0.0)
                 )
     return _entry_balance_diagnostic(update_metrics)
+
+
+def _hierarchical_entry_balance_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    """Reduce the two independent balanced task ledgers without mixing mass."""
+    result: dict[str, dict[str, dict[str, float | int]]] = {}
+    for task, cohorts in _HIERARCHICAL_ENTRY_TASK_COHORTS.items():
+        additive_by_cohort = {
+            cohort: {
+                field: float(sum(update_metrics.get(
+                    f"entry_{task}_{cohort}_{field}", ()
+                )))
+                for field in _HIERARCHICAL_ENTRY_ADDITIVE_FIELDS
+            }
+            for cohort in cohorts
+        }
+        total_mass = sum(
+            values["weighted_mass"]
+            for values in additive_by_cohort.values()
+        )
+        result[task] = {}
+        for cohort, additive in additive_by_cohort.items():
+            rows = int(round(additive["rows"]))
+            result[task][cohort] = {
+                "rows": rows,
+                "weighted_mass": additive["weighted_mass"],
+                "weighted_mass_fraction": (
+                    additive["weighted_mass"] / total_mass
+                    if total_mass else 0.0
+                ),
+                "unweighted_ce_sum": additive["unweighted_ce_sum"],
+                "unweighted_ce_mean": (
+                    additive["unweighted_ce_sum"] / rows if rows else 0.0
+                ),
+                "weighted_ce_sum": additive["weighted_ce_sum"],
+                "weighted_loss_contribution": (
+                    additive["weighted_ce_sum"] / total_mass
+                    if total_mass else 0.0
+                ),
+            }
+    return result
+
+
+def _hierarchical_entry_balance_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    update_metrics: dict[str, list[float]] = {
+        f"entry_{task}_{cohort}_{field}": []
+        for task, cohorts in _HIERARCHICAL_ENTRY_TASK_COHORTS.items()
+        for cohort in cohorts
+        for field in _HIERARCHICAL_ENTRY_ADDITIVE_FIELDS
+    }
+    for row in rows:
+        diagnostics = row.get("hierarchical_entry_balance")
+        diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+        for task, cohorts in _HIERARCHICAL_ENTRY_TASK_COHORTS.items():
+            task_values = diagnostics.get(task)
+            task_values = (
+                task_values if isinstance(task_values, Mapping) else {}
+            )
+            for cohort in cohorts:
+                values = task_values.get(cohort)
+                values = values if isinstance(values, Mapping) else {}
+                for field in _HIERARCHICAL_ENTRY_ADDITIVE_FIELDS:
+                    update_metrics[f"entry_{task}_{cohort}_{field}"].append(
+                        float(values.get(field, 0.0) or 0.0)
+                    )
+    return _hierarchical_entry_balance_diagnostic(update_metrics)
+
+
+def _hierarchical_entry_evaluation_metrics(
+    balance: Mapping[str, object],
+) -> dict[str, float]:
+    """Flatten authenticated task mass under the learner's exact metric names."""
+    metrics: dict[str, float] = {}
+    for task, cohorts in _HIERARCHICAL_ENTRY_TASK_COHORTS.items():
+        task_values = balance.get(task)
+        task_values = task_values if isinstance(task_values, Mapping) else {}
+        for cohort in cohorts:
+            values = task_values.get(cohort)
+            values = values if isinstance(values, Mapping) else {}
+            for field in ("rows", "weighted_mass_fraction"):
+                metrics[f"entry_{task}_{cohort}_{field}"] = float(
+                    values.get(field, 0.0)
+                )
+    return metrics
 
 
 def _regime_entry_conflict_diagnostic(
@@ -1341,6 +1445,7 @@ def _training_evaluation_gates(
     if entry_action_loss_reduction not in {
         "population_weighted_mean_v1",
         "equal_present_class_mean_v1",
+        "hierarchical_enter_wait_direction_v1",
     }:
         raise ValueError("entry action loss reduction gate is invalid")
     if (
@@ -1361,6 +1466,29 @@ def _training_evaluation_gates(
                     0.34,
                 ),
             ))
+    if (
+        entry_action_supervision_active
+        and entry_action_loss_reduction
+        == "hierarchical_enter_wait_direction_v1"
+    ):
+        for task, cohorts in (
+            ("entry_timing", ("wait", "enter")),
+            ("entry_direction", ("long", "short")),
+        ):
+            for cohort in cohorts:
+                gates.extend((
+                    EvaluationGate(f"{task}_{cohort}_rows", ">", 0.0),
+                    EvaluationGate(
+                        f"{task}_{cohort}_weighted_mass_fraction",
+                        ">=",
+                        0.5 - HIERARCHICAL_ENTRY_MASS_ABS_TOLERANCE,
+                    ),
+                    EvaluationGate(
+                        f"{task}_{cohort}_weighted_mass_fraction",
+                        "<=",
+                        0.5 + HIERARCHICAL_ENTRY_MASS_ABS_TOLERANCE,
+                    ),
+                ))
     if regime_selectivity_active:
         gates.extend(
             (
@@ -2795,9 +2923,16 @@ class HistoricalCandidateRunner:
                         for item in coverage_markets.values()
                     ),
                 })
+            overall_diagnostics = diagnostic_summary["overall"]
+            if (
+                str(agent.entry_action_loss_reduction)
+                == "hierarchical_enter_wait_direction_v1"
+            ):
+                metrics.update(_hierarchical_entry_evaluation_metrics(
+                    overall_diagnostics["hierarchical_entry_balance"]
+                ))
             if final_regime_probe is not None:
                 metrics.update(final_regime_probe.metrics)
-                overall_diagnostics = diagnostic_summary["overall"]
                 metrics["latest_teacher_weight_scale"] = float(
                     overall_diagnostics["latest_teacher_weight_scale"]
                 )
@@ -3415,6 +3550,21 @@ def _path_sha256(path: Path) -> str:
 
 def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
     episodes = len(rows)
+    declared_entry_reductions = {
+        str(row["entry_action_loss_reduction"])
+        for row in rows
+        if row.get("entry_action_loss_reduction") is not None
+    }
+    if len(declared_entry_reductions) > 1:
+        raise ValueError("training diagnostic entry-action reduction drifted")
+    entry_action_loss_reduction = next(
+        iter(declared_entry_reductions),
+        None,
+    )
+    hierarchical_entry_diagnostics = (
+        entry_action_loss_reduction
+        == "hierarchical_enter_wait_direction_v1"
+    )
     trades = sum(int(row.get("trade_count", 0)) for row in rows)
     wins = sum(
         float(row.get("trade_count", 0)) * float(row.get("win_rate", 0.0))
@@ -3676,6 +3826,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
             _persistent_regime_selectivity_summary(rows)
         ),
     }
+    if entry_action_loss_reduction is not None:
+        result["entry_action_loss_reduction"] = entry_action_loss_reduction
+    if hierarchical_entry_diagnostics:
+        result["hierarchical_entry_balance"] = (
+            _hierarchical_entry_balance_summary(rows)
+        )
     sampled_target_counts = {
         action: sum(
             int(row.get("sampled_entry_action_target_counts", {}).get(action, 0))
@@ -4065,6 +4221,31 @@ def train_agent(
         raise ValueError("resume progress exceeds the environment-step budget")
     if progress.short_circuit_reason is not None:
         return progress.result()
+    entry_action_loss_reduction = str(getattr(
+        agent,
+        "entry_action_loss_reduction",
+        "population_weighted_mean_v1",
+    ))
+    hierarchical_entry_diagnostics = (
+        entry_action_loss_reduction
+        == "hierarchical_enter_wait_direction_v1"
+    )
+    hierarchical_learner_diagnostic_keys = (
+        (
+            "entry_timing_loss",
+            "entry_direction_loss",
+            *(
+                f"entry_{task}_{cohort}_{field}"
+                for task, cohorts in (
+                    _HIERARCHICAL_ENTRY_TASK_COHORTS.items()
+                )
+                for cohort in cohorts
+                for field in _HIERARCHICAL_ENTRY_REPORT_FIELDS
+            ),
+        )
+        if hierarchical_entry_diagnostics
+        else ()
+    )
     for episode_index in range(progress.completed_episodes, episodes):
         recovery_episode = recovery_schedule[episode_index]
         reset_options = {}
@@ -4491,6 +4672,7 @@ def train_agent(
                 "sampled_burn_in_reset_coverage",
                 "sampled_recurrent_reset_pattern_count",
                 "policy_retention_loss",
+                *hierarchical_learner_diagnostic_keys,
                 "entry_action_target_wait_rows",
                 "entry_action_target_long_rows",
                 "entry_action_target_short_rows",
@@ -4947,6 +5129,7 @@ def train_agent(
                     float(np.mean(episode_entry_action_rows))
                     if episode_entry_action_rows else None
                 ),
+                "entry_action_loss_reduction": entry_action_loss_reduction,
                 "entry_action_target_counts": {
                     action.name: entry_action_target_counts[action]
                     for action in entry_action_target_counts
@@ -5015,6 +5198,17 @@ def train_agent(
                 ),
                 "entry_action_balance": _entry_balance_diagnostic(
                     learner_diagnostics
+                ),
+                **(
+                    {
+                        "hierarchical_entry_balance": (
+                            _hierarchical_entry_balance_diagnostic(
+                                learner_diagnostics
+                            )
+                        )
+                    }
+                    if hierarchical_entry_diagnostics
+                    else {}
                 ),
                 "regime_entry_conflict": _regime_entry_conflict_diagnostic(
                     learner_diagnostics

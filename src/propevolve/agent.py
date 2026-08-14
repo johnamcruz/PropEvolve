@@ -65,6 +65,7 @@ _ENTRY_BALANCE_ACTION_NAMES = ("wait", "long", "short")
 _ENTRY_ACTION_LOSS_REDUCTIONS = {
     "population_weighted_mean_v1",
     "equal_present_class_mean_v1",
+    "hierarchical_enter_wait_direction_v1",
 }
 _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "rows",
@@ -72,6 +73,8 @@ _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "unweighted_ce_sum",
     "weighted_ce_sum",
 )
+_ENTRY_TIMING_NAMES = ("wait", "enter")
+_ENTRY_DIRECTION_NAMES = ("long", "short")
 _REGIME_ENTRY_CONFLICT_FIELDS = (
     "rows",
     "target_wait_probability_sum",
@@ -1069,6 +1072,10 @@ class RecurrentC51Agent:
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_timing_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_direction_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         regime_selectivity_loss = teacher_loss
         regime_selectivity_rows = teacher_loss
         regime_selectivity_target_wait_mean = teacher_loss
@@ -1113,6 +1120,20 @@ class RecurrentC51Agent:
                 (), dtype=torch.float32, device=self.device
             )
             for action in _ENTRY_BALANCE_ACTION_NAMES
+            for field in _ENTRY_BALANCE_ADDITIVE_FIELDS
+        }
+        entry_timing_additive = {
+            f"entry_timing_{timing}_{field}": torch.zeros(
+                (), dtype=torch.float32, device=self.device
+            )
+            for timing in _ENTRY_TIMING_NAMES
+            for field in _ENTRY_BALANCE_ADDITIVE_FIELDS
+        }
+        entry_direction_additive = {
+            f"entry_direction_{direction}_{field}": torch.zeros(
+                (), dtype=torch.float32, device=self.device
+            )
+            for direction in _ENTRY_DIRECTION_NAMES
             for field in _ENTRY_BALANCE_ADDITIVE_FIELDS
         }
         regime_entry_conflict_additive = {
@@ -1843,32 +1864,209 @@ class RecurrentC51Agent:
                 )
                 selected_entry_q = entry_q[timing_rows]
                 selected_timing_targets = timing_targets[timing_rows]
-                unweighted_entry_ce = nn.functional.cross_entropy(
-                    selected_entry_q,
-                    selected_timing_targets,
-                    reduction="none",
-                )
-                selected_class_counts = torch.bincount(
-                    selected_timing_targets, minlength=3
-                ).to(unweighted_entry_ce.dtype)
-                present_classes = selected_class_counts > 0
                 if (
                     self.entry_action_loss_reduction
-                    == "equal_present_class_mean_v1"
+                    == "hierarchical_enter_wait_direction_v1"
                 ):
-                    class_ce_means = torch.stack(tuple(
-                        unweighted_entry_ce[
-                            selected_timing_targets == class_index
-                        ].sum() / selected_class_counts[class_index].clamp_min(1.0)
-                        for class_index in range(3)
+                    timing_binary_targets = (
+                        selected_timing_targets != int(Action.WAIT)
+                    ).to(torch.long)
+                    # Marginalize the unchanged three-action softmax over its
+                    # two Entry coordinates. Timing CE plus conditional
+                    # direction CE therefore reconstructs ordinary three-class
+                    # CE before the two tasks apply their own class balance.
+                    timing_logits = torch.stack((
+                        selected_entry_q[:, int(Action.WAIT)],
+                        torch.logsumexp(selected_entry_q[:, 1:], dim=-1),
+                    ), dim=-1)
+                    timing_ce = nn.functional.cross_entropy(
+                        timing_logits,
+                        timing_binary_targets,
+                        reduction="none",
+                    )
+                    timing_counts = torch.bincount(
+                        timing_binary_targets, minlength=2
+                    ).to(timing_ce.dtype)
+                    timing_present = timing_counts > 0
+                    timing_present_count = timing_present.sum().to(
+                        timing_ce.dtype
+                    )
+                    timing_class_means = torch.stack(tuple(
+                        timing_ce[timing_binary_targets == class_index].sum()
+                        / timing_counts[class_index].clamp_min(1.0)
+                        for class_index in range(2)
                     ))
-                    entry_action_loss = class_ce_means[present_classes].mean()
+                    entry_timing_loss = timing_class_means[
+                        timing_present
+                    ].mean()
+                    for class_index, timing_name in enumerate(
+                        _ENTRY_TIMING_NAMES
+                    ):
+                        class_rows = (
+                            timing_binary_targets == class_index
+                        ).to(timing_ce.dtype)
+                        effective_row_weight = torch.where(
+                            timing_present[class_index],
+                            1.0
+                            / (
+                                timing_present_count
+                                * timing_counts[class_index].clamp_min(1.0)
+                            ),
+                            torch.zeros((), device=self.device),
+                        )
+                        prefix = f"entry_timing_{timing_name}_"
+                        entry_timing_additive.update({
+                            prefix + "rows": class_rows.sum(),
+                            prefix + "weighted_mass": (
+                                class_rows.sum() * effective_row_weight
+                            ),
+                            prefix + "unweighted_ce_sum": (
+                                timing_ce * class_rows
+                            ).sum(),
+                            prefix + "weighted_ce_sum": (
+                                timing_ce
+                                * class_rows
+                                * effective_row_weight
+                            ).sum(),
+                        })
+
+                    direction_rows = timing_binary_targets == 1
+                    direction_targets = (
+                        selected_timing_targets[direction_rows] - 1
+                    )
+                    direction_logits = selected_entry_q[
+                        direction_rows, 1:
+                    ]
+                    direction_ce = nn.functional.cross_entropy(
+                        direction_logits,
+                        direction_targets,
+                        reduction="none",
+                    )
+                    direction_counts = torch.bincount(
+                        direction_targets, minlength=2
+                    ).to(direction_ce.dtype)
+                    direction_present = direction_counts > 0
+                    direction_present_weights = direction_present.to(
+                        direction_ce.dtype
+                    )
+                    direction_present_count = direction_present_weights.sum()
+                    direction_class_means = torch.stack(tuple(
+                        direction_ce[
+                            direction_targets == class_index
+                        ].sum()
+                        / direction_counts[class_index].clamp_min(1.0)
+                        for class_index in range(2)
+                    ))
+                    entry_direction_loss = (
+                        direction_class_means * direction_present_weights
+                    ).sum() / direction_present_count.clamp_min(1.0)
+                    for class_index, direction_name in enumerate(
+                        _ENTRY_DIRECTION_NAMES
+                    ):
+                        class_rows = (
+                            direction_targets == class_index
+                        ).to(direction_ce.dtype)
+                        effective_row_weight = torch.where(
+                            direction_present[class_index],
+                            1.0
+                            / (
+                                direction_present_count
+                                * direction_counts[
+                                    class_index
+                                ].clamp_min(1.0)
+                            ).clamp_min(1.0),
+                            torch.zeros((), device=self.device),
+                        )
+                        prefix = f"entry_direction_{direction_name}_"
+                        entry_direction_additive.update({
+                            prefix + "rows": class_rows.sum(),
+                            prefix + "weighted_mass": (
+                                class_rows.sum() * effective_row_weight
+                            ),
+                            prefix + "unweighted_ce_sum": (
+                                direction_ce * class_rows
+                            ).sum(),
+                            prefix + "weighted_ce_sum": (
+                                direction_ce
+                                * class_rows
+                                * effective_row_weight
+                            ).sum(),
+                        })
+                    entry_action_loss = (
+                        entry_timing_loss + entry_direction_loss
+                    )
                 else:
-                    entry_action_loss = nn.functional.cross_entropy(
+                    unweighted_entry_ce = nn.functional.cross_entropy(
                         selected_entry_q,
                         selected_timing_targets,
-                        weight=self._entry_action_class_weights_tensor,
+                        reduction="none",
                     )
+                    selected_class_counts = torch.bincount(
+                        selected_timing_targets, minlength=3
+                    ).to(unweighted_entry_ce.dtype)
+                    present_classes = selected_class_counts > 0
+                    if (
+                        self.entry_action_loss_reduction
+                        == "equal_present_class_mean_v1"
+                    ):
+                        class_ce_means = torch.stack(tuple(
+                            unweighted_entry_ce[
+                                selected_timing_targets == class_index
+                            ].sum()
+                            / selected_class_counts[class_index].clamp_min(1.0)
+                            for class_index in range(3)
+                        ))
+                        entry_action_loss = class_ce_means[
+                            present_classes
+                        ].mean()
+                    else:
+                        entry_action_loss = nn.functional.cross_entropy(
+                            selected_entry_q,
+                            selected_timing_targets,
+                            weight=self._entry_action_class_weights_tensor,
+                        )
+                    for class_index in range(3):
+                        action_name = _ENTRY_BALANCE_ACTION_NAMES[class_index]
+                        class_rows = (
+                            selected_timing_targets == class_index
+                        ).to(unweighted_entry_ce.dtype)
+                        class_weight = self._entry_action_class_weights_tensor[
+                            class_index
+                        ]
+                        if (
+                            self.entry_action_loss_reduction
+                            == "equal_present_class_mean_v1"
+                        ):
+                            effective_row_weight = torch.where(
+                                present_classes[class_index],
+                                1.0
+                                / (
+                                    present_classes.sum().to(
+                                        unweighted_entry_ce.dtype
+                                    )
+                                    * selected_class_counts[
+                                        class_index
+                                    ].clamp_min(1.0)
+                                ),
+                                torch.zeros((), device=self.device),
+                            )
+                        else:
+                            effective_row_weight = class_weight
+                        prefix = f"entry_balance_{action_name}_"
+                        entry_balance_additive.update({
+                            prefix + "rows": class_rows.sum(),
+                            prefix + "weighted_mass": (
+                                class_rows.sum() * effective_row_weight
+                            ),
+                            prefix + "unweighted_ce_sum": (
+                                unweighted_entry_ce * class_rows
+                            ).sum(),
+                            prefix + "weighted_ce_sum": (
+                                unweighted_entry_ce
+                                * class_rows
+                                * effective_row_weight
+                            ).sum(),
+                        })
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
                 )
@@ -1881,43 +2079,6 @@ class RecurrentC51Agent:
                     selected_predictions, minlength=3
                 ).to(torch.float32)
                 for class_index in range(3):
-                    action_name = _ENTRY_BALANCE_ACTION_NAMES[class_index]
-                    class_rows = (
-                        selected_targets == class_index
-                    ).to(unweighted_entry_ce.dtype)
-                    class_weight = self._entry_action_class_weights_tensor[
-                        class_index
-                    ]
-                    if (
-                        self.entry_action_loss_reduction
-                        == "equal_present_class_mean_v1"
-                    ):
-                        effective_row_weight = torch.where(
-                            present_classes[class_index],
-                            1.0
-                            / (
-                                present_classes.sum().to(unweighted_entry_ce.dtype)
-                                * selected_class_counts[class_index].clamp_min(1.0)
-                            ),
-                            torch.zeros((), device=self.device),
-                        )
-                    else:
-                        effective_row_weight = class_weight
-                    prefix = f"entry_balance_{action_name}_"
-                    entry_balance_additive.update({
-                        prefix + "rows": class_rows.sum(),
-                        prefix + "weighted_mass": (
-                            class_rows.sum() * effective_row_weight
-                        ),
-                        prefix + "unweighted_ce_sum": (
-                            unweighted_entry_ce * class_rows
-                        ).sum(),
-                        prefix + "weighted_ce_sum": (
-                            unweighted_entry_ce
-                            * class_rows
-                            * effective_row_weight
-                        ).sum(),
-                    })
                     entry_action_correct_counts[class_index] = (
                         (selected_targets == class_index)
                         & (selected_predictions == class_index)
@@ -2033,6 +2194,8 @@ class RecurrentC51Agent:
             teacher_loss,
             entry_search_loss,
             entry_action_loss,
+            entry_timing_loss,
+            entry_direction_loss,
             regime_selectivity_loss,
             regime_selectivity_rows,
             regime_selectivity_target_wait_mean,
@@ -2075,6 +2238,8 @@ class RecurrentC51Agent:
             *regime_selectivity_additive.values(),
             *regime_channel_additive.flatten().unbind(),
             *entry_balance_additive.values(),
+            *entry_timing_additive.values(),
+            *entry_direction_additive.values(),
             *regime_entry_conflict_additive.values(),
             *regime_persistent_additive.values(),
         ))
@@ -2083,6 +2248,8 @@ class RecurrentC51Agent:
             teacher_loss_value,
             entry_search_loss_value,
             entry_action_loss_value,
+            entry_timing_loss_value,
+            entry_direction_loss_value,
             regime_selectivity_loss_value,
             regime_selectivity_rows_value,
             regime_selectivity_target_wait_mean_value,
@@ -2146,7 +2313,18 @@ class RecurrentC51Agent:
         entry_balance_values = all_regime_additive_values[
             entry_balance_start:entry_balance_start + entry_balance_count
         ]
-        regime_conflict_start = entry_balance_start + entry_balance_count
+        entry_timing_start = entry_balance_start + entry_balance_count
+        entry_timing_count = len(entry_timing_additive)
+        entry_timing_values = all_regime_additive_values[
+            entry_timing_start:entry_timing_start + entry_timing_count
+        ]
+        entry_direction_start = entry_timing_start + entry_timing_count
+        entry_direction_count = len(entry_direction_additive)
+        entry_direction_values = all_regime_additive_values[
+            entry_direction_start:
+            entry_direction_start + entry_direction_count
+        ]
+        regime_conflict_start = entry_direction_start + entry_direction_count
         regime_conflict_count = len(regime_entry_conflict_additive)
         regime_conflict_values = all_regime_additive_values[
             regime_conflict_start:regime_conflict_start + regime_conflict_count
@@ -2230,6 +2408,48 @@ class RecurrentC51Agent:
                 entry_balance_metric_values[prefix + "weighted_ce_sum"]
                 / total_weighted_ce if total_weighted_ce else 0.0
             )
+
+        def hierarchical_entry_metric_values(
+            additive: Mapping[str, torch.Tensor],
+            values: Sequence[float],
+            *,
+            prefix: str,
+            groups: Sequence[str],
+        ) -> dict[str, float]:
+            metrics = dict(zip(additive, values, strict=True))
+            total_mass = sum(
+                metrics[f"{prefix}_{group}_weighted_mass"]
+                for group in groups
+            )
+            for group in groups:
+                group_prefix = f"{prefix}_{group}_"
+                rows = metrics[group_prefix + "rows"]
+                metrics[group_prefix + "weighted_mass_fraction"] = (
+                    metrics[group_prefix + "weighted_mass"] / total_mass
+                    if total_mass else 0.0
+                )
+                metrics[group_prefix + "unweighted_ce_mean"] = (
+                    metrics[group_prefix + "unweighted_ce_sum"] / rows
+                    if rows else 0.0
+                )
+                metrics[group_prefix + "weighted_loss_contribution"] = (
+                    metrics[group_prefix + "weighted_ce_sum"] / total_mass
+                    if total_mass else 0.0
+                )
+            return metrics
+
+        entry_timing_metric_values = hierarchical_entry_metric_values(
+            entry_timing_additive,
+            entry_timing_values,
+            prefix="entry_timing",
+            groups=_ENTRY_TIMING_NAMES,
+        )
+        entry_direction_metric_values = hierarchical_entry_metric_values(
+            entry_direction_additive,
+            entry_direction_values,
+            prefix="entry_direction",
+            groups=_ENTRY_DIRECTION_NAMES,
+        )
         regime_entry_conflict_metric_values = dict(zip(
             regime_entry_conflict_additive,
             regime_conflict_values,
@@ -2417,6 +2637,8 @@ class RecurrentC51Agent:
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
+            "entry_timing_loss": entry_timing_loss_value,
+            "entry_direction_loss": entry_direction_loss_value,
             "regime_selectivity_loss": regime_selectivity_loss_value,
             "regime_selectivity_supervised_rows": regime_selectivity_rows_value,
             "regime_selectivity_target_wait_mean": (
@@ -2455,6 +2677,8 @@ class RecurrentC51Agent:
             **regime_selectivity_metric_values,
             **regime_channel_metric_values,
             **entry_balance_metric_values,
+            **entry_timing_metric_values,
+            **entry_direction_metric_values,
             **regime_entry_conflict_metric_values,
             **regime_persistent_metric_values,
             "entry_action_supervised_rows": entry_action_supervised_rows_value,
