@@ -1,4 +1,6 @@
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +10,7 @@ from propevolve.training_health import (
     TrainingHealthSnapshot,
     TrainingPolicyHealthSpec,
 )
+from propevolve.config import load_experiment_config
 
 
 def _spec(
@@ -85,6 +88,66 @@ def test_policy_health_accepts_noisy_balanced_learning() -> None:
     assert verdict.stop is False
     assert verdict.reasons == ()
     assert verdict.evidence["probe_due"] is True
+
+
+def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
+    config = load_experiment_config(Path(
+        "config/historical_mask_expansion_regime_stage2_v7.json"
+    ))
+    spec = TrainingPolicyHealthSpec.from_config(
+        config["training"]["short_circuit"]["policy_health"]
+    )
+    receipts: list[dict[str, object]] = []
+    v6_failure = dict(_snapshot().probe_metrics or {})
+    v6_failure["final_regime_probe_wait_recall"] = 0.15625
+    monitor = TrainingHealthMonitor(
+        TrainingHealthDetector(spec),
+        probe=lambda completed: v6_failure,
+        receipt_callback=receipts.append,
+    )
+    diagnostic = {
+        "updates": 32,
+        "entry_action_weight_scale": 0.5,
+        "teacher_weight_scale": 0.5,
+        "entry_action_balance": {
+            name: {"weighted_mass_fraction": 1.0 / 3.0}
+            for name in ("wait", "long", "short")
+        },
+        "regime_entry_conflict": {
+            side: {"soft_wait_disagreement_rows": 0}
+            for side in ("long", "short")
+        },
+    }
+
+    progress_45 = SimpleNamespace(
+        completed_episodes=45,
+        passes=8,
+        blows=1,
+        timeouts=36,
+        near_blow_timeout_count=16,
+        terminal_pnl_sum=-17_807.28,
+        terminal_pnl_count=45,
+        trade_r_sum=-59.36,
+        trade_count=7_377,
+    )
+    assert monitor(progress_45, diagnostic) is None
+    assert receipts[-1]["evidence"]["probe_due"] is False
+
+    progress_100 = SimpleNamespace(
+        completed_episodes=100,
+        passes=20,
+        blows=2,
+        timeouts=78,
+        near_blow_timeout_count=30,
+        terminal_pnl_sum=-20_000.0,
+        terminal_pnl_count=100,
+        trade_r_sum=-20.0,
+        trade_count=10_000,
+    )
+    assert monitor(progress_100, diagnostic) == (
+        "teacher-free policy-health WAIT recall 0.156250 < 0.350000"
+    )
+    assert receipts[-1]["evidence"]["probe_due"] is True
 
 
 @pytest.mark.parametrize(

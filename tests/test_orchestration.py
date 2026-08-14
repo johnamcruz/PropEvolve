@@ -28,6 +28,7 @@ from propevolve.orchestration import (
 _V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
 _V5_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v5.json")
 _V6_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v6.json")
+_V7_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v7.json")
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -157,6 +158,38 @@ def test_stage2_v6_projects_frozen_exact_tiers_and_decisive_validation_stops() -
     assert v6["training"]["short_circuit"]["policy_health"][
         "require_positive_persistent_regime_association"
     ] is True
+    assert plan.stages[-1].config["episode_coverage"] == {
+        "schema": "full_data_episode_coverage_v1",
+        "episode_budget": 500,
+    }
+
+
+def test_stage2_v7_projects_100_250_500_episode_tiers() -> None:
+    from propevolve.config import load_experiment_config
+
+    v6 = load_experiment_config(_V6_CONFIG)
+    v7 = load_experiment_config(_V7_CONFIG)
+    plan = _plan(v7)
+
+    assert plan.identity != _plan(v6).identity
+    assert [stage.name for stage in plan.stages] == [
+        "persistent_chop_association_100ep",
+        "persistent_chop_association_250ep",
+        "persistent_chop_association_500ep_full_coverage",
+    ]
+    assert [stage.config["training_episodes"] for stage in plan.stages] == [
+        100,
+        250,
+        500,
+    ]
+    assert all(
+        stage.config["budget_mode"] == "episodes"
+        and stage.config["validation_episodes"] == 200
+        and stage.config["short_circuit_minimum_episodes"] == 18
+        and stage.config["allow_revisions"] is False
+        and stage.config["revision_paths"] == []
+        for stage in plan.stages
+    )
     assert plan.stages[-1].config["episode_coverage"] == {
         "schema": "full_data_episode_coverage_v1",
         "episode_budget": 500,

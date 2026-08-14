@@ -30,6 +30,9 @@ STAGE2_V5_RECIPE = Path(
 STAGE2_V6_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v6.json"
 )
+STAGE2_V7_RECIPE = Path(
+    "config/historical_mask_expansion_regime_stage2_v7.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -608,6 +611,61 @@ def test_stage2_v6_is_one_frozen_association_change_from_stage1() -> None:
     assert "Stage 2 v5 stopped with negative evidence" in v6["evolution"][
         "hypothesis"
     ]
+
+
+def test_stage2_v7_changes_only_the_episode_evidence_horizon_from_v6() -> None:
+    v6 = load_experiment_config(STAGE2_V6_RECIPE)
+    v7 = load_experiment_config(STAGE2_V7_RECIPE)
+
+    matched_fields = (
+        "agent",
+        "assets",
+        "cache",
+        "cache_root",
+        "challenge",
+        "deployment_tickers",
+        "entry_supervision",
+        "observation",
+        "point_values",
+        "regime_selectivity",
+        "round_trip_fees",
+        "runtime",
+        "sealed_confirmation",
+        "teachers",
+        "temporal",
+        "tickers",
+        "timeframe_minutes",
+        "training_only_tickers",
+    )
+    assert all(v7[field] == v6[field] for field in matched_fields)
+    assert v7["evolution"]["base_parent"] == v6["evolution"]["base_parent"]
+    assert v7["training"] == {
+        **v6["training"],
+        "episodes": 500,
+        "short_circuit": {
+            **v6["training"]["short_circuit"],
+            "policy_health": {
+                **v6["training"]["short_circuit"]["policy_health"],
+                "minimum_completed_episodes": 100,
+                "probe_interval_episodes": 100,
+                "economic_futility": {
+                    **v6["training"]["short_circuit"]["policy_health"][
+                        "economic_futility"
+                    ],
+                    "minimum_completed_episodes": 100,
+                },
+            },
+        },
+    }
+    assert [
+        stage["training_episodes"]
+        for stage in v7["campaign"]["budget_stages"]
+    ] == [100, 250, 500]
+    assert v7["campaign"]["max_revisions_per_stage"] == 0
+    assert v7["evolution"]["allowed_revision_paths"] == ()
+    assert "episode 45" in v7["evolution"]["hypothesis"]
+    assert v7["output"] != v6["output"]
+    assert v7["campaign"]["state_root"] != v6["campaign"]["state_root"]
 
 
 @pytest.mark.parametrize(
