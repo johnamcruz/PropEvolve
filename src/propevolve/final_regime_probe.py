@@ -301,15 +301,24 @@ def evaluate_final_regime_probe(
     short_ready = (
         evidence.transition_positive_short_membership.numpy().astype(np.float64)
     )
+    failed_setup_confluence = (
+        evidence.failed_setup_confluence_membership.numpy().astype(np.float64)
+    )
     for row_index, receipt in enumerate(row_receipts):
         receipt["persistent_regime_strata"] = {
             "persistent_dead_chop_membership": float(dead[row_index]),
             "transition_ready_membership": float(ready[row_index]),
             "transition_positive_long_membership": float(long_ready[row_index]),
             "transition_positive_short_membership": float(short_ready[row_index]),
+            "failed_setup_confluence_membership": float(
+                failed_setup_confluence[row_index]
+            ),
         }
     metrics["final_regime_probe_persistent_dead_wait_mass"] = float(dead.sum())
     metrics["final_regime_probe_transition_ready_wait_mass"] = float(ready.sum())
+    metrics["final_regime_probe_failed_setup_confluence_mass"] = float(
+        failed_setup_confluence.sum()
+    )
     metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = (
         _weighted_mean(wait_probability, dead)
         - _weighted_mean(wait_probability, ready)

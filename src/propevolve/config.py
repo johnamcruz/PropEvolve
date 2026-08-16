@@ -550,6 +550,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         return
     from .balance_aware_regime_selectivity import (
         ACTION_ORDER,
+        EXPANSION_REGIME_CONFLUENCE_FORMULA,
+        EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         FORMULA,
         PERSISTENT_CHOP_ASSOCIATION_FORMULA,
         PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
@@ -613,6 +615,9 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         PERSISTENT_CHOP_ASSOCIATION_SEMANTICS: (
             PERSISTENT_CHOP_ASSOCIATION_FORMULA
         ),
+        EXPANSION_REGIME_CONFLUENCE_SEMANTICS: (
+            EXPANSION_REGIME_CONFLUENCE_FORMULA
+        ),
     }
     expected_formula = expected_formulas.get(semantics)
     policy_health = (
@@ -628,20 +633,27 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         else False
     )
     association_declared = (
-        semantics == PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+        semantics in {
+            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+            EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        }
         or (
             isinstance(specification, dict)
-            and specification.get("formula")
-            == PERSISTENT_CHOP_ASSOCIATION_FORMULA
+            and specification.get("formula") in {
+                PERSISTENT_CHOP_ASSOCIATION_FORMULA,
+                EXPANSION_REGIME_CONFLUENCE_FORMULA,
+            }
         )
         or require_positive_association is True
     )
     if association_declared and (
-        semantics != PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+        semantics not in {
+            PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+            EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        }
         or not isinstance(specification, dict)
         or set(specification) != required
-        or specification.get("formula")
-        != PERSISTENT_CHOP_ASSOCIATION_FORMULA
+        or specification.get("formula") != expected_formula
         or require_positive_association is not True
     ):
         raise ValueError("persistent-chop association contract is invalid")
@@ -670,6 +682,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             STATIC_STATE_SEMANTICS,
             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+            EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }
         or specification.get("formula") != expected_formula
         or (
@@ -713,6 +726,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             semantics in {
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
         )
