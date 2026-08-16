@@ -593,9 +593,14 @@ def test_persistent_regime_gate_requires_negative_only_coverage(
     ),
 )
 @pytest.mark.parametrize("association", (-0.01, 0.0))
+@pytest.mark.parametrize(
+    "semantics",
+    ("persistent_chop_association_v2", "expansion_regime_confluence_v3"),
+)
 def test_v6_persistent_regime_gate_requires_positive_final_association(
     metric: str,
     association: float,
+    semantics: str,
 ) -> None:
     metrics = {
         "short_circuited": 0.0,
@@ -617,6 +622,7 @@ def test_v6_persistent_regime_gate_requires_positive_final_association(
         "regime_selectivity_transition_positive_short_rows": 1.0,
         "regime_selectivity_transition_positive_long_declared_side_probability_sum": 1.0,
         "regime_selectivity_transition_positive_short_declared_side_probability_sum": 1.0,
+        "regime_selectivity_failed_setup_confluence_rows": 1.0,
         "regime_entry_conflict_long_target_wait_probability_mean": 0.0,
         "regime_entry_conflict_short_target_wait_probability_mean": 0.0,
         "regime_entry_conflict_long_target_declared_side_probability_mean": 1.0,
@@ -635,6 +641,7 @@ def test_v6_persistent_regime_gate_requires_positive_final_association(
         "final_regime_probe_transition_ready_wait_mass": 8.0,
         "final_regime_probe_transition_positive_long_mass": 8.0,
         "final_regime_probe_transition_positive_short_mass": 8.0,
+        "final_regime_probe_failed_setup_confluence_mass": 4.0,
         "final_regime_probe_dead_wait_minus_transition_ready_wait": -0.2,
         "final_regime_probe_dead_wait_minus_transition_positive_wait": 0.2,
         "final_regime_probe_transition_positive_long_response": 0.2,
@@ -643,7 +650,7 @@ def test_v6_persistent_regime_gate_requires_positive_final_association(
 
     gates = training_module._training_evaluation_gates(
         regime_selectivity_active=True,
-        regime_selectivity_semantics="persistent_chop_association_v2",
+        regime_selectivity_semantics=semantics,
     )
 
     assert all(gate.passes(metrics) for gate in gates)

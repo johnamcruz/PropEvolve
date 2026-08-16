@@ -114,6 +114,7 @@ _PERSISTENT_REGIME_SELECTIVITY_STRATA = (
     "exact_wait",
     "persistent_dead_chop",
     "transition_ready",
+    "failed_setup_confluence",
 )
 _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "rows",
@@ -1442,6 +1443,7 @@ def _training_evaluation_gates(
         elif regime_selectivity_semantics in {
             "persistent_chop_negative_weight_v1",
             "persistent_chop_association_v2",
+            "expansion_regime_confluence_v3",
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1494,7 +1496,10 @@ def _training_evaluation_gates(
                     "final_regime_probe_transition_positive_short_mass",
                 )
             )
-            if regime_selectivity_semantics == "persistent_chop_association_v2":
+            if regime_selectivity_semantics in {
+                "persistent_chop_association_v2",
+                "expansion_regime_confluence_v3",
+            }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
                     for metric in (
@@ -1503,6 +1508,19 @@ def _training_evaluation_gates(
                         "final_regime_probe_transition_positive_short_response",
                     )
                 )
+            if regime_selectivity_semantics == "expansion_regime_confluence_v3":
+                gates.extend((
+                    EvaluationGate(
+                        "regime_selectivity_failed_setup_confluence_rows",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "final_regime_probe_failed_setup_confluence_mass",
+                        ">",
+                        0.0,
+                    ),
+                ))
         else:
             raise ValueError("Regime selectivity gate semantics are invalid")
     return tuple(gates)

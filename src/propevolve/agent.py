@@ -14,6 +14,7 @@ from torch import nn
 
 from .balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
+    EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     STATIC_STATE_SEMANTICS,
@@ -90,6 +91,9 @@ _REGIME_PERSISTENT_ADDITIVE_METRICS = (
     "regime_selectivity_transition_ready_rows",
     "regime_selectivity_transition_ready_weight_sum",
     "regime_selectivity_transition_ready_model_wait_probability_sum",
+    "regime_selectivity_failed_setup_confluence_rows",
+    "regime_selectivity_failed_setup_confluence_weight_sum",
+    "regime_selectivity_failed_setup_confluence_model_wait_probability_sum",
     "regime_selectivity_transition_positive_long_rows",
     "regime_selectivity_transition_positive_long_declared_side_probability_sum",
     "regime_selectivity_transition_positive_short_rows",
@@ -417,6 +421,7 @@ class RecurrentC51Agent:
                 STATIC_STATE_SEMANTICS,
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -429,6 +434,7 @@ class RecurrentC51Agent:
             in {
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
@@ -1390,6 +1396,7 @@ class RecurrentC51Agent:
                         in {
                             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                            EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1417,6 +1424,7 @@ class RecurrentC51Agent:
                         in {
                             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                            EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1442,6 +1450,7 @@ class RecurrentC51Agent:
                             selected_actions == int(Action.ENTER_SHORT_1)
                         ).to(exact_losses.dtype)
                         wait_mass = wait_weights.sum()
+                        wait_count = wait_rows.sum()
                         long_count = long_rows.sum()
                         short_count = short_rows.sum()
                         wait_active = (wait_mass > 0).to(exact_losses.dtype)
@@ -1449,7 +1458,12 @@ class RecurrentC51Agent:
                         short_active = (short_count > 0).to(exact_losses.dtype)
                         regime_selectivity_exact_wait_loss = (
                             exact_losses * wait_weights
-                        ).sum() / wait_mass.clamp_min(1.0)
+                        ).sum() / (
+                            wait_count
+                            if self.regime_selectivity_semantics
+                            == EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+                            else wait_mass
+                        ).clamp_min(1.0)
                         regime_selectivity_positive_long_loss = (
                             exact_losses * long_rows
                         ).sum() / long_count.clamp_min(1.0)
@@ -1479,10 +1493,16 @@ class RecurrentC51Agent:
                         ready_short_membership = (
                             persistent_evidence.transition_positive_short_membership
                         )
+                        failed_setup_confluence_membership = (
+                            persistent_evidence.failed_setup_confluence_membership
+                        )
                         association_group_active = torch.zeros_like(wait_active)
                         if (
                             self.regime_selectivity_semantics
-                            == PERSISTENT_CHOP_ASSOCIATION_SEMANTICS
+                            in {
+                                PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+                                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            }
                         ):
                             (
                                 regime_selectivity_association_loss,
@@ -1551,6 +1571,18 @@ class RecurrentC51Agent:
                             "regime_selectivity_transition_ready_"
                             "model_wait_probability_sum": (
                                 ready_membership * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_failed_setup_confluence_rows": (
+                                failed_setup_confluence_membership.sum()
+                            ),
+                            "regime_selectivity_failed_setup_confluence_"
+                            "weight_sum": (
+                                failed_setup_confluence_membership * wait_weights
+                            ).sum(),
+                            "regime_selectivity_failed_setup_confluence_"
+                            "model_wait_probability_sum": (
+                                failed_setup_confluence_membership
+                                * model_wait_probability
                             ).sum(),
                             "regime_selectivity_transition_positive_long_rows": (
                                 ready_long_membership.sum()
@@ -2267,6 +2299,9 @@ class RecurrentC51Agent:
         transition_ready_rows = regime_persistent_metric_values[
             "regime_selectivity_transition_ready_rows"
         ]
+        failed_setup_confluence_rows = regime_persistent_metric_values[
+            "regime_selectivity_failed_setup_confluence_rows"
+        ]
         for rows, sum_name, mean_name in (
             (
                 exact_wait_rows,
@@ -2305,6 +2340,18 @@ class RecurrentC51Agent:
                 "regime_selectivity_transition_ready_"
                 "model_wait_probability_sum",
                 "regime_selectivity_transition_ready_"
+                "model_wait_probability_mean",
+            ),
+            (
+                failed_setup_confluence_rows,
+                "regime_selectivity_failed_setup_confluence_weight_sum",
+                "regime_selectivity_failed_setup_confluence_weight_mean",
+            ),
+            (
+                failed_setup_confluence_rows,
+                "regime_selectivity_failed_setup_confluence_"
+                "model_wait_probability_sum",
+                "regime_selectivity_failed_setup_confluence_"
                 "model_wait_probability_mean",
             ),
             (

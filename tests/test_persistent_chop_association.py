@@ -12,6 +12,7 @@ from propevolve.agent import (
 )
 from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
+    EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
 )
@@ -71,6 +72,7 @@ def _agent(
     *,
     semantics: str,
     selectivity_weight: float = 0.3,
+    negative_emphasis: float = 1.0,
     device: str = "cpu",
 ) -> RecurrentC51Agent:
     return RecurrentC51Agent(
@@ -95,7 +97,7 @@ def _agent(
         regime_selectivity_expansion_centers=CENTERS,
         regime_selectivity_side_balance="equal_long_short_v1",
         regime_selectivity_semantics=semantics,
-        regime_selectivity_persistent_chop_negative_emphasis=1.0,
+        regime_selectivity_persistent_chop_negative_emphasis=negative_emphasis,
     )
 
 
@@ -168,6 +170,106 @@ def test_compiler_authenticates_exact_cohorts_and_centers_expansion_evidence() -
     assert evidence.transition_positive_long_membership[2] == 0.0
     assert evidence.transition_positive_long_membership[3] == 0.0
     assert evidence.transition_positive_short_membership[3] > 0.0
+
+
+def test_confluence_semantics_emphasizes_high_expansion_failed_wait_rows() -> None:
+    compiler = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=CENTERS,
+        semantics=EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    low_expansion_transition_wait = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=CENTERS[0] / 9.0,
+    )
+    high_expansion_transition_wait = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=0.90,
+    )
+    high_expansion_transition_entry = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=0.90,
+    )
+    teachers = torch.as_tensor(np.stack((
+        low_expansion_transition_wait,
+        high_expansion_transition_wait,
+        high_expansion_transition_entry,
+    )))
+    actions = torch.tensor((Action.WAIT, Action.WAIT, Action.ENTER_LONG_1))
+
+    evidence = compiler.exact_wait_negative_weight_evidence(teachers, actions)
+
+    assert evidence.exact_wait_weights[1] > evidence.exact_wait_weights[0]
+    assert evidence.exact_wait_weights[2] == 0.0
+    assert evidence.failed_setup_confluence_membership[1] > 0.8
+    assert evidence.failed_setup_confluence_membership[0] < 0.2
+
+
+def test_confluence_objective_improves_hard_wait_without_losing_entry_sides() -> None:
+    hard_wait = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=0.90,
+    )
+    easy_wait = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=CENTERS[0] / 9.0,
+    )
+    ready_long = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=0.90,
+    )
+    ready_short = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        short_score=0.90,
+    )
+    rows = (
+        _transition((-1.0, -1.0, -1.0), hard_wait, Action.WAIT),
+        _transition((0.0, -1.0, 1.0), easy_wait, Action.WAIT),
+        _transition((1.0, 0.0, 0.0), ready_long, Action.ENTER_LONG_1),
+        _transition((0.0, 1.0, 0.0), ready_short, Action.ENTER_SHORT_1),
+    )
+    association = _agent(
+        semantics=PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
+        negative_emphasis=2.0,
+    )
+    confluence = _agent(
+        semantics=EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        negative_emphasis=2.0,
+    )
+
+    for _ in range(12):
+        association.train_batch(rows)
+        confluence.train_batch(rows)
+
+    association_actions, association_probabilities = _flat_probabilities(
+        association, rows
+    )
+    confluence_actions, confluence_probabilities = _flat_probabilities(
+        confluence, rows
+    )
+
+    assert confluence_actions.tolist() == [
+        int(Action.WAIT),
+        int(Action.WAIT),
+        int(Action.ENTER_LONG_1),
+        int(Action.ENTER_SHORT_1),
+    ]
+    assert association_actions[2:].tolist() == confluence_actions[2:].tolist()
+    assert (
+        confluence_probabilities[0, int(Action.WAIT)]
+        > association_probabilities[0, int(Action.WAIT)]
+    )
+    assert confluence.last_train_metrics[
+        "regime_selectivity_failed_setup_confluence_rows"
+    ] > 0.0
 
 
 def test_association_semantics_learns_dead_wait_above_exact_transition_entries(

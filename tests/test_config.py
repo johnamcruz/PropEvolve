@@ -15,6 +15,8 @@ from propevolve.config import (
 )
 from propevolve.balance_aware_regime_selectivity import (
     ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
+    EXPANSION_REGIME_CONFLUENCE_FORMULA,
+    EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     FORMULA as REGIME_SELECTIVITY_FORMULA,
     SCHEMA as REGIME_SELECTIVITY_SCHEMA,
     TARGET_SOURCE as REGIME_SELECTIVITY_TARGET_SOURCE,
@@ -173,6 +175,24 @@ def test_stage2a_regime_selectivity_is_authenticated_and_frozen(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="receipt contract drifted"):
         load_experiment_config(path)
+
+
+def test_stage2a_accepts_versioned_expansion_regime_confluence_semantics(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"].update({
+        "formula": EXPANSION_REGIME_CONFLUENCE_FORMULA,
+        "semantics": EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+    })
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["regime_selectivity"]["semantics"] == (
+        EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+    )
 
 
 def test_stage2a_requires_every_selectivity_identity_field_to_be_frozen(
@@ -1223,3 +1243,28 @@ def test_expansion_anchored_regime_stage2_v10_strengthens_chop_avoidance() -> No
         return values
 
     assert flattened(candidate) == flattened(baseline)
+
+
+def test_expansion_anchored_regime_stage2_v11_changes_only_wait_confluence() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v10.json"
+    )
+    candidate = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v11.json"
+    )
+
+    assert candidate["regime_selectivity"]["semantics"] == (
+        EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+    )
+    assert candidate["regime_selectivity"]["formula"] == (
+        EXPANSION_REGIME_CONFLUENCE_FORMULA
+    )
+    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
+        "base_parent"
+    ]
+    assert candidate["teachers"] == baseline["teachers"]
+    assert candidate["entry_supervision"] == baseline["entry_supervision"]
+    assert candidate["agent"] == baseline["agent"]
+    assert candidate["training"] == baseline["training"]
+    assert candidate["entry_supervision"]["target_r"] == 2.0
+    assert candidate["entry_supervision"]["stop_r"] == 1.0

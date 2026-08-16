@@ -14,6 +14,9 @@ from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
 
 
 CONTRACT = Path("config/sweeps/stage2a_regime_selectivity_tpe_v2.json")
+CONFLUENCE_CONTRACT = Path(
+    "config/sweeps/stage2a_regime_selectivity_tpe_v3.json"
+)
 
 
 def _state(
@@ -77,6 +80,24 @@ def test_stage2a_tpe_contract_searches_only_causal_learning_knobs() -> None:
         "selection.short_entry_count": (">", 0.0),
         "selection.two_r_mfe_capture_ratio": (">=", 0.7),
     }
+
+
+def test_stage2a_v3_tpe_searches_the_fixed_wait_confluence_mechanism() -> None:
+    sweep = load_optuna_sweep(CONFLUENCE_CONTRACT)
+
+    assert sweep.screening_stage == "expansion_regime_confluence_100ep"
+    assert sweep.base_config["regime_selectivity"]["semantics"] == (
+        "expansion_regime_confluence_v3"
+    )
+    assert set(sweep.search_space) == {
+        "challenge.large_win_bonus_coefficient",
+        "regime_selectivity.loss_weight",
+        "regime_selectivity.persistent_chop_negative_emphasis",
+        "training.teacher_guidance_dropout_end",
+    }
+    assert sweep.base_config["agent"]["learning_rate"] == 0.0001
+    assert sweep.base_config["agent"]["policy_retention_loss_weight"] == 10
+    assert sweep.base_config["entry_supervision"]["target_r"] == 2.0
 
 
 @pytest.mark.parametrize(
