@@ -17,13 +17,13 @@ is fixed and is not a search parameter.
 
 ## Search
 
-The 24-trial SQLite study uses six training-only learning or selection
-parameters: learning rate, policy-retention loss, large-winner bonus,
-Regime-selectivity loss, persistent-chop emphasis, and teacher-guidance
-dropout end. Entry supervision, ratchet behavior, account loss, position size,
-MLL headroom, per-trade risk, data, labels, artifacts, architecture, and
-temporal roles are fixed by the authenticated Stage 1 parent and are not
-tunable.
+The 24-trial SQLite study uses four Stage 2A selection parameters:
+large-winner bonus, Regime-selectivity loss, persistent-chop emphasis, and
+teacher-guidance dropout end. Learning rate and policy-retention loss remain
+fixed at the accepted Stage 2A values of `0.0001` and `10`. Entry supervision,
+ratchet behavior, account loss, position size, MLL headroom, per-trade risk,
+data, labels, artifacts, architecture, and temporal roles are fixed and are
+not tunable.
 
 One MPS trial runs at a time. The existing episode-18 training short circuit,
 episode-100 policy-health/economic-futility checks, first-blow selection stop,

@@ -58,13 +58,13 @@ def test_stage2a_tpe_contract_searches_only_causal_learning_knobs() -> None:
     assert sweep.n_jobs == 1
     assert sweep.sampler == "tpe"
     assert set(sweep.search_space) == {
-        "agent.learning_rate",
-        "agent.policy_retention_loss_weight",
         "challenge.large_win_bonus_coefficient",
         "regime_selectivity.loss_weight",
         "regime_selectivity.persistent_chop_negative_emphasis",
         "training.teacher_guidance_dropout_end",
     }
+    assert sweep.base_config["agent"]["learning_rate"] == 0.0001
+    assert sweep.base_config["agent"]["policy_retention_loss_weight"] == 10
     assert sweep.constraints == {
         "selection.average_win_r": (">=", 3.0),
         "selection.blow_rate": ("==", 0.0),

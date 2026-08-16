@@ -27,8 +27,6 @@
     }
   },
   "search_space": {
-    "agent.learning_rate": {"type": "float", "low": 0.00005, "high": 0.0002, "log": true},
-    "agent.policy_retention_loss_weight": {"type": "float", "low": 5.0, "high": 20.0, "log": true},
     "challenge.large_win_bonus_coefficient": {"type": "float", "low": 0.05, "high": 0.3},
     "regime_selectivity.loss_weight": {"type": "float", "low": 0.1, "high": 0.8, "log": true},
     "regime_selectivity.persistent_chop_negative_emphasis": {"type": "float", "low": 0.75, "high": 3.0},

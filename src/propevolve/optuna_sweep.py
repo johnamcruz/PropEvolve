@@ -19,8 +19,6 @@ OBJECTIVE_FORMULA = (
     "100*pass_rate + 8*min(average_win_r,8)"
 )
 SEARCHABLE_PATHS = frozenset({
-    "agent.learning_rate",
-    "agent.policy_retention_loss_weight",
     "challenge.large_win_bonus_coefficient",
     "regime_selectivity.loss_weight",
     "regime_selectivity.persistent_chop_negative_emphasis",
