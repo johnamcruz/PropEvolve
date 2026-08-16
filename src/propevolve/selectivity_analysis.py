@@ -18,6 +18,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from .config import load_experiment_config
 from .decision import Action
 from .replay import FinalRegimeProbeSequence, final_regime_probe_row_identity
 
@@ -331,6 +332,51 @@ def _positive_number(value: object, *, name: str) -> float:
     return number
 
 
+def _bound_candidate_contract(attempt: Path, config_sha256: str) -> Path:
+    for parent in (attempt.parent, *attempt.parents):
+        candidates = parent / "archive" / "candidates"
+        if not candidates.is_dir():
+            continue
+        matches = []
+        for path in sorted(candidates.glob("*/contract.json")):
+            contract = _json(path)
+            if contract.get("experiment_config_sha256") == config_sha256:
+                matches.append(path.resolve(strict=True))
+        if len(matches) != 1:
+            raise ValueError(
+                "attempt must bind exactly one candidate contract to the config"
+            )
+        return matches[0]
+    raise ValueError("attempt has no authenticated candidate contract")
+
+
+def _training_regime_trade_economics(
+    overall: Mapping[str, object],
+) -> dict[str, object]:
+    raw = overall.get("regime_trade_economics")
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("groups"), list):
+        raise ValueError("training Regime trade economics are invalid")
+    total = _nonnegative_count(raw.get("total_trades", 0), name="total trades")
+    attributed = _nonnegative_count(
+        raw.get("attributed_trades", 0), name="attributed trades"
+    )
+    unattributed = _nonnegative_count(
+        raw.get("unattributed_trades", 0), name="unattributed trades"
+    )
+    groups = raw["groups"]
+    if attributed + unattributed != total or any(
+        not isinstance(group, Mapping) for group in groups
+    ):
+        raise ValueError("training Regime trade economics are inconsistent")
+    grouped_trades = sum(
+        _nonnegative_count(group.get("trades", 0), name="group trades")
+        for group in groups
+    )
+    if grouped_trades != attributed:
+        raise ValueError("training Regime trade groups drifted")
+    return json.loads(json.dumps(raw, sort_keys=True))
+
+
 def analyze_selectivity_attempt(
     attempt_dir: str | Path,
     *,
@@ -340,9 +386,18 @@ def analyze_selectivity_attempt(
     """Analyze one completed attempt without changing its evidence."""
     attempt = Path(attempt_dir).resolve(strict=True)
     config_file = Path(config_path).resolve(strict=True)
-    output = Path(output_path)
+    output = Path(output_path).resolve(strict=False)
     if not attempt.is_dir() or not config_file.is_file():
         raise ValueError("selectivity analysis inputs are invalid")
+    if output == config_file or output.is_relative_to(attempt):
+        raise ValueError("selectivity output must not overwrite input evidence")
+    config = load_experiment_config(config_file)
+    config_sha256 = _sha256(config_file)
+    candidate_contract = _bound_candidate_contract(attempt, config_sha256)
+    if output == candidate_contract:
+        raise ValueError("selectivity output must not overwrite input evidence")
+    if output.exists():
+        raise FileExistsError(f"selectivity output already exists: {output}")
     probe_path = attempt / "final-regime-probe.json"
     corpus_path = attempt / "training-policy-health-probe.pkl"
     summary_path = attempt / "training-diagnostic-summary.json"
@@ -356,7 +411,6 @@ def analyze_selectivity_attempt(
         summary.get("overall"), dict
     ):
         raise ValueError("training diagnostic summary is invalid")
-    config = _json(config_file)
     entry = config.get("entry_supervision")
     if not isinstance(entry, dict):
         raise ValueError("trial config lacks Entry supervision")
@@ -370,7 +424,7 @@ def analyze_selectivity_attempt(
 
     report: dict[str, object] = {
         "schema": SCHEMA,
-        "status": "COMPLETE",
+        "status": "PARTIAL",
         "probe_population": "balanced_final_regime_probe",
         "entry_target": entry_target,
         "overall_probe_selectivity": _cohort(rows),
@@ -380,6 +434,9 @@ def analyze_selectivity_attempt(
         "by_regime_expansion_side": _confluence(rows),
         "training_entry_supervision": _training_entry_supervision(overall),
         "training_economics": _training_economics(overall),
+        "training_regime_trade_economics": (
+            _training_regime_trade_economics(overall)
+        ),
         "coverage": {
             "probe_rows_setup_joined": True,
             "probe_is_natural_frequency": False,
@@ -392,7 +449,9 @@ def analyze_selectivity_attempt(
         "inputs": {
             "attempt_dir": str(attempt),
             "config_path": str(config_file),
-            "config_sha256": _sha256(config_file),
+            "config_sha256": config_sha256,
+            "candidate_contract_path": str(candidate_contract),
+            "candidate_contract_sha256": _sha256(candidate_contract),
             "final_regime_probe_sha256": _sha256(probe_path),
             "training_policy_health_probe_sha256": _sha256(corpus_path),
             "training_diagnostic_summary_sha256": _sha256(summary_path),
@@ -403,8 +462,12 @@ def analyze_selectivity_attempt(
     ).hexdigest()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, output)
+    with temporary.open("x") as stream:
+        stream.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    try:
+        os.link(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
     return report
 
 
