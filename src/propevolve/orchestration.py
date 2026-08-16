@@ -163,6 +163,8 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
         for field, expected in expected_contract.items()
     ):
         raise ValueError("external parent causal contract drifted")
+    # Teachers supervise training only; Stage 2 may replace them while the
+    # deployed parent's causal observation and economic contracts stay fixed.
     causal_recipe_paths = (
         "assets",
         "cache",
@@ -175,7 +177,6 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
         "point_values",
         "round_trip_fees",
         "sealed_confirmation",
-        "teachers",
         "entry_supervision",
     )
     def same_json(left: object, right: object) -> bool:

@@ -516,6 +516,54 @@ def test_fresh_campaign_warm_starts_first_stage_from_external_stage1_candidate(
     assert child.manifest["parent_candidate_ids"] == [parent.candidate_id]
 
 
+def test_external_stage1_parent_allows_training_only_teacher_replacement(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    child_recipe = json.loads(config_path.read_text())
+    child_recipe["agent"]["hidden_dim"] = 256
+    child_recipe["campaign"]["budget_stages"] = [
+        _episode_stage(child_recipe, "regime_recovery_stage_2")
+    ]
+    parent_recipe = json.loads(json.dumps(child_recipe))
+    parent_recipe["teachers"][1] = {
+        "kind": "regime",
+        "cache_root": "cache/regime_teacher_9market_3min_pre2025_v1",
+        "channels": ["retired_regime_probability"],
+        "loss_weight": 0.1,
+        "entry_search_loss_weight": 0.0,
+    }
+    stage1_archive = CandidateArchive(tmp_path / "stage-1-output/archive")
+    parent, evaluation = _register_external_stage1_parent(
+        stage1_archive, parent_recipe
+    )
+    child_recipe["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
+    child_recipe["evolution"]["base_parent"] = {
+        "archive_root": str(stage1_archive.root),
+        "candidate_id": parent.candidate_id,
+        "evaluation_id": evaluation.evaluation_id,
+        "model_sha256": parent.manifest["model_sha256"],
+    }
+    config_path.write_text(json.dumps(child_recipe))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="stage2a-replaces-training-only-teacher-test",
+        candidate_runner=runner,
+        reasoning=None,
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.COMPLETE
+    assert runner.configs[0]["teachers"][1]["cache_root"] == (
+        child_recipe["teachers"][1]["cache_root"]
+    )
+    assert tuple(runner.configs[0]["teachers"][1]["channels"]) == tuple(
+        child_recipe["teachers"][1]["channels"]
+    )
+
+
 def test_external_stage1_warm_start_rejects_multiple_declared_parents(
     tmp_path: Path,
 ) -> None:
