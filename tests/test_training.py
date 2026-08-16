@@ -1757,6 +1757,102 @@ def test_v2_association_telemetry_survives_episode_summary_and_evaluation(
     ] == pytest.approx(0.55)
 
 
+def test_v4_side_conditioned_gradient_evidence_survives_training_evaluation(
+    tmp_path: Path,
+) -> None:
+    class SideConditionedAgent(Agent):
+        def train_batch(self, sequences, **kwargs) -> float:
+            loss = super().train_batch(sequences, **kwargs)
+            self.last_train_metrics.update({
+                "regime_selectivity_side_conditioned_loss": 0.25,
+                "regime_selectivity_side_conditioned_active_sides": 2.0,
+                "regime_selectivity_failed_long_confluence_rows": 3.0,
+                "regime_selectivity_failed_long_confluence_"
+                "model_wait_probability_sum": 2.4,
+                "regime_selectivity_failed_short_confluence_rows": 2.0,
+                "regime_selectivity_failed_short_confluence_"
+                "model_wait_probability_sum": 1.4,
+            })
+            return loss
+
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        SideConditionedAgent(),
+        Environment(),
+        episodes=2,
+        minimum_environment_steps=8,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=2,
+            seed=67,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=2,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=67,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    episode = diagnostics[-1]["persistent_regime_selectivity"]
+    assert episode["failed_long_confluence"] == pytest.approx({
+        "rows": 3.0,
+        "weight_sum": 0.0,
+        "weight_mean": 0.0,
+        "model_wait_probability_sum": 2.4,
+        "model_wait_probability_mean": 0.8,
+    })
+    assert episode["failed_short_confluence"] == pytest.approx({
+        "rows": 2.0,
+        "weight_sum": 0.0,
+        "weight_mean": 0.0,
+        "model_wait_probability_sum": 1.4,
+        "model_wait_probability_mean": 0.7,
+    })
+    assert episode["side_conditioned"] == pytest.approx({
+        "loss_sum": 0.25,
+        "loss_mean": 0.25,
+        "update_count": 1.0,
+        "active_sides_sum": 2.0,
+        "both_sides_active_updates": 1.0,
+    })
+
+    source = tmp_path / "training-diagnostics.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in diagnostics))
+    destination = tmp_path / "training-diagnostic-summary.json"
+    training_module._write_training_diagnostic_summary(source, destination)
+    overall = json.loads(destination.read_text())["overall"]
+    evaluation = training_module._persistent_regime_selectivity_evaluation_metrics(
+        overall["persistent_regime_selectivity"]
+    )
+
+    assert evaluation["regime_selectivity_failed_long_confluence_rows"] == 6.0
+    assert evaluation["regime_selectivity_failed_short_confluence_rows"] == 4.0
+    assert evaluation[
+        "regime_selectivity_side_conditioned_both_sides_active_updates"
+    ] == 2.0
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics=(
+            "side_conditioned_expansion_regime_confluence_v4"
+        ),
+    )
+    both_sides_gate = next(
+        gate
+        for gate in gates
+        if gate.metric
+        == "regime_selectivity_side_conditioned_both_sides_active_updates"
+    )
+    assert both_sides_gate.passes(evaluation)
+    assert not both_sides_gate.passes({
+        **evaluation,
+        "regime_selectivity_side_conditioned_both_sides_active_updates": 0.0,
+    })
+
+
 def test_episode_budget_prints_the_episode_progress_counter_once(capsys) -> None:
     class BoundedEnvironment(Environment):
         def reset(self):

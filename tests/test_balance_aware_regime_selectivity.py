@@ -12,7 +12,7 @@ from propevolve.balance_aware_regime_selectivity import (
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     STATIC_STATE_SEMANTICS,
 )
-from propevolve.agent import RecurrentC51Agent
+from propevolve.agent import RecurrentC51Agent, side_conditioned_wait_rank_loss
 from propevolve.decision import Action
 from propevolve.replay import Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
@@ -30,6 +30,34 @@ from propevolve.training import (
 
 
 CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+
+
+def test_side_conditioned_rank_loss_separates_wait_long_and_wait_short_gradients(
+) -> None:
+    action_values = torch.zeros((4, 3), dtype=torch.float64, requires_grad=True)
+    loss, active_sides = side_conditioned_wait_rank_loss(
+        action_values,
+        failed_long_membership=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        valid_long_membership=torch.tensor([0.0, 1.0, 0.0, 0.0]),
+        failed_short_membership=torch.tensor([0.0, 0.0, 1.0, 0.0]),
+        valid_short_membership=torch.tensor([0.0, 0.0, 0.0, 1.0]),
+        q_temperature=1.0,
+    )
+
+    gradient, = torch.autograd.grad(loss, action_values)
+
+    assert active_sides.item() == 2.0
+    torch.testing.assert_close(
+        gradient,
+        torch.tensor([
+            [-0.5, 0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [-0.5, 0.0, 0.5],
+            [0.5, 0.0, -0.5],
+        ], dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def _teacher_row(

@@ -115,6 +115,8 @@ _PERSISTENT_REGIME_SELECTIVITY_STRATA = (
     "persistent_dead_chop",
     "transition_ready",
     "failed_setup_confluence",
+    "failed_long_confluence",
+    "failed_short_confluence",
 )
 _PERSISTENT_REGIME_SELECTIVITY_ADDITIVE_FIELDS = (
     "rows",
@@ -1019,6 +1021,35 @@ def _persistent_regime_selectivity_diagnostic(
         else 0.0
     )
     result["association"] = association
+    side_losses = tuple(update_metrics.get(
+        "regime_selectivity_side_conditioned_loss", ()
+    ))
+    active_sides = tuple(update_metrics.get(
+        "regime_selectivity_side_conditioned_active_sides", ()
+    ))
+    side_loss_sum = float(sum(side_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_side_conditioned_loss_sum", ()
+    )))
+    side_update_count = float(len(side_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_side_conditioned_update_count", ()
+    )))
+    active_sides_sum = float(sum(active_sides)) + float(sum(update_metrics.get(
+        "regime_selectivity_side_conditioned_active_sides_sum", ()
+    )))
+    both_sides_active_updates = float(sum(
+        float(value) >= 2.0 for value in active_sides
+    )) + float(sum(update_metrics.get(
+        "regime_selectivity_side_conditioned_both_sides_active_updates", ()
+    )))
+    result["side_conditioned"] = {
+        "loss_sum": side_loss_sum,
+        "loss_mean": (
+            side_loss_sum / side_update_count if side_update_count else 0.0
+        ),
+        "update_count": side_update_count,
+        "active_sides_sum": active_sides_sum,
+        "both_sides_active_updates": both_sides_active_updates,
+    }
     return result
 
 
@@ -1049,6 +1080,15 @@ def _persistent_regime_selectivity_summary(
                 for cohort in _REGIME_ASSOCIATION_COHORTS
                 for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
             ),
+        )
+    })
+    update_metrics.update({
+        f"regime_selectivity_side_conditioned_{field}": []
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_sides_sum",
+            "both_sides_active_updates",
         )
     })
     for row in rows:
@@ -1084,6 +1124,21 @@ def _persistent_regime_selectivity_summary(
             update_metrics[f"regime_selectivity_association_{field}"].append(
                 float(association.get(field, 0.0) or 0.0)
             )
+        side_conditioned = diagnostics.get("side_conditioned")
+        side_conditioned = (
+            side_conditioned
+            if isinstance(side_conditioned, Mapping)
+            else {}
+        )
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_sides_sum",
+            "both_sides_active_updates",
+        ):
+            update_metrics[
+                f"regime_selectivity_side_conditioned_{field}"
+            ].append(float(side_conditioned.get(field, 0.0) or 0.0))
     return _persistent_regime_selectivity_diagnostic(update_metrics)
 
 
@@ -1221,6 +1276,17 @@ def _persistent_regime_selectivity_evaluation_metrics(
     ] = float(association.get(
         "dead_wait_minus_transition_positive_model_wait", 0.0
     ))
+    side_conditioned = diagnostics.get("side_conditioned", {})
+    for field in (
+        "loss_sum",
+        "loss_mean",
+        "update_count",
+        "active_sides_sum",
+        "both_sides_active_updates",
+    ):
+        metrics[f"regime_selectivity_side_conditioned_{field}"] = float(
+            side_conditioned.get(field, 0.0)
+        )
     return metrics
 
 
@@ -1548,6 +1614,12 @@ def _training_evaluation_gates(
                     ),
                     EvaluationGate(
                         "final_regime_probe_failed_short_confluence_mass",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "regime_selectivity_side_conditioned_"
+                        "both_sides_active_updates",
                         ">",
                         0.0,
                     ),
@@ -4611,6 +4683,8 @@ def train_agent(
                 "regime_selectivity_association_loss",
                 "regime_selectivity_association_active",
                 "regime_selectivity_association_skipped",
+                "regime_selectivity_side_conditioned_loss",
+                "regime_selectivity_side_conditioned_active_sides",
                 "regime_selectivity_dead_wait_minus_"
                 "transition_positive_model_wait",
                 *(
