@@ -47,7 +47,7 @@ def test_runtime_benchmark_orchestrates_four_isolated_arms_and_gates_results(
     monkeypatch.setattr("subprocess.run", completed)
 
     report = run_benchmark(
-        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
         observation_dim=8,
         warmup_updates=1,
         measured_updates=2,

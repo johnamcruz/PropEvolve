@@ -11,7 +11,9 @@ from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import run_evolution_campaign
 
 
-_V4_CONFIG = Path("config/historical_mask_expansion_regime_stage2_v4.json")
+_CURRENT_CONFIG = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
+)
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -86,7 +88,7 @@ class _CaptureFirstReasoningPacket:
 
 
 def _stage2_config_with_external_stage1_parent(tmp_path: Path):
-    payload = json.loads(_V4_CONFIG.read_text())
+    payload = json.loads(_CURRENT_CONFIG.read_text())
     payload["output"] = "runs/stage2-parent-evidence"
     payload["campaign"]["state_root"] = (
         "runs/stage2-parent-evidence/ml-loop-state"
@@ -114,10 +116,16 @@ def _stage2_config_with_external_stage1_parent(tmp_path: Path):
     payload["campaign"]["selection_requirements"] = requirements
     payload["campaign"]["reasoning"]["proposer"] = "standard"
     payload["campaign"]["budget_stages"] = [{
-        "name": "persistent_chop_negative_500k",
-        "minimum_environment_steps": 1_000_000,
+        "name": "three_state_regime_100ep",
+        "budget_mode": "episodes",
+        "training_episodes": 100,
+        "validation_episodes": 200,
+        "short_circuit_minimum_episodes": 18,
         "selection_requirements": requirements,
         "warm_start_parent": True,
+        "allow_revisions": True,
+        "curriculum_override": {},
+        "revision_paths": ["agent.hidden_dim"],
     }]
 
     receipt = tmp_path / "config" / "receipts" / _ENTRY_CENTER_RECEIPT.name
@@ -166,7 +174,7 @@ def _stage2_config_with_external_stage1_parent(tmp_path: Path):
     return config_path, source, parent, parent_evaluation
 
 
-def test_first_v4_child_reasoning_packet_contains_authenticated_parent(
+def test_first_stage2a_child_reasoning_packet_contains_authenticated_parent(
     tmp_path: Path,
 ) -> None:
     config_path, source, parent, parent_evaluation = (

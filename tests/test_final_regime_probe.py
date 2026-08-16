@@ -49,17 +49,12 @@ def _teacher_row(
         np.sqrt(short_expansion_score),
         np.sqrt(short_expansion_score),
     )
+    dead_chop = chop_persistence * (1.0 - transition_readiness)
+    transition = chop_persistence * transition_readiness
     updates = {
-        "structure_chop_probability": chop,
-        "structure_neutral_probability": 0.1,
-        "structure_trend_probability": trend,
-        "structure_chop_persistence_probability": chop_persistence,
-        "structure_trend_onset_probability": transition_readiness,
-        "structure_trend_persistence_probability": transition_readiness,
-        "volatility_expansion_onset_probability": transition_readiness,
-        "volatility_high_persistence_probability": transition_readiness,
-        "kaufman_efficiency": transition_readiness,
-        "volatility_percentile": transition_readiness,
+        "chop_no_trend_probability": dead_chop,
+        "chop_end_transition_probability": transition,
+        "expansion_trend_probability": 1.0 - dead_chop - transition,
     }
     for channel, value in updates.items():
         values[CHANNELS.index(channel)] = value
@@ -187,9 +182,9 @@ def _probe_replay() -> BalancedSequenceReplay:
         rows.append((f"long-ready-{index}", 2.0, Action.ENTER_LONG_1, ready))
         rows.append((f"short-ready-{index}", 3.0, Action.ENTER_SHORT_1, ready))
     for source_index, (episode_id, code, target, teacher) in enumerate(rows, 100):
-        chop = teacher[CHANNELS.index("structure_chop_probability")]
-        neutral = teacher[CHANNELS.index("structure_neutral_probability")]
-        trend = teacher[CHANNELS.index("structure_trend_probability")]
+        chop = teacher[CHANNELS.index("chop_no_trend_probability")]
+        neutral = teacher[CHANNELS.index("chop_end_transition_probability")]
+        trend = teacher[CHANNELS.index("expansion_trend_probability")]
         replay.add(_episode(
             episode_id,
             code,

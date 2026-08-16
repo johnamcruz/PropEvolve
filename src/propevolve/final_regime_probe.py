@@ -262,16 +262,22 @@ def evaluate_final_regime_probe(
         targets,
         (int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)),
     )
-    chop = teachers[:, names["structure_chop_probability"]]
-    neutral = teachers[:, names["structure_neutral_probability"]]
-    trend = teachers[:, names["structure_trend_probability"]]
-    dominant_chop = positive_rows & (chop > np.maximum(neutral, trend))
+    chop = teachers[:, names["chop_no_trend_probability"]]
+    chop_end_transition = teachers[
+        :, names["chop_end_transition_probability"]
+    ]
+    expansion_trend = teachers[:, names["expansion_trend_probability"]]
+    dominant_chop = positive_rows & (
+        chop > np.maximum(chop_end_transition, expansion_trend)
+    )
     nonchop = positive_rows & ~dominant_chop
     wait_probability = probabilities[:, int(Action.WAIT)]
     for row_index, receipt in enumerate(row_receipts):
         receipt["static_regime_stratum"] = (
             "dominant_chop"
-            if chop[row_index] > max(neutral[row_index], trend[row_index])
+            if chop[row_index] > max(
+                chop_end_transition[row_index], expansion_trend[row_index]
+            )
             else "nonchop"
         )
     metrics["final_regime_probe_dominant_chop_rows"] = float(

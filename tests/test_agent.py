@@ -1443,9 +1443,9 @@ def test_stage2a_equal_present_class_loss_survives_static_regime_conflict() -> N
             values[:4] = (0.5, 0.5, 0.1, 0.1)
         else:
             values[:4] = (0.1, 0.1, 0.5, 0.5)
-        values[channels.index("structure_chop_probability")] = 0.9
-        values[channels.index("structure_neutral_probability")] = 0.05
-        values[channels.index("structure_trend_probability")] = 0.05
+        values[channels.index("chop_no_trend_probability")] = 0.9
+        values[channels.index("chop_end_transition_probability")] = 0.05
+        values[channels.index("expansion_trend_probability")] = 0.05
         return values
 
     def row(

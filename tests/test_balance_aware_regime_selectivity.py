@@ -164,14 +164,12 @@ def _transition_teacher_row(
         neutral=0.1,
         trend=0.8,
     ).clone()
+    dead_chop = chop_persistence * (1.0 - transition_readiness)
+    transition = chop_persistence * transition_readiness
     updates = {
-        "structure_chop_persistence_probability": chop_persistence,
-        "structure_trend_onset_probability": transition_readiness,
-        "structure_trend_persistence_probability": transition_readiness,
-        "volatility_expansion_onset_probability": transition_readiness,
-        "volatility_high_persistence_probability": transition_readiness,
-        "kaufman_efficiency": transition_readiness,
-        "volatility_percentile": transition_readiness,
+        "chop_no_trend_probability": dead_chop,
+        "chop_end_transition_probability": transition,
+        "expansion_trend_probability": 1.0 - dead_chop - transition,
     }
     for channel, value in updates.items():
         values[CHANNELS.index(channel)] = value
@@ -621,18 +619,18 @@ def test_regime_diagnostics_vectorize_exact_channels_and_exclude_trend() -> None
 
     assert agent.regime_teacher_channel_names == REGIME_CHANNELS
     assert metrics[
-        "regime_teacher_channel_structure_chop_probability_rows"
+        "regime_teacher_channel_chop_no_trend_probability_rows"
     ] == 2.0
     assert metrics[
-        "regime_teacher_channel_structure_chop_probability_"
+        "regime_teacher_channel_chop_no_trend_probability_"
         "target_probability_sum"
     ] == pytest.approx(1.8)
     assert metrics[
-        "regime_teacher_channel_structure_chop_probability_"
+        "regime_teacher_channel_chop_no_trend_probability_"
         "model_probability_sum"
     ] == pytest.approx(1.0)
     assert metrics[
-        "regime_teacher_channel_structure_chop_probability_absolute_error_sum"
+        "regime_teacher_channel_chop_no_trend_probability_absolute_error_sum"
     ] == pytest.approx(0.8)
     assert not any(
         f"regime_teacher_channel_{channel}_" in key
@@ -1150,7 +1148,7 @@ def _hostile_stage2_v2_entry_rows() -> tuple[
     return centers, rows
 
 
-def test_static_regime_objective_reproduces_hostile_short_soft_veto() -> None:
+def test_static_regime_objective_uses_expansion_anchored_dead_chop() -> None:
     centers, rows = _hostile_stage2_v2_entry_rows()
     policy = _agent(
         seed=271,
@@ -1172,14 +1170,14 @@ def test_static_regime_objective_reproduces_hostile_short_soft_veto() -> None:
         ] == pytest.approx(1.0 / 3.0)
     assert policy.last_train_metrics[
         "regime_entry_conflict_long_target_wait_probability_mean"
-    ] == pytest.approx(0.4677441891910523, abs=1e-6)
+    ] == pytest.approx(0.8416820957958787, abs=1e-6)
     assert policy.last_train_metrics[
         "regime_entry_conflict_short_target_wait_probability_mean"
-    ] == pytest.approx(0.7235930097360516, abs=1e-6)
+    ] == pytest.approx(0.9406073169730343, abs=1e-6)
     observations = ((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0))
     assert tuple(_greedy(policy, row) for row in observations) == (
         Action.WAIT,
-        Action.ENTER_LONG_1,
+        Action.WAIT,
         Action.WAIT,
     )
 
@@ -1297,34 +1295,32 @@ def test_persistent_chop_diagnostics_are_additive_without_thresholds() -> None:
     agent.train_batch(rows)
     metrics = agent.last_train_metrics
 
-    # transition_readiness = Kaufman 0.8 * mean(0.8, ..., 0.8) = 0.64.
-    # Effective memberships are continuous formula components, not thresholded
-    # row masses: dead = 0.9 + 0.9*(1-0.64) on exact WAIT rows, while
-    # transition-ready mass = 0.9*0.64 on both a WAIT and positive Entry row.
+    # The Expansion-anchored classes directly encode dead chop (.90/.18) and
+    # transition-or-expansion readiness (.10/.82), without Kaufman proxies.
     assert metrics["regime_selectivity_exact_wait_rows"] == 2.0
     assert metrics["regime_selectivity_exact_wait_weight_sum"] == pytest.approx(
-        4.6 + 2.296,
+        4.6 + 1.72,
     )
     assert metrics["regime_selectivity_exact_wait_weight_mean"] == pytest.approx(
-        (4.6 + 2.296) / 2.0,
+        (4.6 + 1.72) / 2.0,
     )
     assert metrics["regime_selectivity_persistent_chop_weight_sum"] == pytest.approx(
         metrics["regime_selectivity_exact_wait_weight_sum"]
     )
     assert metrics["regime_selectivity_persistent_dead_chop_rows"] == pytest.approx(
-        0.9 + 0.324,
+        0.9 + 0.18,
     )
     assert metrics[
         "regime_selectivity_persistent_dead_chop_weight_sum"
-    ] == pytest.approx(0.9 * 4.6 + 0.324 * 2.296)
+    ] == pytest.approx(0.9 * 4.6 + 0.18 * 1.72)
     assert metrics["regime_selectivity_transition_ready_rows"] == pytest.approx(
-        0.576,
+        0.1 + 0.82,
     )
     assert metrics[
         "regime_selectivity_transition_ready_weight_sum"
-    ] == pytest.approx(0.576 * 2.296)
+    ] == pytest.approx(0.1 * 4.6 + 0.82 * 1.72)
     assert metrics["regime_selectivity_transition_positive_long_rows"] == (
-        pytest.approx(0.576)
+        pytest.approx(0.82)
     )
 
 

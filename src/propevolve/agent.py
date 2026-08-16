@@ -1696,15 +1696,17 @@ class RecurrentC51Agent:
                         })
                     names = self.teacher_channel_names
                     chop = selected_teachers[
-                        :, names.index("structure_chop_probability")
+                        :, names.index("chop_no_trend_probability")
                     ]
-                    neutral = selected_teachers[
-                        :, names.index("structure_neutral_probability")
+                    chop_end_transition = selected_teachers[
+                        :, names.index("chop_end_transition_probability")
                     ]
-                    trend = selected_teachers[
-                        :, names.index("structure_trend_probability")
+                    expansion_trend = selected_teachers[
+                        :, names.index("expansion_trend_probability")
                     ]
-                    dominant_chop = chop > torch.maximum(neutral, trend)
+                    dominant_chop = chop > torch.maximum(
+                        chop_end_transition, expansion_trend
+                    )
                     stratum_rows = {
                         "positive_long_short": torch.ones_like(
                             selected_actions, dtype=torch.bool

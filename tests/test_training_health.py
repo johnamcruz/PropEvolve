@@ -92,7 +92,7 @@ def test_policy_health_accepts_noisy_balanced_learning() -> None:
 
 def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
     config = load_experiment_config(Path(
-        "config/historical_mask_expansion_regime_stage2_v7.json"
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
     ))
     spec = TrainingPolicyHealthSpec.from_config(
         config["training"]["short_circuit"]["policy_health"]

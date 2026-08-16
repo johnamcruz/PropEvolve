@@ -36,7 +36,7 @@ def test_setup_assets_command_creates_links_without_copying(tmp_path: Path) -> N
 def test_validate_config_command_accepts_promoted_recipe() -> None:
     assert main([
         "validate-config", "--config",
-        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
     ]) == 0
 
 
@@ -45,7 +45,7 @@ def test_evolve_status_reads_durable_state_without_running_training(
     capsys,
 ) -> None:
     payload = json.loads(Path(
-        "config/historical_mask_expansion_regime_stage2_v4.json"
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
     ).read_text())
     payload["campaign"]["state_root"] = "runs/status-test/ml-loop-state"
     config_path = tmp_path / "experiment.json"
@@ -87,13 +87,13 @@ def test_evolve_command_dispatches_the_shared_training_loop(
 
     code = main([
         "evolve",
-        "--config", "config/historical_mask_expansion_regime_stage2_v4.json",
+        "--config", "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
         "--run-id", "fake-e2e",
     ])
 
     assert code == 0
     assert calls == [(
-        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
         "fake-e2e",
         False,
     )]
@@ -117,12 +117,12 @@ def test_evolve_command_can_recover_the_last_reasoning_checkpoint(
 
     assert main([
         "evolve",
-        "--config", "config/historical_mask_expansion_regime_stage2_v4.json",
+        "--config", "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
         "--run-id", "recover-e2e",
         "--recover-reasoning",
     ]) == 0
     assert calls == [(
-        "config/historical_mask_expansion_regime_stage2_v4.json",
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
         "recover-e2e",
         True,
     )]

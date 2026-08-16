@@ -14,20 +14,26 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from ..agent import resolve_device
-from ..balance_aware_regime_selectivity import REGIME_TEACHER_CHANNELS
 from ..cache import EmbeddingCache
 from .base import BaseTeacher
 from .expansion import _flush_scores, _validate_source_receipt
 
 
 TEACHER_CACHE_SCHEMA = "propevolve_regime_teacher_cache_v1"
-MODEL_SCHEMA = "frozen-mask-structure-volatility-regime-teacher-v2"
-TRAINING_SCHEMA = "structure-volatility-regime-teacher-training-v2"
+MODEL_SCHEMA = "frozen-chronos2-expansion-anchored-regime-transformer-v1"
+ARTIFACT_SCHEMA = "expansion-anchored-regime-artifact-v1"
+TRAINING_SCHEMA = "expansion-anchored-regime-training-v1"
+CALIBRATION_SCHEMA = "regime-validation-temperature-bias-v1"
 CONTEXT_LENGTH = 50
 SUFFIX_LOOKBACKS = (5, 10, 20, 50)
-CHANNELS = REGIME_TEACHER_CHANNELS
+CHANNELS = (
+    "chop_no_trend_probability",
+    "chop_end_transition_probability",
+    "expansion_trend_probability",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -72,11 +78,25 @@ class _RegimeConfig:
         return config
 
 
+class _FrozenInputLayerNorm(nn.LayerNorm):
+    """Expansion's MPS-safe unfused-affine LayerNorm."""
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        normalized = F.layer_norm(
+            values,
+            self.normalized_shape,
+            weight=None,
+            bias=None,
+            eps=self.eps,
+        )
+        return normalized * self.weight + self.bias
+
+
 class _RegimeModel(nn.Module):
     def __init__(self, config: _RegimeConfig) -> None:
         super().__init__()
         self.config = config
-        self.input_norm = nn.LayerNorm(config.embedding_dim)
+        self.input_norm = _FrozenInputLayerNorm(config.embedding_dim)
         self.input_projection = nn.Linear(config.embedding_dim, config.model_dim)
         self.age_embedding = nn.Embedding(config.context_length, config.model_dim)
         self.view_embedding = nn.Embedding(len(config.suffix_lookbacks), config.model_dim)
@@ -102,12 +122,7 @@ class _RegimeModel(nn.Module):
             nn.GELU(),
             nn.LayerNorm(config.model_dim),
         )
-        self.state_head = nn.Linear(config.model_dim, 3)
-        self.transition_head = nn.Linear(config.model_dim, 5)
-        self.efficiency_head = nn.Linear(config.model_dim, 1)
-        self.volatility_state_head = nn.Linear(config.model_dim, 3)
-        self.volatility_transition_head = nn.Linear(config.model_dim, 5)
-        self.volatility_percentile_head = nn.Linear(config.model_dim, 1)
+        self.class_head = nn.Linear(config.model_dim, len(CHANNELS))
 
     def forward(self, trajectory: torch.Tensor) -> torch.Tensor:
         lengths = torch.full(
@@ -138,19 +153,14 @@ class _RegimeModel(nn.Module):
                 )
             )
         fused = self.fusion(torch.cat(summaries, dim=-1))
-        return torch.cat((
-            self.state_head(fused).softmax(-1),
-            self.transition_head(fused).softmax(-1),
-            torch.sigmoid(self.efficiency_head(fused)),
-            self.volatility_state_head(fused).softmax(-1),
-            self.volatility_transition_head(fused).softmax(-1),
-            torch.sigmoid(self.volatility_percentile_head(fused)),
-        ), dim=-1)
+        return self.class_head(fused)
 
 
 @dataclass(frozen=True)
 class RegimeTeacher(BaseTeacher):
     model: _RegimeModel
+    temperature: float
+    class_bias: torch.Tensor
 
     kind: ClassVar[str] = "regime"
     channels: ClassVar[tuple[str, ...]] = CHANNELS
@@ -170,13 +180,68 @@ class RegimeTeacher(BaseTeacher):
         checkpoint_sha256 = _sha256(checkpoint)
         if checkpoint_sha256 != regime.get("checkpoint_sha256"):
             raise ValueError("Regime teacher checkpoint identity drifted")
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        validation = manifest_path.parent / str(regime.get("validation", ""))
+        validation_payload = json.loads(validation.read_text())
+        validation_gates = validation_payload.get("gates")
+        candidate_identity = validation_payload.get("candidate_identity")
         if (
-            payload.get("schema") != MODEL_SCHEMA
+            _sha256(validation) != regime.get("validation_sha256")
+            or validation_payload.get("status") != "PROCEED"
+            or not isinstance(validation_gates, dict)
+            or len(validation_gates) != 7
+            or any(
+                not isinstance(gate, dict) or gate.get("status") != "PASS"
+                for gate in validation_gates.values()
+            )
+            or regime.get("validation_verdict") != "PROCEED"
+            or not isinstance(candidate_identity, dict)
+            or candidate_identity.get("checkpoint_sha256") != checkpoint_sha256
+        ):
+            raise ValueError("Regime teacher validation evidence drifted")
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        lineage = payload.get("lineage") or {}
+        calibrator = payload.get("calibrator") or {}
+        if (
+            payload.get("schema") != ARTIFACT_SCHEMA
+            or regime.get("artifact_schema") != ARTIFACT_SCHEMA
             or payload.get("training_schema") != TRAINING_SCHEMA
+            or regime.get("training_schema") != TRAINING_SCHEMA
             or not isinstance(payload.get("state_dict"), dict)
-            or payload.get("cache_identities") != regime.get("cache_identity_sha256s")
-            or payload.get("temporal", {}).get("sealed_start") != "2026-01-01"
+            or payload.get("model_metadata", {}).get("schema") != MODEL_SCHEMA
+            or regime.get("model_schema") != MODEL_SCHEMA
+            or payload.get("best_epoch") != regime.get("best_epoch")
+            or lineage.get("encoder_identity_sha256")
+            != regime.get("encoder_identity_sha256")
+            or lineage.get("dataset_lineage_sha256")
+            != regime.get("dataset_lineage_sha256")
+            or lineage.get("regime_label_schema")
+            != regime.get("label_schema")
+            or lineage.get("regime_label_definition_sha256")
+            != regime.get("label_definition_sha256")
+            or tuple(lineage.get("cache_sha256s", ()))
+            != tuple(regime.get("cache_sha256s", {}).values())
+            or tuple(lineage.get("label_sha256s", ()))
+            != tuple(regime.get("label_sha256s", {}).values())
+            or candidate_identity.get("artifact_lineage_sha256")
+            != lineage.get("sha256")
+            or validation_payload.get("lineage", {}).get(
+                "regime_artifact_lineage_sha256"
+            ) != lineage.get("sha256")
+            or validation_payload.get("lineage", {}).get(
+                "encoder_identity_sha256"
+            ) != lineage.get("encoder_identity_sha256")
+            or validation_payload.get("lineage", {}).get(
+                "dataset_lineage_sha256"
+            ) != lineage.get("dataset_lineage_sha256")
+            or tuple(validation_payload.get("lineage", {}).get(
+                "cache_sha256s", ()
+            )) != tuple(lineage.get("cache_sha256s", ()))
+            or tuple(validation_payload.get("lineage", {}).get(
+                "expansion_label_sha256s", ()
+            )) != tuple(lineage.get("label_sha256s", ()))
+            or calibrator.get("schema") != CALIBRATION_SCHEMA
+            or tuple(calibrator.get("class_order", ()))
+            != ("CHOP_NO_TREND", "CHOP_END_TRANSITION", "EXPANSION_TREND")
             or tuple(regime.get("channels", ())) != CHANNELS
         ):
             raise ValueError("Regime teacher artifact contract drifted")
@@ -185,8 +250,22 @@ class RegimeTeacher(BaseTeacher):
         model.load_state_dict(payload["state_dict"], strict=True)
         resolved_device = resolve_device(device)
         model.to(resolved_device).eval()
+        temperature = float(calibrator.get("temperature", float("nan")))
+        class_bias = torch.as_tensor(
+            calibrator.get("class_bias", ()), dtype=torch.float32,
+            device=resolved_device,
+        )
+        if (
+            not np.isfinite(temperature)
+            or temperature <= 0.0
+            or class_bias.shape != (len(CHANNELS),)
+            or not bool(torch.isfinite(class_bias).all())
+        ):
+            raise ValueError("Regime teacher calibration is invalid")
         return cls(
             model=model,
+            temperature=temperature,
+            class_bias=class_bias,
             device=resolved_device,
             manifest=manifest,
             checkpoint_sha256=checkpoint_sha256,
@@ -200,7 +279,8 @@ class RegimeTeacher(BaseTeacher):
         *,
         ticker: str | None = None,
     ) -> torch.Tensor:
-        return self.model(trajectory.to(self.device, dtype=torch.float32))
+        logits = self.model(trajectory.to(self.device, dtype=torch.float32))
+        return torch.softmax(logits / self.temperature + self.class_bias, dim=-1)
 
 
 @dataclass(frozen=True)
@@ -233,6 +313,11 @@ class RegimeTeacherCache:
         availability = np.load(paths["availability"], mmap_mode="r")
         timestamps = np.load(paths["timestamps"], mmap_mode="r")
         rows = int(manifest.get("rows", -1))
+        available_probabilities = (
+            probabilities[availability]
+            if availability.shape == (rows,) and availability.dtype == np.bool_
+            else np.empty((0, len(CHANNELS)), dtype=np.float32)
+        )
         if (
             probabilities.shape != (rows, len(CHANNELS))
             or probabilities.dtype != np.float32
@@ -242,7 +327,15 @@ class RegimeTeacherCache:
             or np.isnat(timestamps).any()
             or (len(timestamps) > 1 and not np.all(timestamps[1:] > timestamps[:-1]))
             or np.any(timestamps >= _utc_boundary(manifest["training_end_exclusive"]))
-            or not np.isfinite(probabilities[availability]).all()
+            or not np.isfinite(available_probabilities).all()
+            or np.any(available_probabilities < 0.0)
+            or np.any(available_probabilities > 1.0)
+            or not np.allclose(
+                available_probabilities.sum(axis=1),
+                1.0,
+                rtol=0.0,
+                atol=1e-6,
+            )
         ):
             raise ValueError("Regime teacher cache arrays are invalid")
         return cls(root, probabilities, availability, timestamps, manifest)

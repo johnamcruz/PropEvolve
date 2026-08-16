@@ -39,21 +39,9 @@ def _teacher_row(
         np.sqrt(short_score),
         np.sqrt(short_score),
     )
-    values[CHANNELS.index("structure_chop_probability")] = chop_persistence
-    values[CHANNELS.index("structure_neutral_probability")] = 0.1
-    values[CHANNELS.index("structure_trend_probability")] = readiness
-    for name in (
-        "structure_trend_onset_probability",
-        "structure_trend_persistence_probability",
-        "volatility_expansion_onset_probability",
-        "volatility_high_persistence_probability",
-        "kaufman_efficiency",
-        "volatility_percentile",
-    ):
-        values[CHANNELS.index(name)] = readiness
-    values[
-        CHANNELS.index("structure_chop_persistence_probability")
-    ] = chop_persistence
+    values[CHANNELS.index("chop_no_trend_probability")] = chop_persistence
+    values[CHANNELS.index("chop_end_transition_probability")] = readiness
+    values[CHANNELS.index("expansion_trend_probability")] = readiness
     return values
 
 
@@ -138,10 +126,10 @@ def test_negative_only_objective_reproduces_v5_inverted_wait_association() -> No
     metrics = policy.last_train_metrics
     assert metrics[
         "regime_selectivity_persistent_dead_chop_model_wait_probability_mean"
-    ] == pytest.approx(0.5857061867)
+    ] == pytest.approx(0.5829402839)
     assert metrics[
         "regime_selectivity_transition_ready_model_wait_probability_mean"
-    ] == pytest.approx(0.5981066553)
+    ] == pytest.approx(0.5959601998)
     assert metrics[
         "regime_selectivity_persistent_dead_chop_model_wait_probability_mean"
     ] < metrics[

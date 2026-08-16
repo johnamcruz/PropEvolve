@@ -389,7 +389,7 @@ def test_training_summary_separates_guidance_and_autonomy_regime_learning(
         "teacher_guidance_eligible_decisions": 10,
         "teacher_guidance_visible_decisions": 6,
         "regime_teacher_channels": {
-            "structure_chop_probability": {
+            "chop_no_trend_probability": {
                 "rows": 2,
                 "target_probability_sum": 1.6,
                 "model_probability_sum": 1.0,
@@ -460,7 +460,7 @@ def test_training_summary_separates_guidance_and_autonomy_regime_learning(
         "regime_teacher_channels"
     ] == {}
     chop = summary["overall"]["regime_teacher_channels"][
-        "structure_chop_probability"
+        "chop_no_trend_probability"
     ]
     assert chop["target_probability_mean"] == pytest.approx(0.8)
     assert chop["model_probability_mean"] == pytest.approx(0.5)
@@ -1409,7 +1409,7 @@ def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable
             return None
 
     recipe_path = Path(__file__).parents[1] / "config" / (
-        "historical_mask_expansion_regime_stage2_v5.json"
+        "historical_mask_expansion_anchored_regime_stage2_v9.json"
     )
     config = json.loads(recipe_path.read_text())
     Targets.channels = tuple(
@@ -2578,8 +2578,8 @@ def test_teacher_diagnostics_preserve_named_source_channels() -> None:
             "long_clean_retained_given_attempt_probability",
             "short_attempt_probability",
             "short_clean_retained_given_attempt_probability",
-            "structure_trend_probability",
-            "structure_chop_probability",
+            "expansion_trend_probability",
+            "chop_no_trend_probability",
         ),
         episode_diagnostic_callback=diagnostics.append,
     )
@@ -2589,8 +2589,8 @@ def test_teacher_diagnostics_preserve_named_source_channels() -> None:
         "long_clean_retained_given_attempt_probability": 0.7,
         "short_attempt_probability": 0.1,
         "short_clean_retained_given_attempt_probability": 0.6,
-        "structure_trend_probability": 0.8,
-        "structure_chop_probability": 0.05,
+        "expansion_trend_probability": 0.8,
+        "chop_no_trend_probability": 0.05,
     })
 
 
@@ -2695,9 +2695,9 @@ def test_training_joins_only_visible_regime_entry_context_to_trade_economics() -
         "long_clean_retained_given_attempt_probability",
         "short_attempt_probability",
         "short_clean_retained_given_attempt_probability",
-        "structure_chop_probability",
-        "structure_neutral_probability",
-        "structure_trend_probability",
+        "chop_no_trend_probability",
+        "chop_end_transition_probability",
+        "expansion_trend_probability",
     )
     visible = {
         10: np.asarray((0.9, 0.8, 0.1, 0.1, 0.9, 0.05, 0.05), np.float32),
@@ -2756,14 +2756,14 @@ def test_training_joins_only_visible_regime_entry_context_to_trade_economics() -
         "mae_r_mean": 1.0,
         "initial_stop_count": 1,
         "regime_channel_probability_sums": {
-            "structure_chop_probability": pytest.approx(0.9),
-            "structure_neutral_probability": pytest.approx(0.05),
-            "structure_trend_probability": pytest.approx(0.05),
+            "chop_no_trend_probability": pytest.approx(0.9),
+            "chop_end_transition_probability": pytest.approx(0.05),
+            "expansion_trend_probability": pytest.approx(0.05),
         },
         "regime_channel_probability_means": {
-            "structure_chop_probability": pytest.approx(0.9),
-            "structure_neutral_probability": pytest.approx(0.05),
-            "structure_trend_probability": pytest.approx(0.05),
+            "chop_no_trend_probability": pytest.approx(0.9),
+            "chop_end_transition_probability": pytest.approx(0.05),
+            "expansion_trend_probability": pytest.approx(0.05),
         },
     }]
     aggregate = training_module._diagnostic_aggregate(diagnostics)[

@@ -654,11 +654,17 @@ def _regime_trade_economics(
         assert isinstance(teacher, np.ndarray)
         assert isinstance(channels, tuple)
         channel_index = {channel: index for index, channel in enumerate(channels)}
-        chop = float(teacher[channel_index["structure_chop_probability"]])
-        neutral = float(teacher[channel_index["structure_neutral_probability"]])
-        trend = float(teacher[channel_index["structure_trend_probability"]])
+        chop = float(teacher[channel_index["chop_no_trend_probability"]])
+        chop_end_transition = float(
+            teacher[channel_index["chop_end_transition_probability"]]
+        )
+        expansion_trend = float(
+            teacher[channel_index["expansion_trend_probability"]]
+        )
         static_regime = (
-            "dominant_chop" if chop > max(neutral, trend) else "nonchop"
+            "dominant_chop"
+            if chop > max(chop_end_transition, expansion_trend)
+            else "nonchop"
         )
         headroom = float(context["headroom_fraction"])
         headroom_stratum = (
@@ -4306,9 +4312,9 @@ def train_agent(
                 and all(
                     channel in teacher_channels
                     for channel in (
-                        "structure_chop_probability",
-                        "structure_neutral_probability",
-                        "structure_trend_probability",
+                        "chop_no_trend_probability",
+                        "chop_end_transition_probability",
+                        "expansion_trend_probability",
                     )
                 )
             ):

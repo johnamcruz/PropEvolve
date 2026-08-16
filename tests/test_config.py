@@ -22,6 +22,9 @@ from propevolve.balance_aware_regime_selectivity import (
 
 
 CURRENT_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
+)
+STAGE2_V4_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v4.json"
 )
 STAGE2_V5_RECIPE = Path(
@@ -60,14 +63,14 @@ def _episode_budget_payload() -> dict:
     payload = _generic_payload()
     payload["training"]["budget_mode"] = "episodes"
     payload["training"]["episodes"] = 500
-    payload["training"].pop("minimum_environment_steps")
+    payload["training"].pop("minimum_environment_steps", None)
     payload["evolution"]["frozen_paths"] = [
         path for path in payload["evolution"]["frozen_paths"]
         if path != "training.minimum_environment_steps"
     ]
     short_circuit = payload["training"]["short_circuit"]
     short_circuit["minimum_completed_episodes"] = 18
-    short_circuit.pop("minimum_environment_steps")
+    short_circuit.pop("minimum_environment_steps", None)
     requirements = payload["campaign"]["selection_requirements"]
     payload["campaign"]["budget_stages"] = [
         {
@@ -124,28 +127,18 @@ def _stage2a_config(tmp_path: Path) -> Path:
     receipt_path.parent.mkdir(parents=True)
     receipt_path.write_bytes(receipt)
     receipt_payload = json.loads(receipt)
-    payload["regime_selectivity"] = {
-        "schema": REGIME_SELECTIVITY_SCHEMA,
-        "training_only": True,
-        "target_source": REGIME_SELECTIVITY_TARGET_SOURCE,
-        "action_order": list(REGIME_SELECTIVITY_ACTION_ORDER),
-        "formula": REGIME_SELECTIVITY_FORMULA,
-        "semantics": "static_state_v1",
-        "persistent_chop_negative_emphasis": 0.0,
-        "side_balance": {
-            "schema": "equal_long_short_v1",
-            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
-        },
-        "loss_weight": 0.3,
-        "expansion_center_receipt": "config/receipts/centers.json",
-        "expansion_center_receipt_sha256": hashlib.sha256(receipt).hexdigest(),
-        "expansion_long_center": receipt_payload["long_center"],
-        "expansion_short_center": receipt_payload["short_center"],
-        "probability_epsilon": 1e-6,
-        "headroom_pressure": 1.0,
-        "dominant_chop_pressure": 2.0,
-        "q_temperature": 1.0,
-    }
+    payload["regime_selectivity"]["expansion_center_receipt"] = (
+        "config/receipts/centers.json"
+    )
+    payload["regime_selectivity"]["expansion_center_receipt_sha256"] = (
+        hashlib.sha256(receipt).hexdigest()
+    )
+    payload["regime_selectivity"]["expansion_long_center"] = receipt_payload[
+        "long_center"
+    ]
+    payload["regime_selectivity"]["expansion_short_center"] = receipt_payload[
+        "short_center"
+    ]
     payload["evolution"]["frozen_paths"] = sorted(set(
         payload["evolution"]["frozen_paths"]
     ) | set(REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS))
@@ -430,279 +423,12 @@ def test_entry_action_loss_reduction_fails_closed_on_unknown_value(
         load_experiment_config(path)
 
 
-def test_stage2_v4_is_one_frozen_two_boundary_matched_screen() -> None:
-    from propevolve.balance_aware_regime_selectivity import (
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
-    )
-
-    repaired = load_experiment_config(CURRENT_RECIPE)
-
-    assert repaired["regime_selectivity"]["formula"] == (
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA
-    )
-    assert repaired["regime_selectivity"]["semantics"] == (
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
-    )
-    assert repaired["regime_selectivity"][
-        "persistent_chop_negative_emphasis"
-    ] == 1.0
-    assert repaired["agent"]["entry_action_loss_reduction"] == (
-        "equal_present_class_mean_v1"
-    )
-    assert repaired["evolution"]["parent_candidate_ids"] == (
-        repaired["evolution"]["base_parent"]["candidate_id"],
-    )
-    assert repaired["evolution"]["allowed_revision_paths"] == ()
-    assert repaired["evolution"]["revision_bounds"] == {}
-    assert repaired["campaign"]["max_revisions_per_stage"] == 0
-    assert len(repaired["campaign"]["budget_stages"]) == 1
-    assert repaired["campaign"]["budget_stages"][0][
-        "minimum_environment_steps"
-    ] == 500_000
-    assert repaired["campaign"]["budget_stages"][0][
-        "allow_revisions"
-    ] is False
-    assert repaired["campaign"]["budget_stages"][0]["revision_paths"] == ()
-    assert repaired["campaign"]["budget_stages"][0][
-        "curriculum_override"
-    ] == {}
-    assert repaired["training"][
-        "entry_supervision_autonomy_start_fraction"
-    ] == 0.95
-    assert "training.entry_supervision_autonomy_start_fraction" in repaired[
-        "evolution"
-    ]["frozen_paths"]
-    near_blow_gate = {
-        "metric": "selection.near_blow_timeout_rate",
-        "operator": "<=",
-        "value": 0.6263636363636363,
-    }
-    assert near_blow_gate in repaired["campaign"]["budget_stages"][0][
-        "selection_requirements"
-    ]
-    assert {
-        "regime_selectivity.loss_weight",
-        "regime_selectivity.q_temperature",
-        *REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
-    } <= set(repaired["evolution"]["frozen_paths"])
-
-
-def test_stage2_v5_is_a_frozen_exact_episode_curriculum() -> None:
-    from propevolve.balance_aware_regime_selectivity import (
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
-    )
-
-    config = load_experiment_config(STAGE2_V5_RECIPE)
-
-    assert config["training"]["budget_mode"] == "episodes"
-    assert "minimum_environment_steps" not in config["training"]
-    assert config["training"]["episodes"] == 500
-    assert config["training"]["validation_episodes"] == 200
-    assert config["training"]["validation_no_trade_patience_episodes"] == 5
-    assert config["training"]["short_circuit"][
-        "minimum_completed_episodes"
-    ] == 18
-    assert config["training"]["short_circuit"]["policy_health"] == (
-        _policy_health_payload()
-    )
-    assert config["regime_selectivity"]["semantics"] == (
-        PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
-    )
-    assert config["training"][
-        "entry_supervision_autonomy_start_fraction"
-    ] == 0.95
-    assert config["evolution"]["allowed_revision_paths"] == ()
-    assert config["campaign"]["max_revisions_per_stage"] == 0
-    stages = config["campaign"]["budget_stages"]
-    assert [stage["training_episodes"] for stage in stages] == [200, 300, 500]
-    assert all(
-        stage["budget_mode"] == "episodes"
-        and stage["validation_episodes"] == 200
-        and stage["short_circuit_minimum_episodes"] == 18
-        and stage["allow_revisions"] is False
-        and stage["warm_start_parent"] is True
-        and stage["revision_paths"] == ()
-        for stage in stages
-    )
-    assert stages[-1]["episode_coverage"] == {
-        "schema": "full_data_episode_coverage_v1",
-        "episode_budget": 500,
-    }
-    assert TRAINING_POLICY_HEALTH_FROZEN_PATH in config["evolution"][
-        "frozen_paths"
-    ]
-    assert "training.minimum_environment_steps" not in config[
-        "evolution"
-    ]["frozen_paths"]
-
-
-def test_stage2_v6_is_one_frozen_association_change_from_stage1() -> None:
-    stage1_matched_fields = (
-        "assets",
-        "tickers",
-        "deployment_tickers",
-        "training_only_tickers",
-        "timeframe_minutes",
-        "cache_root",
-        "cache",
-        "teachers",
-        "entry_supervision",
-        "observation",
-        "challenge",
-        "point_values",
-        "round_trip_fees",
-        "temporal",
-        "sealed_confirmation",
-        "agent",
-        "runtime",
-    )
-
-    v5 = load_experiment_config(STAGE2_V5_RECIPE)
-    v6 = load_experiment_config(STAGE2_V6_RECIPE)
-
-    assert all(v6[field] == v5[field] for field in stage1_matched_fields)
-    assert v6["training"] == {
-        **v5["training"],
-        "short_circuit": {
-            **v5["training"]["short_circuit"],
-            "policy_health": _policy_health_payload(
-                require_positive_persistent_regime_association=True
-            ),
-        },
-    }
-    assert v6["evolution"]["base_parent"] == v5["evolution"]["base_parent"]
-    assert v6["evolution"]["parent_candidate_ids"] == (
-        "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0",
-    )
-    assert v6["regime_selectivity"] == {
-        **v5["regime_selectivity"],
-        "semantics": STAGE2_V6_ASSOCIATION_SEMANTICS,
-        "formula": STAGE2_V6_ASSOCIATION_FORMULA,
-    }
-    assert v6["regime_selectivity"]["loss_weight"] == pytest.approx(0.3)
-    assert v6["regime_selectivity"]["q_temperature"] == pytest.approx(1.0)
-    assert v6["regime_selectivity"][
-        "persistent_chop_negative_emphasis"
-    ] == pytest.approx(1.0)
-    assert "margin" not in v6["regime_selectivity"]
-    assert "association_objective" not in v6
-    assert v6["evolution"]["allowed_revision_paths"] == ()
-    assert v6["campaign"]["max_revisions_per_stage"] == 0
-    expected_parent_improvements = [
-        {
-            "metric": "selection.pass_rate",
-            "direction": "maximize",
-            "minimum_delta": 0.0,
-        },
-        {
-            "metric": "selection.near_blow_timeout_rate",
-            "direction": "minimize",
-            "minimum_delta": 0.0,
-        },
-    ]
-    assert all(
-        stage["parent_improvement_requirements"]
-        == expected_parent_improvements
-        for stage in v6["campaign"]["budget_stages"]
-    )
-    assert v6["output"] != v5["output"]
-    assert v6["campaign"]["state_root"] != v5["campaign"]["state_root"]
-    assert "Stage 2 v5 stopped with negative evidence" in v6["evolution"][
-        "hypothesis"
-    ]
-
-
-def test_stage2_v7_changes_only_the_episode_evidence_horizon_from_v6() -> None:
-    v6 = load_experiment_config(STAGE2_V6_RECIPE)
-    v7 = load_experiment_config(STAGE2_V7_RECIPE)
-
-    matched_fields = (
-        "agent",
-        "assets",
-        "cache",
-        "cache_root",
-        "challenge",
-        "deployment_tickers",
-        "entry_supervision",
-        "observation",
-        "point_values",
-        "regime_selectivity",
-        "round_trip_fees",
-        "runtime",
-        "sealed_confirmation",
-        "teachers",
-        "temporal",
-        "tickers",
-        "timeframe_minutes",
-        "training_only_tickers",
-    )
-    assert all(v7[field] == v6[field] for field in matched_fields)
-    assert v7["evolution"]["base_parent"] == v6["evolution"]["base_parent"]
-    assert v7["training"] == {
-        **v6["training"],
-        "episodes": 500,
-        "short_circuit": {
-            **v6["training"]["short_circuit"],
-            "policy_health": {
-                **v6["training"]["short_circuit"]["policy_health"],
-                "minimum_completed_episodes": 100,
-                "probe_interval_episodes": 100,
-                "economic_futility": {
-                    **v6["training"]["short_circuit"]["policy_health"][
-                        "economic_futility"
-                    ],
-                    "minimum_completed_episodes": 100,
-                },
-            },
-        },
-    }
-    assert [
-        stage["training_episodes"]
-        for stage in v7["campaign"]["budget_stages"]
-    ] == [100, 250, 500]
-    assert v7["campaign"]["max_revisions_per_stage"] == 0
-    assert v7["evolution"]["allowed_revision_paths"] == ()
-    assert "episode 45" in v7["evolution"]["hypothesis"]
-    assert v7["output"] != v6["output"]
-    assert v7["campaign"]["state_root"] != v6["campaign"]["state_root"]
-
-
 @pytest.mark.parametrize(
-    "mutate",
-    (
-        lambda payload: payload["regime_selectivity"].update(
-            semantics="persistent_chop_negative_weight_v1"
-        ),
-        lambda payload: payload["regime_selectivity"].update(
-            formula=(
-                "equal_present_group_mean(exact_wait_weighted_ce,"
-                "exact_long_ce,exact_short_ce,margin_rank)"
-            )
-        ),
-        lambda payload: payload["regime_selectivity"].update(margin=0.1),
-        lambda payload: payload["training"]["short_circuit"][
-            "policy_health"
-        ].update(require_positive_persistent_regime_association=False),
-    ),
+    "path",
+    (STAGE2_V4_RECIPE, STAGE2_V5_RECIPE, STAGE2_V6_RECIPE, STAGE2_V7_RECIPE),
 )
-def test_stage2_v6_association_contract_fails_closed_on_partial_drift(
-    tmp_path: Path,
-    mutate,
-) -> None:
-    payload = json.loads(STAGE2_V6_RECIPE.read_text())
-    mutate(payload)
-    path = tmp_path / "config" / "invalid-stage2-v6.json"
-    path.parent.mkdir(parents=True)
-    receipt_source = Path(
-        "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
-    )
-    receipt_path = path.parent / "receipts" / receipt_source.name
-    receipt_path.parent.mkdir(parents=True)
-    receipt_path.write_bytes(receipt_source.read_bytes())
-    path.write_text(json.dumps(payload))
-
-    with pytest.raises(ValueError, match="association contract"):
+def test_retired_eighteen_channel_regime_recipes_fail_closed(path: Path) -> None:
+    with pytest.raises(ValueError, match="Regime teacher contract"):
         load_experiment_config(path)
 
 
@@ -720,7 +446,7 @@ def test_stage2_v4_persistent_chop_switch_cannot_partially_revert(
     value: object,
 ) -> None:
     payload = json.loads(Path(
-        "config/historical_mask_expansion_regime_stage2_v4.json"
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
     ).read_text())
     payload["regime_selectivity"][field] = value
     receipt_source = Path(
@@ -734,7 +460,7 @@ def test_stage2_v4_persistent_chop_switch_cannot_partially_revert(
 
     with pytest.raises(
         ValueError,
-        match="balance-aware Regime selectivity contract is invalid",
+        match="contract is invalid",
     ):
         load_experiment_config(path)
 
@@ -908,17 +634,15 @@ def test_distinct_entry_supervision_schedule_must_be_valid_and_frozen(
 
 def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> None:
     payload = _generic_payload()
+    expected = dict(payload["training"]["short_circuit"])
+    expected.pop("collapse")
     payload["training"]["short_circuit"].pop("collapse")
     path = tmp_path / "short-circuit.json"
     path.write_text(json.dumps(payload))
 
     config = load_experiment_config(path)
 
-    assert config["training"]["short_circuit"] == {
-        "minimum_environment_steps": 500_000,
-        "minimum_passes": 1,
-        "maximum_blow_rate": 0.1,
-    }
+    assert config["training"]["short_circuit"] == expected
 
     payload["training"]["short_circuit"]["maximum_blow_rate"] = 1.5
     path.write_text(json.dumps(payload))
@@ -949,34 +673,15 @@ def test_training_short_circuit_is_explicit_and_fail_closed(tmp_path: Path) -> N
         load_experiment_config(path)
 
 
-def test_legacy_step_budget_remains_implicit_without_identity_drift() -> None:
+def test_active_stage2a_uses_the_frozen_episode_budget() -> None:
     config = load_experiment_config(CURRENT_RECIPE)
 
-    assert "budget_mode" not in config["training"]
+    assert config["training"]["budget_mode"] == "episodes"
+    assert config["training"]["episodes"] == 500
     stage = config["campaign"]["budget_stages"][0]
-    assert "budget_mode" not in stage
-    assert stage["minimum_environment_steps"] == 500_000
-    assert "training_episodes" not in stage
-    assert "short_circuit_minimum_episodes" not in stage
-
-
-def test_explicit_step_budget_mode_is_accepted_without_episode_fields(
-    tmp_path: Path,
-) -> None:
-    payload = _generic_payload()
-    payload["training"]["budget_mode"] = "environment_steps"
-    payload["campaign"]["budget_stages"][0][
-        "budget_mode"
-    ] = "environment_steps"
-    path = tmp_path / "explicit-step-budget.json"
-    path.write_text(json.dumps(payload))
-
-    config = load_experiment_config(path)
-
-    assert config["training"]["budget_mode"] == "environment_steps"
-    assert config["campaign"]["budget_stages"][0][
-        "budget_mode"
-    ] == "environment_steps"
+    assert stage["budget_mode"] == "episodes"
+    assert stage["training_episodes"] == 100
+    assert stage["short_circuit_minimum_episodes"] == 18
 
 
 def test_episode_budget_declares_exact_training_and_short_circuit_boundaries(
@@ -1099,9 +804,13 @@ def test_episode_budget_policy_health_contract_is_exact_finite_and_frozen(
     payload["training"]["short_circuit"]["policy_health"] = (
         _policy_health_payload()
     )
-    payload["evolution"]["frozen_paths"].remove(
-        "training.short_circuit.policy_health"
-    )
+    payload["evolution"]["frozen_paths"] = [
+        field for field in payload["evolution"]["frozen_paths"]
+        if field not in {
+            "training.short_circuit",
+            "training.short_circuit.policy_health",
+        }
+    ]
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="policy health must be frozen"):
         load_experiment_config(path)
@@ -1233,26 +942,13 @@ def test_config_accepts_three_frozen_training_only_teachers(
         payload["teachers"][0],
         {
             "kind": "regime",
-            "cache_root": "cache/regime_teacher_9market_3min_pre2025_v1",
+            "cache_root": (
+                "cache/expansion_anchored_regime_teacher_9market_3min_pre2025_v1"
+            ),
             "channels": [
-                "structure_chop_probability",
-                "structure_neutral_probability",
-                "structure_trend_probability",
-                "structure_chop_persistence_probability",
-                "structure_trend_onset_probability",
-                "structure_trend_persistence_probability",
-                "structure_trend_weakening_probability",
-                "structure_other_transition_probability",
-                "kaufman_efficiency",
-                "volatility_low_probability",
-                "volatility_normal_probability",
-                "volatility_high_probability",
-                "volatility_low_persistence_probability",
-                "volatility_expansion_onset_probability",
-                "volatility_high_persistence_probability",
-                "volatility_contraction_probability",
-                "volatility_other_transition_probability",
-                "volatility_percentile",
+                "chop_no_trend_probability",
+                "chop_end_transition_probability",
+                "expansion_trend_probability",
             ],
             "loss_weight": 0.1,
             "entry_search_loss_weight": 0.0,
@@ -1453,3 +1149,37 @@ def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="declared together"):
         load_experiment_config(path)
+
+
+def test_expansion_anchored_regime_stage2_v9_restarts_from_stage1() -> None:
+    config = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
+    )
+    regime = next(
+        teacher for teacher in config["teachers"]
+        if teacher["kind"] == "regime"
+    )
+
+    assert regime["cache_root"] == (
+        "cache/expansion_anchored_regime_teacher_9market_3min_pre2025_v1"
+    )
+    assert tuple(regime["channels"]) == (
+        "chop_no_trend_probability",
+        "chop_end_transition_probability",
+        "expansion_trend_probability",
+    )
+    assert config["evolution"]["base_parent"] == {
+        "archive_root": (
+            "runs/historical_mask_expansion_regime_post_launch_entry_balanced_v8b/"
+            "archive"
+        ),
+        "candidate_id": (
+            "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0"
+        ),
+        "evaluation_id": (
+            "c49852955655b705e376e057dfe2bf58784481175363b970bab063d8c42f981b"
+        ),
+        "model_sha256": (
+            "b445ce526eebafd3121981e9de720031d9710cd4e99c8dc49017d35e50d55584"
+        ),
+    }

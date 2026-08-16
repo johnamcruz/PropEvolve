@@ -113,13 +113,32 @@
   },
   "regime": {
     "checkpoint": "regime/regime_teacher.pt",
-    "checkpoint_sha256": "55772c83d28b9b706f0d262f9b7b916165946f8ee1ff8978261baa61faea5587",
-    "artifact_schema": "frozen-mask-structure-volatility-regime-teacher-v2",
-    "training_schema": "structure-volatility-regime-teacher-training-v2",
-    "universe": ["CL", "ES", "GC", "NQ", "RTY", "SI", "YM", "ZB", "ZN"],
+    "checkpoint_sha256": "f6627ed527f9c48776417b86bd7532ba6d970cb55ce6875bc3f00e903ef0d9bd",
+    "validation": "regime/regime.validation.json",
+    "validation_sha256": "396ad144b3fda5a978e23f69c08f9212befea51030a5a501957a2eb4a580ce99",
+    "validation_verdict": "PROCEED",
+    "best_epoch": 39,
+    "artifact_schema": "expansion-anchored-regime-artifact-v1",
+    "training_schema": "expansion-anchored-regime-training-v1",
+    "model_schema": "frozen-chronos2-expansion-anchored-regime-transformer-v1",
+    "label_schema": "expansion-anchored-regime-lifecycle-v1",
+    "label_definition_sha256": "b27bb4a37e5e41660a22bf06de231c8b1efce6bf6c159cb33521e9a4d3b1efc3",
+    "universe": ["ES", "NQ", "RTY", "YM", "GC", "SI", "CL", "ZB", "ZN"],
     "timeframe": "3min",
     "input": "50-step causal frozen Chronos2 Mask trajectory",
     "encoder_identity_sha256": "1b8b7f001b0b4e501aa47ca90a3c2fd31d0b41dbd1d896e98ce084f6ed325710",
+    "dataset_lineage_sha256": "b53e0aafd515cc3ef609f95840fd9025ba797dc71d425eaf5a936a6b19e93ec2",
+    "cache_sha256s": {
+      "ES": "96d422a45dfe475618c59ebca94f5371b2c227d41b35721ce8530cbc6d0f3071",
+      "NQ": "511136bebd0dc4189ec96495079271c13a72d775332a3bb1f024113452342303",
+      "RTY": "5662b80bfee0eb89d60eb33d4d9846aae7cffbca4d7b3c19f27d0d59994b9cf1",
+      "YM": "c3a9f47d101c5ebc773d8aa77f681a172b8ce955d724533547f18e4be8a237dc",
+      "GC": "abd0831dbc8714fb7da9373ab92a190ad0f301f86346d8c5c5336aa8698b6b7b",
+      "SI": "6f6466d5e0317978460ee52e231695d72c3a22523fe7947b2c469e2e76ac5d8d",
+      "CL": "1c4d7e5adb303247b4c80624cae511fefc5b9cbc50b53ebdcd26a5dad868325f",
+      "ZB": "406e058336c916d758b3ba9ed5ae943b377b765b2ae682e3bb522cefdb13c5b5",
+      "ZN": "babcfb2870fb3dc0a199fc603c0a8aadcf2372b21684e89af75e7f411d038f96"
+    },
     "cache_identity_sha256s": {
       "CL": "0a79dc7afcdfcea6851fe6a7dc7e4ee30b23d4ae09085869f47858cdb92b8a93",
       "ES": "b0f6cc95663aaf261cbdd69edf8b1e3a565664d70e60ceb73416dff2290895fe",
@@ -142,25 +161,21 @@
       "ZB": "3b0dc08e027f6fcdf2ba8906491e1151a31d9e420f46ac9a5464ed3c9ea0df3a",
       "ZN": "b5972553a5c3ee4fdc5f0f5dd7c492b5fdb9a091bf0022d9e3fe2772a1702266"
     },
+    "label_sha256s": {
+      "ES": "a1ad7101a55e2ee52743c5ba87ab5c09bfdae85d5d7177edc04b6d6a5ba11930",
+      "NQ": "4647ba367a8fb354f05839a781eb9969f9bd9c61d139b65d48af9378b0253935",
+      "RTY": "7a35bc1b217942e7b444ea0375e6d5c9a079b9f3a9f1e75023144e65c46e1d91",
+      "YM": "e99eba605e0eca48bec766d6453f5bffec40713e404db311821b06d415d9952a",
+      "GC": "872e50e698d2fac7d42078ece90fd7837ee016909a57f105ba324cf8875225e1",
+      "SI": "72203ef42146fb6d895ff11842893a912fa3d9ef902ebd727237a72e886e7f09",
+      "CL": "b74ec32c8ce05dd847c9db4d5239a3520d2d26af926c1964a6ef2772a394783b",
+      "ZB": "f4b04aaa4238b360b9df708ec0454bd05aa432900e01be8dcecb43d706ebaa24",
+      "ZN": "f8a8e805039339962faebec46f4cb6fe38f55713cf992f5f7533267ebad60eb4"
+    },
     "channels": [
-      "structure_chop_probability",
-      "structure_neutral_probability",
-      "structure_trend_probability",
-      "structure_chop_persistence_probability",
-      "structure_trend_onset_probability",
-      "structure_trend_persistence_probability",
-      "structure_trend_weakening_probability",
-      "structure_other_transition_probability",
-      "kaufman_efficiency",
-      "volatility_low_probability",
-      "volatility_normal_probability",
-      "volatility_high_probability",
-      "volatility_low_persistence_probability",
-      "volatility_expansion_onset_probability",
-      "volatility_high_persistence_probability",
-      "volatility_contraction_probability",
-      "volatility_other_transition_probability",
-      "volatility_percentile"
+      "chop_no_trend_probability",
+      "chop_end_transition_probability",
+      "expansion_trend_probability"
     ]
   }
 }

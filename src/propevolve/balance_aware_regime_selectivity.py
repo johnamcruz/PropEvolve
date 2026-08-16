@@ -23,38 +23,15 @@ EXPANSION_CHANNELS = (
     "short_clean_retained_given_attempt_probability",
 )
 REGIME_STATE_CHANNELS = (
-    "structure_chop_probability",
-    "structure_neutral_probability",
-    "structure_trend_probability",
+    "chop_no_trend_probability",
+    "chop_end_transition_probability",
+    "expansion_trend_probability",
 )
-REGIME_TRANSITION_CHANNELS = (
-    "structure_chop_persistence_probability",
-    "structure_trend_onset_probability",
-    "structure_trend_persistence_probability",
-    "volatility_expansion_onset_probability",
-    "volatility_high_persistence_probability",
-    "kaufman_efficiency",
-    "volatility_percentile",
-)
+REGIME_TRANSITION_CHANNELS = REGIME_STATE_CHANNELS
 REGIME_TEACHER_CHANNELS = (
-    "structure_chop_probability",
-    "structure_neutral_probability",
-    "structure_trend_probability",
-    "structure_chop_persistence_probability",
-    "structure_trend_onset_probability",
-    "structure_trend_persistence_probability",
-    "structure_trend_weakening_probability",
-    "structure_other_transition_probability",
-    "kaufman_efficiency",
-    "volatility_low_probability",
-    "volatility_normal_probability",
-    "volatility_high_probability",
-    "volatility_low_persistence_probability",
-    "volatility_expansion_onset_probability",
-    "volatility_high_persistence_probability",
-    "volatility_contraction_probability",
-    "volatility_other_transition_probability",
-    "volatility_percentile",
+    "chop_no_trend_probability",
+    "chop_end_transition_probability",
+    "expansion_trend_probability",
 )
 ACTION_ORDER = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
 SCHEMA = "balance_aware_regime_selectivity_v1"
@@ -71,9 +48,7 @@ FORMULA = (
 )
 PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA = (
     "exact_wait*(1+persistent_chop_negative_emphasis*"
-    "chop_persistence*(1-kaufman_efficiency*mean("
-    "trend_onset,trend_persistence,volatility_expansion_onset,"
-    "volatility_high_persistence,volatility_percentile)))"
+    "chop_no_trend_probability)"
 )
 PERSISTENT_CHOP_ASSOCIATION_FORMULA = (
     "equal_present_group_mean(exact_wait_weighted_ce,exact_long_ce,"
@@ -274,11 +249,9 @@ class BalanceAwareRegimeSelectivity:
     ) -> torch.Tensor:
         """Compile persistent-dead-chop emphasis for exact WAIT rows only.
 
-        Transition evidence is the unweighted mean of trend onset, trend
-        persistence, volatility-expansion onset, high-volatility persistence,
-        and volatility percentile. Kaufman efficiency gates that evidence, so
-        volatility without efficient displacement cannot erase persistent-chop
-        emphasis. The result is continuous and bounded in
+        The new Expansion-anchored classifier supplies the lifecycle directly:
+        class 0 is persistent dead chop, while classes 1 and 2 are transition
+        and active Expansion. The result is continuous and bounded in
         ``[1, 1 + persistent_chop_negative_emphasis]`` on exact WAIT rows.
         Long and Short rows receive exactly zero mass and therefore cannot be
         softened or redirected by this compiler. The consumer is responsible
@@ -321,21 +294,10 @@ class BalanceAwareRegimeSelectivity:
             )
 
         selected = teacher_probabilities[..., list(self._transition_indices)]
-        chop_persistence = selected[..., 0].clamp(0.0, 1.0)
-        transition_evidence = torch.stack(
-            (
-                selected[..., 1],
-                selected[..., 2],
-                selected[..., 3],
-                selected[..., 4],
-                selected[..., 6],
-            ),
-            dim=-1,
-        ).clamp(0.0, 1.0).mean(dim=-1)
-        kaufman_efficiency = selected[..., 5].clamp(0.0, 1.0)
-        transition_readiness = kaufman_efficiency * transition_evidence
-        persistent_dead_chop = chop_persistence * (1.0 - transition_readiness)
-        transition_ready_chop = chop_persistence * transition_readiness
+        persistent_dead_chop = selected[..., 0].clamp(0.0, 1.0)
+        transition_ready_chop = (
+            selected[..., 1] + selected[..., 2]
+        ).clamp(0.0, 1.0)
         wait_rows = (entry_action_targets == 0).to(teacher_probabilities.dtype)
         long_rows = (entry_action_targets == 1).to(teacher_probabilities.dtype)
         short_rows = (entry_action_targets == 2).to(teacher_probabilities.dtype)
