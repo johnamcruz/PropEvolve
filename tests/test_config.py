@@ -1183,3 +1183,43 @@ def test_expansion_anchored_regime_stage2_v9_restarts_from_stage1() -> None:
             "b445ce526eebafd3121981e9de720031d9710cd4e99c8dc49017d35e50d55584"
         ),
     }
+
+
+def test_expansion_anchored_regime_stage2_v10_strengthens_chop_avoidance() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
+    )
+    candidate = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v10.json"
+    )
+
+    assert candidate["regime_selectivity"][
+        "persistent_chop_negative_emphasis"
+    ] == 2.0
+    assert candidate["training"]["teacher_guidance_dropout_end"] == 0.5
+    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
+        "base_parent"
+    ]
+
+    ignored_paths = {
+        ("_path",),
+        ("campaign", "state_root"),
+        ("evolution", "hypothesis"),
+        ("output",),
+        ("regime_selectivity", "persistent_chop_negative_emphasis"),
+        ("training", "teacher_guidance_dropout_end"),
+    }
+
+    def flattened(payload, prefix=()):
+        values = {}
+        for key, value in payload.items():
+            path = prefix + (key,)
+            if path in ignored_paths:
+                continue
+            if isinstance(value, dict):
+                values.update(flattened(value, path))
+            else:
+                values[path] = value
+        return values
+
+    assert flattened(candidate) == flattened(baseline)

@@ -390,7 +390,6 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     if (
         not isinstance(training, dict)
         or float(training.get("teacher_loss_end_scale", -1.0)) != 0.0
-        or float(training.get("teacher_guidance_dropout_end", -1.0)) != 1.0
         or float(training.get("teacher_autonomy_start_fraction", -1.0)) != 0.8
     ):
         raise ValueError(
