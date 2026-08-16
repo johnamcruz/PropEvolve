@@ -564,7 +564,6 @@ def _validate_source_receipt(
         or receipt.get("cache_identity_sha256") != expected_cache_identity_sha256
         or receipt.get("embeddings_sha256") != expected_embeddings_sha256
         or receipt.get("finite") is not True
-        or int(expected_stat.get("device", -1)) != current.st_dev
         or int(expected_stat.get("inode", -1)) != current.st_ino
         or int(expected_stat.get("mtime_ns", -1)) != current.st_mtime_ns
         or int(expected_stat.get("size", -1)) != current.st_size

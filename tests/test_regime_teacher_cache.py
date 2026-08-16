@@ -203,3 +203,35 @@ def test_regime_builder_censors_selection_and_is_resumable(tmp_path: Path) -> No
     assert not cache.availability[:49].any()
     assert cache.availability[49:].all()
     assert (cache.timestamps < np.datetime64("2025-01-01")).all()
+
+
+def test_regime_builder_reuses_validated_embeddings_after_volume_remount(
+    tmp_path: Path,
+) -> None:
+    source = _embedding_cache(tmp_path)
+    source_manifest = Path(
+        json.loads((source / "manifest.json").read_text())[
+            "imported_ffm_cache_manifest"
+        ]
+    )
+    validation_path = source_manifest.with_name(
+        "NQ_3min_fixture.validation.json"
+    )
+    validation = json.loads(validation_path.read_text())
+    validation["embedding_stat"]["device"] += 1
+    validation_path.write_text(json.dumps(validation))
+
+    result = build_regime_teacher_cache(
+        teacher=RegimeTeacher.load("teachers/manifest.json", device="cpu"),
+        embedding_cache=source,
+        destination=tmp_path / "regime/NQ",
+        ticker="NQ",
+        training_end_exclusive="2025-01-01",
+        expected_cache_identity_sha256=(
+            "1087cb9b2d7bd1dd51e219dd5d792cb52368b1221f6255f662db02d900dd72ca"
+        ),
+        batch_size=4,
+        synchronization_batches=2,
+    )
+
+    assert result == (tmp_path / "regime/NQ").resolve()
