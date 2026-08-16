@@ -58,6 +58,15 @@ def _set_path(payload: dict, dotted_path: str, value: object) -> None:
     target[parts[-1]] = value
 
 
+def _get_path(payload: Mapping, dotted_path: str) -> object:
+    target: object = payload
+    for part in dotted_path.split("."):
+        if not isinstance(target, Mapping) or part not in target:
+            raise ValueError(f"Optuna path does not resolve: {dotted_path}")
+        target = target[part]
+    return target
+
+
 def _write_exact(path: Path, payload: Mapping) -> None:
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if path.exists():
@@ -488,6 +497,14 @@ def run_optuna_sweep(
         for name, value in authority.items():
             study.set_user_attr(name, value)
     reconciled = _reconcile_interrupted_trials(study)
+    if not study.trials:
+        study.enqueue_trial(
+            {
+                name: _get_path(sweep.base_config, name)
+                for name in sweep.search_space
+            },
+            user_attrs={"baseline_control": True},
+        )
     load_state = state_loader or _default_state_loader
 
     def objective(trial: optuna.Trial) -> float:

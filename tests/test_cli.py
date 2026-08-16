@@ -35,11 +35,11 @@ def test_optuna_sweep_command_dispatches_constrained_tpe(
     code = main([
         "optuna-sweep",
         "--config",
-        "config/sweeps/stage2a_regime_selectivity_tpe_v1.json",
+        "config/sweeps/stage2a_regime_selectivity_tpe_v2.json",
     ])
 
     assert code == 0
-    assert calls == ["config/sweeps/stage2a_regime_selectivity_tpe_v1.json"]
+    assert calls == ["config/sweeps/stage2a_regime_selectivity_tpe_v2.json"]
     assert json.loads(capsys.readouterr().out) == {
         "best_trial_number": 7,
         "result": "runs/study/study.result.json",

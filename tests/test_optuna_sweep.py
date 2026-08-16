@@ -13,7 +13,7 @@ from propevolve.orchestration import _plan
 from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
 
 
-CONTRACT = Path("config/sweeps/stage2a_regime_selectivity_tpe_v1.json")
+CONTRACT = Path("config/sweeps/stage2a_regime_selectivity_tpe_v2.json")
 
 
 def _state(
@@ -131,7 +131,7 @@ def test_tpe_runs_existing_campaign_trials_sequentially_and_resumes_sqlite(
     assert len(calls) == 3
     assert result.best_trial_number == 2
     study = optuna.load_study(
-        study_name="stage2a_regime_selectivity_tpe_v1",
+        study_name="stage2a_regime_selectivity_tpe_v2",
         storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
     )
     assert len(study.trials) == 3
@@ -154,6 +154,39 @@ def test_tpe_runs_existing_campaign_trials_sequentially_and_resumes_sqlite(
         code_commit="test-commit",
     )
     assert resumed.best_trial_number == 2
+
+
+def test_tpe_evaluates_exact_frozen_baseline_before_sampled_trials(
+    tmp_path: Path,
+) -> None:
+    configs: list[dict[str, object]] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        configs.append(json.loads(config_path.read_text()))
+        return _state(config_path, run_id, index=len(configs))
+
+    run_optuna_sweep(
+        CONTRACT,
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "config",
+        n_trials=2,
+        runner=runner,
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert configs[0]["challenge"]["large_win_bonus_coefficient"] == 0.1
+    assert configs[0]["regime_selectivity"]["loss_weight"] == 0.3
+    assert configs[0]["regime_selectivity"][
+        "persistent_chop_negative_emphasis"
+    ] == 2.0
+    assert configs[0]["training"]["teacher_guidance_dropout_end"] == 0.5
+    study = optuna.load_study(
+        study_name="stage2a_regime_selectivity_tpe_v2",
+        storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
+    )
+    assert study.trials[0].user_attrs["baseline_control"] is True
 
 
 def test_tpe_selects_only_zero_blow_three_r_teacher_free_trials(
@@ -246,7 +279,7 @@ def test_tpe_continues_after_sparse_validation_short_circuit(
     assert len(calls) == 2
     assert result.best_trial_number == 1
     study = optuna.load_study(
-        study_name="stage2a_regime_selectivity_tpe_v1",
+        study_name="stage2a_regime_selectivity_tpe_v2",
         storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
     )
     assert study.trials[0].value == -1_000_000.0

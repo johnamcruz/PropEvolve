@@ -439,6 +439,130 @@ def test_policy_health_monitor_runs_fixed_probe_at_milestone_and_receipts_it() -
     assert len(receipts[0]["identity_sha256"]) == 64
 
 
+def test_policy_health_monitor_uses_cumulative_entry_mass_not_one_noisy_episode() -> None:
+    class Progress:
+        completed_episodes = 18
+        passes = 0
+        blows = 0
+        timeouts = 2
+        near_blow_timeout_count = 0
+        terminal_pnl_sum = 0.0
+        terminal_pnl_count = 2
+        trade_r_sum = 0.0
+        trade_count = 0
+
+    receipts = []
+    monitor = TrainingHealthMonitor(
+        TrainingHealthDetector(_spec()),
+        probe=lambda completed: {},
+        receipt_callback=receipts.append,
+        initial_entry_weighted_masses={
+            "WAIT": 32.0,
+            "ENTER_LONG_1": 32.0,
+            "ENTER_SHORT_1": 32.0,
+        },
+        minimum_entry_mass_completed_episodes=18,
+    )
+    diagnostic = {
+        "updates": 32,
+        "entry_action_weight_scale": 1.0,
+        "teacher_weight_scale": 1.0,
+        "entry_action_balance": {
+            "wait": {"weighted_mass": 8.666656, "weighted_mass_fraction": 0.270833},
+            "long": {"weighted_mass": 11.666672, "weighted_mass_fraction": 0.364583},
+            "short": {"weighted_mass": 11.666672, "weighted_mass_fraction": 0.364583},
+        },
+        "regime_entry_conflict": {
+            side: {"soft_wait_disagreement_rows": 0}
+            for side in ("long", "short")
+        },
+    }
+
+    assert monitor(Progress(), diagnostic) is None
+    assert receipts[-1]["entry_mass_fractions"] == pytest.approx({
+        "WAIT": 40.666656 / 128.0,
+        "ENTER_LONG_1": 43.666672 / 128.0,
+        "ENTER_SHORT_1": 43.666672 / 128.0,
+    })
+
+
+def test_policy_health_monitor_waits_for_stable_entry_mass_evidence() -> None:
+    class Progress:
+        completed_episodes = 1
+        passes = 0
+        blows = 0
+        timeouts = 1
+        near_blow_timeout_count = 0
+        terminal_pnl_sum = 0.0
+        terminal_pnl_count = 1
+        trade_r_sum = 0.0
+        trade_count = 0
+
+    receipts = []
+    monitor = TrainingHealthMonitor(
+        TrainingHealthDetector(_spec()),
+        probe=lambda completed: {},
+        receipt_callback=receipts.append,
+        minimum_entry_mass_completed_episodes=18,
+    )
+    diagnostic = {
+        "updates": 32,
+        "entry_action_weight_scale": 1.0,
+        "teacher_weight_scale": 1.0,
+        "entry_action_balance": {
+            "wait": {"weighted_mass": 3.2, "weighted_mass_fraction": 0.1},
+            "long": {"weighted_mass": 14.4, "weighted_mass_fraction": 0.45},
+            "short": {"weighted_mass": 14.4, "weighted_mass_fraction": 0.45},
+        },
+        "regime_entry_conflict": {
+            side: {"soft_wait_disagreement_rows": 0}
+            for side in ("long", "short")
+        },
+    }
+
+    assert monitor(Progress(), diagnostic) is None
+    assert receipts[-1]["entry_mass_evidence_ready"] is False
+
+
+def test_policy_health_monitor_still_rejects_cumulative_entry_mass_collapse() -> None:
+    class Progress:
+        completed_episodes = 1
+        passes = 0
+        blows = 0
+        timeouts = 1
+        near_blow_timeout_count = 0
+        terminal_pnl_sum = 0.0
+        terminal_pnl_count = 1
+        trade_r_sum = 0.0
+        trade_count = 0
+
+    monitor = TrainingHealthMonitor(
+        TrainingHealthDetector(_spec()),
+        probe=lambda completed: {},
+        receipt_callback=lambda payload: None,
+    )
+    diagnostic = {
+        "updates": 32,
+        "entry_action_weight_scale": 1.0,
+        "teacher_weight_scale": 1.0,
+        "entry_action_balance": {
+            "wait": {"weighted_mass": 3.2, "weighted_mass_fraction": 0.1},
+            "long": {"weighted_mass": 14.4, "weighted_mass_fraction": 0.45},
+            "short": {"weighted_mass": 14.4, "weighted_mass_fraction": 0.45},
+        },
+        "regime_entry_conflict": {
+            side: {"soft_wait_disagreement_rows": 0}
+            for side in ("long", "short")
+        },
+    }
+
+    assert monitor(Progress(), diagnostic) == (
+        "entry optimizer WAIT mass fraction 0.100000 outside [0.300000, 0.360000]; "
+        "entry optimizer ENTER_LONG_1 mass fraction 0.450000 outside [0.300000, 0.360000]; "
+        "entry optimizer ENTER_SHORT_1 mass fraction 0.450000 outside [0.300000, 0.360000]"
+    )
+
+
 def test_policy_health_monitor_fails_closed_and_receipts_unavailable_probe() -> None:
     class Progress:
         completed_episodes = 45

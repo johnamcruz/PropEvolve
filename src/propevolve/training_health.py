@@ -148,6 +148,7 @@ class TrainingHealthSnapshot:
     entry_mass_fractions: Mapping[str, float]
     positive_entry_soft_wait_disagreement_rows: Mapping[str, int]
     probe_metrics: Mapping[str, float] | None
+    entry_mass_evidence_ready: bool = True
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,7 @@ class TrainingHealthDetector:
         elif (
             snapshot.optimizer_updates > 0
             and snapshot.entry_action_weight_scale > 0.0
+            and snapshot.entry_mass_evidence_ready
         ):
             self._entry_objective_reasons(snapshot, reasons)
         if (
@@ -267,6 +269,7 @@ class TrainingHealthDetector:
         evidence = {
             "schema": "propevolve_training_policy_health_v1",
             "completed_episodes": snapshot.completed_episodes,
+            "entry_mass_evidence_ready": snapshot.entry_mass_evidence_ready,
             "probe_due": probe_due,
             "near_blow_timeout_rate": near_blow_rate,
             "economic_futility_signals": tuple(futility_signals),
@@ -376,6 +379,8 @@ class TrainingHealthMonitor:
         *,
         probe: Callable[[int], Mapping[str, float]],
         receipt_callback: Callable[[dict[str, object]], None],
+        initial_entry_weighted_masses: Mapping[str, float] | None = None,
+        minimum_entry_mass_completed_episodes: int = 1,
     ) -> None:
         if not isinstance(detector, TrainingHealthDetector):
             raise TypeError("training health monitor requires a detector")
@@ -384,6 +389,25 @@ class TrainingHealthMonitor:
         self.detector = detector
         self.probe = probe
         self.receipt_callback = receipt_callback
+        if (
+            isinstance(minimum_entry_mass_completed_episodes, bool)
+            or minimum_entry_mass_completed_episodes < 1
+        ):
+            raise ValueError("minimum entry mass episodes must be positive")
+        self.minimum_entry_mass_completed_episodes = (
+            minimum_entry_mass_completed_episodes
+        )
+        initial = initial_entry_weighted_masses or {}
+        if set(initial) - set(_ACTIONS):
+            raise ValueError("initial entry weighted masses are malformed")
+        self._entry_weighted_masses = {
+            action: float(initial.get(action, 0.0)) for action in _ACTIONS
+        }
+        if any(
+            not math.isfinite(value) or value < 0.0
+            for value in self._entry_weighted_masses.values()
+        ):
+            raise ValueError("initial entry weighted masses are malformed")
 
     def __call__(
         self,
@@ -409,11 +433,11 @@ class TrainingHealthMonitor:
             conflict, Mapping
         ):
             raise ValueError("training policy-health diagnostics are malformed")
-        mass = {
+        episode_mass = {
             action: self._nested_number(
                 entry_balance,
                 action_name,
-                "weighted_mass_fraction",
+                "weighted_mass",
                 default=float("nan"),
             )
             for action, action_name in (
@@ -421,6 +445,45 @@ class TrainingHealthMonitor:
                 ("ENTER_LONG_1", "long"),
                 ("ENTER_SHORT_1", "short"),
             )
+        }
+        if all(
+            math.isfinite(value) and value >= 0.0
+            for value in episode_mass.values()
+        ):
+            for action, value in episode_mass.items():
+                self._entry_weighted_masses[action] += value
+        else:
+            legacy_fractions = {
+                action: self._nested_number(
+                    entry_balance,
+                    action_name,
+                    "weighted_mass_fraction",
+                    default=float("nan"),
+                )
+                for action, action_name in (
+                    ("WAIT", "wait"),
+                    ("ENTER_LONG_1", "long"),
+                    ("ENTER_SHORT_1", "short"),
+                )
+            }
+            if all(
+                math.isfinite(value) and value >= 0.0
+                for value in legacy_fractions.values()
+            ):
+                for action, value in legacy_fractions.items():
+                    self._entry_weighted_masses[action] += value
+            else:
+                self._entry_weighted_masses = {
+                    action: float("nan") for action in _ACTIONS
+                }
+        total_mass = sum(self._entry_weighted_masses.values())
+        mass = {
+            action: (
+                value / total_mass
+                if math.isfinite(total_mass) and total_mass > 0.0
+                else float("nan")
+            )
+            for action, value in self._entry_weighted_masses.items()
         }
         disagreements = {
             action: int(self._nested_number(
@@ -463,6 +526,9 @@ class TrainingHealthMonitor:
             entry_mass_fractions=mass,
             positive_entry_soft_wait_disagreement_rows=disagreements,
             probe_metrics=probe_metrics,
+            entry_mass_evidence_ready=(
+                completed >= self.minimum_entry_mass_completed_episodes
+            ),
         )
         verdict = self.detector.evaluate(snapshot)
         body: dict[str, object] = {
@@ -472,6 +538,8 @@ class TrainingHealthMonitor:
             "reasons": list(verdict.reasons),
             "evidence": dict(verdict.evidence),
             "entry_mass_fractions": mass,
+            "entry_weighted_masses": dict(self._entry_weighted_masses),
+            "entry_mass_evidence_ready": snapshot.entry_mass_evidence_ready,
             "entry_action_weight_scale": snapshot.entry_action_weight_scale,
             "teacher_weight_scale": snapshot.teacher_weight_scale,
             "entry_objective_active": bool(

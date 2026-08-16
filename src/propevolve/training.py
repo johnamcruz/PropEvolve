@@ -2345,6 +2345,20 @@ class HistoricalCandidateRunner:
                 receipt_callback=lambda payload: _append_jsonl(
                     policy_health_path, payload
                 ),
+                initial_entry_weighted_masses=(
+                    _load_policy_health_entry_weighted_masses(
+                        policy_health_path,
+                        completed_episodes=resume.completed_episodes,
+                    )
+                    if resume is not None
+                    else None
+                ),
+                minimum_entry_mass_completed_episodes=int(
+                    training_config["short_circuit"].get(
+                        "minimum_completed_episodes",
+                        1,
+                    )
+                ),
             )
         training = train_agent(
             agent,
@@ -3336,6 +3350,38 @@ def _append_jsonl(path: Path, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         stream.write("\n")
+
+
+def _load_policy_health_entry_weighted_masses(
+    path: Path,
+    *,
+    completed_episodes: int,
+) -> dict[str, float]:
+    if completed_episodes < 1 or not path.is_file():
+        raise ValueError("policy-health cumulative entry mass is missing")
+    lines = [line for line in path.read_text().splitlines() if line]
+    try:
+        receipt = json.loads(lines[-1])
+        identity = receipt.pop("identity_sha256")
+        masses = receipt["entry_weighted_masses"]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("policy-health cumulative entry mass is malformed") from error
+    expected_identity = hashlib.sha256(json.dumps(
+        receipt,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    if (
+        identity != expected_identity
+        or receipt.get("completed_episodes") != completed_episodes
+        or not isinstance(masses, Mapping)
+        or set(masses) != {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+    ):
+        raise ValueError("policy-health cumulative entry mass is malformed")
+    result = {str(action): float(value) for action, value in masses.items()}
+    if any(not math.isfinite(value) or value < 0.0 for value in result.values()):
+        raise ValueError("policy-health cumulative entry mass is malformed")
+    return result
 
 
 def _truncate_episode_jsonl(
