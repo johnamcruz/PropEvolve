@@ -178,6 +178,9 @@ dmypy.json
 # pytype static type analyzer
 .pytype/
 
+# Deterministic local configs materialized by the bounded sweep queue.
+/config/.sweep-*.json
+
 # Cython debug symbols
 cython_debug/
 

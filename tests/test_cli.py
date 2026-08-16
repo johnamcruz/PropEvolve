@@ -2,14 +2,49 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 from ml_training_loop import Phase, RunState
 from ml_training_loop.stores import JsonRunStore
 import propevolve.orchestration
+import propevolve.sweep
 import propevolve.teachers.expansion
 import propevolve.teachers.regime
 import propevolve.teachers.trend
 from propevolve.cli import main
+
+
+def test_sweep_command_dispatches_the_existing_campaign_queue(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+
+    def fake_sweep(config_path):
+        calls.append(config_path)
+        return SimpleNamespace(
+            status="COMPLETE",
+            winner_cell="cell-03",
+            leaderboard_path=Path("runs/study/leaderboard.json"),
+        )
+
+    monkeypatch.setattr(propevolve.sweep, "run_grid_sweep", fake_sweep)
+
+    code = main([
+        "sweep",
+        "--config",
+        "config/sweeps/stage2a_regime_selectivity_grid_v1.json",
+    ])
+
+    assert code == 0
+    assert calls == [
+        "config/sweeps/stage2a_regime_selectivity_grid_v1.json"
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "leaderboard": "runs/study/leaderboard.json",
+        "status": "COMPLETE",
+        "winner_cell": "cell-03",
+    }
 
 
 def test_setup_assets_command_creates_links_without_copying(tmp_path: Path) -> None:

@@ -65,6 +65,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="resume from the latest durable NEEDS_REASONING checkpoint",
     )
+    sweep = subparsers.add_parser(
+        "sweep",
+        help="run or resume a bounded grid through existing campaigns",
+    )
+    sweep.add_argument("--config", required=True)
     status = subparsers.add_parser("evolve-status", help="show durable campaign state")
     status.add_argument("--config", required=True)
     status.add_argument("--run-id", required=True)
@@ -301,6 +306,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             tuple(args.ticker or ()),
         )
+    if args.command == "sweep":
+        from .sweep import run_grid_sweep
+
+        result = run_grid_sweep(args.config)
+        print(json.dumps({
+            "status": result.status,
+            "winner_cell": result.winner_cell,
+            "leaderboard": str(result.leaderboard_path),
+        }, sort_keys=True))
+        return 0 if result.status == "COMPLETE" else 2
     config = load_experiment_config(args.config)
     if args.command == "validate-config":
         print(f"VALID {config['_path']}")
