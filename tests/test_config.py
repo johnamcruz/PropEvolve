@@ -19,6 +19,8 @@ from propevolve.balance_aware_regime_selectivity import (
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     FORMULA as REGIME_SELECTIVITY_FORMULA,
     SCHEMA as REGIME_SELECTIVITY_SCHEMA,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     TARGET_SOURCE as REGIME_SELECTIVITY_TARGET_SOURCE,
 )
 
@@ -1258,6 +1260,31 @@ def test_expansion_anchored_regime_stage2_v11_changes_only_wait_confluence() -> 
     )
     assert candidate["regime_selectivity"]["formula"] == (
         EXPANSION_REGIME_CONFLUENCE_FORMULA
+    )
+    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
+        "base_parent"
+    ]
+    assert candidate["teachers"] == baseline["teachers"]
+    assert candidate["entry_supervision"] == baseline["entry_supervision"]
+    assert candidate["agent"] == baseline["agent"]
+    assert candidate["training"] == baseline["training"]
+    assert candidate["entry_supervision"]["target_r"] == 2.0
+    assert candidate["entry_supervision"]["stop_r"] == 1.0
+
+
+def test_expansion_anchored_regime_stage2_v12_conditions_wait_by_side() -> None:
+    baseline = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v11.json"
+    )
+    candidate = load_experiment_config(
+        "config/historical_mask_expansion_anchored_regime_stage2_v12.json"
+    )
+
+    assert candidate["regime_selectivity"]["semantics"] == (
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+    )
+    assert candidate["regime_selectivity"]["formula"] == (
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA
     )
     assert candidate["evolution"]["base_parent"] == baseline["evolution"][
         "base_parent"

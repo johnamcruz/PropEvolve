@@ -15,6 +15,7 @@ from propevolve.balance_aware_regime_selectivity import (
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
 )
 from propevolve.decision import Action
 from propevolve.replay import Transition
@@ -209,6 +210,40 @@ def test_confluence_semantics_emphasizes_high_expansion_failed_wait_rows() -> No
     assert evidence.failed_setup_confluence_membership[0] < 0.2
 
 
+def test_side_conditioned_confluence_preserves_total_and_declares_side() -> None:
+    compiler = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=CENTERS,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    teachers = torch.as_tensor(np.stack((
+        _teacher_row(
+            chop_persistence=0.05,
+            readiness=0.95,
+            long_score=0.90,
+        ),
+        _teacher_row(
+            chop_persistence=0.05,
+            readiness=0.95,
+            short_score=0.90,
+        ),
+    )))
+    actions = torch.tensor((Action.WAIT, Action.WAIT))
+
+    evidence = compiler.exact_wait_negative_weight_evidence(teachers, actions)
+
+    torch.testing.assert_close(
+        evidence.failed_long_confluence_membership
+        + evidence.failed_short_confluence_membership,
+        evidence.failed_setup_confluence_membership,
+    )
+    assert evidence.failed_long_confluence_membership[0] > 0.8
+    assert evidence.failed_short_confluence_membership[0] < 0.2
+    assert evidence.failed_short_confluence_membership[1] > 0.8
+    assert evidence.failed_long_confluence_membership[1] < 0.2
+
+
 def test_confluence_objective_improves_hard_wait_without_losing_entry_sides() -> None:
     hard_wait = _teacher_row(
         chop_persistence=0.05,
@@ -270,6 +305,79 @@ def test_confluence_objective_improves_hard_wait_without_losing_entry_sides() ->
     assert confluence.last_train_metrics[
         "regime_selectivity_failed_setup_confluence_rows"
     ] > 0.0
+
+
+def test_side_conditioned_confluence_separates_failed_and_valid_entries_by_side(
+) -> None:
+    failed_long = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        long_score=0.90,
+    )
+    valid_long = failed_long.copy()
+    failed_short = _teacher_row(
+        chop_persistence=0.05,
+        readiness=0.95,
+        short_score=0.90,
+    )
+    valid_short = failed_short.copy()
+    rows = (
+        _transition((-1.0, 0.0, 1.0), failed_long, Action.WAIT),
+        _transition((1.0, 0.0, 0.0), valid_long, Action.ENTER_LONG_1),
+        _transition((0.0, -1.0, 1.0), failed_short, Action.WAIT),
+        _transition((0.0, 1.0, 0.0), valid_short, Action.ENTER_SHORT_1),
+    )
+    combined = _agent(
+        semantics=EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        negative_emphasis=2.0,
+    )
+    conditioned = _agent(
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        negative_emphasis=2.0,
+    )
+
+    for _ in range(4):
+        combined.train_batch(rows)
+        conditioned.train_batch(rows)
+
+    conditioned_actions, conditioned_probabilities = _flat_probabilities(
+        conditioned, rows
+    )
+    _, combined_probabilities = _flat_probabilities(combined, rows)
+    assert conditioned_actions.tolist() == [
+        int(Action.WAIT),
+        int(Action.ENTER_LONG_1),
+        int(Action.WAIT),
+        int(Action.ENTER_SHORT_1),
+    ]
+    for failed_index, valid_index, side in (
+        (0, 1, int(Action.ENTER_LONG_1)),
+        (2, 3, int(Action.ENTER_SHORT_1)),
+    ):
+        conditioned_margin = (
+            np.log(
+                conditioned_probabilities[failed_index, int(Action.WAIT)]
+                / conditioned_probabilities[failed_index, side]
+            )
+            - np.log(
+                conditioned_probabilities[valid_index, int(Action.WAIT)]
+                / conditioned_probabilities[valid_index, side]
+            )
+        )
+        combined_margin = (
+            np.log(
+                combined_probabilities[failed_index, int(Action.WAIT)]
+                / combined_probabilities[failed_index, side]
+            )
+            - np.log(
+                combined_probabilities[valid_index, int(Action.WAIT)]
+                / combined_probabilities[valid_index, side]
+            )
+        )
+        assert conditioned_margin > combined_margin
+    metrics = conditioned.last_train_metrics
+    assert metrics["regime_selectivity_failed_long_confluence_rows"] > 0.0
+    assert metrics["regime_selectivity_failed_short_confluence_rows"] > 0.0
 
 
 def test_association_semantics_learns_dead_wait_above_exact_transition_entries(

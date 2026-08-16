@@ -19,6 +19,7 @@ from .balance_aware_regime_selectivity import (
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     STATIC_STATE_SEMANTICS,
     REGIME_TEACHER_CHANNELS,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
 )
 from .decision import Action
 from .config import configure_runtime_environment
@@ -94,6 +95,10 @@ _REGIME_PERSISTENT_ADDITIVE_METRICS = (
     "regime_selectivity_failed_setup_confluence_rows",
     "regime_selectivity_failed_setup_confluence_weight_sum",
     "regime_selectivity_failed_setup_confluence_model_wait_probability_sum",
+    "regime_selectivity_failed_long_confluence_rows",
+    "regime_selectivity_failed_long_confluence_model_wait_probability_sum",
+    "regime_selectivity_failed_short_confluence_rows",
+    "regime_selectivity_failed_short_confluence_model_wait_probability_sum",
     "regime_selectivity_transition_positive_long_rows",
     "regime_selectivity_transition_positive_long_declared_side_probability_sum",
     "regime_selectivity_transition_positive_short_rows",
@@ -214,6 +219,63 @@ def persistent_chop_association_rank_loss(
         ) * active,
         active,
     )
+
+
+def side_conditioned_wait_rank_loss(
+    flat_action_values: torch.Tensor,
+    *,
+    failed_long_membership: torch.Tensor,
+    failed_short_membership: torch.Tensor,
+    valid_long_membership: torch.Tensor,
+    valid_short_membership: torch.Tensor,
+    q_temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Separate failed-versus-valid WAIT preference for Long and Short."""
+    memberships = (
+        failed_long_membership,
+        failed_short_membership,
+        valid_long_membership,
+        valid_short_membership,
+    )
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or any(value.shape != flat_action_values.shape[:-1] for value in memberships)
+        or isinstance(q_temperature, bool)
+        or not math.isfinite(float(q_temperature))
+        or float(q_temperature) <= 0.0
+    ):
+        raise ValueError("side-conditioned WAIT rank loss contract is invalid")
+    tiny = torch.finfo(flat_action_values.dtype).tiny
+    loss_sum = torch.zeros(
+        (), dtype=flat_action_values.dtype, device=flat_action_values.device
+    )
+    active_sides = torch.zeros_like(loss_sum)
+    for side_index, failed, valid in (
+        (int(Action.ENTER_LONG_1), failed_long_membership, valid_long_membership),
+        (int(Action.ENTER_SHORT_1), failed_short_membership, valid_short_membership),
+    ):
+        failed_mass = failed.sum()
+        valid_mass = valid.sum()
+        active = ((failed_mass > 0) & (valid_mass > 0)).to(
+            flat_action_values.dtype
+        )
+        wait_preference = (
+            flat_action_values[:, int(Action.WAIT)]
+            - flat_action_values[:, side_index]
+        ) / float(q_temperature)
+        failed_preference = (
+            wait_preference * failed
+        ).sum() / failed_mass.clamp_min(tiny)
+        valid_preference = (
+            wait_preference * valid
+        ).sum() / valid_mass.clamp_min(tiny)
+        loss_sum = loss_sum + nn.functional.softplus(
+            valid_preference - failed_preference
+        ) * active
+        active_sides = active_sides + active
+    return loss_sum, active_sides
 
 
 class RecurrentC51Network(nn.Module):
@@ -422,6 +484,7 @@ class RecurrentC51Agent:
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -435,6 +498,7 @@ class RecurrentC51Agent:
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
@@ -1088,6 +1152,8 @@ class RecurrentC51Agent:
         regime_selectivity_association_loss = teacher_loss
         regime_selectivity_association_active = teacher_loss
         regime_selectivity_association_skipped = teacher_loss
+        regime_selectivity_side_conditioned_loss = teacher_loss
+        regime_selectivity_side_conditioned_active_sides = teacher_loss
         regime_selectivity_additive: dict[str, torch.Tensor] = {}
         regime_channel_names = self.regime_teacher_channel_names
         regime_channel_additive = torch.zeros(
@@ -1397,6 +1463,7 @@ class RecurrentC51Agent:
                             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1425,6 +1492,7 @@ class RecurrentC51Agent:
                             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1461,7 +1529,10 @@ class RecurrentC51Agent:
                         ).sum() / (
                             wait_count
                             if self.regime_selectivity_semantics
-                            == EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+                            in {
+                                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            }
                             else wait_mass
                         ).clamp_min(1.0)
                         regime_selectivity_positive_long_loss = (
@@ -1496,12 +1567,19 @@ class RecurrentC51Agent:
                         failed_setup_confluence_membership = (
                             persistent_evidence.failed_setup_confluence_membership
                         )
+                        failed_long_confluence_membership = (
+                            persistent_evidence.failed_long_confluence_membership
+                        )
+                        failed_short_confluence_membership = (
+                            persistent_evidence.failed_short_confluence_membership
+                        )
                         association_group_active = torch.zeros_like(wait_active)
                         if (
                             self.regime_selectivity_semantics
                             in {
                                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             }
                         ):
                             (
@@ -1526,16 +1604,48 @@ class RecurrentC51Agent:
                             regime_selectivity_association_skipped = (
                                 1.0 - association_group_active
                             )
+                        side_conditioned_group_active = torch.zeros_like(wait_active)
+                        if (
+                            self.regime_selectivity_semantics
+                            == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+                        ):
+                            (
+                                side_conditioned_loss_sum,
+                                side_conditioned_group_active,
+                            ) = side_conditioned_wait_rank_loss(
+                                flat_q,
+                                failed_long_membership=(
+                                    failed_long_confluence_membership
+                                ),
+                                failed_short_membership=(
+                                    failed_short_confluence_membership
+                                ),
+                                valid_long_membership=ready_long_membership,
+                                valid_short_membership=ready_short_membership,
+                                q_temperature=(
+                                    self.regime_selectivity_q_temperature
+                                ),
+                            )
+                            regime_selectivity_side_conditioned_loss = (
+                                side_conditioned_loss_sum
+                                / side_conditioned_group_active.clamp_min(1.0)
+                            )
+                            regime_selectivity_side_conditioned_active_sides = (
+                                side_conditioned_group_active
+                            )
                         regime_selectivity_loss = (
                             regime_selectivity_exact_wait_loss * wait_active
                             + regime_selectivity_positive_long_loss * long_active
                             + regime_selectivity_positive_short_loss * short_active
                             + regime_selectivity_association_loss
+                            + regime_selectivity_side_conditioned_loss
+                            * side_conditioned_group_active
                         ) / (
                             wait_active
                             + long_active
                             + short_active
                             + association_group_active
+                            + side_conditioned_group_active
                         ).clamp_min(1.0)
                         regime_persistent_additive.update({
                             "regime_selectivity_exact_wait_rows": (
@@ -1582,6 +1692,22 @@ class RecurrentC51Agent:
                             "regime_selectivity_failed_setup_confluence_"
                             "model_wait_probability_sum": (
                                 failed_setup_confluence_membership
+                                * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_failed_long_confluence_rows": (
+                                failed_long_confluence_membership.sum()
+                            ),
+                            "regime_selectivity_failed_long_confluence_"
+                            "model_wait_probability_sum": (
+                                failed_long_confluence_membership
+                                * model_wait_probability
+                            ).sum(),
+                            "regime_selectivity_failed_short_confluence_rows": (
+                                failed_short_confluence_membership.sum()
+                            ),
+                            "regime_selectivity_failed_short_confluence_"
+                            "model_wait_probability_sum": (
+                                failed_short_confluence_membership
                                 * model_wait_probability
                             ).sum(),
                             "regime_selectivity_transition_positive_long_rows": (
@@ -2080,6 +2206,8 @@ class RecurrentC51Agent:
             regime_selectivity_association_loss,
             regime_selectivity_association_active,
             regime_selectivity_association_skipped,
+            regime_selectivity_side_conditioned_loss,
+            regime_selectivity_side_conditioned_active_sides,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -2130,6 +2258,8 @@ class RecurrentC51Agent:
             regime_selectivity_association_loss_value,
             regime_selectivity_association_active_value,
             regime_selectivity_association_skipped_value,
+            regime_selectivity_side_conditioned_loss_value,
+            regime_selectivity_side_conditioned_active_sides_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -2302,6 +2432,12 @@ class RecurrentC51Agent:
         failed_setup_confluence_rows = regime_persistent_metric_values[
             "regime_selectivity_failed_setup_confluence_rows"
         ]
+        failed_long_confluence_rows = regime_persistent_metric_values[
+            "regime_selectivity_failed_long_confluence_rows"
+        ]
+        failed_short_confluence_rows = regime_persistent_metric_values[
+            "regime_selectivity_failed_short_confluence_rows"
+        ]
         for rows, sum_name, mean_name in (
             (
                 exact_wait_rows,
@@ -2352,6 +2488,20 @@ class RecurrentC51Agent:
                 "regime_selectivity_failed_setup_confluence_"
                 "model_wait_probability_sum",
                 "regime_selectivity_failed_setup_confluence_"
+                "model_wait_probability_mean",
+            ),
+            (
+                failed_long_confluence_rows,
+                "regime_selectivity_failed_long_confluence_"
+                "model_wait_probability_sum",
+                "regime_selectivity_failed_long_confluence_"
+                "model_wait_probability_mean",
+            ),
+            (
+                failed_short_confluence_rows,
+                "regime_selectivity_failed_short_confluence_"
+                "model_wait_probability_sum",
+                "regime_selectivity_failed_short_confluence_"
                 "model_wait_probability_mean",
             ),
             (
@@ -2500,6 +2650,12 @@ class RecurrentC51Agent:
             ),
             "regime_selectivity_association_skipped": (
                 regime_selectivity_association_skipped_value
+            ),
+            "regime_selectivity_side_conditioned_loss": (
+                regime_selectivity_side_conditioned_loss_value
+            ),
+            "regime_selectivity_side_conditioned_active_sides": (
+                regime_selectivity_side_conditioned_active_sides_value
             ),
             **regime_selectivity_metric_values,
             **regime_channel_metric_values,

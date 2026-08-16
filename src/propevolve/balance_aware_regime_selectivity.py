@@ -42,6 +42,9 @@ PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS = (
 )
 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 EXPANSION_REGIME_CONFLUENCE_SEMANTICS = "expansion_regime_confluence_v3"
+SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS = (
+    "side_conditioned_expansion_regime_confluence_v4"
+)
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
     "-headroom_pressure*(1-mll_headroom_fraction)"
@@ -61,6 +64,14 @@ EXPANSION_REGIME_CONFLUENCE_FORMULA = (
     "exact_long_ce,exact_short_ce,"
     "zero_margin_dead_vs_transition_positive_wait_rank)"
 )
+SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA = (
+    "equal_present_group_mean("
+    "exact_wait_expansion_regime_confluence_weighted_ce,"
+    "exact_long_ce,exact_short_ce,"
+    "dead_vs_transition_positive_wait_rank,"
+    "failed_long_vs_valid_long_wait_rank,"
+    "failed_short_vs_valid_short_wait_rank)"
+)
 
 
 class PersistentChopEvidence(NamedTuple):
@@ -72,6 +83,8 @@ class PersistentChopEvidence(NamedTuple):
     transition_positive_long_membership: torch.Tensor
     transition_positive_short_membership: torch.Tensor
     failed_setup_confluence_membership: torch.Tensor
+    failed_long_confluence_membership: torch.Tensor
+    failed_short_confluence_membership: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -137,6 +150,7 @@ class BalanceAwareRegimeSelectivity:
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             )
             or not np.isfinite(self.persistent_chop_negative_emphasis)
             or float(self.persistent_chop_negative_emphasis) < 0.0
@@ -146,6 +160,7 @@ class BalanceAwareRegimeSelectivity:
             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         } and any(
             channel not in names for channel in REGIME_TRANSITION_CHANNELS
         ):
@@ -283,6 +298,7 @@ class BalanceAwareRegimeSelectivity:
             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }:
             raise ValueError(
                 "exact WAIT negative weights require persistent-chop semantics"
@@ -313,11 +329,14 @@ class BalanceAwareRegimeSelectivity:
         long_rows = (entry_action_targets == 1).to(teacher_probabilities.dtype)
         short_rows = (entry_action_targets == 2).to(teacher_probabilities.dtype)
         failed_setup_confluence = torch.zeros_like(persistent_dead_chop)
+        failed_long_confluence = torch.zeros_like(persistent_dead_chop)
+        failed_short_confluence = torch.zeros_like(persistent_dead_chop)
         transition_positive_long = long_rows * transition_ready_chop
         transition_positive_short = short_rows * transition_ready_chop
         if self.semantics in {
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }:
             epsilon = float(self.probability_epsilon)
             long_score = (
@@ -348,7 +367,10 @@ class BalanceAwareRegimeSelectivity:
             transition_positive_short = (
                 transition_positive_short * short_expansion_evidence
             )
-            if self.semantics == EXPANSION_REGIME_CONFLUENCE_SEMANTICS:
+            if self.semantics in {
+                EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            }:
                 failed_setup_confluence = (
                     wait_rows
                     * transition_ready_chop
@@ -357,6 +379,23 @@ class BalanceAwareRegimeSelectivity:
                         short_expansion_evidence,
                     )
                 ).clamp(0.0, 1.0)
+                if (
+                    self.semantics
+                    == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+                ):
+                    evidence_sum = (
+                        long_expansion_evidence + short_expansion_evidence
+                    ).clamp_min(torch.finfo(teacher_probabilities.dtype).tiny)
+                    failed_long_confluence = (
+                        failed_setup_confluence
+                        * long_expansion_evidence
+                        / evidence_sum
+                    )
+                    failed_short_confluence = (
+                        failed_setup_confluence
+                        * short_expansion_evidence
+                        / evidence_sum
+                    )
         wait_emphasis = (
             persistent_dead_chop + failed_setup_confluence
         ).clamp(0.0, 1.0)
@@ -370,6 +409,8 @@ class BalanceAwareRegimeSelectivity:
             transition_positive_long_membership=transition_positive_long,
             transition_positive_short_membership=transition_positive_short,
             failed_setup_confluence_membership=failed_setup_confluence,
+            failed_long_confluence_membership=failed_long_confluence,
+            failed_short_confluence_membership=failed_short_confluence,
         )
 
 
@@ -388,6 +429,8 @@ __all__ = [
     "REGIME_STATE_CHANNELS",
     "REGIME_TEACHER_CHANNELS",
     "REGIME_TRANSITION_CHANNELS",
+    "SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA",
+    "SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS",
     "SCHEMA",
     "STATIC_STATE_SEMANTICS",
     "TARGET_SOURCE",

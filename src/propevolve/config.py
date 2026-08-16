@@ -558,6 +558,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
         SCHEMA,
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         STATIC_STATE_SEMANTICS,
         TARGET_SOURCE,
     )
@@ -618,6 +620,9 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         EXPANSION_REGIME_CONFLUENCE_SEMANTICS: (
             EXPANSION_REGIME_CONFLUENCE_FORMULA
         ),
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS: (
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA
+        ),
     }
     expected_formula = expected_formulas.get(semantics)
     policy_health = (
@@ -636,12 +641,14 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         semantics in {
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }
         or (
             isinstance(specification, dict)
             and specification.get("formula") in {
                 PERSISTENT_CHOP_ASSOCIATION_FORMULA,
                 EXPANSION_REGIME_CONFLUENCE_FORMULA,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
             }
         )
         or require_positive_association is True
@@ -650,6 +657,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         semantics not in {
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }
         or not isinstance(specification, dict)
         or set(specification) != required
@@ -683,6 +691,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }
         or specification.get("formula") != expected_formula
         or (
@@ -727,6 +736,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
                 PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             }
             and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
         )

@@ -1444,6 +1444,7 @@ def _training_evaluation_gates(
             "persistent_chop_negative_weight_v1",
             "persistent_chop_association_v2",
             "expansion_regime_confluence_v3",
+            "side_conditioned_expansion_regime_confluence_v4",
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1499,6 +1500,7 @@ def _training_evaluation_gates(
             if regime_selectivity_semantics in {
                 "persistent_chop_association_v2",
                 "expansion_regime_confluence_v3",
+                "side_conditioned_expansion_regime_confluence_v4",
             }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
@@ -1508,7 +1510,10 @@ def _training_evaluation_gates(
                         "final_regime_probe_transition_positive_short_response",
                     )
                 )
-            if regime_selectivity_semantics == "expansion_regime_confluence_v3":
+            if regime_selectivity_semantics in {
+                "expansion_regime_confluence_v3",
+                "side_conditioned_expansion_regime_confluence_v4",
+            }:
                 gates.extend((
                     EvaluationGate(
                         "regime_selectivity_failed_setup_confluence_rows",
@@ -1517,6 +1522,32 @@ def _training_evaluation_gates(
                     ),
                     EvaluationGate(
                         "final_regime_probe_failed_setup_confluence_mass",
+                        ">",
+                        0.0,
+                    ),
+                ))
+            if (
+                regime_selectivity_semantics
+                == "side_conditioned_expansion_regime_confluence_v4"
+            ):
+                gates.extend((
+                    EvaluationGate(
+                        "regime_selectivity_failed_long_confluence_rows",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "regime_selectivity_failed_short_confluence_rows",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "final_regime_probe_failed_long_confluence_mass",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "final_regime_probe_failed_short_confluence_mass",
                         ">",
                         0.0,
                     ),

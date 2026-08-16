@@ -17,6 +17,9 @@ CONTRACT = Path("config/sweeps/stage2a_regime_selectivity_tpe_v2.json")
 CONFLUENCE_CONTRACT = Path(
     "config/sweeps/stage2a_regime_selectivity_tpe_v3.json"
 )
+SIDE_CONDITIONED_CONTRACT = Path(
+    "config/sweeps/stage2a_regime_selectivity_tpe_v4.json"
+)
 
 
 def _state(
@@ -88,6 +91,26 @@ def test_stage2a_v3_tpe_searches_the_fixed_wait_confluence_mechanism() -> None:
     assert sweep.screening_stage == "expansion_regime_confluence_100ep"
     assert sweep.base_config["regime_selectivity"]["semantics"] == (
         "expansion_regime_confluence_v3"
+    )
+    assert set(sweep.search_space) == {
+        "challenge.large_win_bonus_coefficient",
+        "regime_selectivity.loss_weight",
+        "regime_selectivity.persistent_chop_negative_emphasis",
+        "training.teacher_guidance_dropout_end",
+    }
+    assert sweep.base_config["agent"]["learning_rate"] == 0.0001
+    assert sweep.base_config["agent"]["policy_retention_loss_weight"] == 10
+    assert sweep.base_config["entry_supervision"]["target_r"] == 2.0
+
+
+def test_stage2a_v4_tpe_searches_side_conditioned_wait_discrimination() -> None:
+    sweep = load_optuna_sweep(SIDE_CONDITIONED_CONTRACT)
+
+    assert sweep.screening_stage == (
+        "side_conditioned_expansion_regime_confluence_100ep"
+    )
+    assert sweep.base_config["regime_selectivity"]["semantics"] == (
+        "side_conditioned_expansion_regime_confluence_v4"
     )
     assert set(sweep.search_space) == {
         "challenge.large_win_bonus_coefficient",

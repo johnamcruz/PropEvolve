@@ -615,10 +615,12 @@ def test_final_probe_rows_explain_predictions_with_regime_channels_and_strata() 
     assert row["persistent_regime_strata"].keys() == {
         "persistent_dead_chop_membership",
         "transition_ready_membership",
-            "transition_positive_long_membership",
-            "transition_positive_short_membership",
-            "failed_setup_confluence_membership",
-        }
+        "transition_positive_long_membership",
+        "transition_positive_short_membership",
+        "failed_setup_confluence_membership",
+        "failed_long_confluence_membership",
+        "failed_short_confluence_membership",
+    }
     confusion_total = sum(
         report.metrics[
             f"final_regime_probe_target_{target}_predicted_{prediction}_rows"

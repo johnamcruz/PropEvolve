@@ -304,6 +304,12 @@ def evaluate_final_regime_probe(
     failed_setup_confluence = (
         evidence.failed_setup_confluence_membership.numpy().astype(np.float64)
     )
+    failed_long_confluence = (
+        evidence.failed_long_confluence_membership.numpy().astype(np.float64)
+    )
+    failed_short_confluence = (
+        evidence.failed_short_confluence_membership.numpy().astype(np.float64)
+    )
     for row_index, receipt in enumerate(row_receipts):
         receipt["persistent_regime_strata"] = {
             "persistent_dead_chop_membership": float(dead[row_index]),
@@ -313,11 +319,23 @@ def evaluate_final_regime_probe(
             "failed_setup_confluence_membership": float(
                 failed_setup_confluence[row_index]
             ),
+            "failed_long_confluence_membership": float(
+                failed_long_confluence[row_index]
+            ),
+            "failed_short_confluence_membership": float(
+                failed_short_confluence[row_index]
+            ),
         }
     metrics["final_regime_probe_persistent_dead_wait_mass"] = float(dead.sum())
     metrics["final_regime_probe_transition_ready_wait_mass"] = float(ready.sum())
     metrics["final_regime_probe_failed_setup_confluence_mass"] = float(
         failed_setup_confluence.sum()
+    )
+    metrics["final_regime_probe_failed_long_confluence_mass"] = float(
+        failed_long_confluence.sum()
+    )
+    metrics["final_regime_probe_failed_short_confluence_mass"] = float(
+        failed_short_confluence.sum()
     )
     metrics["final_regime_probe_dead_wait_minus_transition_ready_wait"] = (
         _weighted_mean(wait_probability, dead)
