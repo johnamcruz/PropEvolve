@@ -22,8 +22,6 @@ SEARCHABLE_PATHS = frozenset({
     "agent.learning_rate",
     "agent.policy_retention_loss_weight",
     "challenge.large_win_bonus_coefficient",
-    "challenge.ratchet_giveback_r",
-    "entry_supervision.loss_weight",
     "regime_selectivity.loss_weight",
     "regime_selectivity.persistent_chop_negative_emphasis",
     "training.teacher_guidance_dropout_end",
@@ -243,8 +241,27 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     if constraints != FEASIBILITY_CONSTRAINTS:
         raise ValueError("Optuna feasibility constraints drifted")
     search_space = payload["search_space"]
-    if not isinstance(search_space, dict) or set(search_space) != SEARCHABLE_PATHS:
+    if not isinstance(search_space, dict) or not search_space:
         raise ValueError("Optuna search space must be nonempty")
+    from .orchestration import (
+        _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS,
+        _EXTERNAL_PARENT_ECONOMIC_FIELDS,
+    )
+
+    parent_bound = []
+    for name in search_space:
+        root, _, leaf = str(name).partition(".")
+        if root in _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS or (
+            root == "challenge" and leaf in _EXTERNAL_PARENT_ECONOMIC_FIELDS
+        ):
+            parent_bound.append(str(name))
+    if parent_bound:
+        raise ValueError(
+            "Optuna search space changes external parent contract: "
+            + ", ".join(sorted(parent_bound))
+        )
+    if set(search_space) != SEARCHABLE_PATHS:
+        raise ValueError("Optuna search space drifted")
     for name, specification in search_space.items():
         if not isinstance(specification, dict):
             raise ValueError(f"Optuna search dimension is invalid: {name}")

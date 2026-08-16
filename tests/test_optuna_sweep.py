@@ -61,8 +61,6 @@ def test_stage2a_tpe_contract_searches_only_causal_learning_knobs() -> None:
         "agent.learning_rate",
         "agent.policy_retention_loss_weight",
         "challenge.large_win_bonus_coefficient",
-        "challenge.ratchet_giveback_r",
-        "entry_supervision.loss_weight",
         "regime_selectivity.loss_weight",
         "regime_selectivity.persistent_chop_negative_emphasis",
         "training.teacher_guidance_dropout_end",
@@ -79,6 +77,34 @@ def test_stage2a_tpe_contract_searches_only_causal_learning_knobs() -> None:
         "selection.short_entry_count": (">", 0.0),
         "selection.two_r_mfe_capture_ratio": (">=", 0.7),
     }
+
+
+@pytest.mark.parametrize(
+    "path",
+    ("entry_supervision.loss_weight", "challenge.ratchet_giveback_r"),
+)
+def test_tpe_rejects_external_parent_contract_search_dimensions(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    payload = json.loads(CONTRACT.read_text())
+    payload["base_config"] = str(
+        Path("config/historical_mask_expansion_anchored_regime_stage2_v10.json")
+        .resolve()
+    )
+    payload["search_space"][path] = {
+        "type": "float",
+        "low": 0.1,
+        "high": 0.2,
+    }
+    contract = tmp_path / "invalid-parent-drift.json"
+    contract.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="Optuna search space changes external parent contract",
+    ):
+        load_optuna_sweep(contract)
 
 
 def test_tpe_runs_existing_campaign_trials_sequentially_and_resumes_sqlite(

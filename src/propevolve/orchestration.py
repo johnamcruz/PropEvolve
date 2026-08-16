@@ -48,6 +48,34 @@ from .reasoning import GepaReflectiveReasoningAdapter
 
 
 _STAGE_ADAPTER = "propevolve-candidate"
+
+_EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS = (
+    "assets",
+    "cache",
+    "cache_root",
+    "tickers",
+    "deployment_tickers",
+    "training_only_tickers",
+    "timeframe_minutes",
+    "temporal",
+    "point_values",
+    "round_trip_fees",
+    "sealed_confirmation",
+    "entry_supervision",
+)
+_EXTERNAL_PARENT_ECONOMIC_FIELDS = (
+    "profit_target",
+    "max_loss",
+    "episode_days",
+    "bars_per_day",
+    "max_position_size",
+    "minimum_mll_headroom",
+    "trailing_mll_lock",
+    "per_trade_risk_dollars",
+    "ratchet_activation_r",
+    "ratchet_giveback_r",
+    "ratchet_lock_floor_r",
+)
 _GATE_ADAPTER = "propevolve-economic-evidence"
 _DEFAULT_REASONING = object()
 
@@ -165,26 +193,12 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
         raise ValueError("external parent causal contract drifted")
     # Teachers supervise training only; Stage 2 may replace them while the
     # deployed parent's causal observation and economic contracts stay fixed.
-    causal_recipe_paths = (
-        "assets",
-        "cache",
-        "cache_root",
-        "tickers",
-        "deployment_tickers",
-        "training_only_tickers",
-        "timeframe_minutes",
-        "temporal",
-        "point_values",
-        "round_trip_fees",
-        "sealed_confirmation",
-        "entry_supervision",
-    )
     def same_json(left: object, right: object) -> bool:
         return json.dumps(
             left, sort_keys=True, separators=(",", ":")
         ) == json.dumps(right, sort_keys=True, separators=(",", ":"))
 
-    for path in causal_recipe_paths:
+    for path in _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS:
         parent_present = path in parent_recipe
         child_present = path in config
         if parent_present != child_present or (
@@ -193,20 +207,7 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
             raise ValueError(
                 f"external parent causal recipe drifted at {path}"
             )
-    economic_fields = (
-        "profit_target",
-        "max_loss",
-        "episode_days",
-        "bars_per_day",
-        "max_position_size",
-        "minimum_mll_headroom",
-        "trailing_mll_lock",
-        "per_trade_risk_dollars",
-        "ratchet_activation_r",
-        "ratchet_giveback_r",
-        "ratchet_lock_floor_r",
-    )
-    for field in economic_fields:
+    for field in _EXTERNAL_PARENT_ECONOMIC_FIELDS:
         parent_present = field in parent_recipe["challenge"]
         child_present = field in config["challenge"]
         if parent_present != child_present or (

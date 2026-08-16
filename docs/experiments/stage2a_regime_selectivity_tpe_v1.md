@@ -17,12 +17,13 @@ is fixed and is not a search parameter.
 
 ## Search
 
-The 24-trial SQLite study uses eight causal learning or selection parameters:
-learning rate, policy-retention loss, large-winner bonus, ratchet giveback,
-Entry-supervision loss, Regime-selectivity loss, persistent-chop emphasis,
-and teacher-guidance dropout end. Account loss, position size, MLL headroom,
-per-trade risk, data, labels, artifacts, architecture, and temporal roles are
-not tunable.
+The 24-trial SQLite study uses six training-only learning or selection
+parameters: learning rate, policy-retention loss, large-winner bonus,
+Regime-selectivity loss, persistent-chop emphasis, and teacher-guidance
+dropout end. Entry supervision, ratchet behavior, account loss, position size,
+MLL headroom, per-trade risk, data, labels, artifacts, architecture, and
+temporal roles are fixed by the authenticated Stage 1 parent and are not
+tunable.
 
 One MPS trial runs at a time. The existing episode-18 training short circuit,
 episode-100 policy-health/economic-futility checks, first-blow selection stop,
