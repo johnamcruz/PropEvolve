@@ -239,7 +239,7 @@ class FakeCandidateRunner:
             },
         }))
         hidden_dim = int(config["agent"]["hidden_dim"])
-        model = self.archive.root / f"candidate-{hidden_dim}.pt"
+        model = output / "model.pt"
         model.write_bytes(str(hidden_dim).encode())
         candidate = self.archive.register_candidate(
             model,
