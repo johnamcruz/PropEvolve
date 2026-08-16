@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = [
   "ml-training-loop @ git+https://github.com/johnamcruz/ML-training-loop.git@9150279a179598484ff284b116ef990e6c206a37",
   "numpy>=1.26",
+  "optuna>=4.8,<5",
   "pandas>=2.1",
   "torch>=2.4",
 ]

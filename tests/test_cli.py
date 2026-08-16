@@ -7,43 +7,44 @@ from types import SimpleNamespace
 from ml_training_loop import Phase, RunState
 from ml_training_loop.stores import JsonRunStore
 import propevolve.orchestration
-import propevolve.sweep
 import propevolve.teachers.expansion
 import propevolve.teachers.regime
 import propevolve.teachers.trend
 from propevolve.cli import main
 
 
-def test_sweep_command_dispatches_the_existing_campaign_queue(
+def test_optuna_sweep_command_dispatches_constrained_tpe(
     monkeypatch,
     capsys,
 ) -> None:
+    import propevolve.optuna_sweep
+
     calls = []
 
     def fake_sweep(config_path):
         calls.append(config_path)
         return SimpleNamespace(
             status="COMPLETE",
-            winner_cell="cell-03",
-            leaderboard_path=Path("runs/study/leaderboard.json"),
+            best_trial_number=7,
+            study_path=Path("runs/study/study.db"),
+            result_path=Path("runs/study/study.result.json"),
         )
 
-    monkeypatch.setattr(propevolve.sweep, "run_grid_sweep", fake_sweep)
+    monkeypatch.setattr(propevolve.optuna_sweep, "run_optuna_sweep", fake_sweep)
 
     code = main([
-        "sweep",
+        "optuna-sweep",
         "--config",
-        "config/sweeps/stage2a_regime_selectivity_grid_v1.json",
+        "config/sweeps/stage2a_regime_selectivity_tpe_v1.json",
     ])
 
     assert code == 0
-    assert calls == [
-        "config/sweeps/stage2a_regime_selectivity_grid_v1.json"
-    ]
+    assert calls == ["config/sweeps/stage2a_regime_selectivity_tpe_v1.json"]
     assert json.loads(capsys.readouterr().out) == {
-        "leaderboard": "runs/study/leaderboard.json",
+        "best_trial_number": 7,
+        "result": "runs/study/study.result.json",
         "status": "COMPLETE",
-        "winner_cell": "cell-03",
+        "study": "runs/study/study.db",
     }
 
 
