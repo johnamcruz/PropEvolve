@@ -41,7 +41,8 @@ def test_verified_regime_teacher_has_authenticated_soft_outputs() -> None:
         probabilities[0],
         (0.48450127, 0.34060439, 0.17489433),
         rtol=0.0,
-        atol=1e-7,
+        # Supported Torch CPU kernels can differ slightly in float32 softmax.
+        atol=1e-6,
     )
     assert teacher.manifest["regime"]["validation_verdict"] == "PROCEED"
     assert teacher.manifest["regime"]["best_epoch"] == 39
