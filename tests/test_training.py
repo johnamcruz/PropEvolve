@@ -1970,7 +1970,7 @@ def test_episode_budget_drives_learning_schedules_by_episode_position() -> None:
 
     assert agent.epsilons == pytest.approx([1.0, 0.75, 0.5, 0.25])
     assert agent.teacher_weight_scales == pytest.approx([0.5, 0.0])
-    assert agent.entry_action_weight_scales == pytest.approx([0.5, 0.0])
+    assert agent.entry_action_weight_scales == [1.0, 1.0]
     assert [row["teacher_schedule_progress"] for row in diagnostics] == [0.5, 1.0]
     assert [
         row["teacher_guidance_dropout_probability"] for row in diagnostics
@@ -2128,12 +2128,13 @@ def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
 def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
     agent = Agent()
     diagnostics = []
-    observed_targets = []
+    observed_visibility = []
 
     class CapturingReplay(BalancedSequenceReplay):
         def add(self, episode):
-            observed_targets.extend(
-                transition.teacher_target for transition in episode.transitions
+            observed_visibility.extend(
+                transition.teacher_imitation_visible
+                for transition in episode.transitions
             )
             super().add(episode)
 
@@ -2158,7 +2159,7 @@ def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    assert [target is not None for target in observed_targets] == [
+    assert observed_visibility == [
         True, True, True, False, True, False, True, False
     ]
     assert diagnostics[0]["teacher_weight_scale"] == pytest.approx(0.6)
@@ -2171,12 +2172,13 @@ def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
 def test_teacher_curriculum_has_a_declared_final_autonomy_tail() -> None:
     agent = Agent()
     diagnostics = []
-    observed_targets = []
+    observed_visibility = []
 
     class CapturingReplay(BalancedSequenceReplay):
         def add(self, episode):
-            observed_targets.extend(
-                transition.teacher_target for transition in episode.transitions
+            observed_visibility.extend(
+                transition.teacher_imitation_visible
+                for transition in episode.transitions
             )
             super().add(episode)
 
@@ -2202,7 +2204,7 @@ def test_teacher_curriculum_has_a_declared_final_autonomy_tail() -> None:
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    assert [target is not None for target in observed_targets] == [
+    assert observed_visibility == [
         True, False, True, False, False, False, False, False
     ]
     assert diagnostics[1]["teacher_weight_scale"] == 0.0
@@ -2239,12 +2241,13 @@ def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
                 "equity_pnl": 0.0,
             }
 
-    observed = []
+    observed_visibility = []
 
     class CapturingReplay(BalancedSequenceReplay):
         def add(self, episode):
-            observed.extend(
-                transition.teacher_target for transition in episode.transitions
+            observed_visibility.extend(
+                transition.teacher_imitation_visible
+                for transition in episode.transitions
             )
             super().add(episode)
 
@@ -2269,10 +2272,10 @@ def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
         teacher_autonomy_start_fraction=0.8,
     )
 
-    assert observed[8:] == [None, None]
+    assert observed_visibility[8:] == [False, False]
 
 
-def test_entry_supervision_keeps_the_legacy_label_visibility_boundary() -> None:
+def test_teacher_dropout_does_not_remove_exact_action_or_confluence_supervision() -> None:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -2306,13 +2309,17 @@ def test_entry_supervision_keeps_the_legacy_label_visibility_boundary() -> None:
                 "equity_pnl": 0.0,
             }
 
-    observed: list[tuple[np.ndarray | None, Action | None]] = []
+    observed: list[tuple[np.ndarray | None, Action | None, bool]] = []
     diagnostics = []
 
     class CapturingReplay(BalancedSequenceReplay):
         def add(self, episode):
             observed.extend(
-                (transition.teacher_target, transition.entry_action_target)
+                (
+                    transition.teacher_target,
+                    transition.entry_action_target,
+                    transition.teacher_imitation_visible,
+                )
                 for transition in episode.transitions
             )
             super().add(episode)
@@ -2343,24 +2350,29 @@ def test_entry_supervision_keeps_the_legacy_label_visibility_boundary() -> None:
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    # The extended optimizer schedule must not expose new labels beyond the
-    # existing teacher visibility boundary or feed labels into select_action.
+    # Dropout applies only to optional teacher imitation. Exact action and
+    # confluence labels remain available to the training loss on every row.
     assert any(
-        semantic is not None and action == Action.ENTER_LONG_1
-        for semantic, action in observed[:8]
+        semantic is not None and action == Action.ENTER_LONG_1 and visible
+        for semantic, action, visible in observed[:8]
     )
-    assert observed[8:] == [(None, None), (None, None)]
+    assert all(
+        semantic is not None and action == Action.ENTER_LONG_1
+        for semantic, action, _ in observed
+    )
+    assert observed[-2][2:] == (False,)
+    assert observed[-1][2:] == (False,)
     assert agent.teacher_weight_scales[0] == 0.0
-    assert agent.entry_action_weight_scales[0] == 0.0
+    assert agent.entry_action_weight_scales[0] == 1.0
     assert diagnostics[0]["teacher_weight_scale"] == 0.0
-    assert diagnostics[0]["entry_action_weight_scale"] == 0.0
+    assert diagnostics[0]["entry_action_weight_scale"] == 1.0
     assert diagnostics[0]["teacher_schedule_progress"] == 1.0
     assert diagnostics[0]["entry_action_schedule_progress"] == 1.0
     assert diagnostics[0]["entry_action_target_counts"]["ENTER_LONG_1"] > 0
     assert diagnostics[0]["entry_action_target_counts"]["WAIT"] == 0
 
 
-def test_entry_supervision_has_a_distinct_teacher_free_replay_phase() -> None:
+def test_exact_entry_supervision_remains_active_after_imitation_autonomy() -> None:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -2439,30 +2451,27 @@ def test_entry_supervision_has_a_distinct_teacher_free_replay_phase() -> None:
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    # Episode nine updates at 90%: the generic teacher is fully autonomous,
-    # while exact Entry labels still consolidate through replay.  Episode ten
-    # is the final 5% autonomy check with both objectives disabled.
+    # The generic imitation teacher reaches autonomy while exact Entry labels
+    # remain active through the entire training run.
     assert diagnostics[8]["teacher_weight_scale"] == 0.0
-    assert diagnostics[8]["entry_action_weight_scale"] == pytest.approx(1 / 19)
+    assert diagnostics[8]["entry_action_weight_scale"] == 1.0
     assert agent.teacher_weight_scales[8] == 0.0
-    assert agent.entry_action_weight_scales[8] == pytest.approx(1 / 19)
+    assert agent.entry_action_weight_scales[8] == 1.0
     assert agent.replayed_entry_rows[8] > 0
     assert diagnostics[9]["teacher_weight_scale"] == 0.0
-    assert diagnostics[9]["entry_action_weight_scale"] == 0.0
+    assert diagnostics[9]["entry_action_weight_scale"] == 1.0
     assert agent.teacher_weight_scales[9] == 0.0
-    assert agent.entry_action_weight_scales[9] == 0.0
+    assert agent.entry_action_weight_scales[9] == 1.0
     summary = training_module._diagnostic_aggregate(diagnostics)
     assert summary["latest_teacher_weight_scale"] == 0.0
-    assert summary["latest_entry_action_weight_scale"] == 0.0
+    assert summary["latest_entry_action_weight_scale"] == 1.0
     assert summary["latest_teacher_schedule_progress"] == 1.0
     assert summary["latest_entry_action_schedule_progress"] == 1.0
     consolidation_summary = training_module._diagnostic_aggregate(
         diagnostics[8:]
     )
     assert consolidation_summary["mean_teacher_weight_scale"] == 0.0
-    assert consolidation_summary[
-        "mean_entry_action_weight_scale"
-    ] == pytest.approx(1 / 38)
+    assert consolidation_summary["mean_entry_action_weight_scale"] == 1.0
 
 
 @pytest.mark.parametrize("invalid", (True, "0.95", 0.79, 1.01))
@@ -4104,6 +4113,21 @@ def test_evaluation_never_updates_agent() -> None:
     result = evaluate_agent(agent, Environment(), episodes=2, recurrent_horizon=2)
     assert result.passes == 2
     assert agent.updates == 0
+
+
+def test_teacher_free_evaluation_performs_zero_teacher_lookups() -> None:
+    class TeacherLookupTripwireEnvironment(Environment):
+        def teacher_lookup(self, ticker: str, decision_index: int):
+            raise AssertionError("teacher-free evaluation accessed a teacher")
+
+    result = evaluate_agent(
+        Agent(),
+        TeacherLookupTripwireEnvironment(),
+        episodes=2,
+        recurrent_horizon=2,
+    )
+
+    assert result.passes == 2
 
 
 def test_greedy_evaluation_preserves_serialized_agent_state(

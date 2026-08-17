@@ -10,6 +10,7 @@ import torch
 from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     STATIC_STATE_SEMANTICS,
 )
 from propevolve.agent import RecurrentC51Agent, side_conditioned_wait_rank_loss
@@ -86,6 +87,107 @@ def _selectivity() -> BalanceAwareRegimeSelectivity:
     )
 
 
+def test_frozen_confluence_contract_requires_side_dominance_and_preserves_exact_classes(
+) -> None:
+    selectivity = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.10, 0.10),
+        probability_epsilon=1e-6,
+        headroom_pressure=1.0,
+        dominant_chop_pressure=2.0,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    rows = torch.stack((
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.95,
+            short_clean=0.95,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.90,
+            short_clean=0.90,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.05,
+            long_clean=0.05,
+            short_attempt=0.05,
+            short_clean=0.05,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.20,
+            long_clean=0.20,
+            short_attempt=0.20,
+            short_clean=0.20,
+            chop=0.95,
+            neutral=0.03,
+            trend=0.02,
+        ),
+    ))
+    targets = torch.tensor((
+        int(Action.ENTER_LONG_1),
+        int(Action.ENTER_SHORT_1),
+        int(Action.ENTER_LONG_1),
+        int(Action.WAIT),
+        int(Action.WAIT),
+        int(Action.WAIT),
+        int(Action.WAIT),
+        int(Action.WAIT),
+    ))
+
+    evidence = selectivity.exact_wait_negative_weight_evidence(rows, targets)
+
+    assert evidence.transition_positive_long_membership[0] > 0.0
+    assert evidence.transition_positive_short_membership[1] > 0.0
+    assert (
+        evidence.transition_positive_long_membership[0]
+        > evidence.transition_positive_long_membership[2]
+    )
+    assert evidence.failed_long_confluence_membership[3] > 0.0
+    assert evidence.failed_short_confluence_membership[4] > 0.0
+    assert evidence.exact_wait_weights[3] > evidence.exact_wait_weights[6]
+    assert evidence.exact_wait_weights[4] > evidence.exact_wait_weights[6]
+    assert evidence.transition_positive_long_membership[3] == 0.0
+    assert evidence.transition_positive_short_membership[4] == 0.0
+    assert evidence.exact_wait_weights[5] > evidence.exact_wait_weights[6]
+    assert evidence.exact_wait_weights[7] > evidence.exact_wait_weights[6]
+
+
 def _agent(
     *,
     seed: int,
@@ -142,6 +244,7 @@ def _sequence(
     *,
     headroom: float,
     target: Action,
+    teacher_imitation_visible: bool = True,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     return (
@@ -154,10 +257,67 @@ def _sequence(
             valid_actions=flat,
             next_valid_actions=(),
             teacher_target=teacher.numpy(),
+            teacher_imitation_visible=teacher_imitation_visible,
             entry_action_target=target,
             regime_selectivity_headroom_fraction=headroom,
         ),
     )
+
+
+def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(
+) -> None:
+    agent = _agent(
+        seed=503,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=(
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+        ),
+        persistent_chop_negative_emphasis=2.0,
+    )
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    long_winner = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            **ready,
+        ),
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        teacher_imitation_visible=False,
+    )
+    failed_long = _sequence(
+        (0.0, 1.0, 0.0),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            **ready,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )
+
+    agent.train_batch(
+        (long_winner, failed_long),
+        teacher_weight_scale=1.0,
+        entry_action_weight_scale=1.0,
+    )
+
+    assert agent.last_train_metrics["teacher_loss"] == 0.0
+    assert agent.last_train_metrics["entry_action_loss"] > 0.0
+    assert agent.last_train_metrics["entry_action_supervised_rows"] == 2.0
+    assert agent.last_train_metrics["regime_selectivity_loss"] > 0.0
+    assert agent.last_train_metrics["regime_selectivity_supervised_rows"] == 2.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_failed_long_confluence_rows"
+    ] > 0.0
 
 
 def _greedy(agent: RecurrentC51Agent, observation: tuple[float, ...]) -> Action:
@@ -811,7 +971,7 @@ def test_selectivity_never_trains_on_the_n_step_tail() -> None:
     assert agent.last_train_metrics["entry_action_supervised_rows"] == 0.0
 
 
-def test_zero_curriculum_scale_has_exact_rl_update_parity() -> None:
+def test_zero_exact_and_imitation_scales_have_exact_rl_update_parity() -> None:
     control = _agent(seed=97, selectivity_weight=0.0)
     taught = _agent(
         seed=97,
@@ -833,8 +993,16 @@ def test_zero_curriculum_scale_has_exact_rl_update_parity() -> None:
         target=Action.ENTER_LONG_1,
     )
 
-    control.train_batch((sequence, sequence), teacher_weight_scale=0.0)
-    taught.train_batch((sequence, sequence), teacher_weight_scale=0.0)
+    control.train_batch(
+        (sequence, sequence),
+        teacher_weight_scale=0.0,
+        entry_action_weight_scale=0.0,
+    )
+    taught.train_batch(
+        (sequence, sequence),
+        teacher_weight_scale=0.0,
+        entry_action_weight_scale=0.0,
+    )
 
     assert taught.last_train_metrics["regime_selectivity_loss"] == 0.0
     assert taught.last_train_metrics["regime_selectivity_supervised_rows"] == 0.0

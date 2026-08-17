@@ -1197,7 +1197,7 @@ class RecurrentC51Agent:
         entry_diagnostics_active = (
             (
                 self.regime_selectivity is not None
-                and teacher_weight_scale > 0.0
+                and entry_action_weight_scale > 0.0
             )
             or (
                 self.entry_action_loss_weight > 0.0
@@ -1270,14 +1270,23 @@ class RecurrentC51Agent:
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
-        # A zero curriculum scale is the explicit autonomy boundary.  Do not
-        # even read replayed teacher targets or execute the discarded-use
-        # auxiliary head once that boundary has been reached.
-        if self.teacher_channels and teacher_weight_scale > 0.0:
+        # Teacher dropout and its curriculum scale govern optional imitation
+        # only. Exact action and Regime-confluence supervision remain training
+        # labels and are never policy observations.
+        if self.teacher_channels and (
+            teacher_weight_scale > 0.0
+            or (
+                self.regime_selectivity is not None
+                and entry_action_weight_scale > 0.0
+            )
+        ):
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
                 np.nan,
                 dtype=np.float32,
+            )
+            teacher_imitation_visible = np.zeros(
+                observations.shape[:2], dtype=np.bool_
             )
             for batch_index, sequence in enumerate(sequences):
                 for time_index, transition in enumerate(sequence):
@@ -1288,7 +1297,13 @@ class RecurrentC51Agent:
                         if target.shape != (self.teacher_channels,):
                             raise ValueError("teacher target width drifted")
                         teacher_targets[batch_index, time_index] = target
-            teacher_rows_numpy = np.isfinite(teacher_targets).all(axis=-1)
+                        teacher_imitation_visible[batch_index, time_index] = bool(
+                            transition.teacher_imitation_visible
+                        )
+            all_teacher_rows_numpy = np.isfinite(teacher_targets).all(axis=-1)
+            teacher_rows_numpy = (
+                all_teacher_rows_numpy & teacher_imitation_visible
+            )
             teacher_targets_tensor = torch.as_tensor(
                 teacher_targets, dtype=torch.float32, device=self.device
             )[:, self.recurrent_burn_in:]
@@ -1296,38 +1311,48 @@ class RecurrentC51Agent:
                 teacher_rows_numpy[:, self.recurrent_burn_in:],
                 device=self.device,
             ) & auxiliary_valid
-            if bool(teacher_rows.any().item()):
-                assert self.online.teacher_output is not None
-                with self._autocast():
-                    teacher_logits = self.online.teacher_output(recurrent)
-                teacher_losses = nn.functional.binary_cross_entropy_with_logits(
-                    teacher_logits.float()[teacher_rows],
-                    teacher_targets_tensor[teacher_rows],
-                    reduction="none",
-                )
-                teacher_probabilities = teacher_logits.float()[teacher_rows].sigmoid()
-                teacher_probability_targets = teacher_targets_tensor[teacher_rows]
-                if regime_channel_names:
-                    regime_targets = teacher_probability_targets.index_select(
-                        -1, self._regime_teacher_channel_indices_tensor
+            all_teacher_rows = torch.as_tensor(
+                all_teacher_rows_numpy[:, self.recurrent_burn_in:],
+                device=self.device,
+            ) & auxiliary_valid
+            if bool(all_teacher_rows.any().item()):
+                if bool(teacher_rows.any().item()):
+                    assert self.online.teacher_output is not None
+                    with self._autocast():
+                        teacher_logits = self.online.teacher_output(recurrent)
+                    teacher_losses = nn.functional.binary_cross_entropy_with_logits(
+                        teacher_logits.float()[teacher_rows],
+                        teacher_targets_tensor[teacher_rows],
+                        reduction="none",
                     )
-                    regime_predictions = teacher_probabilities.index_select(
-                        -1, self._regime_teacher_channel_indices_tensor
+                    teacher_probabilities = (
+                        teacher_logits.float()[teacher_rows].sigmoid()
                     )
-                    regime_errors = regime_predictions - regime_targets
-                    teacher_row_count = teacher_rows.sum().to(torch.float32)
-                    regime_channel_additive = torch.stack((
-                        teacher_row_count.expand(len(regime_channel_names)),
-                        regime_targets.sum(dim=0),
-                        regime_predictions.sum(dim=0),
-                        regime_errors.abs().sum(dim=0),
-                        regime_errors.square().sum(dim=0),
-                    ), dim=-1)
-                teacher_loss = (
-                    teacher_losses * self._teacher_channel_loss_weights_tensor
-                ).sum(dim=-1).mean()
-                loss = loss + teacher_weight_scale * teacher_loss
-                if self.teacher_entry_search_loss_weight:
+                    teacher_probability_targets = teacher_targets_tensor[teacher_rows]
+                    if regime_channel_names:
+                        regime_targets = teacher_probability_targets.index_select(
+                            -1, self._regime_teacher_channel_indices_tensor
+                        )
+                        regime_predictions = teacher_probabilities.index_select(
+                            -1, self._regime_teacher_channel_indices_tensor
+                        )
+                        regime_errors = regime_predictions - regime_targets
+                        teacher_row_count = teacher_rows.sum().to(torch.float32)
+                        regime_channel_additive = torch.stack((
+                            teacher_row_count.expand(len(regime_channel_names)),
+                            regime_targets.sum(dim=0),
+                            regime_predictions.sum(dim=0),
+                            regime_errors.abs().sum(dim=0),
+                            regime_errors.square().sum(dim=0),
+                        ), dim=-1)
+                    teacher_loss = (
+                        teacher_losses * self._teacher_channel_loss_weights_tensor
+                    ).sum(dim=-1).mean()
+                    loss = loss + teacher_weight_scale * teacher_loss
+                if (
+                    self.teacher_entry_search_loss_weight
+                    and bool(teacher_rows.any().item())
+                ):
                     entry_rows = (
                         teacher_rows
                         & valid_masks[
@@ -1426,7 +1451,7 @@ class RecurrentC51Agent:
                     ]
                     selectivity_headroom = headroom_tensor[:, :training_steps]
                     exact_flat_rows = (
-                        teacher_rows[:, :training_steps]
+                        all_teacher_rows[:, :training_steps]
                         & learnable_rows
                         & torch.isfinite(selectivity_headroom)
                         & (selectivity_action_targets_tensor >= int(Action.WAIT))
@@ -1806,7 +1831,7 @@ class RecurrentC51Agent:
                         regime_selectivity_positive_short_loss = (
                             selectivity_row_losses * short_loss_rows
                         ).sum() / short_loss_rows.sum().clamp_min(1.0)
-                    loss = loss + teacher_weight_scale * (
+                    loss = loss + entry_action_weight_scale * (
                         self.regime_selectivity_loss_weight
                         * regime_selectivity_loss
                     )

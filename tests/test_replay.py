@@ -533,7 +533,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 6
+    assert state["schema_version"] == 7
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -575,6 +575,48 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
     )
     with pytest.raises(ValueError, match="contract drifted"):
         drifted.load_state_dict(state)
+
+
+def test_replay_round_trip_preserves_teacher_imitation_visibility() -> None:
+    flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    episode = Episode(
+        episode_id="dropout-row",
+        ticker="NQ",
+        outcome="timeout",
+        primary_side="flat",
+        ended_at_ns=1,
+        transitions=(Transition(
+            observation=np.zeros(1, np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.ones(1, np.float32),
+            terminated=True,
+            valid_actions=flat,
+            next_valid_actions=(),
+            teacher_target=np.ones(7, np.float32),
+            teacher_imitation_visible=False,
+            entry_action_target=Action.WAIT,
+            regime_selectivity_headroom_fraction=1.0,
+        ),),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=1,
+        sequence_length=1,
+        seed=53,
+    )
+    replay.add(episode)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=1,
+        sequence_length=1,
+        seed=53,
+    )
+
+    restored.load_state_dict(replay.state_dict())
+
+    row = restored.sample(1)[0][0]
+    assert row.teacher_target is not None
+    assert row.entry_action_target == Action.WAIT
+    assert row.teacher_imitation_visible is False
 
 
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
@@ -914,7 +956,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 6
+    assert state["schema_version"] == 7
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

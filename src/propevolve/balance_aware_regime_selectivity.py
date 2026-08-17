@@ -367,6 +367,23 @@ class BalanceAwareRegimeSelectivity:
             transition_positive_short = (
                 transition_positive_short * short_expansion_evidence
             )
+            if (
+                self.semantics
+                == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+            ):
+                evidence_sum = (
+                    long_expansion_evidence + short_expansion_evidence
+                ).clamp_min(torch.finfo(teacher_probabilities.dtype).tiny)
+                transition_positive_long = (
+                    transition_positive_long
+                    * long_expansion_evidence
+                    / evidence_sum
+                )
+                transition_positive_short = (
+                    transition_positive_short
+                    * short_expansion_evidence
+                    / evidence_sum
+                )
             if self.semantics in {
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -383,9 +400,6 @@ class BalanceAwareRegimeSelectivity:
                     self.semantics
                     == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
                 ):
-                    evidence_sum = (
-                        long_expansion_evidence + short_expansion_evidence
-                    ).clamp_min(torch.finfo(teacher_probabilities.dtype).tiny)
                     failed_long_confluence = (
                         failed_setup_confluence
                         * long_expansion_evidence

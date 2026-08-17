@@ -27,6 +27,7 @@ class Transition:
     next_recurrent_reset: bool = False
     competence_anchor: bool = False
     teacher_target: np.ndarray | None = None
+    teacher_imitation_visible: bool = True
     entry_action_target: Action | None = None
     regime_selectivity_headroom_fraction: float | None = None
     safety_priority: float = 0.0
@@ -113,6 +114,7 @@ class _StoredEpisode:
     recurrent_resets: np.ndarray
     next_recurrent_resets: np.ndarray
     teacher_targets: np.ndarray | None
+    teacher_imitation_visible: np.ndarray
     entry_action_targets: np.ndarray
     entry_long_anchor_indices: np.ndarray
     entry_short_anchor_indices: np.ndarray
@@ -237,6 +239,10 @@ class _StoredEpisode:
                 [item.next_recurrent_reset for item in transitions], np.bool_
             ),
             teacher_targets=teacher_targets,
+            teacher_imitation_visible=np.asarray(
+                [item.teacher_imitation_visible for item in transitions],
+                np.bool_,
+            ),
             entry_action_targets=entry_action_targets,
             entry_long_anchor_indices=np.flatnonzero(
                 entry_action_targets == int(Action.ENTER_LONG_1)
@@ -289,6 +295,9 @@ class _StoredEpisode:
                     if self.teacher_targets is None
                     or not np.isfinite(self.teacher_targets[index]).all()
                     else self.teacher_targets[index]
+                ),
+                teacher_imitation_visible=bool(
+                    self.teacher_imitation_visible[index]
                 ),
                 entry_action_target=(
                     None
@@ -666,7 +675,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 6,
+            "schema_version": 7,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -698,7 +707,7 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 6:
+        if state.get("schema_version") != 7:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -748,6 +757,9 @@ class BalancedSequenceReplay:
                     payload["entry_opportunity_priorities"], dtype=np.float32
                 )
                 raw_teacher_targets = payload["teacher_targets"]
+                teacher_imitation_visible = np.asarray(
+                    payload["teacher_imitation_visible"], dtype=np.bool_
+                )
                 raw_entry_action_targets = payload["entry_action_targets"]
                 raw_regime_selectivity_headroom = payload[
                     "regime_selectivity_headroom_fractions"
@@ -783,6 +795,7 @@ class BalancedSequenceReplay:
                 or recurrent_resets.shape != (count,)
                 or next_recurrent_resets.shape != (count,)
                 or entry_action_targets.shape != (count,)
+                or teacher_imitation_visible.shape != (count,)
                 or regime_selectivity_headroom.shape != (count,)
                 or source_decision_indices.shape != (count,)
                 or safety_priorities.shape != (count,)
@@ -845,6 +858,7 @@ class BalancedSequenceReplay:
                 recurrent_resets=recurrent_resets,
                 next_recurrent_resets=next_recurrent_resets,
                 teacher_targets=teacher_targets,
+                teacher_imitation_visible=teacher_imitation_visible,
                 entry_action_targets=entry_action_targets,
                 entry_long_anchor_indices=np.flatnonzero(
                     entry_action_targets == int(Action.ENTER_LONG_1)

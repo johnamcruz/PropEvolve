@@ -4308,9 +4308,7 @@ def train_agent(
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0
         ) * teacher_schedule_progress
-        entry_action_weight_scale = 1.0 + (
-            teacher_loss_end_scale - 1.0
-        ) * entry_action_schedule_progress
+        entry_action_weight_scale = 1.0
         teacher_guidance_dropout_probability = teacher_guidance_dropout_start
         terminal_info = reset_info
         step_index = 0
@@ -4347,9 +4345,7 @@ def train_agent(
                 teacher_weight_scale = 1.0 + (
                     teacher_loss_end_scale - 1.0
                 ) * teacher_schedule_progress
-                entry_action_weight_scale = 1.0 + (
-                    teacher_loss_end_scale - 1.0
-                ) * entry_action_schedule_progress
+                entry_action_weight_scale = 1.0
                 teacher_guidance_dropout_probability = (
                     teacher_guidance_dropout_start
                     + (
@@ -4434,15 +4430,13 @@ def train_agent(
             )
             teacher_target = (
                 teacher_lookup(episode_ticker, decision_index)
-                if teacher_lookup is not None and teacher_visible
+                if teacher_lookup is not None
                 else None
             )
             entry_action_target = (
                 entry_action_lookup(episode_ticker, decision_index)
                 if (
                     entry_action_lookup is not None
-                    and teacher_visible
-                    and teacher_weight_scale > 0.0
                     and flat_actions.issubset(valid)
                 )
                 else None
@@ -4455,7 +4449,6 @@ def train_agent(
                 > 0.0
                 and teacher_target is not None
                 and entry_action_target is not None
-                and teacher_weight_scale > 0.0
                 and flat_actions.issubset(valid)
             ):
                 if "mll_headroom_fraction" not in terminal_info:
@@ -4544,6 +4537,7 @@ def train_agent(
                     and (step_index + 1) % recurrent_horizon == 0
                 ),
                 teacher_target=teacher_target,
+                teacher_imitation_visible=teacher_visible,
                 entry_action_target=entry_action_target,
                 regime_selectivity_headroom_fraction=(
                     regime_selectivity_headroom_fraction
@@ -4581,9 +4575,7 @@ def train_agent(
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0
         ) * teacher_schedule_progress
-        entry_action_weight_scale = 1.0 + (
-            teacher_loss_end_scale - 1.0
-        ) * entry_action_schedule_progress
+        entry_action_weight_scale = 1.0
         outcome = str(terminal_info["outcome"])
         ordinary_outcomes = {"pass", "blow", "timeout"}
         recovery_outcomes = {
