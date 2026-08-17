@@ -1411,6 +1411,7 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
         seed=421,
         entry_action_loss_weight=1.0,
         entry_action_loss_reduction="equal_present_class_mean_v1",
+        entry_action_margin=0.25,
     )
     rows = (
         _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),
@@ -1423,6 +1424,7 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
     restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
 
     assert restored.entry_action_loss_reduction == "equal_present_class_mean_v1"
+    assert restored.entry_action_margin == 0.25
     restored.train_batch(rows)
     for action_name in ("wait", "long", "short"):
         assert restored.last_train_metrics[

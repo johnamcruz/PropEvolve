@@ -154,6 +154,39 @@ def centered_entry_search_target(
     return torch.sigmoid(centered_log_odds)
 
 
+def exact_action_margin_losses(
+    flat_action_values: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    margin: float,
+) -> torch.Tensor:
+    """Require each exact entry action to outrank both alternatives."""
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or targets.shape != flat_action_values.shape[:-1]
+        or targets.dtype != torch.long
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+        or float(margin) < 0.0
+    ):
+        raise ValueError("exact action margin loss contract is invalid")
+    if float(margin) == 0.0:
+        return torch.zeros(
+            flat_action_values.shape[0],
+            dtype=flat_action_values.dtype,
+            device=flat_action_values.device,
+        )
+    demonstrated = flat_action_values.gather(1, targets[:, None]).squeeze(1)
+    alternative_offsets = torch.full_like(flat_action_values, float(margin))
+    alternative_offsets.scatter_(1, targets[:, None], 0.0)
+    strongest_margin_action = (
+        flat_action_values + alternative_offsets
+    ).max(dim=1).values
+    return strongest_margin_action - demonstrated
+
+
 def persistent_chop_association_rank_loss(
     flat_action_values: torch.Tensor,
     *,
@@ -370,6 +403,7 @@ class RecurrentC51Agent:
         entry_action_loss_weight: float = 0.0,
         entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
         entry_action_loss_reduction: str = "population_weighted_mean_v1",
+        entry_action_margin: float = 0.0,
         regime_selectivity_loss_weight: float = 0.0,
         regime_selectivity_expansion_centers: Sequence[float] | None = None,
         regime_selectivity_probability_epsilon: float = 1e-6,
@@ -409,6 +443,9 @@ class RecurrentC51Agent:
             or teacher_loss_weight < 0
             or teacher_entry_search_loss_weight < 0
             or entry_action_loss_weight < 0
+            or isinstance(entry_action_margin, bool)
+            or not np.isfinite(entry_action_margin)
+            or entry_action_margin < 0
             or not np.isfinite(regime_selectivity_loss_weight)
             or regime_selectivity_loss_weight < 0
             or policy_retention_loss_weight < 0
@@ -560,6 +597,7 @@ class RecurrentC51Agent:
         self.entry_action_loss_weight = float(entry_action_loss_weight)
         self.entry_action_class_weights = entry_action_class_weights
         self.entry_action_loss_reduction = str(entry_action_loss_reduction)
+        self.entry_action_margin = float(entry_action_margin)
         self.regime_selectivity_loss_weight = float(
             regime_selectivity_loss_weight
         )
@@ -1139,6 +1177,9 @@ class RecurrentC51Agent:
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+        entry_action_margin_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         regime_selectivity_loss = teacher_loss
         regime_selectivity_rows = teacher_loss
         regime_selectivity_target_wait_mean = teacher_loss
@@ -2033,6 +2074,11 @@ class RecurrentC51Agent:
                     selected_timing_targets,
                     reduction="none",
                 )
+                unweighted_margin = exact_action_margin_losses(
+                    selected_entry_q,
+                    selected_timing_targets,
+                    margin=self.entry_action_margin,
+                )
                 selected_class_counts = torch.bincount(
                     selected_timing_targets, minlength=3
                 ).to(unweighted_entry_ce.dtype)
@@ -2048,12 +2094,27 @@ class RecurrentC51Agent:
                         for class_index in range(3)
                     ))
                     entry_action_loss = class_ce_means[present_classes].mean()
+                    class_margin_means = torch.stack(tuple(
+                        unweighted_margin[
+                            selected_timing_targets == class_index
+                        ].sum() / selected_class_counts[class_index].clamp_min(1.0)
+                        for class_index in range(3)
+                    ))
+                    entry_action_margin_loss = class_margin_means[
+                        present_classes
+                    ].mean()
                 else:
                     entry_action_loss = nn.functional.cross_entropy(
                         selected_entry_q,
                         selected_timing_targets,
                         weight=self._entry_action_class_weights_tensor,
                     )
+                    selected_class_weights = self._entry_action_class_weights_tensor[
+                        selected_timing_targets
+                    ]
+                    entry_action_margin_loss = (
+                        unweighted_margin * selected_class_weights
+                    ).sum() / selected_class_weights.sum()
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
                 )
@@ -2110,7 +2171,7 @@ class RecurrentC51Agent:
                 loss = loss + (
                     entry_action_weight_scale
                     * self.entry_action_loss_weight
-                    * entry_action_loss
+                    * (entry_action_loss + entry_action_margin_loss)
                 )
         management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
@@ -2218,6 +2279,7 @@ class RecurrentC51Agent:
             teacher_loss,
             entry_search_loss,
             entry_action_loss,
+            entry_action_margin_loss,
             regime_selectivity_loss,
             regime_selectivity_rows,
             regime_selectivity_target_wait_mean,
@@ -2270,6 +2332,7 @@ class RecurrentC51Agent:
             teacher_loss_value,
             entry_search_loss_value,
             entry_action_loss_value,
+            entry_action_margin_loss_value,
             regime_selectivity_loss_value,
             regime_selectivity_rows_value,
             regime_selectivity_target_wait_mean_value,
@@ -2641,6 +2704,7 @@ class RecurrentC51Agent:
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
+            "entry_action_margin_loss": entry_action_margin_loss_value,
             "regime_selectivity_loss": regime_selectivity_loss_value,
             "regime_selectivity_supervised_rows": regime_selectivity_rows_value,
             "regime_selectivity_target_wait_mean": (
@@ -2928,6 +2992,7 @@ class RecurrentC51Agent:
                 "entry_action_loss_weight": self.entry_action_loss_weight,
                 "entry_action_class_weights": self.entry_action_class_weights,
                 "entry_action_loss_reduction": self.entry_action_loss_reduction,
+                "entry_action_margin": self.entry_action_margin,
                 "regime_selectivity_loss_weight": (
                     self.regime_selectivity_loss_weight
                 ),
@@ -3047,6 +3112,7 @@ class RecurrentC51Agent:
         config.setdefault(
             "entry_action_loss_reduction", "population_weighted_mean_v1"
         )
+        config.setdefault("entry_action_margin", 0.0)
         config.setdefault("teacher_channel_names", ())
         config.setdefault("regime_selectivity_loss_weight", 0.0)
         config.setdefault("regime_selectivity_expansion_centers", None)

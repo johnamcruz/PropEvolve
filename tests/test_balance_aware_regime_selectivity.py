@@ -13,7 +13,11 @@ from propevolve.balance_aware_regime_selectivity import (
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     STATIC_STATE_SEMANTICS,
 )
-from propevolve.agent import RecurrentC51Agent, side_conditioned_wait_rank_loss
+from propevolve.agent import (
+    RecurrentC51Agent,
+    exact_action_margin_losses,
+    side_conditioned_wait_rank_loss,
+)
 from propevolve.decision import Action
 from propevolve.replay import Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
@@ -31,6 +35,78 @@ from propevolve.training import (
 
 
 CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+
+
+def test_exact_action_margin_penalizes_correct_but_weak_action_separation() -> None:
+    action_values = torch.tensor(
+        [
+            [1.00, 0.90, 0.00],
+            [0.80, 1.00, 0.90],
+            [0.90, 0.80, 1.00],
+        ],
+        dtype=torch.float64,
+    )
+
+    losses = exact_action_margin_losses(
+        action_values,
+        torch.tensor([0, 1, 2]),
+        margin=0.25,
+    )
+
+    torch.testing.assert_close(
+        losses,
+        torch.tensor([0.15, 0.15, 0.15], dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("target", (0, 1, 2))
+def test_exact_action_margin_is_zero_after_each_action_clears_the_gap(
+    target: int,
+) -> None:
+    action_values = torch.zeros((1, 3), dtype=torch.float64)
+    action_values[0, target] = 0.25
+
+    losses = exact_action_margin_losses(
+        action_values,
+        torch.tensor([target]),
+        margin=0.25,
+    )
+
+    torch.testing.assert_close(
+        losses,
+        torch.zeros(1, dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_zero_exact_action_margin_preserves_legacy_loss() -> None:
+    action_values = torch.tensor([[0.7, 0.6, 0.5]], dtype=torch.float64)
+
+    losses = exact_action_margin_losses(
+        action_values,
+        torch.tensor([2]),
+        margin=0.0,
+    )
+
+    torch.testing.assert_close(
+        losses,
+        torch.zeros(1, dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize("margin", (-0.1, float("nan"), True))
+def test_agent_rejects_invalid_exact_action_margin(margin: float) -> None:
+    with pytest.raises(ValueError, match="teacher settings must be nonnegative"):
+        _agent(
+            seed=509,
+            selectivity_weight=0.0,
+            entry_action_margin=margin,
+        )
 
 
 def test_side_conditioned_rank_loss_separates_wait_long_and_wait_short_gradients(
@@ -188,12 +264,177 @@ def test_frozen_confluence_contract_requires_side_dominance_and_preserves_exact_
     assert evidence.exact_wait_weights[7] > evidence.exact_wait_weights[6]
 
 
+@pytest.mark.parametrize(
+    ("target", "declared_membership", "declared_scores", "opposite_scores"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            "transition_positive_long_membership",
+            (0.90, 0.90),
+            (0.10, 0.10),
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            "transition_positive_short_membership",
+            (0.90, 0.90),
+            (0.10, 0.10),
+        ),
+    ),
+    ids=("long", "short"),
+)
+def test_entry_rule_requires_declared_expansion_ready_regime_and_side_dominance(
+    target: Action,
+    declared_membership: str,
+    declared_scores: tuple[float, float],
+    opposite_scores: tuple[float, float],
+) -> None:
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    long_scores, short_scores = (
+        (declared_scores, opposite_scores)
+        if target == Action.ENTER_LONG_1
+        else (opposite_scores, declared_scores)
+    )
+    dominant = _teacher_row(
+        long_attempt=long_scores[0],
+        long_clean=long_scores[1],
+        short_attempt=short_scores[0],
+        short_clean=short_scores[1],
+        **ready,
+    )
+    conflicting = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.95,
+        short_clean=0.95,
+        **ready,
+    )
+    selectivity = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.10, 0.10),
+        probability_epsilon=1e-6,
+        headroom_pressure=1.0,
+        dominant_chop_pressure=2.0,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+
+    evidence = selectivity.exact_wait_negative_weight_evidence(
+        torch.stack((dominant, conflicting)),
+        torch.tensor((int(target), int(target))),
+    )
+    membership = getattr(evidence, declared_membership)
+
+    assert membership[0] > membership[1]
+
+
+@pytest.mark.parametrize(
+    ("teacher", "failed_membership"),
+    (
+        (
+            dict(
+                long_attempt=0.90,
+                long_clean=0.90,
+                short_attempt=0.10,
+                short_clean=0.10,
+            ),
+            "failed_long_confluence_membership",
+        ),
+        (
+            dict(
+                long_attempt=0.10,
+                long_clean=0.10,
+                short_attempt=0.90,
+                short_clean=0.90,
+            ),
+            "failed_short_confluence_membership",
+        ),
+    ),
+    ids=("failed-long", "failed-short"),
+)
+def test_failed_directional_confluence_strengthens_wait_never_enter(
+    teacher: dict[str, float],
+    failed_membership: str,
+) -> None:
+    selectivity = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.10, 0.10),
+        probability_epsilon=1e-6,
+        headroom_pressure=1.0,
+        dominant_chop_pressure=2.0,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    row = _teacher_row(
+        **teacher,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+
+    evidence = selectivity.exact_wait_negative_weight_evidence(
+        row[None],
+        torch.tensor((int(Action.WAIT),)),
+    )
+
+    assert getattr(evidence, failed_membership)[0] > 0.0
+    assert evidence.transition_positive_long_membership[0] == 0.0
+    assert evidence.transition_positive_short_membership[0] == 0.0
+
+
+def test_conflict_weak_expansion_and_persistent_chop_strengthen_wait() -> None:
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    rows = torch.stack((
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.90,
+            short_clean=0.90,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.05,
+            long_clean=0.05,
+            short_attempt=0.05,
+            short_clean=0.05,
+            **ready,
+        ),
+        _teacher_row(
+            long_attempt=0.20,
+            long_clean=0.20,
+            short_attempt=0.20,
+            short_clean=0.20,
+            chop=0.95,
+            neutral=0.03,
+            trend=0.02,
+        ),
+    ))
+    selectivity = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.10, 0.10),
+        probability_epsilon=1e-6,
+        headroom_pressure=1.0,
+        dominant_chop_pressure=2.0,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+
+    evidence = selectivity.exact_wait_negative_weight_evidence(
+        rows,
+        torch.full((3,), int(Action.WAIT)),
+    )
+
+    conflict, weak, chop = evidence.exact_wait_weights
+    assert conflict > weak
+    assert chop > weak
+
+
 def _agent(
     *,
     seed: int,
     selectivity_weight: float,
     n_step_return: int = 1,
     entry_action_weight: float = 0.0,
+    entry_action_margin: float = 0.0,
     entry_action_loss_reduction: str = "population_weighted_mean_v1",
     side_balance: str | None = None,
     selectivity_semantics: str | None = None,
@@ -231,6 +472,7 @@ def _agent(
         teacher_loss_weight=1e-6,
         teacher_entry_search_centers=expansion_centers,
         entry_action_loss_weight=entry_action_weight,
+        entry_action_margin=entry_action_margin,
         entry_action_loss_reduction=entry_action_loss_reduction,
         regime_selectivity_loss_weight=selectivity_weight,
         regime_selectivity_expansion_centers=expansion_centers,
@@ -270,6 +512,7 @@ def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(
         seed=503,
         selectivity_weight=1.0,
         entry_action_weight=1.0,
+        entry_action_margin=0.25,
         side_balance="equal_long_short_v1",
         selectivity_semantics=(
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
@@ -312,6 +555,7 @@ def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(
 
     assert agent.last_train_metrics["teacher_loss"] == 0.0
     assert agent.last_train_metrics["entry_action_loss"] > 0.0
+    assert agent.last_train_metrics["entry_action_margin_loss"] > 0.0
     assert agent.last_train_metrics["entry_action_supervised_rows"] == 2.0
     assert agent.last_train_metrics["regime_selectivity_loss"] > 0.0
     assert agent.last_train_metrics["regime_selectivity_supervised_rows"] == 2.0

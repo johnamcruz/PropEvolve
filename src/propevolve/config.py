@@ -867,8 +867,16 @@ def load_experiment_config(path: str | Path) -> dict:
     agent.setdefault(
         "entry_action_loss_reduction", "population_weighted_mean_v1"
     )
+    agent.setdefault("entry_action_margin", 0.0)
     if agent["entry_action_loss_reduction"] not in ENTRY_ACTION_LOSS_REDUCTIONS:
         raise ValueError("entry action loss reduction is invalid")
+    if (
+        isinstance(agent["entry_action_margin"], bool)
+        or not isinstance(agent["entry_action_margin"], (int, float))
+        or not math.isfinite(float(agent["entry_action_margin"]))
+        or float(agent["entry_action_margin"]) < 0.0
+    ):
+        raise ValueError("entry action margin is invalid")
     if (
         "agent.entry_action_loss_reduction"
         in payload.get("evolution", {}).get("frozen_paths", ())

@@ -40,6 +40,9 @@ STAGE2_V6_RECIPE = Path(
 STAGE2_V7_RECIPE = Path(
     "config/historical_mask_expansion_regime_stage2_v7.json"
 )
+STAGE2_ACTION_MARGIN_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v13_action_margin.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -443,6 +446,29 @@ def test_entry_action_loss_reduction_fails_closed_on_unknown_value(
 
     with pytest.raises(ValueError, match="entry action loss reduction is invalid"):
         load_experiment_config(path)
+
+
+def test_entry_action_margin_fails_closed_on_invalid_value(tmp_path: Path) -> None:
+    payload = _generic_payload()
+    payload["agent"]["entry_action_margin"] = -0.1
+    path = tmp_path / "invalid-entry-action-margin.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="entry action margin is invalid"):
+        load_experiment_config(path)
+
+
+def test_stage2_action_margin_campaign_is_one_matched_100_episode_test() -> None:
+    payload = load_experiment_config(STAGE2_ACTION_MARGIN_RECIPE)
+
+    assert payload["agent"]["entry_action_margin"] == 0.25
+    assert "agent.entry_action_margin" in payload["evolution"]["frozen_paths"]
+    assert payload["evolution"]["allowed_revision_paths"] == ()
+    assert len(payload["campaign"]["budget_stages"]) == 1
+    stage = payload["campaign"]["budget_stages"][0]
+    assert stage["training_episodes"] == 100
+    assert stage["validation_episodes"] == 200
+    assert stage["allow_revisions"] is False
 
 
 @pytest.mark.parametrize(

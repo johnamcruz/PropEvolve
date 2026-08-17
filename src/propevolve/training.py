@@ -183,6 +183,7 @@ def _assert_recovery_entry_balance(
     expected_reduction = str(agent_settings.get(
         "entry_action_loss_reduction", "population_weighted_mean_v1"
     ))
+    expected_margin = float(agent_settings.get("entry_action_margin", 0.0))
     if (
         agent.entry_action_class_weights != expected
         or getattr(
@@ -191,6 +192,7 @@ def _assert_recovery_entry_balance(
             "population_weighted_mean_v1",
         )
         != expected_reduction
+        or getattr(agent, "entry_action_margin", 0.0) != expected_margin
     ):
         raise ValueError("training recovery entry balance drifted")
 
