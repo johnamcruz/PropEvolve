@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from .balance_aware_regime_selectivity import (
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
@@ -577,6 +578,7 @@ class RecurrentC51Agent:
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -591,6 +593,7 @@ class RecurrentC51Agent:
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
@@ -1591,6 +1594,7 @@ class RecurrentC51Agent:
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1620,6 +1624,7 @@ class RecurrentC51Agent:
                             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1659,6 +1664,7 @@ class RecurrentC51Agent:
                             in {
                                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             }
                             else wait_mass
                         ).clamp_min(1.0)
@@ -1707,6 +1713,7 @@ class RecurrentC51Agent:
                                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             }
                         ):
                             (
@@ -1734,7 +1741,10 @@ class RecurrentC51Agent:
                         side_conditioned_group_active = torch.zeros_like(wait_active)
                         if (
                             self.regime_selectivity_semantics
-                            == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+                            in {
+                                SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                            }
                         ):
                             (
                                 side_conditioned_loss_sum,
@@ -1760,8 +1770,16 @@ class RecurrentC51Agent:
                             regime_selectivity_side_conditioned_active_sides = (
                                 side_conditioned_group_active
                             )
+                        dominant_chop_margin_membership = (
+                            compiler.dominant_chop_margin_membership(
+                                selected_teachers
+                            )
+                            if self.regime_selectivity_semantics
+                            == ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+                            else dead_membership
+                        )
                         chop_margin_membership = (
-                            dead_membership
+                            dominant_chop_margin_membership
                             + failed_long_confluence_membership
                             + failed_short_confluence_membership
                         )
@@ -1776,7 +1794,9 @@ class RecurrentC51Agent:
                         chop_margin_loss = (
                             chop_specific_wait_margin_losses(
                                 flat_q,
-                                dominant_chop_membership=dead_membership,
+                                dominant_chop_membership=(
+                                    dominant_chop_margin_membership
+                                ),
                                 failed_long_membership=(
                                     failed_long_confluence_membership
                                 ),

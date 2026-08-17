@@ -9,6 +9,7 @@ import torch
 
 from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     STATIC_STATE_SEMANTICS,
@@ -36,6 +37,38 @@ from propevolve.training import (
 
 
 CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+
+
+def test_all_dominant_chop_actions_receive_learned_wait_margin_membership(
+) -> None:
+    compiler = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.1, 0.1),
+        semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    teacher_probabilities = torch.tensor(
+        [
+            [0.4, 0.8, 0.1, 0.8, 0.70, 0.20, 0.10],
+            [0.1, 0.8, 0.4, 0.8, 0.60, 0.25, 0.15],
+            [0.1, 0.1, 0.1, 0.1, 0.80, 0.10, 0.10],
+            [0.4, 0.8, 0.1, 0.8, 0.10, 0.55, 0.35],
+        ],
+        dtype=torch.float32,
+    )
+    economic_targets = torch.tensor([1, 2, 0, 1], dtype=torch.long)
+
+    membership = compiler.dominant_chop_margin_membership(
+        teacher_probabilities,
+    )
+
+    assert economic_targets.tolist() == [1, 2, 0, 1]
+    torch.testing.assert_close(
+        membership,
+        torch.tensor([0.50, 0.35, 0.70, 0.0], dtype=torch.float32),
+        rtol=0.0,
+        atol=1e-7,
+    )
 
 
 def test_exact_action_margin_penalizes_correct_but_weak_action_separation() -> None:
@@ -751,6 +784,70 @@ def test_chop_wait_margins_remain_active_after_teacher_dropout() -> None:
     assert margin_agent.last_train_metrics[
         "regime_selectivity_transition_positive_short_rows"
     ] > 0.0
+
+
+def test_all_action_dominant_chop_margin_learns_wait_without_relabeling(
+) -> None:
+    settings = dict(
+        seed=522,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        selectivity_semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+    )
+    baseline = _agent(**settings)
+    margin_agent = _agent(
+        **settings,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+    )
+    dominant = dict(chop=0.90, neutral=0.05, trend=0.05)
+    dominant_long = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            **dominant,
+        ),
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        teacher_imitation_visible=False,
+    )
+    dominant_short = _sequence(
+        (0.0, 0.0, 1.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            **dominant,
+        ),
+        headroom=1.0,
+        target=Action.ENTER_SHORT_1,
+        teacher_imitation_visible=False,
+    )
+
+    baseline.train_batch(
+        (dominant_long, dominant_short),
+        teacher_weight_scale=1.0,
+        entry_action_weight_scale=1.0,
+    )
+    margin_agent.train_batch(
+        (dominant_long, dominant_short),
+        teacher_weight_scale=1.0,
+        entry_action_weight_scale=1.0,
+    )
+
+    assert margin_agent.last_train_metrics["teacher_loss"] == 0.0
+    assert margin_agent.last_train_metrics["entry_action_target_wait_rows"] == 0.0
+    assert margin_agent.last_train_metrics["entry_action_target_long_rows"] == 1.0
+    assert margin_agent.last_train_metrics["entry_action_target_short_rows"] == 1.0
+    assert margin_agent.last_train_metrics["regime_selectivity_loss"] > (
+        baseline.last_train_metrics["regime_selectivity_loss"]
+    )
 
 
 def test_chop_margin_cohorts_are_learned_after_recurrent_burn_in() -> None:

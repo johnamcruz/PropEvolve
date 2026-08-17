@@ -15,6 +15,8 @@ from propevolve.config import (
 )
 from propevolve.balance_aware_regime_selectivity import (
     ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
+    ALL_DOMINANT_CHOP_MARGIN_FORMULA,
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -55,6 +57,9 @@ STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE = Path(
 )
 STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v17_sparse_hard_wait_replay.json"
+)
+STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v18_all_dominant_chop_margin.json"
 )
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
@@ -483,6 +488,59 @@ def test_sparse_hard_wait_recipe_uses_one_sequence_every_eight_updates() -> None
     assert "training.regime_wait_sequence_update_period" in config["evolution"][
         "frozen_paths"
     ]
+
+
+def test_all_dominant_chop_margin_semantics_are_frozen_and_loadable(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"].update({
+        "semantics": ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        "formula": ALL_DOMINANT_CHOP_MARGIN_FORMULA,
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+    })
+    payload["evolution"]["frozen_paths"] = sorted(set(
+        payload["evolution"]["frozen_paths"]
+    ) | {
+        "regime_selectivity.chop_wait_margin",
+        "regime_selectivity.failed_confluence_margin",
+    })
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["regime_selectivity"]["semantics"] == (
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+    )
+    assert config["regime_selectivity"]["formula"] == (
+        ALL_DOMINANT_CHOP_MARGIN_FORMULA
+    )
+
+
+def test_all_dominant_chop_margin_recipe_is_one_matched_100_episode_test(
+) -> None:
+    baseline = load_experiment_config(STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE)
+    candidate = load_experiment_config(STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE)
+
+    assert candidate["regime_selectivity"]["semantics"] == (
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+    )
+    assert candidate["regime_selectivity"]["formula"] == (
+        ALL_DOMINANT_CHOP_MARGIN_FORMULA
+    )
+    assert candidate["teachers"] == baseline["teachers"]
+    assert candidate["entry_supervision"] == baseline["entry_supervision"]
+    assert candidate["agent"] == baseline["agent"]
+    assert candidate["training"] == baseline["training"]
+    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
+        "base_parent"
+    ]
+    stage = candidate["campaign"]["budget_stages"][0]
+    assert stage["name"] == "all_dominant_chop_margin_100ep"
+    assert stage["training_episodes"] == 100
+    assert stage["validation_episodes"] == 200
 
 
 def test_replay_fraction_contract_includes_hard_wait_quota(tmp_path: Path) -> None:

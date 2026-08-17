@@ -13,6 +13,7 @@ import torch
 
 import propevolve.training as training_module
 from propevolve.balance_aware_regime_selectivity import (
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     REGIME_TEACHER_CHANNELS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -185,12 +186,19 @@ def test_stage2a_recipe_projects_chop_specific_wait_margins() -> None:
     assert settings["regime_selectivity_failed_confluence_margin"] == 0.35
 
 
-def test_chop_margin_candidate_rejects_any_teacher_free_dominant_chop_entry() -> None:
+@pytest.mark.parametrize(
+    "semantics",
+    (
+        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+    ),
+)
+def test_chop_margin_candidate_rejects_any_teacher_free_dominant_chop_entry(
+    semantics: str,
+) -> None:
     gates = training_module._training_evaluation_gates(
         regime_selectivity_active=True,
-        regime_selectivity_semantics=(
-            "side_conditioned_expansion_regime_confluence_v4"
-        ),
+        regime_selectivity_semantics=semantics,
         chop_wait_margin_active=True,
     )
     dominant_entry_gate = next(

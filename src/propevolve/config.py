@@ -550,6 +550,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         return
     from .balance_aware_regime_selectivity import (
         ACTION_ORDER,
+        ALL_DOMINANT_CHOP_MARGIN_FORMULA,
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
         CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA,
         EXPANSION_REGIME_CONFLUENCE_FORMULA,
         EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -626,6 +628,9 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS: (
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA
         ),
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS: (
+            ALL_DOMINANT_CHOP_MARGIN_FORMULA
+        ),
     }
     expected_formula = expected_formulas.get(semantics)
     if (
@@ -651,6 +656,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
         }
         or (
             isinstance(specification, dict)
@@ -658,6 +664,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
                 PERSISTENT_CHOP_ASSOCIATION_FORMULA,
                 EXPANSION_REGIME_CONFLUENCE_FORMULA,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
+                ALL_DOMINANT_CHOP_MARGIN_FORMULA,
             }
         )
         or require_positive_association is True
@@ -667,6 +674,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
         }
         or not isinstance(specification, dict)
         or set(specification) not in valid_required_sets
@@ -717,6 +725,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
         }
         or specification.get("formula") != expected_formula
         or (
@@ -764,6 +773,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
                 PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             }
             and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
         )
@@ -776,7 +786,10 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             or int(training.get("regime_wait_sequence_update_period", 0)) > 0
         )
         and semantics
-        != SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+        not in {
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        }
     ):
         raise ValueError(
             "Regime WAIT replay requires side-conditioned confluence semantics"

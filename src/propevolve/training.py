@@ -21,6 +21,7 @@ import numpy as np
 
 from .assets import AssetContract
 from .balance_aware_regime_selectivity import (
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     REGIME_TEACHER_CHANNELS,
 )
@@ -1596,6 +1597,7 @@ def _training_evaluation_gates(
             "persistent_chop_association_v2",
             "expansion_regime_confluence_v3",
             "side_conditioned_expansion_regime_confluence_v4",
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1652,6 +1654,7 @@ def _training_evaluation_gates(
                 "persistent_chop_association_v2",
                 "expansion_regime_confluence_v3",
                 "side_conditioned_expansion_regime_confluence_v4",
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
@@ -1664,6 +1667,7 @@ def _training_evaluation_gates(
             if regime_selectivity_semantics in {
                 "expansion_regime_confluence_v3",
                 "side_conditioned_expansion_regime_confluence_v4",
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1677,10 +1681,10 @@ def _training_evaluation_gates(
                         0.0,
                     ),
                 ))
-            if (
-                regime_selectivity_semantics
-                == "side_conditioned_expansion_regime_confluence_v4"
-            ):
+            if regime_selectivity_semantics in {
+                "side_conditioned_expansion_regime_confluence_v4",
+                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            }:
                 gates.extend((
                     EvaluationGate(
                         "regime_selectivity_failed_long_confluence_rows",

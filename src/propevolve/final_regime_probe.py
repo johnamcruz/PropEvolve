@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from .balance_aware_regime_selectivity import (
+    ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     EXPANSION_CHANNELS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
@@ -267,12 +268,15 @@ def evaluate_final_regime_probe(
         :, names["chop_end_transition_probability"]
     ]
     expansion_trend = teachers[:, names["expansion_trend_probability"]]
-    dominant_chop = positive_rows & (
-        chop > np.maximum(chop_end_transition, expansion_trend)
+    dominant_chop_state = chop > np.maximum(
+        chop_end_transition,
+        expansion_trend,
     )
+    dominant_chop = positive_rows & dominant_chop_state
     dominant_chop_wait = (
-        (targets == int(Action.WAIT))
-        & (chop > np.maximum(chop_end_transition, expansion_trend))
+        dominant_chop_state
+        if regime_selectivity_semantics == ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+        else (targets == int(Action.WAIT)) & dominant_chop_state
     )
     nonchop = positive_rows & ~dominant_chop
     wait_probability = probabilities[:, int(Action.WAIT)]
