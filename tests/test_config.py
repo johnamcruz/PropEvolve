@@ -50,6 +50,9 @@ STAGE2_CHOP_MARGIN_RECIPE = Path(
 STAGE2_HARD_WAIT_REPLAY_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v15_hard_wait_replay.json"
 )
+STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v16_balanced_hard_wait_replay.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -409,6 +412,21 @@ def test_hard_wait_replay_recipe_reserves_two_sequences_without_reducing_safety(
     assert training["safety_sequence_fraction"] == pytest.approx(0.25)
     assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
     assert training["regime_wait_sequence_fraction"] == pytest.approx(0.125)
+    assert "training.regime_wait_sequence_fraction" in config["evolution"][
+        "frozen_paths"
+    ]
+
+
+def test_balanced_hard_wait_replay_recipe_reserves_one_sequence_and_restores_terminal(
+) -> None:
+    config = load_experiment_config(STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE)
+    training = config["training"]
+
+    assert training["batch_sequences"] == 16
+    assert training["terminal_sequence_fraction"] == pytest.approx(0.4375)
+    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
+    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
+    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.0625)
     assert "training.regime_wait_sequence_fraction" in config["evolution"][
         "frozen_paths"
     ]
