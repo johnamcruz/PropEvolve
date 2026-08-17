@@ -270,6 +270,10 @@ def evaluate_final_regime_probe(
     dominant_chop = positive_rows & (
         chop > np.maximum(chop_end_transition, expansion_trend)
     )
+    dominant_chop_wait = (
+        (targets == int(Action.WAIT))
+        & (chop > np.maximum(chop_end_transition, expansion_trend))
+    )
     nonchop = positive_rows & ~dominant_chop
     wait_probability = probabilities[:, int(Action.WAIT)]
     for row_index, receipt in enumerate(row_receipts):
@@ -284,6 +288,12 @@ def evaluate_final_regime_probe(
         dominant_chop.sum()
     )
     metrics["final_regime_probe_nonchop_rows"] = float(nonchop.sum())
+    metrics["final_regime_probe_dominant_chop_wait_rows"] = float(
+        dominant_chop_wait.sum()
+    )
+    metrics["final_regime_probe_dominant_chop_greedy_entry_rows"] = float(
+        ((predictions != int(Action.WAIT)) & dominant_chop_wait).sum()
+    )
     metrics["final_regime_probe_chop_minus_nonchop_wait"] = (
         _weighted_mean(wait_probability, dominant_chop.astype(np.float64))
         - _weighted_mean(wait_probability, nonchop.astype(np.float64))

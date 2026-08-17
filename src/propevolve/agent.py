@@ -187,6 +187,53 @@ def exact_action_margin_losses(
     return strongest_margin_action - demonstrated
 
 
+def chop_specific_wait_margin_losses(
+    flat_action_values: torch.Tensor,
+    *,
+    dominant_chop_membership: torch.Tensor,
+    failed_long_membership: torch.Tensor,
+    failed_short_membership: torch.Tensor,
+    chop_margin: float,
+    failed_confluence_margin: float,
+) -> torch.Tensor:
+    """Require WAIT to outrank entry actions only on declared chop failures."""
+    memberships = (
+        dominant_chop_membership,
+        failed_long_membership,
+        failed_short_membership,
+    )
+    margins = (chop_margin, failed_confluence_margin)
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or any(value.shape != flat_action_values.shape[:-1] for value in memberships)
+        or any(
+            isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+            for value in margins
+        )
+    ):
+        raise ValueError("chop-specific WAIT margin loss contract is invalid")
+    wait = flat_action_values[:, int(Action.WAIT)]
+    strongest_entry = flat_action_values[:, 1:].max(dim=1).values
+    dominant_loss = nn.functional.relu(
+        strongest_entry + float(chop_margin) - wait
+    ) * dominant_chop_membership * float(chop_margin > 0.0)
+    long_loss = nn.functional.relu(
+        flat_action_values[:, int(Action.ENTER_LONG_1)]
+        + float(failed_confluence_margin)
+        - wait
+    ) * failed_long_membership * float(failed_confluence_margin > 0.0)
+    short_loss = nn.functional.relu(
+        flat_action_values[:, int(Action.ENTER_SHORT_1)]
+        + float(failed_confluence_margin)
+        - wait
+    ) * failed_short_membership * float(failed_confluence_margin > 0.0)
+    return dominant_loss + long_loss + short_loss
+
+
 def persistent_chop_association_rank_loss(
     flat_action_values: torch.Tensor,
     *,
@@ -409,6 +456,8 @@ class RecurrentC51Agent:
         regime_selectivity_probability_epsilon: float = 1e-6,
         regime_selectivity_headroom_pressure: float = 1.0,
         regime_selectivity_dominant_chop_pressure: float = 2.0,
+        regime_selectivity_chop_wait_margin: float = 0.0,
+        regime_selectivity_failed_confluence_margin: float = 0.0,
         regime_selectivity_q_temperature: float = 1.0,
         regime_selectivity_side_balance: str = "none",
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
@@ -448,6 +497,12 @@ class RecurrentC51Agent:
             or entry_action_margin < 0
             or not np.isfinite(regime_selectivity_loss_weight)
             or regime_selectivity_loss_weight < 0
+            or isinstance(regime_selectivity_chop_wait_margin, bool)
+            or not np.isfinite(regime_selectivity_chop_wait_margin)
+            or regime_selectivity_chop_wait_margin < 0
+            or isinstance(regime_selectivity_failed_confluence_margin, bool)
+            or not np.isfinite(regime_selectivity_failed_confluence_margin)
+            or regime_selectivity_failed_confluence_margin < 0
             or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
@@ -614,6 +669,12 @@ class RecurrentC51Agent:
         )
         self.regime_selectivity_dominant_chop_pressure = float(
             regime_selectivity_dominant_chop_pressure
+        )
+        self.regime_selectivity_chop_wait_margin = float(
+            regime_selectivity_chop_wait_margin
+        )
+        self.regime_selectivity_failed_confluence_margin = float(
+            regime_selectivity_failed_confluence_margin
         )
         self.regime_selectivity_q_temperature = float(
             regime_selectivity_q_temperature
@@ -1699,6 +1760,38 @@ class RecurrentC51Agent:
                             regime_selectivity_side_conditioned_active_sides = (
                                 side_conditioned_group_active
                             )
+                        chop_margin_membership = (
+                            dead_membership
+                            + failed_long_confluence_membership
+                            + failed_short_confluence_membership
+                        )
+                        chop_margin_active = (
+                            (chop_margin_membership.sum() > 0).to(exact_losses.dtype)
+                            * float(
+                                self.regime_selectivity_chop_wait_margin > 0.0
+                                or self.regime_selectivity_failed_confluence_margin
+                                > 0.0
+                            )
+                        )
+                        chop_margin_loss = (
+                            chop_specific_wait_margin_losses(
+                                flat_q,
+                                dominant_chop_membership=dead_membership,
+                                failed_long_membership=(
+                                    failed_long_confluence_membership
+                                ),
+                                failed_short_membership=(
+                                    failed_short_confluence_membership
+                                ),
+                                chop_margin=(
+                                    self.regime_selectivity_chop_wait_margin
+                                ),
+                                failed_confluence_margin=(
+                                    self.regime_selectivity_failed_confluence_margin
+                                ),
+                            ).sum()
+                            / chop_margin_membership.sum().clamp_min(1.0)
+                        )
                         regime_selectivity_loss = (
                             regime_selectivity_exact_wait_loss * wait_active
                             + regime_selectivity_positive_long_loss * long_active
@@ -1713,6 +1806,10 @@ class RecurrentC51Agent:
                             + association_group_active
                             + side_conditioned_group_active
                         ).clamp_min(1.0)
+                        regime_selectivity_loss = (
+                            regime_selectivity_loss
+                            + chop_margin_loss * chop_margin_active
+                        )
                         regime_persistent_additive.update({
                             "regime_selectivity_exact_wait_rows": (
                                 wait_rows.sum()
@@ -3008,6 +3105,12 @@ class RecurrentC51Agent:
                 "regime_selectivity_dominant_chop_pressure": (
                     self.regime_selectivity_dominant_chop_pressure
                 ),
+                "regime_selectivity_chop_wait_margin": (
+                    self.regime_selectivity_chop_wait_margin
+                ),
+                "regime_selectivity_failed_confluence_margin": (
+                    self.regime_selectivity_failed_confluence_margin
+                ),
                 "regime_selectivity_q_temperature": (
                     self.regime_selectivity_q_temperature
                 ),
@@ -3115,6 +3218,8 @@ class RecurrentC51Agent:
         config.setdefault("entry_action_margin", 0.0)
         config.setdefault("teacher_channel_names", ())
         config.setdefault("regime_selectivity_loss_weight", 0.0)
+        config.setdefault("regime_selectivity_chop_wait_margin", 0.0)
+        config.setdefault("regime_selectivity_failed_confluence_margin", 0.0)
         config.setdefault("regime_selectivity_expansion_centers", None)
         config.setdefault("regime_selectivity_probability_epsilon", 1e-6)
         config.setdefault("regime_selectivity_headroom_pressure", 1.0)

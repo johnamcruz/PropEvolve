@@ -550,6 +550,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         return
     from .balance_aware_regime_selectivity import (
         ACTION_ORDER,
+        CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA,
         EXPANSION_REGIME_CONFLUENCE_FORMULA,
         EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         FORMULA,
@@ -591,6 +592,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         "persistent_chop_negative_emphasis",
         "side_balance",
     }
+    margin_fields = {"chop_wait_margin", "failed_confluence_margin"}
+    valid_required_sets = (required, required | margin_fields)
     legacy_contract = (
         isinstance(specification, dict)
         and set(specification) == legacy_required
@@ -625,6 +628,12 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         ),
     }
     expected_formula = expected_formulas.get(semantics)
+    if (
+        isinstance(specification, dict)
+        and margin_fields <= set(specification)
+        and semantics == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+    ):
+        expected_formula = CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA
     policy_health = (
         payload.get("training", {})
         .get("short_circuit", {})
@@ -660,7 +669,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
         }
         or not isinstance(specification, dict)
-        or set(specification) != required
+        or set(specification) not in valid_required_sets
         or specification.get("formula") != expected_formula
         or require_positive_association is not True
     ):
@@ -677,11 +686,27 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             "dominant_chop_pressure",
             "q_temperature",
             "persistent_chop_negative_emphasis",
+            "chop_wait_margin",
+            "failed_confluence_margin",
         )
-    ) if isinstance(specification, dict) else ()
+    ) if isinstance(specification, dict) and margin_fields <= set(specification) else (
+        tuple(
+            specification.get(field)
+            for field in (
+                "loss_weight",
+                "expansion_long_center",
+                "expansion_short_center",
+                "probability_epsilon",
+                "headroom_pressure",
+                "dominant_chop_pressure",
+                "q_temperature",
+                "persistent_chop_negative_emphasis",
+            )
+        ) if isinstance(specification, dict) else ()
+    )
     if (
         not isinstance(specification, dict)
-        or set(specification) != required
+        or set(specification) not in valid_required_sets
         or specification.get("schema") != SCHEMA
         or specification.get("training_only") is not True
         or specification.get("target_source") != TARGET_SOURCE
@@ -710,7 +735,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         or teachers[0].get("kind") != "expansion"
         or not any(teacher.get("kind") == "regime" for teacher in teachers)
         or tuple(teachers[0].get("channels", ())) != EXPANSION_CHANNELS
-        or len(numeric) != 8
+        or len(numeric) not in {8, 10}
         or any(
             isinstance(value, bool) or not isinstance(value, (int, float))
             for value in numeric
@@ -726,6 +751,8 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         )
         or float(specification["headroom_pressure"]) < 0.0
         or float(specification["dominant_chop_pressure"]) < 0.0
+        or float(specification.get("chop_wait_margin", 0.0)) < 0.0
+        or float(specification.get("failed_confluence_margin", 0.0)) < 0.0
         or float(specification["q_temperature"]) <= 0.0
         or (
             semantics == STATIC_STATE_SEMANTICS
@@ -1368,6 +1395,20 @@ def load_experiment_config(path: str | Path) -> dict:
             )
             if revisable_semantics and revisable_semantics != semantics_paths:
                 valid_regime_identity = False
+            margin_paths = {
+                "regime_selectivity.chop_wait_margin",
+                "regime_selectivity.failed_confluence_margin",
+            }
+            if margin_fields := (
+                {"chop_wait_margin", "failed_confluence_margin"}
+                & set(payload["regime_selectivity"])
+            ):
+                valid_regime_identity = (
+                    valid_regime_identity
+                    and margin_fields
+                    == {"chop_wait_margin", "failed_confluence_margin"}
+                    and margin_paths <= set(frozen)
+                )
         if not valid_regime_identity:
             raise ValueError(
                 "Regime selectivity identity must be frozen for the campaign"

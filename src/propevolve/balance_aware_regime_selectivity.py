@@ -72,6 +72,12 @@ SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA = (
     "failed_long_vs_valid_long_wait_rank,"
     "failed_short_vs_valid_short_wait_rank)"
 )
+CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA = (
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA
+    + "+membership_weighted_mean(dominant_chop_wait_margin,"
+    "failed_long_wait_margin,"
+    "failed_short_wait_margin)"
+)
 
 
 class PersistentChopEvidence(NamedTuple):

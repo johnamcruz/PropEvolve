@@ -589,6 +589,11 @@ def test_static_probe_detects_positive_entry_wait_suppression_in_chop() -> None:
     report = _evaluate(policy, replay)
 
     assert report.metrics["final_regime_probe_chop_minus_nonchop_wait"] > 0.0
+    assert report.metrics["final_regime_probe_dominant_chop_wait_rows"] > 0.0
+    assert (
+        report.metrics["final_regime_probe_dominant_chop_greedy_entry_rows"]
+        == 0.0
+    )
 
 
 def test_final_probe_rows_explain_predictions_with_regime_channels_and_strata() -> None:

@@ -208,9 +208,33 @@ def _assert_recovery_regime_selectivity(
     expected_emphasis = float(
         agent_settings["regime_selectivity_persistent_chop_negative_emphasis"]
     )
+    expected_chop_margin = float(
+        agent_settings.get("regime_selectivity_chop_wait_margin", 0.0)
+    )
+    expected_failed_margin = float(
+        agent_settings.get("regime_selectivity_failed_confluence_margin", 0.0)
+    )
+    undeclared_chop_default = (
+        0.0
+        if "regime_selectivity_chop_wait_margin" not in agent_settings
+        else math.nan
+    )
+    undeclared_failed_default = (
+        0.0
+        if "regime_selectivity_failed_confluence_margin" not in agent_settings
+        else math.nan
+    )
     if (
         getattr(agent, "regime_selectivity_semantics", None)
         != expected_semantics
+        or not math.isclose(
+            float(getattr(
+                agent,
+                "regime_selectivity_failed_confluence_margin",
+                undeclared_failed_default,
+            )),
+            expected_failed_margin,
+        )
         or not math.isclose(
             float(getattr(
                 agent,
@@ -218,6 +242,14 @@ def _assert_recovery_regime_selectivity(
                 math.nan,
             )),
             expected_emphasis,
+        )
+        or not math.isclose(
+            float(getattr(
+                agent,
+                "regime_selectivity_chop_wait_margin",
+                undeclared_chop_default,
+            )),
+            expected_chop_margin,
         )
         or getattr(agent, "regime_selectivity_side_balance", None)
         != agent_settings.get("regime_selectivity_side_balance")
@@ -232,7 +264,7 @@ def _regime_selectivity_agent_settings(
     if specification is None:
         return {}
     side_balance = specification.get("side_balance")
-    return {
+    settings = {
         "regime_selectivity_loss_weight": float(specification["loss_weight"]),
         "regime_selectivity_expansion_centers": (
             float(specification["expansion_long_center"]),
@@ -262,6 +294,16 @@ def _regime_selectivity_agent_settings(
             else str(side_balance["schema"])
         ),
     }
+    if "chop_wait_margin" in specification:
+        settings.update({
+            "regime_selectivity_chop_wait_margin": float(
+                specification["chop_wait_margin"]
+            ),
+            "regime_selectivity_failed_confluence_margin": float(
+                specification["failed_confluence_margin"]
+            ),
+        })
+    return settings
 
 
 def _regime_selectivity_replay_settings(
@@ -1411,6 +1453,7 @@ def _training_evaluation_gates(
     regime_selectivity_semantics: str = "static_state_v1",
     entry_action_loss_reduction: str = "population_weighted_mean_v1",
     entry_action_supervision_active: bool = False,
+    chop_wait_margin_active: bool = False,
 ) -> tuple[EvaluationGate, ...]:
     gates = [EvaluationGate("short_circuited", "==", 0.0)]
     if entry_action_loss_reduction not in {
@@ -1626,6 +1669,29 @@ def _training_evaluation_gates(
                         0.0,
                     ),
                 ))
+                if chop_wait_margin_active:
+                    gates.extend((
+                        EvaluationGate(
+                            "regime_selectivity_persistent_dead_chop_rows",
+                            ">=",
+                            32.0,
+                        ),
+                        EvaluationGate(
+                            "regime_selectivity_failed_short_confluence_rows",
+                            ">=",
+                            32.0,
+                        ),
+                        EvaluationGate(
+                            "final_regime_probe_dominant_chop_wait_rows",
+                            ">",
+                            0.0,
+                        ),
+                        EvaluationGate(
+                            "final_regime_probe_dominant_chop_greedy_entry_rows",
+                            "==",
+                            0.0,
+                        ),
+                    ))
         else:
             raise ValueError("Regime selectivity gate semantics are invalid")
     return tuple(gates)
@@ -3088,6 +3154,17 @@ class HistoricalCandidateRunner:
                     ),
                     entry_action_supervision_active=(
                         entry_supervision_spec is not None
+                    ),
+                    chop_wait_margin_active=(
+                        regime_selectivity_spec is not None
+                        and (
+                            float(regime_selectivity_spec.get(
+                                "chop_wait_margin", 0.0
+                            )) > 0.0
+                            or float(regime_selectivity_spec.get(
+                                "failed_confluence_margin", 0.0
+                            )) > 0.0
+                        )
                     ),
                 ),
             ),

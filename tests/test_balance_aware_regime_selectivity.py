@@ -17,6 +17,7 @@ from propevolve.agent import (
     RecurrentC51Agent,
     exact_action_margin_losses,
     side_conditioned_wait_rank_loss,
+    chop_specific_wait_margin_losses,
 )
 from propevolve.decision import Action
 from propevolve.replay import Transition
@@ -132,6 +133,58 @@ def test_side_conditioned_rank_loss_separates_wait_long_and_wait_short_gradients
             [-0.5, 0.0, 0.5],
             [0.5, 0.0, -0.5],
         ], dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_chop_specific_margin_requires_wait_over_entries_without_touching_valid_short(
+) -> None:
+    action_values = torch.tensor(
+        [
+            [0.10, 0.30, 0.40],  # dominant chop: WAIT below both entries
+            [0.20, 0.60, 0.10],  # failed Long: WAIT below Long
+            [0.20, 0.10, 0.50],  # failed Short: WAIT below Short
+            [0.10, 0.20, 0.70],  # valid Short: not a WAIT-margin row
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+
+    losses = chop_specific_wait_margin_losses(
+        action_values,
+        dominant_chop_membership=torch.tensor([1.0, 0.0, 0.0, 0.0]),
+        failed_long_membership=torch.tensor([0.0, 1.0, 0.0, 0.0]),
+        failed_short_membership=torch.tensor([0.0, 0.0, 1.0, 0.0]),
+        chop_margin=0.25,
+        failed_confluence_margin=0.35,
+    )
+
+    torch.testing.assert_close(
+        losses,
+        torch.tensor([0.55, 0.75, 0.65, 0.0], dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+
+def test_each_chop_margin_can_be_disabled_independently() -> None:
+    action_values = torch.tensor(
+        [[0.0, 1.0, 0.5], [0.0, 0.5, 1.0]], dtype=torch.float64
+    )
+
+    losses = chop_specific_wait_margin_losses(
+        action_values,
+        dominant_chop_membership=torch.tensor([1.0, 0.0]),
+        failed_long_membership=torch.tensor([0.0, 0.0]),
+        failed_short_membership=torch.tensor([0.0, 1.0]),
+        chop_margin=0.0,
+        failed_confluence_margin=0.25,
+    )
+
+    torch.testing.assert_close(
+        losses,
+        torch.tensor([0.0, 1.25], dtype=torch.float64),
         rtol=0.0,
         atol=0.0,
     )
@@ -433,12 +486,15 @@ def _agent(
     seed: int,
     selectivity_weight: float,
     n_step_return: int = 1,
+    recurrent_burn_in: int = 0,
     entry_action_weight: float = 0.0,
     entry_action_margin: float = 0.0,
     entry_action_loss_reduction: str = "population_weighted_mean_v1",
     side_balance: str | None = None,
     selectivity_semantics: str | None = None,
     persistent_chop_negative_emphasis: float | None = None,
+    chop_wait_margin: float = 0.0,
+    failed_confluence_margin: float = 0.0,
     expansion_centers: tuple[float, float] = (0.10, 0.10),
     device: str = "cpu",
 ) -> RecurrentC51Agent:
@@ -465,6 +521,7 @@ def _agent(
         gradient_clip=10.0,
         target_sync_updates=250,
         n_step_return=n_step_return,
+        recurrent_burn_in=recurrent_burn_in,
         device=device,
         seed=seed,
         teacher_channels=len(CHANNELS),
@@ -476,6 +533,8 @@ def _agent(
         entry_action_loss_reduction=entry_action_loss_reduction,
         regime_selectivity_loss_weight=selectivity_weight,
         regime_selectivity_expansion_centers=expansion_centers,
+        regime_selectivity_chop_wait_margin=chop_wait_margin,
+        regime_selectivity_failed_confluence_margin=failed_confluence_margin,
         **optional_settings,
     )
 
@@ -561,6 +620,152 @@ def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(
     assert agent.last_train_metrics["regime_selectivity_supervised_rows"] == 2.0
     assert agent.last_train_metrics[
         "regime_selectivity_failed_long_confluence_rows"
+    ] > 0.0
+
+
+def test_chop_wait_margins_remain_active_after_teacher_dropout() -> None:
+    settings = dict(
+        seed=521,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        selectivity_semantics=(
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+        ),
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+    )
+    baseline = _agent(**settings)
+    margin_agent = _agent(
+        **settings,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.35,
+    )
+    dead_chop = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.20,
+            long_clean=0.20,
+            short_attempt=0.80,
+            short_clean=0.80,
+            chop=0.90,
+            neutral=0.05,
+            trend=0.05,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )
+    failed_short = _sequence(
+        (0.0, 1.0, 0.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )
+    valid_short = _sequence(
+        (0.0, 0.0, 1.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+        headroom=1.0,
+        target=Action.ENTER_SHORT_1,
+        teacher_imitation_visible=False,
+    )
+
+    batch = (dead_chop, failed_short, valid_short)
+    baseline.train_batch(batch, teacher_weight_scale=1.0)
+    margin_agent.train_batch(batch, teacher_weight_scale=1.0)
+
+    assert margin_agent.last_train_metrics["teacher_loss"] == 0.0
+    assert margin_agent.last_train_metrics["regime_selectivity_loss"] > (
+        baseline.last_train_metrics["regime_selectivity_loss"]
+    )
+    assert margin_agent.last_train_metrics[
+        "regime_selectivity_transition_positive_short_rows"
+    ] > 0.0
+
+
+def test_chop_margin_cohorts_are_learned_after_recurrent_burn_in() -> None:
+    agent = _agent(
+        seed=523,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        recurrent_burn_in=1,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=(
+            SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+        ),
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+    )
+    neutral_burn = _sequence(
+        (0.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.10,
+            short_clean=0.10,
+            chop=0.20,
+            neutral=0.60,
+            trend=0.20,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )[0]
+    dead_chop = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.20,
+            long_clean=0.20,
+            short_attempt=0.20,
+            short_clean=0.20,
+            chop=0.90,
+            neutral=0.05,
+            trend=0.05,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )[0]
+    failed_short = _sequence(
+        (0.0, 1.0, 0.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.90,
+            short_clean=0.90,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )[0]
+
+    agent.train_batch(((neutral_burn, dead_chop), (neutral_burn, failed_short)))
+
+    assert agent.last_train_metrics[
+        "regime_selectivity_persistent_dead_chop_rows"
+    ] > 0.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_failed_short_confluence_rows"
     ] > 0.0
 
 

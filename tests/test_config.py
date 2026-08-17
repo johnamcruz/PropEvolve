@@ -15,6 +15,7 @@ from propevolve.config import (
 )
 from propevolve.balance_aware_regime_selectivity import (
     ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
+    CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     FORMULA as REGIME_SELECTIVITY_FORMULA,
@@ -42,6 +43,9 @@ STAGE2_V7_RECIPE = Path(
 )
 STAGE2_ACTION_MARGIN_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v13_action_margin.json"
+)
+STAGE2_CHOP_MARGIN_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v14_chop_margin.json"
 )
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
@@ -469,6 +473,24 @@ def test_stage2_action_margin_campaign_is_one_matched_100_episode_test() -> None
     assert stage["training_episodes"] == 100
     assert stage["validation_episodes"] == 200
     assert stage["allow_revisions"] is False
+
+
+def test_stage2_chop_margin_campaign_freezes_symmetric_wait_separation() -> None:
+    payload = load_experiment_config(STAGE2_CHOP_MARGIN_RECIPE)
+
+    selectivity = payload["regime_selectivity"]
+    assert selectivity["formula"] == CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA
+    assert selectivity["chop_wait_margin"] == 0.25
+    assert selectivity["failed_confluence_margin"] == 0.25
+    assert {
+        "regime_selectivity.chop_wait_margin",
+        "regime_selectivity.failed_confluence_margin",
+    } <= set(payload["evolution"]["frozen_paths"])
+    assert len(payload["campaign"]["budget_stages"]) == 1
+    stage = payload["campaign"]["budget_stages"][0]
+    assert stage["name"] == "chop_margin_100ep"
+    assert stage["training_episodes"] == 100
+    assert stage["validation_episodes"] == 200
 
 
 @pytest.mark.parametrize(

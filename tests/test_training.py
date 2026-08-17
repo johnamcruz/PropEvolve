@@ -157,6 +157,52 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
     }) == {"entry_opportunity_side_balance": "equal_long_short_v1"}
 
 
+def test_stage2a_recipe_projects_chop_specific_wait_margins() -> None:
+    settings = _regime_selectivity_agent_settings({
+        "loss_weight": 0.3,
+        "expansion_long_center": 0.10,
+        "expansion_short_center": 0.10,
+        "probability_epsilon": 1e-6,
+        "headroom_pressure": 1.0,
+        "dominant_chop_pressure": 2.0,
+        "q_temperature": 1.0,
+        "semantics": "side_conditioned_expansion_regime_confluence_v4",
+        "persistent_chop_negative_emphasis": 2.0,
+        "side_balance": {
+            "schema": "equal_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.35,
+    })
+
+    assert settings["regime_selectivity_chop_wait_margin"] == 0.25
+    assert settings["regime_selectivity_failed_confluence_margin"] == 0.35
+
+
+def test_chop_margin_candidate_rejects_any_teacher_free_dominant_chop_entry() -> None:
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics=(
+            "side_conditioned_expansion_regime_confluence_v4"
+        ),
+        chop_wait_margin_active=True,
+    )
+    dominant_entry_gate = next(
+        gate
+        for gate in gates
+        if gate.metric
+        == "final_regime_probe_dominant_chop_greedy_entry_rows"
+    )
+
+    assert dominant_entry_gate.passes({
+        "final_regime_probe_dominant_chop_greedy_entry_rows": 0.0,
+    })
+    assert not dominant_entry_gate.passes({
+        "final_regime_probe_dominant_chop_greedy_entry_rows": 1.0,
+    })
+
+
 def test_final_regime_probe_uses_frozen_selectivity_identity() -> None:
     assert training_module._regime_selectivity_probe_settings({
         "semantics": "persistent_chop_association_v2",
@@ -292,6 +338,22 @@ def test_recovery_rejects_regime_learning_identity_drift() -> None:
         _assert_recovery_regime_selectivity(
             Agent(),
             {**expected, "regime_selectivity_side_balance": "none"},
+        )
+
+    class MarginAgent(Agent):
+        regime_selectivity_chop_wait_margin = 0.25
+        regime_selectivity_failed_confluence_margin = 0.25
+
+    margin_expected = {
+        **expected,
+        "regime_selectivity_chop_wait_margin": 0.25,
+        "regime_selectivity_failed_confluence_margin": 0.25,
+    }
+    _assert_recovery_regime_selectivity(MarginAgent(), margin_expected)
+    with pytest.raises(ValueError, match="recovery Regime learning identity drifted"):
+        _assert_recovery_regime_selectivity(
+            MarginAgent(),
+            {**margin_expected, "regime_selectivity_failed_confluence_margin": 0.5},
         )
 
 
