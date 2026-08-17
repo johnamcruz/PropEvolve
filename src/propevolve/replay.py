@@ -558,6 +558,7 @@ class BalancedSequenceReplay:
         safety_sequence_fraction: float = 0.0,
         entry_opportunity_sequence_fraction: float = 0.0,
         regime_wait_sequence_fraction: float = 0.0,
+        regime_wait_sequence_update_period: int = 0,
         entry_opportunity_side_balance: str = "none",
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
@@ -599,6 +600,23 @@ class BalancedSequenceReplay:
             entry_opportunity_sequence_fraction
         )
         self.regime_wait_sequence_fraction = float(regime_wait_sequence_fraction)
+        if (
+            isinstance(regime_wait_sequence_update_period, bool)
+            or not isinstance(regime_wait_sequence_update_period, int)
+            or regime_wait_sequence_update_period < 0
+            or (
+                regime_wait_sequence_update_period > 0
+                and self.regime_wait_sequence_fraction > 0.0
+            )
+            or (
+                regime_wait_sequence_update_period > 0
+                and self.terminal_sequence_fraction <= 0.0
+            )
+        ):
+            raise ValueError("replay Regime WAIT update schedule is invalid")
+        self.regime_wait_sequence_update_period = int(
+            regime_wait_sequence_update_period
+        )
         if entry_opportunity_side_balance not in {
             "none",
             "equal_long_short_v1",
@@ -608,6 +626,7 @@ class BalancedSequenceReplay:
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
+        self._sample_calls = 0
 
     def __len__(self) -> int:
         return len(self._episodes)
@@ -720,7 +739,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 8,
+            "schema_version": 9,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -733,11 +752,15 @@ class BalancedSequenceReplay:
                     self.entry_opportunity_sequence_fraction
                 ),
                 "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
+                "regime_wait_sequence_update_period": (
+                    self.regime_wait_sequence_update_period
+                ),
                 "entry_opportunity_side_balance": (
                     self.entry_opportunity_side_balance
                 ),
             },
             "random_state": self._random.getstate(),
+            "sample_calls": self._sample_calls,
             "episodes": [
                 {
                     field: getattr(episode, field)
@@ -757,7 +780,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8}:
+        if schema_version not in {7, 8, 9}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -771,10 +794,17 @@ class BalancedSequenceReplay:
                 self.entry_opportunity_sequence_fraction
             ),
             "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
+            "regime_wait_sequence_update_period": (
+                self.regime_wait_sequence_update_period
+            ),
             "entry_opportunity_side_balance": (
                 self.entry_opportunity_side_balance
             ),
         }
+        if schema_version in {7, 8}:
+            if self.regime_wait_sequence_update_period != 0:
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("regime_wait_sequence_update_period")
         if schema_version == 7:
             if self.regime_wait_sequence_fraction != 0.0:
                 raise ValueError("replay checkpoint contract drifted")
@@ -983,8 +1013,17 @@ class BalancedSequenceReplay:
             self._random.setstate(state["random_state"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("replay checkpoint RNG state is invalid") from error
+        sample_calls = state.get("sample_calls", 0)
+        if (
+            isinstance(sample_calls, bool)
+            or not isinstance(sample_calls, int)
+            or sample_calls < 0
+            or (schema_version == 9 and "sample_calls" not in state)
+        ):
+            raise ValueError("replay checkpoint sample schedule is invalid")
         self._episodes = restored
         self._transition_count = transition_count
+        self._sample_calls = sample_calls
 
     def add(self, episode: Episode) -> None:
         stored = _StoredEpisode.from_episode(episode)
@@ -1047,9 +1086,20 @@ class BalancedSequenceReplay:
         sequences = []
         terminal_count = round(count * self.terminal_sequence_fraction)
         safety_count = round(count * self.safety_sequence_fraction)
-        regime_wait_count = round(count * self.regime_wait_sequence_fraction)
+        fixed_regime_wait_count = round(
+            count * self.regime_wait_sequence_fraction
+        )
         entry_count = round(count * self.entry_opportunity_sequence_fraction)
         sampled_episodes = list(self.sample_episodes(count))
+        self._sample_calls += 1
+        scheduled_regime_wait_count = int(
+            self.regime_wait_sequence_update_period > 0
+            and self._sample_calls % self.regime_wait_sequence_update_period == 0
+        )
+        if scheduled_regime_wait_count > terminal_count:
+            raise ValueError("Regime WAIT schedule lacks a terminal sequence slot")
+        terminal_count -= scheduled_regime_wait_count
+        regime_wait_count = fixed_regime_wait_count + scheduled_regime_wait_count
         regime_wait_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
         regime_wait_episodes = [
             stored
@@ -1066,6 +1116,9 @@ class BalancedSequenceReplay:
             cumulative_regime_wait_priorities.append(
                 previous + stored.regime_wait_priority_sum
             )
+        if scheduled_regime_wait_count and not cumulative_regime_wait_priorities:
+            terminal_count += scheduled_regime_wait_count
+            regime_wait_count -= scheduled_regime_wait_count
         regime_wait_start = terminal_count + safety_count
         for offset in range(regime_wait_count):
             if not cumulative_regime_wait_priorities:

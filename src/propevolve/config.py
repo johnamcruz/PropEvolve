@@ -769,11 +769,12 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         )
     ):
         raise ValueError("balance-aware Regime selectivity contract is invalid")
+    training = payload.get("training", {})
     if (
-        float(payload.get("training", {}).get(
-            "regime_wait_sequence_fraction", 0.0
-        ))
-        > 0.0
+        (
+            float(training.get("regime_wait_sequence_fraction", 0.0)) > 0.0
+            or int(training.get("regime_wait_sequence_update_period", 0)) > 0
+        )
         and semantics
         != SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
     ):
@@ -966,6 +967,7 @@ def load_experiment_config(path: str | Path) -> dict:
     training.setdefault("safety_sequence_fraction", 0.0)
     training.setdefault("entry_opportunity_sequence_fraction", 0.0)
     training.setdefault("regime_wait_sequence_fraction", 0.0)
+    training.setdefault("regime_wait_sequence_update_period", 0)
     training.setdefault("management_epsilon_start", training["epsilon_start"])
     training.setdefault("management_epsilon_end", training["epsilon_end"])
     training.setdefault("validation_no_trade_patience_episodes", 0)
@@ -1044,8 +1046,29 @@ def load_experiment_config(path: str | Path) -> dict:
         + float(training["regime_wait_sequence_fraction"]) > 1
     ):
         raise ValueError("training replay sequence fractions are invalid")
+    regime_wait_update_period = training["regime_wait_sequence_update_period"]
     if (
-        float(training["regime_wait_sequence_fraction"]) > 0.0
+        isinstance(regime_wait_update_period, bool)
+        or not isinstance(regime_wait_update_period, int)
+        or regime_wait_update_period < 0
+        or (
+            regime_wait_update_period > 0
+            and float(training["regime_wait_sequence_fraction"]) > 0.0
+        )
+        or (
+            regime_wait_update_period > 0
+            and round(
+                int(training["batch_sequences"])
+                * float(training["terminal_sequence_fraction"])
+            ) < 1
+        )
+    ):
+        raise ValueError("training Regime WAIT update schedule is invalid")
+    if (
+        (
+            float(training["regime_wait_sequence_fraction"]) > 0.0
+            or regime_wait_update_period > 0
+        )
         and payload.get("regime_selectivity") is None
     ):
         raise ValueError(
@@ -1437,6 +1460,13 @@ def load_experiment_config(path: str | Path) -> dict:
         if (
             float(training.get("regime_wait_sequence_fraction", 0.0)) > 0.0
             and "training.regime_wait_sequence_fraction" not in frozen
+        ):
+            raise ValueError(
+                "Regime WAIT replay identity must be frozen for the campaign"
+            )
+        if (
+            int(training.get("regime_wait_sequence_update_period", 0)) > 0
+            and "training.regime_wait_sequence_update_period" not in frozen
         ):
             raise ValueError(
                 "Regime WAIT replay identity must be frozen for the campaign"

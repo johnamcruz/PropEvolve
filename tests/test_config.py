@@ -53,6 +53,9 @@ STAGE2_HARD_WAIT_REPLAY_RECIPE = Path(
 STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v16_balanced_hard_wait_replay.json"
 )
+STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v17_sparse_hard_wait_replay.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -428,6 +431,56 @@ def test_balanced_hard_wait_replay_recipe_reserves_one_sequence_and_restores_ter
     assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
     assert training["regime_wait_sequence_fraction"] == pytest.approx(0.0625)
     assert "training.regime_wait_sequence_fraction" in config["evolution"][
+        "frozen_paths"
+    ]
+
+
+def test_sparse_hard_wait_update_schedule_is_integer_frozen_and_selectivity_bound(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    staged = json.loads(path.read_text())
+    payload = json.loads(STAGE2_CHOP_MARGIN_RECIPE.read_text())
+    for field in (
+        "expansion_center_receipt",
+        "expansion_center_receipt_sha256",
+        "expansion_long_center",
+        "expansion_short_center",
+    ):
+        payload["regime_selectivity"][field] = staged["regime_selectivity"][field]
+    payload["training"].update({
+        "terminal_sequence_fraction": 0.5,
+        "safety_sequence_fraction": 0.25,
+        "entry_opportunity_sequence_fraction": 0.25,
+        "regime_wait_sequence_fraction": 0.0,
+        "regime_wait_sequence_update_period": 8,
+    })
+    frozen = payload["evolution"]["frozen_paths"]
+    frozen.append("training.regime_wait_sequence_update_period")
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+    assert config["training"]["regime_wait_sequence_update_period"] == 8
+
+    payload["evolution"]["frozen_paths"].remove(
+        "training.regime_wait_sequence_update_period"
+    )
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="Regime WAIT replay identity"):
+        load_experiment_config(path)
+
+
+def test_sparse_hard_wait_recipe_uses_one_sequence_every_eight_updates() -> None:
+    config = load_experiment_config(STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE)
+    training = config["training"]
+
+    assert training["batch_sequences"] == 16
+    assert training["terminal_sequence_fraction"] == pytest.approx(0.5)
+    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
+    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
+    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.0)
+    assert training["regime_wait_sequence_update_period"] == 8
+    assert "training.regime_wait_sequence_update_period" in config["evolution"][
         "frozen_paths"
     ]
 

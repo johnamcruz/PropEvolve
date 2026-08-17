@@ -2798,7 +2798,8 @@ def test_training_marks_hard_exact_wait_for_post_burn_in_replay() -> None:
         replay=CapturingReplay(
             capacity_episodes=2,
             sequence_length=1,
-            regime_wait_sequence_fraction=1.0,
+            terminal_sequence_fraction=1.0,
+            regime_wait_sequence_update_period=1,
             seed=3,
         ),
         warmup_episodes=1,

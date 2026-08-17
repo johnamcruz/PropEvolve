@@ -2503,6 +2503,9 @@ class HistoricalCandidateRunner:
             regime_wait_sequence_fraction=float(
                 training_config.get("regime_wait_sequence_fraction", 0.0)
             ),
+            regime_wait_sequence_update_period=int(
+                training_config.get("regime_wait_sequence_update_period", 0)
+            ),
             **_regime_selectivity_replay_settings(regime_selectivity_spec),
             recurrent_burn_in=int(agent.recurrent_burn_in),
             n_step_return=int(agent.n_step_return),
@@ -4748,7 +4751,10 @@ def train_agent(
             episode_outcome=outcome,
         )
         replay_transitions = tuple(transitions)
-        if replay.regime_wait_sequence_fraction > 0.0:
+        if (
+            replay.regime_wait_sequence_fraction > 0.0
+            or replay.regime_wait_sequence_update_period > 0
+        ):
             compiler = getattr(agent, "regime_selectivity", None)
             if compiler is None:
                 raise ValueError(
