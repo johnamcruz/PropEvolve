@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 import numpy as np
 
 from .assets import AssetContract
-from .balance_aware_regime_selectivity import REGIME_TEACHER_CHANNELS
+from .balance_aware_regime_selectivity import (
+    BalanceAwareRegimeSelectivity,
+    REGIME_TEACHER_CHANNELS,
+)
 from .cache import load_market_series
 from .config import (
     DEFAULT_RUNTIME,
@@ -320,6 +323,43 @@ def _regime_selectivity_replay_settings(
             else str(side_balance["schema"])
         )
     }
+
+
+def _with_regime_wait_replay_priorities(
+    transitions: Sequence[Transition],
+    compiler: BalanceAwareRegimeSelectivity,
+) -> tuple[Transition, ...]:
+    """Attach loss-identical hard-WAIT priority once per completed episode."""
+    eligible = [
+        index
+        for index, transition in enumerate(transitions)
+        if transition.teacher_target is not None
+        and transition.entry_action_target is not None
+    ]
+    if not eligible:
+        return tuple(transitions)
+    teachers = np.stack([
+        np.asarray(transitions[index].teacher_target, dtype=np.float32)
+        for index in eligible
+    ])
+    targets = np.asarray([
+        int(Action(transitions[index].entry_action_target))
+        for index in eligible
+    ], dtype=np.int64)
+    import torch
+
+    with torch.no_grad():
+        priorities = compiler.exact_wait_replay_priorities(
+            torch.from_numpy(teachers),
+            torch.from_numpy(targets),
+        ).cpu().numpy()
+    annotated = list(transitions)
+    for index, priority in zip(eligible, priorities, strict=True):
+        annotated[index] = replace(
+            annotated[index],
+            regime_wait_priority=float(priority),
+        )
+    return tuple(annotated)
 
 
 def _regime_selectivity_probe_settings(
@@ -2459,6 +2499,9 @@ class HistoricalCandidateRunner:
             ),
             entry_opportunity_sequence_fraction=float(
                 training_config.get("entry_opportunity_sequence_fraction", 0.0)
+            ),
+            regime_wait_sequence_fraction=float(
+                training_config.get("regime_wait_sequence_fraction", 0.0)
             ),
             **_regime_selectivity_replay_settings(regime_selectivity_spec),
             recurrent_burn_in=int(agent.recurrent_burn_in),
@@ -4704,13 +4747,24 @@ def train_agent(
             visible_regime_entry_context,
             episode_outcome=outcome,
         )
+        replay_transitions = tuple(transitions)
+        if replay.regime_wait_sequence_fraction > 0.0:
+            compiler = getattr(agent, "regime_selectivity", None)
+            if compiler is None:
+                raise ValueError(
+                    "Regime WAIT replay requires authenticated selectivity"
+                )
+            replay_transitions = _with_regime_wait_replay_priorities(
+                replay_transitions,
+                compiler,
+            )
         replay.add(Episode(
             episode_id=f"historical-{episode_index}-{time.time_ns()}",
             ticker=str(terminal_info["ticker"]),
             outcome=outcome,
             primary_side=str(terminal_info["primary_side"]),
             ended_at_ns=time.time_ns(),
-            transitions=tuple(transitions),
+            transitions=replay_transitions,
         ))
         episode_losses = []
         episode_rl_losses = []

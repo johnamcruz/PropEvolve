@@ -150,6 +150,105 @@ def test_replay_anchors_declared_fraction_at_expansion_entry_opportunity() -> No
     assert sequence[-1].entry_opportunity_priority == pytest.approx(0.95)
 
 
+def test_replay_anchors_declared_fraction_at_hard_exact_wait_after_burn_in() -> None:
+    episode = _episode("NQ", "timeout", "long", 0)
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    priorities = (0.0, 0.0, 0.0, 0.95, 0.0, 0.0)
+    prioritized = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "valid_actions": flat_actions,
+                "next_valid_actions": () if item.terminated else flat_actions,
+                "teacher_target": np.array(
+                    [0.8, 0.8, 0.1, 0.2, 0.9, 0.05, 0.05],
+                    np.float32,
+                ),
+                "entry_action_target": Action.WAIT,
+                "regime_wait_priority": priority,
+            })
+            for item, priority in zip(
+                episode.transitions, priorities, strict=True
+            )
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        regime_wait_sequence_fraction=1.0,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=32,
+    )
+    replay.add(prioritized)
+
+    sequence = replay.sample(1)[0]
+
+    assert sequence[2].entry_action_target is Action.WAIT
+    assert sequence[2].regime_wait_priority == pytest.approx(0.95)
+    assert sequence[2].training_valid is True
+
+    state = replay.state_dict()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        regime_wait_sequence_fraction=1.0,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    restored.load_state_dict(state)
+    restored_sequence = restored.sample(1)[0]
+    assert restored_sequence[2].entry_action_target is Action.WAIT
+    assert restored_sequence[2].regime_wait_priority == pytest.approx(0.95)
+
+
+def test_replay_rejects_hard_wait_priority_on_positive_entry_target() -> None:
+    episode = _entry_opportunity_episode(
+        episode_id="long-positive",
+        side=Action.ENTER_LONG_1,
+        offset=0,
+    )
+    invalid = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "regime_wait_priority": (
+                    1.0
+                    if item.entry_action_target is Action.ENTER_LONG_1
+                    else 0.0
+                ),
+            })
+            for item in episode.transitions
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        regime_wait_sequence_fraction=1.0,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=33,
+    )
+
+    with pytest.raises(ValueError, match="lacks exact evidence"):
+        replay.add(invalid)
+
+
 def test_replay_entry_anchor_keeps_wait_wait_enter_context() -> None:
     episode = _episode("NQ", "timeout", "long", 0)
     flat_actions = (
@@ -533,7 +632,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 7
+    assert state["schema_version"] == 8
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -575,6 +674,23 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
     )
     with pytest.raises(ValueError, match="contract drifted"):
         drifted.load_state_dict(state)
+
+    legacy = replay.state_dict()
+    legacy["schema_version"] = 7
+    legacy["contract"].pop("regime_wait_sequence_fraction")
+    for payload in legacy["episodes"]:
+        payload.pop("regime_wait_priorities")
+    legacy_restored = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="equal_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    legacy_restored.load_state_dict(legacy)
+    assert legacy_restored.transition_count == replay.transition_count
 
 
 def test_replay_round_trip_preserves_teacher_imitation_visibility() -> None:
@@ -956,7 +1072,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 7
+    assert state["schema_version"] == 8
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

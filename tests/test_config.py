@@ -47,6 +47,9 @@ STAGE2_ACTION_MARGIN_RECIPE = Path(
 STAGE2_CHOP_MARGIN_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v14_chop_margin.json"
 )
+STAGE2_HARD_WAIT_REPLAY_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v15_hard_wait_replay.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -394,6 +397,47 @@ def test_validation_no_trade_patience_is_json_configured_and_fail_closed(
         path.write_text(json.dumps(payload))
         with pytest.raises(ValueError, match="validation no-trade patience"):
             load_experiment_config(path)
+
+
+def test_hard_wait_replay_recipe_reserves_two_sequences_without_reducing_safety(
+) -> None:
+    config = load_experiment_config(STAGE2_HARD_WAIT_REPLAY_RECIPE)
+    training = config["training"]
+
+    assert training["batch_sequences"] == 16
+    assert training["terminal_sequence_fraction"] == pytest.approx(0.375)
+    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
+    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
+    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.125)
+    assert "training.regime_wait_sequence_fraction" in config["evolution"][
+        "frozen_paths"
+    ]
+
+
+def test_replay_fraction_contract_includes_hard_wait_quota(tmp_path: Path) -> None:
+    payload = _generic_payload()
+    payload["training"].update({
+        "terminal_sequence_fraction": 0.5,
+        "safety_sequence_fraction": 0.25,
+        "entry_opportunity_sequence_fraction": 0.25,
+        "regime_wait_sequence_fraction": 0.125,
+    })
+    path = tmp_path / "invalid-replay-fractions.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="replay sequence fractions"):
+        load_experiment_config(path)
+
+    payload = _generic_payload()
+    payload["training"].update({
+        "terminal_sequence_fraction": 0.375,
+        "safety_sequence_fraction": 0.25,
+        "entry_opportunity_sequence_fraction": 0.25,
+        "regime_wait_sequence_fraction": 0.125,
+    })
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="requires authenticated selectivity"):
+        load_experiment_config(path)
 
 
 @pytest.mark.parametrize(

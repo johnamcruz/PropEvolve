@@ -32,6 +32,7 @@ class Transition:
     regime_selectivity_headroom_fraction: float | None = None
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
+    regime_wait_priority: float = 0.0
     training_valid: bool = True
     source_decision_index: int | None = None
 
@@ -121,6 +122,10 @@ class _StoredEpisode:
     regime_selectivity_headroom_fractions: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
+    regime_wait_priorities: np.ndarray
+    regime_wait_anchor_indices: np.ndarray
+    regime_wait_anchor_cumulative_priorities: np.ndarray
+    regime_wait_priority_sum: float
     source_decision_indices: np.ndarray
 
     @property
@@ -147,6 +152,12 @@ class _StoredEpisode:
             for item in transitions
         ):
             raise ValueError("replay entry opportunity priority is invalid")
+        if any(
+            not np.isfinite(item.regime_wait_priority)
+            or item.regime_wait_priority < 0
+            for item in transitions
+        ):
+            raise ValueError("replay Regime WAIT priority is invalid")
         if any(
             item.source_decision_index is not None
             and (
@@ -214,6 +225,25 @@ class _StoredEpisode:
             ):
                 raise ValueError("replay Regime-selectivity row is invalid")
             regime_selectivity_headroom_fractions[index] = headroom
+        regime_wait_priorities = np.asarray(
+            [item.regime_wait_priority for item in transitions], np.float32
+        )
+        regime_wait_anchor_indices = np.flatnonzero(
+            regime_wait_priorities > 0.0
+        ).astype(np.int32, copy=False)
+        if any(
+            item.regime_wait_priority > 0.0
+            and (
+                item.entry_action_target != Action.WAIT
+                or item.teacher_target is None
+                or not flat_actions.issubset(item.valid_actions)
+            )
+            for item in transitions
+        ):
+            raise ValueError("replay Regime WAIT priority lacks exact evidence")
+        regime_wait_anchor_cumulative_priorities = np.cumsum(
+            regime_wait_priorities[regime_wait_anchor_indices], dtype=np.float64
+        )
         return cls(
             episode_id=episode.episode_id,
             ticker=episode.ticker,
@@ -258,6 +288,16 @@ class _StoredEpisode:
             ),
             entry_opportunity_priorities=np.asarray(
                 [item.entry_opportunity_priority for item in transitions], np.float32
+            ),
+            regime_wait_priorities=regime_wait_priorities,
+            regime_wait_anchor_indices=regime_wait_anchor_indices,
+            regime_wait_anchor_cumulative_priorities=(
+                regime_wait_anchor_cumulative_priorities
+            ),
+            regime_wait_priority_sum=(
+                0.0
+                if not regime_wait_anchor_cumulative_priorities.size
+                else float(regime_wait_anchor_cumulative_priorities[-1])
             ),
             source_decision_indices=np.asarray(
                 [
@@ -317,6 +357,7 @@ class _StoredEpisode:
                 entry_opportunity_priority=float(
                     self.entry_opportunity_priorities[index]
                 ),
+                regime_wait_priority=float(self.regime_wait_priorities[index]),
                 training_valid=True,
                 source_decision_index=(
                     None
@@ -516,6 +557,7 @@ class BalancedSequenceReplay:
         terminal_sequence_fraction: float = 0.0,
         safety_sequence_fraction: float = 0.0,
         entry_opportunity_sequence_fraction: float = 0.0,
+        regime_wait_sequence_fraction: float = 0.0,
         entry_opportunity_side_balance: str = "none",
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
@@ -528,8 +570,10 @@ class BalancedSequenceReplay:
         if (
             not 0.0 <= safety_sequence_fraction <= 1.0
             or not 0.0 <= entry_opportunity_sequence_fraction <= 1.0
+            or not 0.0 <= regime_wait_sequence_fraction <= 1.0
             or terminal_sequence_fraction + safety_sequence_fraction
-            + entry_opportunity_sequence_fraction > 1.0
+            + entry_opportunity_sequence_fraction
+            + regime_wait_sequence_fraction > 1.0
         ):
             raise ValueError("replay sequence fractions are invalid")
         self.capacity = int(capacity_episodes)
@@ -554,6 +598,7 @@ class BalancedSequenceReplay:
         self.entry_opportunity_sequence_fraction = float(
             entry_opportunity_sequence_fraction
         )
+        self.regime_wait_sequence_fraction = float(regime_wait_sequence_fraction)
         if entry_opportunity_side_balance not in {
             "none",
             "equal_long_short_v1",
@@ -675,7 +720,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 7,
+            "schema_version": 8,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -687,6 +732,7 @@ class BalancedSequenceReplay:
                 "entry_opportunity_sequence_fraction": (
                     self.entry_opportunity_sequence_fraction
                 ),
+                "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
                 "entry_opportunity_side_balance": (
                     self.entry_opportunity_side_balance
                 ),
@@ -699,6 +745,9 @@ class BalancedSequenceReplay:
                     if field not in {
                         "entry_long_anchor_indices",
                         "entry_short_anchor_indices",
+                        "regime_wait_anchor_indices",
+                        "regime_wait_anchor_cumulative_priorities",
+                        "regime_wait_priority_sum",
                     }
                 }
                 for episode in self._episodes.values()
@@ -707,7 +756,8 @@ class BalancedSequenceReplay:
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
-        if state.get("schema_version") != 7:
+        schema_version = state.get("schema_version")
+        if schema_version not in {7, 8}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -720,10 +770,15 @@ class BalancedSequenceReplay:
             "entry_opportunity_sequence_fraction": (
                 self.entry_opportunity_sequence_fraction
             ),
+            "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
             "entry_opportunity_side_balance": (
                 self.entry_opportunity_side_balance
             ),
         }
+        if schema_version == 7:
+            if self.regime_wait_sequence_fraction != 0.0:
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("regime_wait_sequence_fraction")
         if state.get("contract") != expected_contract:
             raise ValueError("replay checkpoint contract drifted")
         payloads = state.get("episodes")
@@ -755,6 +810,13 @@ class BalancedSequenceReplay:
                 )
                 entry_priorities = np.asarray(
                     payload["entry_opportunity_priorities"], dtype=np.float32
+                )
+                regime_wait_priorities = np.asarray(
+                    payload.get(
+                        "regime_wait_priorities",
+                        np.zeros(actions.size, dtype=np.float32),
+                    ),
+                    dtype=np.float32,
                 )
                 raw_teacher_targets = payload["teacher_targets"]
                 teacher_imitation_visible = np.asarray(
@@ -800,13 +862,16 @@ class BalancedSequenceReplay:
                 or source_decision_indices.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
+                or regime_wait_priorities.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
                 or not np.isfinite(observations).all()
                 or not np.isfinite(rewards).all()
                 or not np.isfinite(safety_priorities).all()
                 or not np.isfinite(entry_priorities).all()
+                or not np.isfinite(regime_wait_priorities).all()
                 or (safety_priorities < 0).any()
                 or (entry_priorities < 0).any()
+                or (regime_wait_priorities < 0).any()
                 or (actions < 0).any()
                 or (actions >= action_count).any()
                 or (entry_action_targets < -1).any()
@@ -843,6 +908,28 @@ class BalancedSequenceReplay:
             episode_id = str(payload.get("episode_id", ""))
             if not episode_id or episode_id in restored:
                 raise ValueError("replay checkpoint episode identity is invalid")
+            positive_regime_wait = regime_wait_priorities > 0.0
+            if np.any(
+                positive_regime_wait
+                & (entry_action_targets != int(Action.WAIT))
+            ) or (
+                np.any(positive_regime_wait)
+                and (
+                    teacher_targets is None
+                    or np.any(
+                        positive_regime_wait
+                        & ~np.isfinite(teacher_targets).all(axis=1)
+                    )
+                )
+            ):
+                raise ValueError("replay checkpoint Regime WAIT evidence is invalid")
+            regime_wait_anchor_indices = np.flatnonzero(
+                positive_regime_wait
+            ).astype(np.int32, copy=False)
+            regime_wait_anchor_cumulative_priorities = np.cumsum(
+                regime_wait_priorities[regime_wait_anchor_indices],
+                dtype=np.float64,
+            )
             episode = _StoredEpisode(
                 episode_id=episode_id,
                 ticker=str(payload.get("ticker", "")),
@@ -871,6 +958,16 @@ class BalancedSequenceReplay:
                 ),
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
+                regime_wait_priorities=regime_wait_priorities,
+                regime_wait_anchor_indices=regime_wait_anchor_indices,
+                regime_wait_anchor_cumulative_priorities=(
+                    regime_wait_anchor_cumulative_priorities
+                ),
+                regime_wait_priority_sum=(
+                    0.0
+                    if not regime_wait_anchor_cumulative_priorities.size
+                    else float(regime_wait_anchor_cumulative_priorities[-1])
+                ),
                 source_decision_indices=source_decision_indices,
             )
             if not episode.ticker or not episode.outcome or not episode.primary_side:
@@ -950,8 +1047,56 @@ class BalancedSequenceReplay:
         sequences = []
         terminal_count = round(count * self.terminal_sequence_fraction)
         safety_count = round(count * self.safety_sequence_fraction)
+        regime_wait_count = round(count * self.regime_wait_sequence_fraction)
         entry_count = round(count * self.entry_opportunity_sequence_fraction)
         sampled_episodes = list(self.sample_episodes(count))
+        regime_wait_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
+        regime_wait_episodes = [
+            stored
+            for stored in self._episodes.values()
+            if stored.regime_wait_priority_sum > 0.0
+        ]
+        cumulative_regime_wait_priorities: list[float] = []
+        for stored in regime_wait_episodes:
+            previous = (
+                cumulative_regime_wait_priorities[-1]
+                if cumulative_regime_wait_priorities
+                else 0.0
+            )
+            cumulative_regime_wait_priorities.append(
+                previous + stored.regime_wait_priority_sum
+            )
+        regime_wait_start = terminal_count + safety_count
+        for offset in range(regime_wait_count):
+            if not cumulative_regime_wait_priorities:
+                break
+            selected_priority = (
+                self._random.random() * cumulative_regime_wait_priorities[-1]
+            )
+            episode_offset = bisect_right(
+                cumulative_regime_wait_priorities, selected_priority
+            )
+            episode = regime_wait_episodes[episode_offset]
+            previous_priority = (
+                cumulative_regime_wait_priorities[episode_offset - 1]
+                if episode_offset
+                else 0.0
+            )
+            local_priority = selected_priority - previous_priority
+            anchor_offset = int(
+                np.searchsorted(
+                    episode.regime_wait_anchor_cumulative_priorities,
+                    local_priority,
+                    side="right",
+                )
+            )
+            anchor_offset = min(
+                anchor_offset, episode.regime_wait_anchor_indices.size - 1
+            )
+            regime_wait_anchors[regime_wait_start + offset] = (
+                episode,
+                int(episode.regime_wait_anchor_indices[anchor_offset]),
+            )
         balanced_entry_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
         if self.entry_opportunity_side_balance == "equal_long_short_v1":
             opportunity_episodes: dict[Action, list[_StoredEpisode]] = defaultdict(list)
@@ -977,7 +1122,7 @@ class BalancedSequenceReplay:
             ]
             if len(available_sides) == 2:
                 self._random.shuffle(available_sides)
-            entry_start = terminal_count + safety_count
+            entry_start = terminal_count + safety_count + regime_wait_count
             for offset in range(entry_count):
                 if not available_sides:
                     break
@@ -1003,6 +1148,16 @@ class BalancedSequenceReplay:
                     anchor_index,
                 )
         for index, episode in enumerate(sampled_episodes):
+            regime_wait_anchor = regime_wait_anchors.get(index)
+            if regime_wait_anchor is not None:
+                episode, anchor_index = regime_wait_anchor
+                sequences.append(episode.target_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                ))
+                continue
             balanced_entry_anchor = balanced_entry_anchors.get(index)
             if balanced_entry_anchor is not None:
                 episode, anchor_index = balanced_entry_anchor
@@ -1018,7 +1173,11 @@ class BalancedSequenceReplay:
                     anchor = "terminal"
                 elif index < terminal_count + safety_count:
                     anchor = "safety"
-                elif index < terminal_count + safety_count + entry_count:
+                elif index < terminal_count + safety_count + regime_wait_count:
+                    anchor = "terminal"
+                elif index < (
+                    terminal_count + safety_count + regime_wait_count + entry_count
+                ):
                     anchor = "entry"
                 else:
                     # Recovery traces always end at a real economic boundary;
@@ -1038,7 +1197,12 @@ class BalancedSequenceReplay:
             elif index < terminal_count + safety_count:
                 critical = int(np.argmax(episode.safety_priorities))
                 start = max(0, min(last_start, critical - self.sequence_length + 1))
-            elif index < terminal_count + safety_count + entry_count:
+            elif index < terminal_count + safety_count + regime_wait_count:
+                critical = int(np.argmax(episode.regime_wait_priorities))
+                start = max(0, min(last_start, critical - self.sequence_length + 1))
+            elif index < (
+                terminal_count + safety_count + regime_wait_count + entry_count
+            ):
                 critical = int(np.argmax(episode.entry_opportunity_priorities))
                 start = max(0, min(last_start, critical - self.sequence_length + 1))
             else:

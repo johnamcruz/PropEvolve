@@ -12,6 +12,11 @@ import pytest
 import torch
 
 import propevolve.training as training_module
+from propevolve.balance_aware_regime_selectivity import (
+    BalanceAwareRegimeSelectivity,
+    REGIME_TEACHER_CHANNELS,
+    SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+)
 from propevolve.cache import build_embedding_cache
 from propevolve.decision import Action, PositionSide, RecoveryEntryPermit
 from propevolve.environment import ChallengeSpec, ChallengeStartState, MarketSeries
@@ -2728,6 +2733,95 @@ def test_regime_selectivity_replay_uses_decision_time_not_post_action_headroom()
 
     assert len(captured) == 1
     assert captured[0].regime_selectivity_headroom_fraction == pytest.approx(0.10)
+
+
+def test_training_marks_hard_exact_wait_for_post_burn_in_replay() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class OneDecisionEnvironment:
+        def reset(self):
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+                "mll_headroom_fraction": 1.0,
+            }
+
+        def step(self, action):
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "fill_index": 1,
+                "outcome": "timeout",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 0.0,
+                "mll_headroom_fraction": 1.0,
+            }
+
+    class SelectivityAgent(Agent):
+        regime_selectivity_loss_weight = 1.0
+        regime_selectivity = BalanceAwareRegimeSelectivity(
+            channel_names=(
+                "long_attempt_probability",
+                "long_clean_retained_given_attempt_probability",
+                "short_attempt_probability",
+                "short_clean_retained_given_attempt_probability",
+                *REGIME_TEACHER_CHANNELS,
+            ),
+            expansion_centers=(0.10, 0.10),
+            semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+            persistent_chop_negative_emphasis=2.0,
+        )
+
+    captured = []
+
+    class CapturingReplay(BalancedSequenceReplay):
+        def add(self, episode):
+            captured.extend(episode.transitions)
+            super().add(episode)
+
+    teacher = np.array(
+        [0.2, 0.2, 0.2, 0.2, 0.95, 0.03, 0.02], np.float32
+    )
+    train_agent(
+        SelectivityAgent(),
+        OneDecisionEnvironment(),
+        episodes=1,
+        minimum_environment_steps=1,
+        replay=CapturingReplay(
+            capacity_episodes=2,
+            sequence_length=1,
+            regime_wait_sequence_fraction=1.0,
+            seed=3,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=23,
+        teacher_lookup=lambda ticker, index: teacher,
+        teacher_channels=tuple(SelectivityAgent.regime_selectivity.channel_names),
+        entry_action_lookup=lambda ticker, index: Action.WAIT,
+        teacher_loss_end_scale=0.0,
+        teacher_guidance_dropout_start=1.0,
+        teacher_guidance_dropout_end=1.0,
+        teacher_autonomy_start_fraction=0.8,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].entry_action_target is Action.WAIT
+    assert captured[0].teacher_imitation_visible is False
+    assert captured[0].regime_wait_priority > 0.9
 
 
 def test_teacher_diagnostics_preserve_named_source_channels() -> None:

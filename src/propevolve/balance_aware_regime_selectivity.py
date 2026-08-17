@@ -294,6 +294,26 @@ class BalanceAwareRegimeSelectivity:
         )
         return evidence.exact_wait_weights
 
+    def exact_wait_replay_priorities(
+        self,
+        teacher_probabilities: torch.Tensor,
+        entry_action_targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return bounded replay mass for hard exact-WAIT confluence rows.
+
+        This reuses the loss compiler's authenticated memberships so replay
+        cannot invent a second definition of dominant chop or failed setup.
+        Positive Entry targets always receive zero priority.
+        """
+        evidence = self.exact_wait_negative_weight_evidence(
+            teacher_probabilities,
+            entry_action_targets,
+        )
+        return (
+            evidence.persistent_dead_chop_membership
+            + evidence.failed_setup_confluence_membership
+        ).clamp(0.0, 1.0)
+
     def exact_wait_negative_weight_evidence(
         self,
         teacher_probabilities: torch.Tensor,

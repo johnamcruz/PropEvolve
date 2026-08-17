@@ -481,6 +481,60 @@ def test_conflict_weak_expansion_and_persistent_chop_strengthen_wait() -> None:
     assert chop > weak
 
 
+def test_hard_wait_replay_priority_uses_exact_wait_confluence_only() -> None:
+    selectivity = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.10, 0.10),
+        probability_epsilon=1e-6,
+        headroom_pressure=1.0,
+        dominant_chop_pressure=2.0,
+        semantics=SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    rows = torch.stack((
+        _teacher_row(
+            long_attempt=0.20,
+            long_clean=0.20,
+            short_attempt=0.20,
+            short_clean=0.20,
+            chop=0.95,
+            neutral=0.03,
+            trend=0.02,
+        ),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.05,
+            short_clean=0.05,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.05,
+            short_clean=0.05,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+    ))
+
+    priorities = selectivity.exact_wait_replay_priorities(
+        rows,
+        torch.tensor([
+            int(Action.WAIT),
+            int(Action.WAIT),
+            int(Action.ENTER_LONG_1),
+        ]),
+    )
+
+    assert priorities[0] > 0.9
+    assert priorities[1] > 0.5
+    assert priorities[2] == 0.0
+
+
 def _agent(
     *,
     seed: int,

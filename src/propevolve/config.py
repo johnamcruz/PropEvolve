@@ -769,6 +769,17 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         )
     ):
         raise ValueError("balance-aware Regime selectivity contract is invalid")
+    if (
+        float(payload.get("training", {}).get(
+            "regime_wait_sequence_fraction", 0.0
+        ))
+        > 0.0
+        and semantics
+        != SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
+    ):
+        raise ValueError(
+            "Regime WAIT replay requires side-conditioned confluence semantics"
+        )
     root = (
         config_path.parent.parent.resolve()
         if config_path.parent.name == "config"
@@ -954,6 +965,7 @@ def load_experiment_config(path: str | Path) -> dict:
     training.setdefault("terminal_sequence_fraction", 0.0)
     training.setdefault("safety_sequence_fraction", 0.0)
     training.setdefault("entry_opportunity_sequence_fraction", 0.0)
+    training.setdefault("regime_wait_sequence_fraction", 0.0)
     training.setdefault("management_epsilon_start", training["epsilon_start"])
     training.setdefault("management_epsilon_end", training["epsilon_end"])
     training.setdefault("validation_no_trade_patience_episodes", 0)
@@ -1023,13 +1035,22 @@ def load_experiment_config(path: str | Path) -> dict:
         not 0 <= float(training["terminal_sequence_fraction"]) <= 1
         or not 0 <= float(training["safety_sequence_fraction"]) <= 1
         or not 0 <= float(training["entry_opportunity_sequence_fraction"]) <= 1
+        or not 0 <= float(training["regime_wait_sequence_fraction"]) <= 1
         or float(training["terminal_sequence_fraction"])
         + float(training["safety_sequence_fraction"]) > 1
         or float(training["terminal_sequence_fraction"])
         + float(training["safety_sequence_fraction"])
-        + float(training["entry_opportunity_sequence_fraction"]) > 1
+        + float(training["entry_opportunity_sequence_fraction"])
+        + float(training["regime_wait_sequence_fraction"]) > 1
     ):
         raise ValueError("training replay sequence fractions are invalid")
+    if (
+        float(training["regime_wait_sequence_fraction"]) > 0.0
+        and payload.get("regime_selectivity") is None
+    ):
+        raise ValueError(
+            "Regime WAIT replay requires authenticated selectivity"
+        )
     if (
         isinstance(training["checkpoint_every_episodes"], bool)
         or int(training["checkpoint_every_episodes"]) < 1
@@ -1412,6 +1433,13 @@ def load_experiment_config(path: str | Path) -> dict:
         if not valid_regime_identity:
             raise ValueError(
                 "Regime selectivity identity must be frozen for the campaign"
+            )
+        if (
+            float(training.get("regime_wait_sequence_fraction", 0.0)) > 0.0
+            and "training.regime_wait_sequence_fraction" not in frozen
+        ):
+            raise ValueError(
+                "Regime WAIT replay identity must be frozen for the campaign"
             )
     if payload.get("recovery_curriculum") is not None:
         if not all(path in frozen for path in RECOVERY_CURRICULUM_FROZEN_PATHS):
