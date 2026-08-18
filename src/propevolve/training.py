@@ -2904,11 +2904,6 @@ class HistoricalCandidateRunner:
             teacher_guidance_dropout_end=float(
                 training_config.get("teacher_guidance_dropout_end", 0.0)
             ),
-            teacher_schedule_episodes=(
-                int(training_config["teacher_schedule_episodes"])
-                if "teacher_schedule_episodes" in training_config
-                else None
-            ),
             teacher_autonomy_start_fraction=float(
                 training_config.get("teacher_autonomy_start_fraction", 1.0)
             ),
@@ -4437,7 +4432,6 @@ def train_agent(
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
-    teacher_schedule_episodes: int | None = None,
     teacher_autonomy_start_fraction: float = 1.0,
     entry_supervision_autonomy_start_fraction: float | None = None,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
@@ -4460,15 +4454,6 @@ def train_agent(
         raise ValueError("episode ceiling and minimum environment steps must be positive")
     if budget_mode not in {"environment_steps", "episodes"}:
         raise ValueError("training budget mode is invalid")
-    if teacher_schedule_episodes is None:
-        teacher_schedule_episodes = episodes
-    elif (
-        budget_mode != "episodes"
-        or isinstance(teacher_schedule_episodes, bool)
-        or not isinstance(teacher_schedule_episodes, int)
-        or not 1 <= teacher_schedule_episodes <= episodes
-    ):
-        raise ValueError("teacher schedule episode horizon is invalid")
     if (
         replay.recurrent_burn_in != int(getattr(agent, "recurrent_burn_in", 0))
         or replay.n_step_return != int(getattr(agent, "n_step_return", 1))
@@ -4666,17 +4651,12 @@ def train_agent(
             if budget_mode == "episodes"
             else min(1.0, progress.environment_steps / minimum_environment_steps)
         )
-        teacher_step_progress = (
-            min(1.0, episode_index / teacher_schedule_episodes)
-            if budget_mode == "episodes"
-            else step_progress
-        )
         teacher_schedule_progress = min(
-            1.0, teacher_step_progress / teacher_autonomy_start_fraction
+            1.0, step_progress / teacher_autonomy_start_fraction
         )
         entry_action_schedule_progress = min(
             1.0,
-            teacher_step_progress / entry_supervision_autonomy_start_fraction,
+            step_progress / entry_supervision_autonomy_start_fraction,
         )
         epsilon = epsilon_start + (epsilon_end - epsilon_start) * step_progress
         management_epsilon = (
@@ -4705,11 +4685,6 @@ def train_agent(
                     1.0,
                     (episode_index + within_episode_progress) / episodes,
                 )
-                teacher_decision_progress = min(
-                    1.0,
-                    (episode_index + within_episode_progress)
-                    / teacher_schedule_episodes,
-                )
                 epsilon = epsilon_start + (
                     epsilon_end - epsilon_start
                 ) * decision_progress
@@ -4718,12 +4693,11 @@ def train_agent(
                 ) * decision_progress
                 teacher_schedule_progress = min(
                     1.0,
-                    teacher_decision_progress
-                    / teacher_autonomy_start_fraction,
+                    decision_progress / teacher_autonomy_start_fraction,
                 )
                 entry_action_schedule_progress = min(
                     1.0,
-                    teacher_decision_progress
+                    decision_progress
                     / entry_supervision_autonomy_start_fraction,
                 )
                 teacher_weight_scale = 1.0 + (
@@ -4949,18 +4923,12 @@ def train_agent(
                 / minimum_environment_steps,
             )
         )
-        teacher_update_progress = (
-            min(1.0, (episode_index + 1) / teacher_schedule_episodes)
-            if budget_mode == "episodes"
-            else update_progress
-        )
         teacher_schedule_progress = min(
-            1.0, teacher_update_progress / teacher_autonomy_start_fraction
+            1.0, update_progress / teacher_autonomy_start_fraction
         )
         entry_action_schedule_progress = min(
             1.0,
-            teacher_update_progress
-            / entry_supervision_autonomy_start_fraction,
+            update_progress / entry_supervision_autonomy_start_fraction,
         )
         teacher_weight_scale = 1.0 + (
             teacher_loss_end_scale - 1.0

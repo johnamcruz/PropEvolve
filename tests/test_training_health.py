@@ -90,6 +90,34 @@ def test_policy_health_accepts_noisy_balanced_learning() -> None:
     assert verdict.evidence["probe_due"] is True
 
 
+def test_policy_health_defers_transfer_failure_until_teacher_autonomy() -> None:
+    failed_transfer = dict(_snapshot().probe_metrics or {})
+    failed_transfer["final_regime_probe_short_recall"] = 0.1875
+    failed_transfer["final_regime_probe_transition_positive_short_response"] = (
+        -0.073294
+    )
+    detector = TrainingHealthDetector(
+        _spec(require_positive_persistent_regime_association=True)
+    )
+
+    guided = detector.evaluate(_snapshot(
+        teacher_weight_scale=0.4,
+        probe_metrics=failed_transfer,
+    ))
+    autonomous = detector.evaluate(_snapshot(
+        teacher_weight_scale=0.0,
+        probe_metrics=failed_transfer,
+    ))
+
+    assert guided.stop is False
+    assert guided.reasons == ()
+    assert guided.evidence["probe_due"] is True
+    assert guided.evidence["probe_enforced"] is False
+    assert autonomous.stop is True
+    assert autonomous.evidence["probe_enforced"] is True
+    assert any("Short recall" in reason for reason in autonomous.reasons)
+
+
 def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
     config = load_experiment_config(Path(
         "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
@@ -144,6 +172,7 @@ def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
         trade_r_sum=-20.0,
         trade_count=10_000,
     )
+    diagnostic["teacher_weight_scale"] = 0.0
     assert monitor(progress_100, diagnostic) == (
         "teacher-free policy-health WAIT recall 0.156250 < 0.350000"
     )
@@ -167,7 +196,7 @@ def test_policy_health_stops_direction_or_wait_collapse(
     probe[metric] = value
 
     verdict = TrainingHealthDetector(_spec()).evaluate(
-        _snapshot(probe_metrics=probe)
+        _snapshot(teacher_weight_scale=0.0, probe_metrics=probe)
     )
 
     assert verdict.stop is True
@@ -192,7 +221,7 @@ def test_v6_policy_health_stops_nonpositive_persistent_regime_association(
 
     verdict = TrainingHealthDetector(_spec(
         require_positive_persistent_regime_association=True,
-    )).evaluate(_snapshot(probe_metrics=probe))
+    )).evaluate(_snapshot(teacher_weight_scale=0.0, probe_metrics=probe))
 
     assert verdict.stop is True
     assert len(verdict.reasons) == 1

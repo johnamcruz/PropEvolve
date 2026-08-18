@@ -2387,57 +2387,6 @@ def test_teacher_curriculum_has_a_declared_final_autonomy_tail() -> None:
     assert agent.teacher_weight_scales == [0.0, 0.0]
 
 
-def test_long_run_preserves_a_shorter_absolute_teacher_schedule() -> None:
-    agent = Agent()
-    diagnostics = []
-
-    class EpisodeBudgetEnvironment(Environment):
-        def reset(self):
-            observation, info = super().reset()
-            info.update({"ticker": "NQ", "start": 0, "end": 4})
-            return observation, info
-
-    train_agent(
-        agent,
-        EpisodeBudgetEnvironment(),
-        episodes=10,
-        minimum_environment_steps=40,
-        budget_mode="episodes",
-        replay=BalancedSequenceReplay(
-            capacity_episodes=20,
-            sequence_length=2,
-            seed=1,
-        ),
-        warmup_episodes=1,
-        updates_per_episode=1,
-        batch_sequences=1,
-        recurrent_horizon=2,
-        epsilon_start=0.25,
-        epsilon_end=0.02,
-        episode_tickers=None,
-        ticker_seed=19,
-        teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
-        teacher_loss_end_scale=0.0,
-        teacher_guidance_dropout_start=0.0,
-        teacher_guidance_dropout_end=1.0,
-        teacher_schedule_episodes=4,
-        teacher_autonomy_start_fraction=0.5,
-        entry_supervision_autonomy_start_fraction=0.75,
-        episode_diagnostic_callback=diagnostics.append,
-    )
-
-    assert diagnostics[0]["teacher_weight_scale"] == pytest.approx(0.5)
-    assert diagnostics[1]["teacher_weight_scale"] == 0.0
-    assert diagnostics[1][
-        "teacher_guidance_dropout_probability"
-    ] == pytest.approx(0.875)
-    assert diagnostics[2]["teacher_guidance_dropout_probability"] == 1.0
-    assert diagnostics[2]["entry_action_schedule_progress"] == 1.0
-    assert all(
-        row["teacher_weight_scale"] == 0.0 for row in diagnostics[1:]
-    )
-
-
 def test_teacher_autonomy_boundary_is_exact_inside_a_crossing_episode() -> None:
     class LongEpisodeEnvironment:
         def __init__(self) -> None:

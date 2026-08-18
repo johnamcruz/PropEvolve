@@ -221,8 +221,15 @@ class TrainingHealthDetector:
             snapshot.completed_episodes >= self.spec.minimum_completed_episodes
             and snapshot.completed_episodes % self.spec.probe_interval_episodes == 0
         )
+        probe_enforced = bool(
+            probe_due and snapshot.teacher_weight_scale == 0.0
+        )
         if probe_due:
-            self._probe_reasons(snapshot.probe_metrics, reasons)
+            self._probe_reasons(
+                snapshot.probe_metrics,
+                reasons,
+                enforce_performance=probe_enforced,
+            )
 
         futility_signals: list[str] = []
         near_blow_rate = (
@@ -271,6 +278,7 @@ class TrainingHealthDetector:
             "completed_episodes": snapshot.completed_episodes,
             "entry_mass_evidence_ready": snapshot.entry_mass_evidence_ready,
             "probe_due": probe_due,
+            "probe_enforced": probe_enforced,
             "near_blow_timeout_rate": near_blow_rate,
             "economic_futility_signals": tuple(futility_signals),
         }
@@ -318,6 +326,8 @@ class TrainingHealthDetector:
         self,
         metrics: Mapping[str, float] | None,
         reasons: list[str],
+        *,
+        enforce_performance: bool,
     ) -> None:
         if metrics is None:
             reasons.append("teacher-free policy-health probe is missing")
@@ -340,7 +350,7 @@ class TrainingHealthDetector:
                 reasons.append(
                     f"teacher-free policy-health {display} recall is missing or non-finite"
                 )
-            elif float(recall) < thresholds[action]:
+            elif enforce_performance and float(recall) < thresholds[action]:
                 reasons.append(
                     f"teacher-free policy-health {display} recall "
                     f"{float(recall):.6f} < {thresholds[action]:.6f}"
@@ -363,7 +373,7 @@ class TrainingHealthDetector:
                     reasons.append(
                         f"teacher-free policy-health {display} is missing or non-finite"
                     )
-                elif float(value) <= 0.0:
+                elif enforce_performance and float(value) <= 0.0:
                     reasons.append(
                         f"teacher-free policy-health {display} "
                         f"{float(value):.6f} <= 0.000000"
