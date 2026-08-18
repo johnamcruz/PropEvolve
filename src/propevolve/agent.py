@@ -6,7 +6,7 @@ import copy
 from contextlib import nullcontext
 import math
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, NamedTuple, Sequence
 
 import numpy as np
 import torch
@@ -16,8 +16,10 @@ from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+    REGIME_STATE_NAMES,
     STATIC_STATE_SEMANTICS,
     REGIME_TEACHER_CHANNELS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -111,6 +113,26 @@ _REGIME_PERSISTENT_ADDITIVE_METRICS = (
     "regime_selectivity_association_transition_positive_short_rows",
     "regime_selectivity_association_transition_positive_short_model_wait_probability_sum",
 )
+
+_PAIRED_A_PLUS_GROUP_FIELDS = (
+    "pair_count",
+    "pair_mass",
+    "loss_sum",
+    "good_advantage_sum",
+    "bad_advantage_sum",
+)
+
+
+class PairedAPlusRankResult(NamedTuple):
+    """Loss and additive evidence for matched economic Entry pairs."""
+
+    loss: torch.Tensor
+    active_groups: torch.Tensor
+    pair_count: torch.Tensor
+    pair_mass: torch.Tensor
+    good_advantage_sum: torch.Tensor
+    bad_advantage_sum: torch.Tensor
+    group_metrics: dict[str, torch.Tensor]
 
 
 def resolve_device(device: str) -> torch.device:
@@ -359,6 +381,148 @@ def side_conditioned_wait_rank_loss(
     return loss_sum, active_sides
 
 
+def paired_a_plus_rank_loss(
+    flat_action_values: torch.Tensor,
+    *,
+    failed_long_membership: torch.Tensor,
+    failed_short_membership: torch.Tensor,
+    valid_long_membership: torch.Tensor,
+    valid_short_membership: torch.Tensor,
+    regime_probabilities: torch.Tensor,
+    margin: float,
+) -> PairedAPlusRankResult:
+    """Rank exact economic winners above matched same-side failures.
+
+    Each valid/failed pair must share side. Continuous three-state Regime
+    similarity and confluence memberships supply the pair weight. The policy
+    still receives no teacher channels as input.
+    """
+    memberships = (
+        failed_long_membership,
+        failed_short_membership,
+        valid_long_membership,
+        valid_short_membership,
+    )
+    row_shape = flat_action_values.shape[:-1]
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or any(
+            value.shape != row_shape or not torch.is_floating_point(value)
+            for value in memberships
+        )
+        or regime_probabilities.shape != (*row_shape, len(REGIME_STATE_NAMES))
+        or not torch.is_floating_point(regime_probabilities)
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+        or float(margin) < 0.0
+    ):
+        raise ValueError("paired A+ rank loss contract is invalid")
+    # Range/simplex validity is authenticated once at teacher-cache ingestion.
+    # Repeating those reductions here would synchronize every MPS update.
+    regime_memberships = regime_probabilities.to(flat_action_values.dtype)
+    zero = torch.zeros(
+        (), dtype=flat_action_values.dtype, device=flat_action_values.device
+    )
+    balanced_side_loss_sum = zero
+    active_sides = zero
+    active_groups = zero
+    pair_count = zero
+    pair_mass = zero
+    good_advantage_sum = zero
+    bad_advantage_sum = zero
+    group_metrics: dict[str, torch.Tensor] = {}
+    tiny = torch.finfo(flat_action_values.dtype).tiny
+    for side_name, side_index, failed, valid in (
+        (
+            "long",
+            int(Action.ENTER_LONG_1),
+            failed_long_membership,
+            valid_long_membership,
+        ),
+        (
+            "short",
+            int(Action.ENTER_SHORT_1),
+            failed_short_membership,
+            valid_short_membership,
+        ),
+    ):
+        side_loss_sum = zero
+        side_pair_mass = zero
+        side_pair_count = (
+            (valid > 0).sum().to(flat_action_values.dtype)
+            * (failed > 0).sum().to(flat_action_values.dtype)
+        )
+        advantage = (
+            flat_action_values[:, side_index]
+            - flat_action_values[:, int(Action.WAIT)]
+        )
+        for regime_index, regime_name in enumerate(REGIME_STATE_NAMES):
+            group_membership = regime_memberships[:, regime_index]
+            good_weights = valid * group_membership
+            bad_weights = failed * group_membership
+            good_rows = good_weights > 0
+            bad_rows = bad_weights > 0
+            selected_good_weights = good_weights[good_rows]
+            selected_bad_weights = bad_weights[bad_rows]
+            selected_good_advantage = advantage[good_rows]
+            selected_bad_advantage = advantage[bad_rows]
+            weights = (
+                selected_good_weights[:, None]
+                * selected_bad_weights[None, :]
+            )
+            group_pair_mass = weights.sum()
+            group_active = (group_pair_mass > 0).to(
+                flat_action_values.dtype
+            )
+            group_pair_count = (
+                good_rows.sum().to(flat_action_values.dtype)
+                * bad_rows.sum().to(flat_action_values.dtype)
+            )
+            pair_losses = nn.functional.softplus(
+                float(margin)
+                + selected_bad_advantage[None, :]
+                - selected_good_advantage[:, None]
+            )
+            group_loss_sum = (pair_losses * weights).sum()
+            group_good_advantage_sum = (
+                selected_good_advantage * selected_good_weights
+            ).sum() * selected_bad_weights.sum()
+            group_bad_advantage_sum = (
+                selected_bad_advantage * selected_bad_weights
+            ).sum() * selected_good_weights.sum()
+            side_loss_sum = side_loss_sum + group_loss_sum
+            side_pair_mass = side_pair_mass + group_pair_mass
+            active_groups = active_groups + group_active
+            pair_mass = pair_mass + group_pair_mass
+            good_advantage_sum = good_advantage_sum + group_good_advantage_sum
+            bad_advantage_sum = bad_advantage_sum + group_bad_advantage_sum
+            prefix = f"{side_name}_{regime_name}_"
+            group_metrics.update({
+                prefix + "pair_count": group_pair_count,
+                prefix + "pair_mass": group_pair_mass,
+                prefix + "loss_sum": group_loss_sum,
+                prefix + "good_advantage_sum": group_good_advantage_sum,
+                prefix + "bad_advantage_sum": group_bad_advantage_sum,
+            })
+        side_active = (side_pair_mass > 0).to(flat_action_values.dtype)
+        balanced_side_loss_sum = balanced_side_loss_sum + (
+            side_loss_sum / side_pair_mass.clamp_min(tiny)
+        ) * side_active
+        pair_count = pair_count + side_pair_count * side_active
+        active_sides = active_sides + side_active
+    return PairedAPlusRankResult(
+        loss=balanced_side_loss_sum / active_sides.clamp_min(1.0),
+        active_groups=active_groups,
+        pair_count=pair_count,
+        pair_mass=pair_mass,
+        good_advantage_sum=good_advantage_sum,
+        bad_advantage_sum=bad_advantage_sum,
+        group_metrics=group_metrics,
+    )
+
+
 class RecurrentC51Network(nn.Module):
     """Compact market/account encoder with recurrent C51 action values."""
 
@@ -459,6 +623,7 @@ class RecurrentC51Agent:
         regime_selectivity_dominant_chop_pressure: float = 2.0,
         regime_selectivity_chop_wait_margin: float = 0.0,
         regime_selectivity_failed_confluence_margin: float = 0.0,
+        regime_selectivity_paired_a_plus_margin: float = 0.0,
         regime_selectivity_q_temperature: float = 1.0,
         regime_selectivity_side_balance: str = "none",
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
@@ -504,6 +669,9 @@ class RecurrentC51Agent:
             or isinstance(regime_selectivity_failed_confluence_margin, bool)
             or not np.isfinite(regime_selectivity_failed_confluence_margin)
             or regime_selectivity_failed_confluence_margin < 0
+            or isinstance(regime_selectivity_paired_a_plus_margin, bool)
+            or not np.isfinite(regime_selectivity_paired_a_plus_margin)
+            or regime_selectivity_paired_a_plus_margin < 0
             or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
@@ -579,6 +747,7 @@ class RecurrentC51Agent:
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -594,11 +763,19 @@ class RecurrentC51Agent:
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
             raise ValueError(
                 "persistent-chop Regime selectivity requires equal Long/Short groups"
+            )
+        if (
+            regime_selectivity_semantics
+            == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+        ) != (float(regime_selectivity_paired_a_plus_margin) > 0.0):
+            raise ValueError(
+                "paired A+ margin requires exactly the paired A+ semantics"
             )
         torch.manual_seed(seed)
         self.seed = int(seed)
@@ -678,6 +855,9 @@ class RecurrentC51Agent:
         )
         self.regime_selectivity_failed_confluence_margin = float(
             regime_selectivity_failed_confluence_margin
+        )
+        self.regime_selectivity_paired_a_plus_margin = float(
+            regime_selectivity_paired_a_plus_margin
         )
         self.regime_selectivity_q_temperature = float(
             regime_selectivity_q_temperature
@@ -1259,6 +1439,19 @@ class RecurrentC51Agent:
         regime_selectivity_association_skipped = teacher_loss
         regime_selectivity_side_conditioned_loss = teacher_loss
         regime_selectivity_side_conditioned_active_sides = teacher_loss
+        regime_selectivity_paired_a_plus_loss = teacher_loss
+        regime_selectivity_paired_a_plus_active_groups = teacher_loss
+        regime_selectivity_paired_a_plus_pair_count = teacher_loss
+        regime_selectivity_paired_a_plus_pair_mass = teacher_loss
+        regime_selectivity_paired_a_plus_good_advantage_sum = teacher_loss
+        regime_selectivity_paired_a_plus_bad_advantage_sum = teacher_loss
+        paired_a_plus_additive = {
+            f"regime_selectivity_paired_a_plus_{side}_{regime}_{field}":
+            torch.zeros((), dtype=torch.float32, device=self.device)
+            for side in ("long", "short")
+            for regime in REGIME_STATE_NAMES
+            for field in _PAIRED_A_PLUS_GROUP_FIELDS
+        }
         regime_selectivity_additive: dict[str, torch.Tensor] = {}
         regime_channel_names = self.regime_teacher_channel_names
         regime_channel_additive = torch.zeros(
@@ -1595,6 +1788,7 @@ class RecurrentC51Agent:
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1625,6 +1819,7 @@ class RecurrentC51Agent:
                             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1665,6 +1860,7 @@ class RecurrentC51Agent:
                                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                             else wait_mass
                         ).clamp_min(1.0)
@@ -1714,6 +1910,7 @@ class RecurrentC51Agent:
                                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                         ):
                             (
@@ -1744,6 +1941,7 @@ class RecurrentC51Agent:
                             in {
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                         ):
                             (
@@ -1770,12 +1968,62 @@ class RecurrentC51Agent:
                             regime_selectivity_side_conditioned_active_sides = (
                                 side_conditioned_group_active
                             )
+                        paired_a_plus_group_active = torch.zeros_like(wait_active)
+                        if (
+                            self.regime_selectivity_semantics
+                            == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+                        ):
+                            regime_probabilities = selected_teachers.index_select(
+                                -1,
+                                self._regime_teacher_channel_indices_tensor,
+                            )
+                            paired_result = paired_a_plus_rank_loss(
+                                flat_q,
+                                failed_long_membership=(
+                                    failed_long_confluence_membership
+                                ),
+                                failed_short_membership=(
+                                    failed_short_confluence_membership
+                                ),
+                                valid_long_membership=ready_long_membership,
+                                valid_short_membership=ready_short_membership,
+                                regime_probabilities=regime_probabilities,
+                                margin=self.regime_selectivity_paired_a_plus_margin,
+                            )
+                            regime_selectivity_paired_a_plus_loss = (
+                                paired_result.loss
+                            )
+                            regime_selectivity_paired_a_plus_active_groups = (
+                                paired_result.active_groups
+                            )
+                            regime_selectivity_paired_a_plus_pair_count = (
+                                paired_result.pair_count
+                            )
+                            regime_selectivity_paired_a_plus_pair_mass = (
+                                paired_result.pair_mass
+                            )
+                            regime_selectivity_paired_a_plus_good_advantage_sum = (
+                                paired_result.good_advantage_sum
+                            )
+                            regime_selectivity_paired_a_plus_bad_advantage_sum = (
+                                paired_result.bad_advantage_sum
+                            )
+                            paired_a_plus_additive.update({
+                                "regime_selectivity_paired_a_plus_" + name: value
+                                for name, value in paired_result.group_metrics.items()
+                            })
+                            paired_a_plus_group_active = (
+                                paired_result.active_groups > 0
+                            ).to(exact_losses.dtype)
                         dominant_chop_margin_membership = (
                             compiler.dominant_chop_margin_membership(
                                 selected_teachers
                             )
                             if self.regime_selectivity_semantics
-                            == ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+                            in {
+                                ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                            }
                             else dead_membership
                         )
                         chop_margin_membership = (
@@ -1829,6 +2077,8 @@ class RecurrentC51Agent:
                         regime_selectivity_loss = (
                             regime_selectivity_loss
                             + chop_margin_loss * chop_margin_active
+                            + regime_selectivity_paired_a_plus_loss
+                            * paired_a_plus_group_active
                         )
                         regime_persistent_additive.update({
                             "regime_selectivity_exact_wait_rows": (
@@ -2412,6 +2662,12 @@ class RecurrentC51Agent:
             regime_selectivity_association_skipped,
             regime_selectivity_side_conditioned_loss,
             regime_selectivity_side_conditioned_active_sides,
+            regime_selectivity_paired_a_plus_loss,
+            regime_selectivity_paired_a_plus_active_groups,
+            regime_selectivity_paired_a_plus_pair_count,
+            regime_selectivity_paired_a_plus_pair_mass,
+            regime_selectivity_paired_a_plus_good_advantage_sum,
+            regime_selectivity_paired_a_plus_bad_advantage_sum,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -2443,6 +2699,7 @@ class RecurrentC51Agent:
             *entry_balance_additive.values(),
             *regime_entry_conflict_additive.values(),
             *regime_persistent_additive.values(),
+            *paired_a_plus_additive.values(),
         ))
         (
             rl_loss_value,
@@ -2465,6 +2722,12 @@ class RecurrentC51Agent:
             regime_selectivity_association_skipped_value,
             regime_selectivity_side_conditioned_loss_value,
             regime_selectivity_side_conditioned_active_sides_value,
+            regime_selectivity_paired_a_plus_loss_value,
+            regime_selectivity_paired_a_plus_active_groups_value,
+            regime_selectivity_paired_a_plus_pair_count_value,
+            regime_selectivity_paired_a_plus_pair_mass_value,
+            regime_selectivity_paired_a_plus_good_advantage_sum_value,
+            regime_selectivity_paired_a_plus_bad_advantage_sum_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -2520,8 +2783,14 @@ class RecurrentC51Agent:
         regime_conflict_values = all_regime_additive_values[
             regime_conflict_start:regime_conflict_start + regime_conflict_count
         ]
+        regime_persistent_start = regime_conflict_start + regime_conflict_count
+        regime_persistent_count = len(regime_persistent_additive)
         regime_persistent_additive_values = all_regime_additive_values[
-            regime_conflict_start + regime_conflict_count:
+            regime_persistent_start:
+            regime_persistent_start + regime_persistent_count
+        ]
+        paired_a_plus_values = all_regime_additive_values[
+            regime_persistent_start + regime_persistent_count:
         ]
         regime_selectivity_metric_values = {
             f"regime_selectivity_{stratum}_{field}": 0.0
@@ -2602,6 +2871,11 @@ class RecurrentC51Agent:
         regime_entry_conflict_metric_values = dict(zip(
             regime_entry_conflict_additive,
             regime_conflict_values,
+            strict=True,
+        ))
+        paired_a_plus_metric_values = dict(zip(
+            paired_a_plus_additive,
+            paired_a_plus_values,
             strict=True,
         ))
         for side in ("long", "short"):
@@ -2863,6 +3137,25 @@ class RecurrentC51Agent:
             "regime_selectivity_side_conditioned_active_sides": (
                 regime_selectivity_side_conditioned_active_sides_value
             ),
+            "regime_selectivity_paired_a_plus_loss": (
+                regime_selectivity_paired_a_plus_loss_value
+            ),
+            "regime_selectivity_paired_a_plus_active_groups": (
+                regime_selectivity_paired_a_plus_active_groups_value
+            ),
+            "regime_selectivity_paired_a_plus_pair_count": (
+                regime_selectivity_paired_a_plus_pair_count_value
+            ),
+            "regime_selectivity_paired_a_plus_pair_mass": (
+                regime_selectivity_paired_a_plus_pair_mass_value
+            ),
+            "regime_selectivity_paired_a_plus_good_advantage_sum": (
+                regime_selectivity_paired_a_plus_good_advantage_sum_value
+            ),
+            "regime_selectivity_paired_a_plus_bad_advantage_sum": (
+                regime_selectivity_paired_a_plus_bad_advantage_sum_value
+            ),
+            **paired_a_plus_metric_values,
             **regime_selectivity_metric_values,
             **regime_channel_metric_values,
             **entry_balance_metric_values,
@@ -3131,6 +3424,9 @@ class RecurrentC51Agent:
                 "regime_selectivity_failed_confluence_margin": (
                     self.regime_selectivity_failed_confluence_margin
                 ),
+                "regime_selectivity_paired_a_plus_margin": (
+                    self.regime_selectivity_paired_a_plus_margin
+                ),
                 "regime_selectivity_q_temperature": (
                     self.regime_selectivity_q_temperature
                 ),
@@ -3240,6 +3536,7 @@ class RecurrentC51Agent:
         config.setdefault("regime_selectivity_loss_weight", 0.0)
         config.setdefault("regime_selectivity_chop_wait_margin", 0.0)
         config.setdefault("regime_selectivity_failed_confluence_margin", 0.0)
+        config.setdefault("regime_selectivity_paired_a_plus_margin", 0.0)
         config.setdefault("regime_selectivity_expansion_centers", None)
         config.setdefault("regime_selectivity_probability_epsilon", 1e-6)
         config.setdefault("regime_selectivity_headroom_pressure", 1.0)

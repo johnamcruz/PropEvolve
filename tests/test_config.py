@@ -21,6 +21,8 @@ from propevolve.balance_aware_regime_selectivity import (
     EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     FORMULA as REGIME_SELECTIVITY_FORMULA,
+    PAIRED_A_PLUS_CONTRASTIVE_FORMULA,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     SCHEMA as REGIME_SELECTIVITY_SCHEMA,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -60,6 +62,9 @@ STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE = Path(
 )
 STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v18_all_dominant_chop_margin.json"
+)
+STAGE2_PAIRED_A_PLUS_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive.json"
 )
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
@@ -519,6 +524,34 @@ def test_all_dominant_chop_margin_semantics_are_frozen_and_loadable(
     )
 
 
+def test_paired_a_plus_margin_is_configured_and_frozen_without_score_cutoffs(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"].update({
+        "semantics": PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "formula": PAIRED_A_PLUS_CONTRASTIVE_FORMULA,
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.25,
+    })
+    payload["evolution"]["frozen_paths"] = sorted(set(
+        payload["evolution"]["frozen_paths"]
+    ) | {
+        "regime_selectivity.chop_wait_margin",
+        "regime_selectivity.failed_confluence_margin",
+        "regime_selectivity.paired_a_plus_margin",
+    })
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    selectivity = config["regime_selectivity"]
+    assert selectivity["paired_a_plus_margin"] == 0.25
+    assert not any("threshold" in field for field in selectivity)
+
+
 def test_all_dominant_chop_margin_recipe_is_one_matched_100_episode_test(
 ) -> None:
     baseline = load_experiment_config(STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE)
@@ -539,6 +572,31 @@ def test_all_dominant_chop_margin_recipe_is_one_matched_100_episode_test(
     ]
     stage = candidate["campaign"]["budget_stages"][0]
     assert stage["name"] == "all_dominant_chop_margin_100ep"
+    assert stage["training_episodes"] == 100
+    assert stage["validation_episodes"] == 200
+
+
+def test_paired_a_plus_recipe_changes_only_the_training_contrast_contract(
+) -> None:
+    baseline = load_experiment_config(STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE)
+    candidate = load_experiment_config(STAGE2_PAIRED_A_PLUS_RECIPE)
+
+    assert candidate["teachers"] == baseline["teachers"]
+    assert candidate["entry_supervision"] == baseline["entry_supervision"]
+    assert candidate["agent"] == baseline["agent"]
+    assert candidate["training"] == baseline["training"]
+    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
+        "base_parent"
+    ]
+    selectivity = candidate["regime_selectivity"]
+    assert selectivity["semantics"] == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+    assert selectivity["formula"] == PAIRED_A_PLUS_CONTRASTIVE_FORMULA
+    assert selectivity["paired_a_plus_margin"] == 0.25
+    assert "regime_selectivity.paired_a_plus_margin" in candidate[
+        "evolution"
+    ]["frozen_paths"]
+    assert not any("threshold" in field for field in selectivity)
+    stage = candidate["campaign"]["budget_stages"][0]
     assert stage["training_episodes"] == 100
     assert stage["validation_episodes"] == 200
 

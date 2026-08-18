@@ -15,6 +15,7 @@ import propevolve.training as training_module
 from propevolve.balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     REGIME_TEACHER_CHANNELS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
 )
@@ -184,6 +185,57 @@ def test_stage2a_recipe_projects_chop_specific_wait_margins() -> None:
 
     assert settings["regime_selectivity_chop_wait_margin"] == 0.25
     assert settings["regime_selectivity_failed_confluence_margin"] == 0.35
+
+
+def test_stage2a_recipe_projects_configured_paired_a_plus_margin() -> None:
+    settings = _regime_selectivity_agent_settings({
+        "loss_weight": 0.3,
+        "expansion_long_center": 0.10,
+        "expansion_short_center": 0.10,
+        "probability_epsilon": 1e-6,
+        "headroom_pressure": 1.0,
+        "dominant_chop_pressure": 2.0,
+        "q_temperature": 1.0,
+        "semantics": PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "persistent_chop_negative_emphasis": 2.0,
+        "side_balance": {
+            "schema": "equal_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.4,
+    })
+
+    assert settings["regime_selectivity_paired_a_plus_margin"] == 0.4
+
+
+def test_paired_a_plus_diagnostics_preserve_side_and_regime_evidence() -> None:
+    prefix = "regime_selectivity_paired_a_plus_"
+    diagnostics = training_module._paired_a_plus_diagnostic({
+        prefix + "loss": [0.4, 0.2],
+        prefix + "active_groups": [2.0, 1.0],
+        prefix + "pair_count": [3.0],
+        prefix + "pair_mass": [2.0],
+        prefix + "good_advantage_sum": [1.0],
+        prefix + "bad_advantage_sum": [-0.5],
+        prefix + "long_chop_end_transition_pair_count": [1.0],
+        prefix + "long_chop_end_transition_pair_mass": [0.75],
+        prefix + "long_chop_end_transition_loss_sum": [0.3],
+        prefix + "long_chop_end_transition_good_advantage_sum": [0.45],
+        prefix + "long_chop_end_transition_bad_advantage_sum": [-0.15],
+        prefix + "short_expansion_trend_pair_count": [2.0],
+        prefix + "short_expansion_trend_pair_mass": [1.25],
+        prefix + "short_expansion_trend_loss_sum": [0.5],
+        prefix + "short_expansion_trend_good_advantage_sum": [0.55],
+        prefix + "short_expansion_trend_bad_advantage_sum": [-0.35],
+    })
+
+    assert diagnostics["loss_mean"] == pytest.approx(0.3)
+    assert diagnostics["good_advantage_mean"] == pytest.approx(0.5)
+    assert diagnostics["bad_advantage_mean"] == pytest.approx(-0.25)
+    assert diagnostics["sides"]["long"]["pair_mass"] == pytest.approx(0.75)
+    assert diagnostics["sides"]["short"]["pair_mass"] == pytest.approx(1.25)
 
 
 @pytest.mark.parametrize(
@@ -367,6 +419,22 @@ def test_recovery_rejects_regime_learning_identity_drift() -> None:
         _assert_recovery_regime_selectivity(
             MarginAgent(),
             {**margin_expected, "regime_selectivity_failed_confluence_margin": 0.5},
+        )
+
+    class PairedAgent(MarginAgent):
+        regime_selectivity_semantics = PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+        regime_selectivity_paired_a_plus_margin = 0.25
+
+    paired_expected = {
+        **margin_expected,
+        "regime_selectivity_semantics": PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "regime_selectivity_paired_a_plus_margin": 0.25,
+    }
+    _assert_recovery_regime_selectivity(PairedAgent(), paired_expected)
+    with pytest.raises(ValueError, match="recovery Regime learning identity drifted"):
+        _assert_recovery_regime_selectivity(
+            PairedAgent(),
+            {**paired_expected, "regime_selectivity_paired_a_plus_margin": 0.5},
         )
 
 

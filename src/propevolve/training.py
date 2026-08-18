@@ -23,6 +23,8 @@ from .assets import AssetContract
 from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    REGIME_STATE_NAMES,
     REGIME_TEACHER_CHANNELS,
 )
 from .cache import load_market_series
@@ -140,6 +142,15 @@ _REGIME_ASSOCIATION_ADDITIVE_FIELDS = (
     "rows",
     "model_wait_probability_sum",
 )
+_PAIRED_A_PLUS_SIDES = ("long", "short")
+_PAIRED_A_PLUS_REGIMES = REGIME_STATE_NAMES
+_PAIRED_A_PLUS_GROUP_FIELDS = (
+    "pair_count",
+    "pair_mass",
+    "loss_sum",
+    "good_advantage_sum",
+    "bad_advantage_sum",
+)
 
 
 def _entry_action_balance(
@@ -218,6 +229,9 @@ def _assert_recovery_regime_selectivity(
     expected_failed_margin = float(
         agent_settings.get("regime_selectivity_failed_confluence_margin", 0.0)
     )
+    expected_paired_margin = float(
+        agent_settings.get("regime_selectivity_paired_a_plus_margin", 0.0)
+    )
     undeclared_chop_default = (
         0.0
         if "regime_selectivity_chop_wait_margin" not in agent_settings
@@ -254,6 +268,14 @@ def _assert_recovery_regime_selectivity(
                 undeclared_chop_default,
             )),
             expected_chop_margin,
+        )
+        or not math.isclose(
+            float(getattr(
+                agent,
+                "regime_selectivity_paired_a_plus_margin",
+                0.0,
+            )),
+            expected_paired_margin,
         )
         or getattr(agent, "regime_selectivity_side_balance", None)
         != agent_settings.get("regime_selectivity_side_balance")
@@ -307,6 +329,10 @@ def _regime_selectivity_agent_settings(
                 specification["failed_confluence_margin"]
             ),
         })
+    if "paired_a_plus_margin" in specification:
+        settings["regime_selectivity_paired_a_plus_margin"] = float(
+            specification["paired_a_plus_margin"]
+        )
     return settings
 
 
@@ -1021,9 +1047,96 @@ def _regime_trade_economics_summary(
     }
 
 
+def _paired_a_plus_diagnostic(
+    update_metrics: Mapping[str, Sequence[float]],
+) -> dict[str, object]:
+    """Reduce learned A+ contrasts by side and three-state Regime."""
+    raw_losses = tuple(update_metrics.get(
+        "regime_selectivity_paired_a_plus_loss", ()
+    ))
+    loss_sum = float(sum(raw_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_paired_a_plus_loss_sum", ()
+    )))
+    update_count = float(len(raw_losses)) + float(sum(update_metrics.get(
+        "regime_selectivity_paired_a_plus_update_count", ()
+    )))
+    pair_mass = float(sum(update_metrics.get(
+        "regime_selectivity_paired_a_plus_pair_mass", ()
+    )))
+    good_sum = float(sum(update_metrics.get(
+        "regime_selectivity_paired_a_plus_good_advantage_sum", ()
+    )))
+    bad_sum = float(sum(update_metrics.get(
+        "regime_selectivity_paired_a_plus_bad_advantage_sum", ()
+    )))
+    groups: dict[str, dict[str, float]] = {}
+    for side in _PAIRED_A_PLUS_SIDES:
+        for regime in _PAIRED_A_PLUS_REGIMES:
+            name = f"{side}_{regime}"
+            prefix = f"regime_selectivity_paired_a_plus_{name}_"
+            values = {
+                field: float(sum(update_metrics.get(prefix + field, ())))
+                for field in _PAIRED_A_PLUS_GROUP_FIELDS
+            }
+            mass = values["pair_mass"]
+            groups[name] = {
+                **values,
+                "loss_mean": values["loss_sum"] / mass if mass else 0.0,
+                "good_advantage_mean": (
+                    values["good_advantage_sum"] / mass if mass else 0.0
+                ),
+                "bad_advantage_mean": (
+                    values["bad_advantage_sum"] / mass if mass else 0.0
+                ),
+            }
+    sides: dict[str, dict[str, float]] = {}
+    for side in _PAIRED_A_PLUS_SIDES:
+        side_groups = [
+            groups[f"{side}_{regime}"] for regime in _PAIRED_A_PLUS_REGIMES
+        ]
+        side_mass = sum(group["pair_mass"] for group in side_groups)
+        side_good_sum = sum(
+            group["good_advantage_sum"] for group in side_groups
+        )
+        side_bad_sum = sum(
+            group["bad_advantage_sum"] for group in side_groups
+        )
+        sides[side] = {
+            "pair_count": sum(group["pair_count"] for group in side_groups),
+            "pair_mass": side_mass,
+            "loss_sum": sum(group["loss_sum"] for group in side_groups),
+            "good_advantage_sum": side_good_sum,
+            "good_advantage_mean": (
+                side_good_sum / side_mass if side_mass else 0.0
+            ),
+            "bad_advantage_sum": side_bad_sum,
+            "bad_advantage_mean": (
+                side_bad_sum / side_mass if side_mass else 0.0
+            ),
+        }
+    return {
+        "loss_sum": loss_sum,
+        "loss_mean": loss_sum / update_count if update_count else 0.0,
+        "update_count": update_count,
+        "active_groups": float(sum(update_metrics.get(
+            "regime_selectivity_paired_a_plus_active_groups", ()
+        ))),
+        "pair_count": float(sum(update_metrics.get(
+            "regime_selectivity_paired_a_plus_pair_count", ()
+        ))),
+        "pair_mass": pair_mass,
+        "good_advantage_sum": good_sum,
+        "good_advantage_mean": good_sum / pair_mass if pair_mass else 0.0,
+        "bad_advantage_sum": bad_sum,
+        "bad_advantage_mean": bad_sum / pair_mass if pair_mass else 0.0,
+        "sides": sides,
+        "groups": groups,
+    }
+
+
 def _persistent_regime_selectivity_diagnostic(
     update_metrics: Mapping[str, Sequence[float]],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, object]:
     """Reduce transition-aware WAIT evidence from additive optimizer metrics."""
     result: dict[str, dict[str, float]] = {}
     for stratum in _PERSISTENT_REGIME_SELECTIVITY_STRATA:
@@ -1135,12 +1248,13 @@ def _persistent_regime_selectivity_diagnostic(
         "active_sides_sum": active_sides_sum,
         "both_sides_active_updates": both_sides_active_updates,
     }
+    result["paired_a_plus"] = _paired_a_plus_diagnostic(update_metrics)
     return result
 
 
 def _persistent_regime_selectivity_summary(
     rows: Sequence[Mapping[str, object]],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, object]:
     """Aggregate continuous persistent-chop evidence without thresholds."""
     update_metrics: dict[str, list[float]] = {
         f"regime_selectivity_{stratum}_{field}": []
@@ -1175,6 +1289,24 @@ def _persistent_regime_selectivity_summary(
             "active_sides_sum",
             "both_sides_active_updates",
         )
+    })
+    update_metrics.update({
+        f"regime_selectivity_paired_a_plus_{field}": []
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_groups",
+            "pair_count",
+            "pair_mass",
+            "good_advantage_sum",
+            "bad_advantage_sum",
+        )
+    })
+    update_metrics.update({
+        f"regime_selectivity_paired_a_plus_{side}_{regime}_{field}": []
+        for side in _PAIRED_A_PLUS_SIDES
+        for regime in _PAIRED_A_PLUS_REGIMES
+        for field in _PAIRED_A_PLUS_GROUP_FIELDS
     })
     for row in rows:
         diagnostics = row.get("persistent_regime_selectivity")
@@ -1224,6 +1356,32 @@ def _persistent_regime_selectivity_summary(
             update_metrics[
                 f"regime_selectivity_side_conditioned_{field}"
             ].append(float(side_conditioned.get(field, 0.0) or 0.0))
+        paired = diagnostics.get("paired_a_plus")
+        paired = paired if isinstance(paired, Mapping) else {}
+        for field in (
+            "loss_sum",
+            "update_count",
+            "active_groups",
+            "pair_count",
+            "pair_mass",
+            "good_advantage_sum",
+            "bad_advantage_sum",
+        ):
+            update_metrics[
+                f"regime_selectivity_paired_a_plus_{field}"
+            ].append(float(paired.get(field, 0.0) or 0.0))
+        groups = paired.get("groups")
+        groups = groups if isinstance(groups, Mapping) else {}
+        for side in _PAIRED_A_PLUS_SIDES:
+            for regime in _PAIRED_A_PLUS_REGIMES:
+                name = f"{side}_{regime}"
+                values = groups.get(name)
+                values = values if isinstance(values, Mapping) else {}
+                for field in _PAIRED_A_PLUS_GROUP_FIELDS:
+                    update_metrics[
+                        "regime_selectivity_paired_a_plus_"
+                        f"{name}_{field}"
+                    ].append(float(values.get(field, 0.0) or 0.0))
     return _persistent_regime_selectivity_diagnostic(update_metrics)
 
 
@@ -1292,7 +1450,7 @@ def _regime_selectivity_evaluation_metrics(
 
 
 def _persistent_regime_selectivity_evaluation_metrics(
-    diagnostics: Mapping[str, Mapping[str, float]],
+    diagnostics: Mapping[str, object],
 ) -> dict[str, float]:
     metrics = {
         f"regime_selectivity_{stratum}_{field}": float(
@@ -1362,6 +1520,9 @@ def _persistent_regime_selectivity_evaluation_metrics(
         "dead_wait_minus_transition_positive_model_wait", 0.0
     ))
     side_conditioned = diagnostics.get("side_conditioned", {})
+    side_conditioned = (
+        side_conditioned if isinstance(side_conditioned, Mapping) else {}
+    )
     for field in (
         "loss_sum",
         "loss_mean",
@@ -1372,6 +1533,52 @@ def _persistent_regime_selectivity_evaluation_metrics(
         metrics[f"regime_selectivity_side_conditioned_{field}"] = float(
             side_conditioned.get(field, 0.0)
         )
+    paired = diagnostics.get("paired_a_plus", {})
+    paired = paired if isinstance(paired, Mapping) else {}
+    for field in (
+        "loss_sum",
+        "loss_mean",
+        "update_count",
+        "active_groups",
+        "pair_count",
+        "pair_mass",
+        "good_advantage_sum",
+        "good_advantage_mean",
+        "bad_advantage_sum",
+        "bad_advantage_mean",
+    ):
+        metrics[f"regime_selectivity_paired_a_plus_{field}"] = float(
+            paired.get(field, 0.0)
+        )
+    groups = paired.get("groups", {})
+    groups = groups if isinstance(groups, Mapping) else {}
+    sides = paired.get("sides", {})
+    sides = sides if isinstance(sides, Mapping) else {}
+    for side in _PAIRED_A_PLUS_SIDES:
+        values = sides.get(side, {})
+        values = values if isinstance(values, Mapping) else {}
+        for field in (
+            "pair_count",
+            "pair_mass",
+            "loss_sum",
+            "good_advantage_sum",
+            "good_advantage_mean",
+            "bad_advantage_sum",
+            "bad_advantage_mean",
+        ):
+            metrics[
+                f"regime_selectivity_paired_a_plus_{side}_{field}"
+            ] = float(values.get(field, 0.0))
+    for side in _PAIRED_A_PLUS_SIDES:
+        for regime in _PAIRED_A_PLUS_REGIMES:
+            name = f"{side}_{regime}"
+            values = groups.get(name, {})
+            values = values if isinstance(values, Mapping) else {}
+            for field in (*_PAIRED_A_PLUS_GROUP_FIELDS, "loss_mean",
+                          "good_advantage_mean", "bad_advantage_mean"):
+                metrics[
+                    f"regime_selectivity_paired_a_plus_{name}_{field}"
+                ] = float(values.get(field, 0.0))
     return metrics
 
 
@@ -1598,6 +1805,7 @@ def _training_evaluation_gates(
             "expansion_regime_confluence_v3",
             "side_conditioned_expansion_regime_confluence_v4",
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1655,6 +1863,7 @@ def _training_evaluation_gates(
                 "expansion_regime_confluence_v3",
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
@@ -1668,6 +1877,7 @@ def _training_evaluation_gates(
                 "expansion_regime_confluence_v3",
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1684,6 +1894,7 @@ def _training_evaluation_gates(
             if regime_selectivity_semantics in {
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1736,6 +1947,22 @@ def _training_evaluation_gates(
                             0.0,
                         ),
                     ))
+            if regime_selectivity_semantics == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS:
+                gates.extend((
+                    EvaluationGate(
+                        "regime_selectivity_paired_a_plus_pair_mass", ">", 0.0
+                    ),
+                    EvaluationGate(
+                        "regime_selectivity_paired_a_plus_long_pair_mass",
+                        ">",
+                        0.0,
+                    ),
+                    EvaluationGate(
+                        "regime_selectivity_paired_a_plus_short_pair_mass",
+                        ">",
+                        0.0,
+                    ),
+                ))
         else:
             raise ValueError("Regime selectivity gate semantics are invalid")
     return tuple(gates)
@@ -4820,12 +5047,25 @@ def train_agent(
                 "regime_selectivity_association_skipped",
                 "regime_selectivity_side_conditioned_loss",
                 "regime_selectivity_side_conditioned_active_sides",
+                "regime_selectivity_paired_a_plus_loss",
+                "regime_selectivity_paired_a_plus_active_groups",
+                "regime_selectivity_paired_a_plus_pair_count",
+                "regime_selectivity_paired_a_plus_pair_mass",
+                "regime_selectivity_paired_a_plus_good_advantage_sum",
+                "regime_selectivity_paired_a_plus_bad_advantage_sum",
                 "regime_selectivity_dead_wait_minus_"
                 "transition_positive_model_wait",
                 *(
                     f"regime_selectivity_association_{cohort}_{field}"
                     for cohort in _REGIME_ASSOCIATION_COHORTS
                     for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
+                ),
+                *(
+                    "regime_selectivity_paired_a_plus_"
+                    f"{side}_{regime}_{field}"
+                    for side in _PAIRED_A_PLUS_SIDES
+                    for regime in _PAIRED_A_PLUS_REGIMES
+                    for field in _PAIRED_A_PLUS_GROUP_FIELDS
                 ),
                 *(
                     f"regime_selectivity_{stratum}_{field}"

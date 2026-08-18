@@ -27,6 +27,9 @@ REGIME_STATE_CHANNELS = (
     "chop_end_transition_probability",
     "expansion_trend_probability",
 )
+REGIME_STATE_NAMES = tuple(
+    channel.removesuffix("_probability") for channel in REGIME_STATE_CHANNELS
+)
 REGIME_TRANSITION_CHANNELS = REGIME_STATE_CHANNELS
 REGIME_TEACHER_CHANNELS = (
     "chop_no_trend_probability",
@@ -47,6 +50,9 @@ SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS = (
 )
 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS = (
     "side_conditioned_expansion_regime_all_dominant_chop_margin_v5"
+)
+PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS = (
+    "paired_a_plus_expansion_regime_contrastive_v6"
 )
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
@@ -86,6 +92,12 @@ ALL_DOMINANT_CHOP_MARGIN_FORMULA = (
     + "+membership_weighted_mean(all_action_dominant_chop_wait_margin,"
     "failed_long_wait_margin,"
     "failed_short_wait_margin)"
+)
+PAIRED_A_PLUS_CONTRASTIVE_FORMULA = (
+    ALL_DOMINANT_CHOP_MARGIN_FORMULA
+    + "+equal_present_side_mean(regime_similarity_weighted_mean("
+    "softplus(pair_margin+failed_side_q_minus_wait-"
+    "valid_side_q_minus_wait)))"
 )
 
 
@@ -167,6 +179,7 @@ class BalanceAwareRegimeSelectivity:
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             )
             or not np.isfinite(self.persistent_chop_negative_emphasis)
             or float(self.persistent_chop_negative_emphasis) < 0.0
@@ -178,6 +191,7 @@ class BalanceAwareRegimeSelectivity:
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
         } and any(
             channel not in names for channel in REGIME_TRANSITION_CHANNELS
         ):
@@ -212,7 +226,10 @@ class BalanceAwareRegimeSelectivity:
         teacher_probabilities: torch.Tensor,
     ) -> torch.Tensor:
         """Return soft dominance mass for learned WAIT pressure on every action."""
-        if self.semantics != ALL_DOMINANT_CHOP_MARGIN_SEMANTICS:
+        if self.semantics not in {
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        }:
             raise ValueError(
                 "all-action dominant-chop margin requires its frozen semantics"
             )
@@ -359,6 +376,7 @@ class BalanceAwareRegimeSelectivity:
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
         }:
             raise ValueError(
                 "exact WAIT negative weights require persistent-chop semantics"
@@ -398,6 +416,7 @@ class BalanceAwareRegimeSelectivity:
             EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
         }:
             epsilon = float(self.probability_epsilon)
             long_score = (
@@ -433,6 +452,7 @@ class BalanceAwareRegimeSelectivity:
                 in {
                     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                 }
             ):
                 evidence_sum = (
@@ -452,6 +472,7 @@ class BalanceAwareRegimeSelectivity:
                 EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 failed_setup_confluence = (
                     wait_rows
@@ -466,6 +487,7 @@ class BalanceAwareRegimeSelectivity:
                     in {
                         SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                        PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
                     }
                 ):
                     failed_long_confluence = (
@@ -509,8 +531,11 @@ __all__ = [
     "PERSISTENT_CHOP_ASSOCIATION_SEMANTICS",
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA",
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS",
+    "PAIRED_A_PLUS_CONTRASTIVE_FORMULA",
+    "PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS",
     "PersistentChopEvidence",
     "REGIME_STATE_CHANNELS",
+    "REGIME_STATE_NAMES",
     "REGIME_TEACHER_CHANNELS",
     "REGIME_TRANSITION_CHANNELS",
     "SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA",

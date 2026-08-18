@@ -10,6 +10,7 @@ import torch
 from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     STATIC_STATE_SEMANTICS,
@@ -17,6 +18,7 @@ from propevolve.balance_aware_regime_selectivity import (
 from propevolve.agent import (
     RecurrentC51Agent,
     exact_action_margin_losses,
+    paired_a_plus_rank_loss,
     side_conditioned_wait_rank_loss,
     chop_specific_wait_margin_losses,
 )
@@ -169,6 +171,148 @@ def test_side_conditioned_rank_loss_separates_wait_long_and_wait_short_gradients
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_paired_a_plus_rank_loss_requires_good_long_to_outrank_matched_failure(
+) -> None:
+    action_values = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, -0.5, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+
+    result = paired_a_plus_rank_loss(
+        action_values,
+        failed_long_membership=torch.tensor([0.0, 1.0]),
+        failed_short_membership=torch.zeros(2),
+        valid_long_membership=torch.tensor([1.0, 0.0]),
+        valid_short_membership=torch.zeros(2),
+        regime_probabilities=torch.tensor([
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]),
+        margin=0.25,
+    )
+
+    assert result.active_groups.item() == 1.0
+    assert result.pair_count.item() == 1.0
+    assert result.pair_mass.item() == 1.0
+    assert result.good_advantage_sum.item() == 1.0
+    assert result.bad_advantage_sum.item() == -0.5
+    assert result.loss.item() == pytest.approx(0.2519290813453729)
+
+
+def test_paired_a_plus_uses_continuous_regime_similarity_without_argmax() -> None:
+    result = paired_a_plus_rank_loss(
+        torch.tensor([
+            [0.0, 1.0, -1.0],
+            [0.0, -1.0, -1.0],
+        ]),
+        failed_long_membership=torch.tensor([0.0, 1.0]),
+        failed_short_membership=torch.zeros(2),
+        valid_long_membership=torch.tensor([1.0, 0.0]),
+        valid_short_membership=torch.zeros(2),
+        regime_probabilities=torch.tensor([
+            [0.00, 0.49, 0.51],
+            [0.00, 0.51, 0.49],
+        ]),
+        margin=0.25,
+    )
+
+    assert result.active_groups.item() == 2.0
+    assert result.pair_mass.item() == pytest.approx(0.4998)
+    assert result.loss.item() == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(-1.75)).item()
+    )
+
+
+def test_paired_a_plus_rank_loss_balances_present_long_and_short_sides() -> None:
+    action_values = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],  # Long good.
+            [0.0, 0.0, 0.0],  # Long failure.
+            [0.0, 0.0, 2.0],  # Short good, transition Regime.
+            [0.0, 0.0, -2.0],  # Matched Short failure.
+            [0.0, 0.0, 2.0],  # Short good, expansion-trend Regime.
+            [0.0, 0.0, -2.0],  # Matched Short failure.
+        ],
+        dtype=torch.float64,
+    )
+    result = paired_a_plus_rank_loss(
+        action_values,
+        failed_long_membership=torch.tensor([0, 1, 0, 0, 0, 0.0]),
+        valid_long_membership=torch.tensor([1, 0, 0, 0, 0, 0.0]),
+        failed_short_membership=torch.tensor([0, 0, 0, 1, 0, 1.0]),
+        valid_short_membership=torch.tensor([0, 0, 1, 0, 1, 0.0]),
+        regime_probabilities=torch.nn.functional.one_hot(
+            torch.tensor([0, 0, 1, 1, 2, 2]), num_classes=3
+        ).float(),
+        margin=0.25,
+    )
+
+    assert result.active_groups.item() == 3.0
+    assert result.loss.item() == pytest.approx(0.42459244212563435)
+
+
+@pytest.mark.parametrize(
+    ("failed_long", "failed_short", "valid_long", "valid_short", "regimes"),
+    (
+        # Opposite sides never form an A+ pair.
+        ([0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 0.0], [2, 2]),
+        # The same side in different learned Regime classes never forms a pair.
+        ([0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [1, 2]),
+        # Missing failed cohorts produce no invented supervision.
+        ([0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [2, 2]),
+    ),
+)
+def test_paired_a_plus_rank_loss_never_invents_cross_context_pairs(
+    failed_long: list[float],
+    failed_short: list[float],
+    valid_long: list[float],
+    valid_short: list[float],
+    regimes: list[int],
+) -> None:
+    result = paired_a_plus_rank_loss(
+        torch.tensor([
+            [0.0, 0.5, -0.5],
+            [0.0, -0.5, 0.5],
+        ]),
+        failed_long_membership=torch.tensor(failed_long),
+        failed_short_membership=torch.tensor(failed_short),
+        valid_long_membership=torch.tensor(valid_long),
+        valid_short_membership=torch.tensor(valid_short),
+        regime_probabilities=torch.nn.functional.one_hot(
+            torch.tensor(regimes), num_classes=3
+        ).float(),
+        margin=0.25,
+    )
+
+    assert result.loss.item() == 0.0
+    assert result.active_groups.item() == 0.0
+    assert result.pair_mass.item() == 0.0
+
+
+def test_paired_a_plus_margin_cannot_drift_from_its_declared_semantics() -> None:
+    with pytest.raises(ValueError, match=r"paired A\+"):
+        _agent(
+            seed=528,
+            selectivity_weight=1.0,
+            side_balance="equal_long_short_v1",
+            selectivity_semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            persistent_chop_negative_emphasis=2.0,
+            paired_a_plus_margin=0.25,
+        )
+    with pytest.raises(ValueError, match=r"paired A\+"):
+        _agent(
+            seed=529,
+            selectivity_weight=1.0,
+            side_balance="equal_long_short_v1",
+            selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            persistent_chop_negative_emphasis=2.0,
+            paired_a_plus_margin=0.0,
+        )
 
 
 def test_chop_specific_margin_requires_wait_over_entries_without_touching_valid_short(
@@ -582,6 +726,7 @@ def _agent(
     persistent_chop_negative_emphasis: float | None = None,
     chop_wait_margin: float = 0.0,
     failed_confluence_margin: float = 0.0,
+    paired_a_plus_margin: float = 0.0,
     expansion_centers: tuple[float, float] = (0.10, 0.10),
     device: str = "cpu",
 ) -> RecurrentC51Agent:
@@ -622,6 +767,7 @@ def _agent(
         regime_selectivity_expansion_centers=expansion_centers,
         regime_selectivity_chop_wait_margin=chop_wait_margin,
         regime_selectivity_failed_confluence_margin=failed_confluence_margin,
+        regime_selectivity_paired_a_plus_margin=paired_a_plus_margin,
         **optional_settings,
     )
 
@@ -708,6 +854,206 @@ def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(
     assert agent.last_train_metrics[
         "regime_selectivity_failed_long_confluence_rows"
     ] > 0.0
+
+
+def test_paired_a_plus_supervision_remains_active_after_teacher_dropout() -> None:
+    agent = _agent(
+        seed=524,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    batch = (
+        _sequence(
+            (1.0, 0.0, 0.0),
+            _teacher_row(
+                long_attempt=0.90,
+                long_clean=0.90,
+                short_attempt=0.10,
+                short_clean=0.10,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+            teacher_imitation_visible=False,
+        ),
+        _sequence(
+            (0.0, 1.0, 0.0),
+            _teacher_row(
+                long_attempt=0.90,
+                long_clean=0.90,
+                short_attempt=0.10,
+                short_clean=0.10,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.WAIT,
+            teacher_imitation_visible=False,
+        ),
+        _sequence(
+            (0.0, 0.0, 1.0),
+            _teacher_row(
+                long_attempt=0.10,
+                long_clean=0.10,
+                short_attempt=0.90,
+                short_clean=0.90,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.ENTER_SHORT_1,
+            teacher_imitation_visible=False,
+        ),
+        _sequence(
+            (1.0, 1.0, 0.0),
+            _teacher_row(
+                long_attempt=0.10,
+                long_clean=0.10,
+                short_attempt=0.90,
+                short_clean=0.90,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.WAIT,
+            teacher_imitation_visible=False,
+        ),
+    )
+
+    agent.train_batch(
+        batch,
+        teacher_weight_scale=1.0,
+        entry_action_weight_scale=1.0,
+    )
+
+    assert agent.last_train_metrics["teacher_loss"] == 0.0
+    assert agent.last_train_metrics["entry_action_supervised_rows"] == 4.0
+    # Continuous opposite-side evidence stays in the weighted population;
+    # no fixed cutoff turns weak evidence into a handcrafted hard class.
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_pair_count"
+    ] == 4.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_long_expansion_trend_"
+        "pair_count"
+    ] == 2.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_short_expansion_trend_"
+        "pair_count"
+    ] == 2.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_loss"
+    ] > 0.0
+
+
+def test_paired_a_plus_pressure_is_additive_without_weakening_v18_losses() -> None:
+    common = dict(
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+    )
+    baseline = _agent(
+        seed=526,
+        selectivity_semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        **common,
+    )
+    paired = _agent(
+        seed=526,
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        paired_a_plus_margin=0.25,
+        **common,
+    )
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    batch = (
+        _sequence(
+            (1.0, 0.0, 0.0),
+            _teacher_row(
+                long_attempt=0.90,
+                long_clean=0.90,
+                short_attempt=0.10,
+                short_clean=0.10,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+            teacher_imitation_visible=False,
+        ),
+        _sequence(
+            (0.0, 1.0, 0.0),
+            _teacher_row(
+                long_attempt=0.90,
+                long_clean=0.90,
+                short_attempt=0.10,
+                short_clean=0.10,
+                **ready,
+            ),
+            headroom=1.0,
+            target=Action.WAIT,
+            teacher_imitation_visible=False,
+        ),
+    )
+
+    baseline.train_batch(batch)
+    paired.train_batch(batch)
+
+    assert paired.last_train_metrics["regime_selectivity_loss"] == pytest.approx(
+        baseline.last_train_metrics["regime_selectivity_loss"]
+        + paired.last_train_metrics["regime_selectivity_paired_a_plus_loss"]
+    )
+
+
+def test_paired_a_plus_is_exactly_v18_when_no_matched_pair_exists() -> None:
+    common = dict(
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+    )
+    baseline = _agent(
+        seed=527,
+        selectivity_semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        **common,
+    )
+    paired = _agent(
+        seed=527,
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        paired_a_plus_margin=0.25,
+        **common,
+    )
+    valid_only = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            chop=0.05,
+            neutral=0.45,
+            trend=0.50,
+        ),
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        teacher_imitation_visible=False,
+    )
+
+    baseline.train_batch((valid_only,))
+    paired.train_batch((valid_only,))
+
+    assert paired.last_train_metrics[
+        "regime_selectivity_paired_a_plus_pair_mass"
+    ] == 0.0
+    assert paired.last_train_metrics["regime_selectivity_loss"] == pytest.approx(
+        baseline.last_train_metrics["regime_selectivity_loss"]
+    )
 
 
 def test_chop_wait_margins_remain_active_after_teacher_dropout() -> None:
@@ -918,6 +1264,65 @@ def test_chop_margin_cohorts_are_learned_after_recurrent_burn_in() -> None:
     assert agent.last_train_metrics[
         "regime_selectivity_failed_short_confluence_rows"
     ] > 0.0
+
+
+def test_paired_a_plus_uses_learning_rows_after_recurrent_burn_in() -> None:
+    agent = _agent(
+        seed=525,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        recurrent_burn_in=1,
+        side_balance="equal_long_short_v1",
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    burn = _sequence(
+        (0.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.90,
+            long_clean=0.90,
+            short_attempt=0.10,
+            short_clean=0.10,
+            chop=0.05,
+            neutral=0.90,
+            trend=0.05,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )[0]
+    teacher = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    good = _sequence(
+        (1.0, 0.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        teacher_imitation_visible=False,
+    )[0]
+    failed = _sequence(
+        (0.0, 1.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.WAIT,
+        teacher_imitation_visible=False,
+    )[0]
+
+    agent.train_batch(((burn, good), (burn, failed)))
+
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_long_expansion_trend_pair_count"
+    ] == 1.0
 
 
 def _greedy(agent: RecurrentC51Agent, observation: tuple[float, ...]) -> Action:
