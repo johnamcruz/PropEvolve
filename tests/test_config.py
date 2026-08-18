@@ -645,6 +645,11 @@ def test_context_matched_a_plus_recipe_is_one_200_episode_v19_ablation() -> None
     selectivity = candidate["regime_selectivity"]
     assert selectivity["semantics"] == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
     assert selectivity["formula"] == CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA
+    assert selectivity["semantics"] == (
+        "generic_canonical_paired_a_plus_expansion_regime_v8"
+    )
+    assert "candidate_side_canonical" in selectivity["formula"]
+    assert "same_ticker" not in selectivity["formula"]
     assert selectivity["paired_a_plus_margin"] == 0.25
     stage = candidate["campaign"]["budget_stages"][0]
     assert stage["name"] == "context_matched_aplus_200ep"

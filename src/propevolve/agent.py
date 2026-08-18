@@ -394,15 +394,15 @@ def paired_a_plus_rank_loss(
     regime_probabilities: torch.Tensor,
     expansion_probabilities: torch.Tensor | None = None,
     headroom_fractions: torch.Tensor | None = None,
-    ticker_ids: torch.Tensor | None = None,
     margin: float,
 ) -> PairedAPlusRankResult:
-    """Rank exact economic winners above matched same-side failures.
+    """Rank exact economic winners above matched candidate-side failures.
 
-    Each valid/failed pair must share side. Context-matched callers also
-    require the same ticker and continuously weight Expansion, three-state
-    Regime, and account-headroom similarity. The policy still receives no
-    teacher channels as input.
+    Context-matched callers canonicalize Long and Short into candidate-side
+    coordinates, then compare winners and failures across markets and original
+    directions. Expansion, three-state Regime, and account-headroom similarity
+    weight each pair continuously. The policy still receives no teacher
+    channels or ticker identity as input.
     """
     memberships = (
         failed_long_membership,
@@ -414,7 +414,6 @@ def paired_a_plus_rank_loss(
     context_values = (
         expansion_probabilities,
         headroom_fractions,
-        ticker_ids,
     )
     context_matching = any(value is not None for value in context_values)
     if (
@@ -435,9 +434,6 @@ def paired_a_plus_rank_loss(
                 or not torch.is_floating_point(expansion_probabilities)
                 or headroom_fractions.shape != row_shape
                 or not torch.is_floating_point(headroom_fractions)
-                or ticker_ids.shape != row_shape
-                or ticker_ids.dtype == torch.bool
-                or torch.is_floating_point(ticker_ids)
             )
         )
         or isinstance(margin, bool)
@@ -490,29 +486,49 @@ def paired_a_plus_rank_loss(
         if context_matching:
             assert context_expansion is not None
             assert context_headroom is not None
-            assert ticker_ids is not None
+            canonical_expansion = (
+                context_expansion
+                if side_name == "long"
+                else context_expansion[:, (2, 3, 0, 1)]
+            )
+            failed_expansion = torch.cat((
+                context_expansion,
+                context_expansion[:, (2, 3, 0, 1)],
+            ))
+            failed_membership = torch.cat((
+                failed_long_membership,
+                failed_short_membership,
+            ))
+            failed_advantage = torch.cat((
+                flat_action_values[:, int(Action.ENTER_LONG_1)]
+                - flat_action_values[:, int(Action.WAIT)],
+                flat_action_values[:, int(Action.ENTER_SHORT_1)]
+                - flat_action_values[:, int(Action.WAIT)],
+            ))
+            failed_regime_memberships = torch.cat((
+                regime_memberships,
+                regime_memberships,
+            ))
+            failed_headroom = torch.cat((context_headroom, context_headroom))
             side_context_weights = (
-                (ticker_ids[:, None] == ticker_ids[None, :]).to(
-                    flat_action_values.dtype
-                )
-                * (
+                (
                     1.0
                     - torch.abs(
-                        context_expansion[:, None, :]
-                        - context_expansion[None, :, :]
+                        canonical_expansion[:, None, :]
+                        - failed_expansion[None, :, :]
                     ).mean(-1)
                 ).clamp(0.0, 1.0)
                 * (
                     1.0
                     - torch.abs(
                         context_headroom[:, None]
-                        - context_headroom[None, :]
+                        - failed_headroom[None, :]
                     )
                 ).clamp(0.0, 1.0)
             )
             side_pair_count = (
                 (valid[:, None] > 0)
-                & (failed[None, :] > 0)
+                & (failed_membership[None, :] > 0)
                 & (side_context_weights > 0)
             ).sum().to(flat_action_values.dtype)
         else:
@@ -527,13 +543,22 @@ def paired_a_plus_rank_loss(
         for regime_index, regime_name in enumerate(REGIME_STATE_NAMES):
             group_membership = regime_memberships[:, regime_index]
             good_weights = valid * group_membership
-            bad_weights = failed * group_membership
+            bad_weights = (
+                failed_membership
+                * failed_regime_memberships[:, regime_index]
+                if context_matching
+                else failed * group_membership
+            )
             good_rows = good_weights > 0
             bad_rows = bad_weights > 0
             selected_good_weights = good_weights[good_rows]
             selected_bad_weights = bad_weights[bad_rows]
             selected_good_advantage = advantage[good_rows]
-            selected_bad_advantage = advantage[bad_rows]
+            selected_bad_advantage = (
+                failed_advantage[bad_rows]
+                if context_matching
+                else advantage[bad_rows]
+            )
             weights = (
                 selected_good_weights[:, None]
                 * selected_bad_weights[None, :]
@@ -547,8 +572,15 @@ def paired_a_plus_rank_loss(
                 flat_action_values.dtype
             )
             group_pair_count = (
-                good_rows.sum().to(flat_action_values.dtype)
-                * bad_rows.sum().to(flat_action_values.dtype)
+                (
+                    (good_rows[:, None] & bad_rows[None, :])
+                    & (side_context_weights > 0)
+                ).sum().to(flat_action_values.dtype)
+                if context_matching
+                else (
+                    good_rows.sum().to(flat_action_values.dtype)
+                    * bad_rows.sum().to(flat_action_values.dtype)
+                )
             )
             pair_losses = nn.functional.softplus(
                 float(margin)
@@ -1827,35 +1859,6 @@ class RecurrentC51Agent:
                         dtype=torch.float32,
                         device=self.device,
                     )[:, self.recurrent_burn_in:]
-                    selectivity_ticker_ids = None
-                    if (
-                        self.regime_selectivity_semantics
-                        == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
-                    ):
-                        ticker_names = sorted({
-                            item.source_ticker
-                            for sequence in sequences
-                            for item in sequence
-                            if item.source_ticker is not None
-                        })
-                        ticker_index = {
-                            ticker: index
-                            for index, ticker in enumerate(ticker_names)
-                        }
-                        ticker_rows = np.asarray([
-                            [
-                                -1
-                                if item.source_ticker is None
-                                else ticker_index[item.source_ticker]
-                                for item in sequence
-                            ]
-                            for sequence in sequences
-                        ], dtype=np.int64)
-                        selectivity_ticker_ids = torch.as_tensor(
-                            ticker_rows,
-                            dtype=torch.long,
-                            device=self.device,
-                        )[:, self.recurrent_burn_in:]
                     selectivity_action_targets_tensor = diagnostic_targets
                     selectivity_teacher_targets = teacher_targets_tensor[
                         :, :training_steps
@@ -1865,14 +1868,6 @@ class RecurrentC51Agent:
                         all_teacher_rows[:, :training_steps]
                         & learnable_rows
                         & torch.isfinite(selectivity_headroom)
-                        & (
-                            torch.ones_like(
-                                selectivity_headroom,
-                                dtype=torch.bool,
-                            )
-                            if selectivity_ticker_ids is None
-                            else selectivity_ticker_ids[:, :training_steps] >= 0
-                        )
                         & (selectivity_action_targets_tensor >= int(Action.WAIT))
                         & (
                             selectivity_action_targets_tensor
@@ -2127,13 +2122,6 @@ class RecurrentC51Agent:
                                     selected_headroom
                                     if self.regime_selectivity_semantics
                                     == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
-                                    else None
-                                ),
-                                ticker_ids=(
-                                    selectivity_ticker_ids[
-                                        :, :training_steps
-                                    ][selectivity_rows]
-                                    if selectivity_ticker_ids is not None
                                     else None
                                 ),
                                 margin=self.regime_selectivity_paired_a_plus_margin,

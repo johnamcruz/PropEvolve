@@ -229,14 +229,15 @@ def test_paired_a_plus_uses_continuous_regime_similarity_without_argmax() -> Non
     )
 
 
-def test_paired_a_plus_context_matching_rejects_cross_ticker_pairs() -> None:
+def test_paired_a_plus_context_matching_learns_cross_market_direction_agnostic_pairs(
+) -> None:
     result = paired_a_plus_rank_loss(
         torch.tensor([
             [0.0, 1.0, -1.0],
             [0.0, -1.0, -1.0],
         ]),
-        failed_long_membership=torch.tensor([0.0, 1.0]),
-        failed_short_membership=torch.zeros(2),
+        failed_long_membership=torch.zeros(2),
+        failed_short_membership=torch.tensor([0.0, 1.0]),
         valid_long_membership=torch.tensor([1.0, 0.0]),
         valid_short_membership=torch.zeros(2),
         regime_probabilities=torch.tensor([
@@ -245,17 +246,100 @@ def test_paired_a_plus_context_matching_rejects_cross_ticker_pairs() -> None:
         ]),
         expansion_probabilities=torch.tensor([
             [0.8, 0.7, 0.1, 0.2],
-            [0.8, 0.7, 0.1, 0.2],
+            [0.1, 0.2, 0.8, 0.7],
         ]),
         headroom_fractions=torch.tensor([0.8, 0.8]),
-        ticker_ids=torch.tensor([0, 1]),
         margin=0.25,
     )
 
-    assert result.loss.item() == 0.0
-    assert result.active_groups.item() == 0.0
-    assert result.pair_count.item() == 0.0
-    assert result.pair_mass.item() == 0.0
+    assert result.loss.item() == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(-1.75)).item()
+    )
+    assert result.active_groups.item() == 1.0
+    assert result.pair_count.item() == 1.0
+    assert result.pair_mass.item() == 1.0
+
+
+def test_paired_a_plus_context_matching_is_direction_invariant() -> None:
+    def result(*, mirrored: bool):
+        if mirrored:
+            action_values = torch.tensor([
+                [0.0, -1.0, 1.0],
+                [0.0, -1.0, -1.0],
+            ])
+            failed_long = torch.tensor([0.0, 1.0])
+            failed_short = torch.zeros(2)
+            valid_long = torch.zeros(2)
+            valid_short = torch.tensor([1.0, 0.0])
+            expansion = torch.tensor([
+                [0.1, 0.2, 0.8, 0.7],
+                [0.8, 0.7, 0.1, 0.2],
+            ])
+        else:
+            action_values = torch.tensor([
+                [0.0, 1.0, -1.0],
+                [0.0, -1.0, -1.0],
+            ])
+            failed_long = torch.zeros(2)
+            failed_short = torch.tensor([0.0, 1.0])
+            valid_long = torch.tensor([1.0, 0.0])
+            valid_short = torch.zeros(2)
+            expansion = torch.tensor([
+                [0.8, 0.7, 0.1, 0.2],
+                [0.1, 0.2, 0.8, 0.7],
+            ])
+        return paired_a_plus_rank_loss(
+            action_values,
+            failed_long_membership=failed_long,
+            failed_short_membership=failed_short,
+            valid_long_membership=valid_long,
+            valid_short_membership=valid_short,
+            regime_probabilities=torch.tensor([
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+            expansion_probabilities=expansion,
+            headroom_fractions=torch.tensor([0.8, 0.8]),
+            margin=0.25,
+        )
+
+    original = result(mirrored=False)
+    mirrored = result(mirrored=True)
+
+    assert original.pair_mass.item() == 1.0
+    torch.testing.assert_close(original.loss, mirrored.loss)
+    torch.testing.assert_close(original.pair_mass, mirrored.pair_mass)
+
+
+def test_generic_a_plus_pair_updates_each_examples_original_action_head() -> None:
+    action_values = torch.tensor([
+        [0.0, 1.0, -1.0],  # Winning Long candidate.
+        [0.0, -1.0, -1.0],  # Failed Short candidate.
+    ], requires_grad=True)
+    result = paired_a_plus_rank_loss(
+        action_values,
+        failed_long_membership=torch.zeros(2),
+        failed_short_membership=torch.tensor([0.0, 1.0]),
+        valid_long_membership=torch.tensor([1.0, 0.0]),
+        valid_short_membership=torch.zeros(2),
+        regime_probabilities=torch.tensor([
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]),
+        expansion_probabilities=torch.tensor([
+            [0.8, 0.7, 0.1, 0.2],
+            [0.1, 0.2, 0.8, 0.7],
+        ]),
+        headroom_fractions=torch.tensor([0.8, 0.8]),
+        margin=0.25,
+    )
+
+    gradient, = torch.autograd.grad(result.loss, action_values)
+
+    assert gradient[0, int(Action.ENTER_LONG_1)] < 0.0
+    assert gradient[1, int(Action.ENTER_SHORT_1)] > 0.0
+    assert gradient[0, int(Action.ENTER_SHORT_1)] == 0.0
+    assert gradient[1, int(Action.ENTER_LONG_1)] == 0.0
 
 
 def test_paired_a_plus_context_matching_weights_continuous_expansion_and_headroom(
@@ -281,7 +365,6 @@ def test_paired_a_plus_context_matching_weights_continuous_expansion_and_headroo
             [0.3, 0.2, 0.6, 0.7],
         ]),
         headroom_fractions=torch.tensor([0.8, 0.8, 0.4]),
-        ticker_ids=torch.tensor([0, 0, 0]),
         margin=0.25,
     )
 
@@ -1017,19 +1100,8 @@ def test_paired_a_plus_supervision_remains_active_after_teacher_dropout() -> Non
     ] > 0.0
 
 
-def test_context_matched_paired_a_plus_training_uses_same_ticker_type_and_side(
+def test_context_matched_paired_a_plus_training_uses_generic_market_and_side_pattern(
 ) -> None:
-    agent = _agent(
-        seed=530,
-        selectivity_weight=1.0,
-        entry_action_weight=1.0,
-        selectivity_semantics=CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
-        side_balance="equal_long_short_v1",
-        persistent_chop_negative_emphasis=2.0,
-        chop_wait_margin=0.25,
-        failed_confluence_margin=0.25,
-        paired_a_plus_margin=0.25,
-    )
     ready = dict(chop=0.05, neutral=0.45, trend=0.50)
     teacher = _teacher_row(
         long_attempt=0.90,
@@ -1038,35 +1110,52 @@ def test_context_matched_paired_a_plus_training_uses_same_ticker_type_and_side(
         short_clean=0.10,
         **ready,
     )
-    batch = (
-        _sequence(
-            (1.0, 0.0, 0.0), teacher,
-            headroom=0.8, target=Action.ENTER_LONG_1, ticker="NQ",
-            teacher_imitation_visible=False,
-        ),
-        _sequence(
-            (0.0, 1.0, 0.0), teacher,
-            headroom=0.8, target=Action.WAIT, ticker="NQ",
-            teacher_imitation_visible=False,
-        ),
-        _sequence(
-            (0.0, 0.0, 1.0), teacher,
-            headroom=0.8, target=Action.WAIT, ticker="ES",
-            teacher_imitation_visible=False,
-        ),
-    )
+    def train(tickers: tuple[str, str, str]) -> dict[str, float]:
+        agent = _agent(
+            seed=530,
+            selectivity_weight=1.0,
+            entry_action_weight=1.0,
+            selectivity_semantics=CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+            side_balance="equal_long_short_v1",
+            persistent_chop_negative_emphasis=2.0,
+            chop_wait_margin=0.25,
+            failed_confluence_margin=0.25,
+            paired_a_plus_margin=0.25,
+        )
+        agent.train_batch((
+            _sequence(
+                (1.0, 0.0, 0.0), teacher,
+                headroom=0.8, target=Action.ENTER_LONG_1, ticker=tickers[0],
+                teacher_imitation_visible=False,
+            ),
+            _sequence(
+                (0.0, 1.0, 0.0), teacher,
+                headroom=0.8, target=Action.WAIT, ticker=tickers[1],
+                teacher_imitation_visible=False,
+            ),
+            _sequence(
+                (0.0, 0.0, 1.0), teacher,
+                headroom=0.8, target=Action.WAIT, ticker=tickers[2],
+                teacher_imitation_visible=False,
+            ),
+        ))
+        return agent.last_train_metrics
 
-    agent.train_batch(batch)
+    same_market = train(("NQ", "NQ", "NQ"))
+    cross_market = train(("NQ", "NQ", "ES"))
 
-    assert agent.last_train_metrics[
+    assert cross_market[
         "regime_selectivity_paired_a_plus_pair_count"
-    ] == 1.0
-    assert agent.last_train_metrics[
+    ] == same_market["regime_selectivity_paired_a_plus_pair_count"]
+    assert cross_market[
         "regime_selectivity_paired_a_plus_pair_mass"
-    ] > 0.0
+    ] == pytest.approx(
+        same_market["regime_selectivity_paired_a_plus_pair_mass"]
+    )
+    assert cross_market["regime_selectivity_paired_a_plus_pair_mass"] > 0.0
 
 
-def test_context_matched_a_plus_aligns_tickers_to_the_n_step_learning_window(
+def test_generic_a_plus_aligns_context_to_n_step_window_without_ticker_identity(
 ) -> None:
     agent = _agent(
         seed=531,
@@ -1106,7 +1195,7 @@ def test_context_matched_a_plus_aligns_tickers_to_the_n_step_learning_window(
                 Action.ENTER_LONG_1 if index == 64 else Action.WAIT
             ),
             regime_selectivity_headroom_fraction=0.8,
-            source_ticker="NQ",
+            source_ticker=None,
         )
         for index in range(96)
     )

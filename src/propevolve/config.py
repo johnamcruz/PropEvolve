@@ -1540,7 +1540,7 @@ def load_experiment_config(path: str | Path) -> dict:
                     and payload["regime_selectivity"].get("semantics")
                     in {
                         "paired_a_plus_expansion_regime_contrastive_v6",
-                        "context_matched_paired_a_plus_expansion_regime_v7",
+                        "generic_canonical_paired_a_plus_expansion_regime_v8",
                     }
                     and "regime_selectivity.paired_a_plus_margin" in frozen
                 )

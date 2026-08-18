@@ -55,7 +55,7 @@ PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS = (
     "paired_a_plus_expansion_regime_contrastive_v6"
 )
 CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS = (
-    "context_matched_paired_a_plus_expansion_regime_v7"
+    "generic_canonical_paired_a_plus_expansion_regime_v8"
 )
 PAIRED_A_PLUS_SEMANTICS = (
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
@@ -108,7 +108,7 @@ PAIRED_A_PLUS_CONTRASTIVE_FORMULA = (
 )
 CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA = (
     ALL_DOMINANT_CHOP_MARGIN_FORMULA
-    + "+equal_present_side_mean(same_ticker*"
+    + "+equal_present_side_mean(candidate_side_canonical*"
     "continuous_expansion_type_similarity*"
     "continuous_regime_similarity*continuous_headroom_similarity*"
     "softplus(pair_margin+failed_side_q_minus_wait-"
