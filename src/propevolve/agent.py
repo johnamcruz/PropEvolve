@@ -213,6 +213,41 @@ def exact_action_margin_losses(
     return strongest_margin_action - demonstrated
 
 
+def entry_opportunity_value_kl_loss(
+    flat_action_values: torch.Tensor,
+    opportunity_values: torch.Tensor,
+    *,
+    temperature: float,
+) -> torch.Tensor:
+    """Distill one training-only WAIT/Long/Short economic ranking."""
+
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or opportunity_values.shape != flat_action_values.shape
+        or not torch.is_floating_point(flat_action_values)
+        or not torch.is_floating_point(opportunity_values)
+        or not torch.isfinite(flat_action_values).all()
+        or not torch.isfinite(opportunity_values).all()
+        or isinstance(temperature, bool)
+        or not math.isfinite(float(temperature))
+        or float(temperature) <= 0.0
+    ):
+        raise ValueError("Entry opportunity-value KL contract is invalid")
+    scale = float(temperature)
+    teacher_probabilities = nn.functional.softmax(
+        opportunity_values / scale, dim=-1
+    )
+    policy_log_probabilities = nn.functional.log_softmax(
+        flat_action_values / scale, dim=-1
+    )
+    return nn.functional.kl_div(
+        policy_log_probabilities,
+        teacher_probabilities,
+        reduction="none",
+    ).sum(-1)
+
+
 def chop_specific_wait_margin_losses(
     flat_action_values: torch.Tensor,
     *,
@@ -718,6 +753,8 @@ class RecurrentC51Agent:
         entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
         entry_action_loss_reduction: str = "population_weighted_mean_v1",
         entry_action_margin: float = 0.0,
+        entry_opportunity_value_loss_weight: float = 0.0,
+        entry_opportunity_value_temperature: float = 1.0,
         regime_selectivity_loss_weight: float = 0.0,
         regime_selectivity_expansion_centers: Sequence[float] | None = None,
         regime_selectivity_probability_epsilon: float = 1e-6,
@@ -763,6 +800,12 @@ class RecurrentC51Agent:
             or isinstance(entry_action_margin, bool)
             or not np.isfinite(entry_action_margin)
             or entry_action_margin < 0
+            or isinstance(entry_opportunity_value_loss_weight, bool)
+            or not np.isfinite(entry_opportunity_value_loss_weight)
+            or entry_opportunity_value_loss_weight < 0
+            or isinstance(entry_opportunity_value_temperature, bool)
+            or not np.isfinite(entry_opportunity_value_temperature)
+            or entry_opportunity_value_temperature <= 0
             or not np.isfinite(regime_selectivity_loss_weight)
             or regime_selectivity_loss_weight < 0
             or isinstance(regime_selectivity_chop_wait_margin, bool)
@@ -936,6 +979,12 @@ class RecurrentC51Agent:
         self.entry_action_class_weights = entry_action_class_weights
         self.entry_action_loss_reduction = str(entry_action_loss_reduction)
         self.entry_action_margin = float(entry_action_margin)
+        self.entry_opportunity_value_loss_weight = float(
+            entry_opportunity_value_loss_weight
+        )
+        self.entry_opportunity_value_temperature = float(
+            entry_opportunity_value_temperature
+        )
         self.regime_selectivity_loss_weight = float(
             regime_selectivity_loss_weight
         )
@@ -1540,6 +1589,12 @@ class RecurrentC51Agent:
         entry_action_margin_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
+        entry_opportunity_value_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
+        entry_opportunity_value_rows = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         regime_selectivity_loss = teacher_loss
         regime_selectivity_rows = teacher_loss
         regime_selectivity_target_wait_mean = teacher_loss
@@ -1615,6 +1670,10 @@ class RecurrentC51Agent:
             )
             or (
                 self.entry_action_loss_weight > 0.0
+                and entry_action_weight_scale > 0.0
+            )
+            or (
+                self.entry_opportunity_value_loss_weight > 0.0
                 and entry_action_weight_scale > 0.0
             )
         )
@@ -2677,6 +2736,93 @@ class RecurrentC51Agent:
                     * self.entry_action_loss_weight
                     * (entry_action_loss + entry_action_margin_loss)
                 )
+        if (
+            self.entry_opportunity_value_loss_weight > 0.0
+            and entry_action_weight_scale > 0.0
+        ):
+            opportunity_rows = np.full(
+                (*observations.shape[:2], 3), np.nan, dtype=np.float32
+            )
+            for batch_index, sequence in enumerate(sequences):
+                for time_index, transition in enumerate(sequence):
+                    if transition.entry_opportunity_values is None:
+                        continue
+                    values = np.asarray(
+                        transition.entry_opportunity_values,
+                        dtype=np.float32,
+                    ).reshape(-1)
+                    if values.shape != (3,) or not np.isfinite(values).all():
+                        raise ValueError(
+                            "Entry opportunity-value target is invalid"
+                        )
+                    opportunity_rows[batch_index, time_index] = values
+            selected_opportunity_values = torch.as_tensor(
+                opportunity_rows[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                ],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            finite_opportunity_rows = torch.isfinite(
+                selected_opportunity_values
+            ).all(-1)
+            flat_opportunity_rows = (
+                valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.WAIT),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_LONG_1),
+                ]
+                & valid_masks[
+                    :,
+                    self.recurrent_burn_in:
+                    self.recurrent_burn_in + training_steps,
+                    int(Action.ENTER_SHORT_1),
+                ]
+                & learnable_rows
+            )
+            if bool((finite_opportunity_rows & ~flat_opportunity_rows).any()):
+                raise ValueError(
+                    "Entry opportunity-value target requires a flat decision"
+                )
+            if bool(finite_opportunity_rows.any()):
+                all_q_values = (
+                    all_logits.float().softmax(-1) * self.support
+                ).sum(-1)
+                flat_q_values = torch.stack(
+                    tuple(
+                        all_q_values[:, :training_steps, int(action)]
+                        for action in (
+                            Action.WAIT,
+                            Action.ENTER_LONG_1,
+                            Action.ENTER_SHORT_1,
+                        )
+                    ),
+                    dim=-1,
+                )
+                entry_opportunity_value_loss = (
+                    entry_opportunity_value_kl_loss(
+                        flat_q_values[finite_opportunity_rows],
+                        selected_opportunity_values[finite_opportunity_rows],
+                        temperature=self.entry_opportunity_value_temperature,
+                    ).mean()
+                )
+                entry_opportunity_value_rows = finite_opportunity_rows.sum().to(
+                    torch.float32
+                )
+                loss = loss + (
+                    entry_action_weight_scale
+                    * self.entry_opportunity_value_loss_weight
+                    * entry_opportunity_value_loss
+                )
         management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
             & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
@@ -2784,6 +2930,8 @@ class RecurrentC51Agent:
             entry_search_loss,
             entry_action_loss,
             entry_action_margin_loss,
+            entry_opportunity_value_loss,
+            entry_opportunity_value_rows,
             regime_selectivity_loss,
             regime_selectivity_rows,
             regime_selectivity_target_wait_mean,
@@ -2844,6 +2992,8 @@ class RecurrentC51Agent:
             entry_search_loss_value,
             entry_action_loss_value,
             entry_action_margin_loss_value,
+            entry_opportunity_value_loss_value,
+            entry_opportunity_value_rows_value,
             regime_selectivity_loss_value,
             regime_selectivity_rows_value,
             regime_selectivity_target_wait_mean_value,
@@ -3233,6 +3383,10 @@ class RecurrentC51Agent:
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
             "entry_action_margin_loss": entry_action_margin_loss_value,
+            "entry_opportunity_value_loss": entry_opportunity_value_loss_value,
+            "entry_opportunity_value_supervised_rows": (
+                entry_opportunity_value_rows_value
+            ),
             "regime_selectivity_loss": regime_selectivity_loss_value,
             "regime_selectivity_supervised_rows": regime_selectivity_rows_value,
             "regime_selectivity_target_wait_mean": (
@@ -3386,6 +3540,7 @@ class RecurrentC51Agent:
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
         self.entry_action_loss_weight = 0.0
+        self.entry_opportunity_value_loss_weight = 0.0
         self.teacher_loss_weight = 0.0
         self.teacher_entry_search_loss_weight = 0.0
         self.teacher_entry_search_objective = "raw_probability"
@@ -3455,6 +3610,7 @@ class RecurrentC51Agent:
             or self.teacher_loss_weight != 0.0
             or self.teacher_entry_search_loss_weight != 0.0
             or self.entry_action_loss_weight != 0.0
+            or self.entry_opportunity_value_loss_weight != 0.0
             or self.regime_selectivity_loss_weight != 0.0
             or self.regime_selectivity is not None
             or self.retention_anchor is not None
@@ -3551,6 +3707,12 @@ class RecurrentC51Agent:
                 "entry_action_class_weights": self.entry_action_class_weights,
                 "entry_action_loss_reduction": self.entry_action_loss_reduction,
                 "entry_action_margin": self.entry_action_margin,
+                "entry_opportunity_value_loss_weight": (
+                    self.entry_opportunity_value_loss_weight
+                ),
+                "entry_opportunity_value_temperature": (
+                    self.entry_opportunity_value_temperature
+                ),
                 "regime_selectivity_loss_weight": (
                     self.regime_selectivity_loss_weight
                 ),
@@ -3680,6 +3842,8 @@ class RecurrentC51Agent:
             "entry_action_loss_reduction", "population_weighted_mean_v1"
         )
         config.setdefault("entry_action_margin", 0.0)
+        config.setdefault("entry_opportunity_value_loss_weight", 0.0)
+        config.setdefault("entry_opportunity_value_temperature", 1.0)
         config.setdefault("teacher_channel_names", ())
         config.setdefault("regime_selectivity_loss_weight", 0.0)
         config.setdefault("regime_selectivity_chop_wait_margin", 0.0)

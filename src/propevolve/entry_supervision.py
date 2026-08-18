@@ -88,8 +88,10 @@ class EntryActionTargets:
     """In-memory, immutable action targets for authenticated market rows."""
 
     _targets: Mapping[str, np.ndarray]
+    _opportunity_values: Mapping[str, np.ndarray]
     _metadata: Mapping[str, Mapping[int, EntryTargetMetadata]]
     manifest: Mapping[str, object]
+    opportunity_value_manifest: Mapping[str, object]
 
     def target(self, ticker: str, row: int) -> Action | None:
         value = int(self._lookup_target(ticker=ticker, row=row))
@@ -98,6 +100,21 @@ class EntryActionTargets:
     def metadata(self, ticker: str, row: int) -> EntryTargetMetadata | None:
         self._validate_row(ticker=ticker, row=row)
         return self._metadata[ticker].get(row)
+
+    def opportunity_values(
+        self,
+        ticker: str,
+        row: int,
+    ) -> tuple[float, float, float] | None:
+        """Return the training-only WAIT/Long/Short opportunity preference."""
+
+        self._validate_row(ticker=ticker, row=row)
+        values = self._opportunity_values[ticker][row]
+        return (
+            None
+            if not np.isfinite(values).all()
+            else tuple(float(value) for value in values)
+        )
 
     def _validate_row(self, *, ticker: str, row: int) -> None:
         if ticker not in self._targets:
@@ -300,6 +317,7 @@ class _Event:
     continuation: tuple[bool, ...] | None
     economic_win: tuple[bool, ...] | None
     economic_good: tuple[bool, ...] | None
+    opportunity_good: tuple[tuple[bool, bool], ...] | None
 
 
 def build_entry_action_targets(
@@ -328,8 +346,10 @@ def build_entry_action_targets(
         raise ValueError("entry supervision training end contract drifted")
     boundary = np.datetime64(training_end_exclusive, "ns")
     all_targets: dict[str, np.ndarray] = {}
+    all_opportunity_values: dict[str, np.ndarray] = {}
     all_metadata: dict[str, Mapping[int, EntryTargetMetadata]] = {}
     summaries: dict[str, object] = {}
+    opportunity_summaries: dict[str, object] = {}
 
     for ticker in tickers:
         market = markets[ticker]
@@ -354,12 +374,13 @@ def build_entry_action_targets(
             round_trip_fee=fee,
             contract=contract,
         )
-        targets, metadata, summary = _materialize_market_targets(
+        targets, opportunity_values, metadata, summary = _materialize_market_targets(
             rows=len(timestamps),
             role_end=role_end,
             events=events,
         )
         all_targets[ticker] = targets
+        all_opportunity_values[ticker] = opportunity_values
         all_metadata[ticker] = MappingProxyType(metadata)
         target_sha256 = _target_digest(targets, metadata)
         summaries[ticker] = {
@@ -368,6 +389,14 @@ def build_entry_action_targets(
             "training_rows": role_end,
             **_market_source_digests(market, stop=role_end),
             "targets_sha256": target_sha256,
+        }
+        opportunity_summaries[ticker] = {
+            "rows": len(timestamps),
+            "training_rows": role_end,
+            "values_sha256": _opportunity_value_digest(opportunity_values),
+            "available_rows": int(
+                np.count_nonzero(np.isfinite(opportunity_values).all(axis=1))
+            ),
         }
         print(
             f"[entry-supervision] COMPLETE ticker={ticker} "
@@ -412,10 +441,39 @@ def build_entry_action_targets(
     manifest_payload["identity_sha256"] = hashlib.sha256(
         json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    opportunity_manifest_payload: dict[str, object] = {
+        "schema": "post_launch_entry_opportunity_value_v1",
+        "training_only": True,
+        "source_entry_manifest_identity_sha256": manifest_payload[
+            "identity_sha256"
+        ],
+        "training_end_exclusive": training_end_exclusive,
+        "semantics": {
+            "order": ENTRY_ACTION_ORDER,
+            "wait": 0.0,
+            "continuation_and_economic_winner": 2.0,
+            "non_winner": -1.0,
+        },
+        "storage": {
+            "dtype": "float32",
+            "unavailable": "all_nan",
+        },
+        "tickers": tickers,
+        "markets": opportunity_summaries,
+    }
+    opportunity_manifest_payload["identity_sha256"] = hashlib.sha256(
+        json.dumps(
+            opportunity_manifest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     return EntryActionTargets(
         _targets=MappingProxyType(all_targets),
+        _opportunity_values=MappingProxyType(all_opportunity_values),
         _metadata=MappingProxyType(all_metadata),
         manifest=_deep_freeze(manifest_payload),
+        opportunity_value_manifest=_deep_freeze(opportunity_manifest_payload),
     )
 
 
@@ -574,39 +632,52 @@ def _find_events(
             # ends at anchor+5+H-1, so the exclusive bound is anchor+5+H.
             resolved = anchor + CANDIDATE_COUNT + economic_horizon <= role_end
             if not resolved:
-                events.append(_Event(side, anchor, False, None, None, None))
+                events.append(
+                    _Event(side, anchor, False, None, None, None, None)
+                )
                 continue
             continuation = []
             economic_win = []
+            opportunity_good = []
             for offset in range(CANDIDATE_COUNT):
                 decision = anchor + offset
-                continuation.append(_target_before_adverse(
-                    open_,
-                    high,
-                    low,
-                    decision=decision,
-                    role_end=role_end,
-                    side=side,
-                    risk_dollars=float(contract["risk_dollars"]),
-                    point_value=point_value,
-                    round_trip_fee=round_trip_fee,
-                    target_r=float(continuation_spec["favorable_r"]),
-                    adverse_r=float(continuation_spec["adverse_r"]),
-                    horizon=int(continuation_spec["horizon_bars"]),
-                ))
-                economic_win.append(_target_before_adverse(
-                    open_,
-                    high,
-                    low,
-                    decision=decision,
-                    role_end=role_end,
-                    side=side,
-                    risk_dollars=float(contract["risk_dollars"]),
-                    point_value=point_value,
-                    round_trip_fee=round_trip_fee,
-                    target_r=float(contract["target_r"]),
-                    adverse_r=float(contract["stop_r"]),
-                    horizon=economic_horizon,
+                side_outcomes: dict[str, tuple[bool, bool]] = {}
+                for candidate_side in ("long", "short"):
+                    continued = _target_before_adverse(
+                        open_,
+                        high,
+                        low,
+                        decision=decision,
+                        role_end=role_end,
+                        side=candidate_side,
+                        risk_dollars=float(contract["risk_dollars"]),
+                        point_value=point_value,
+                        round_trip_fee=round_trip_fee,
+                        target_r=float(continuation_spec["favorable_r"]),
+                        adverse_r=float(continuation_spec["adverse_r"]),
+                        horizon=int(continuation_spec["horizon_bars"]),
+                    )
+                    won = _target_before_adverse(
+                        open_,
+                        high,
+                        low,
+                        decision=decision,
+                        role_end=role_end,
+                        side=candidate_side,
+                        risk_dollars=float(contract["risk_dollars"]),
+                        point_value=point_value,
+                        round_trip_fee=round_trip_fee,
+                        target_r=float(contract["target_r"]),
+                        adverse_r=float(contract["stop_r"]),
+                        horizon=economic_horizon,
+                    )
+                    side_outcomes[candidate_side] = (continued, won)
+                continuation.append(side_outcomes[side][0])
+                economic_win.append(side_outcomes[side][1])
+                opportunity_good.append(tuple(
+                    side_outcomes[candidate_side][0]
+                    and side_outcomes[candidate_side][1]
+                    for candidate_side in ("long", "short")
                 ))
             good = tuple(
                 continued and won
@@ -619,6 +690,7 @@ def _find_events(
                 tuple(continuation),
                 tuple(economic_win),
                 good,
+                tuple(opportunity_good),
             ))
     return tuple(sorted(events, key=lambda event: (event.anchor, event.side)))
 
@@ -714,10 +786,12 @@ def _materialize_market_targets(
     events: tuple[_Event, ...],
 ) -> tuple[
     np.ndarray,
+    np.ndarray,
     dict[int, EntryTargetMetadata],
     dict[str, int],
 ]:
     targets = np.full(rows, -1, dtype=np.int8)
+    opportunity_values = np.full((rows, 3), np.nan, dtype=np.float32)
     metadata: dict[int, EntryTargetMetadata] = {}
     ambiguous_ids: set[int] = set()
     ambiguous_anchors: dict[int, tuple[int, ...]] = {}
@@ -780,6 +854,7 @@ def _materialize_market_targets(
         assert event.continuation is not None
         assert event.economic_win is not None
         assert event.economic_good is not None
+        assert event.opportunity_good is not None
         supervision = build_post_launch_entry_supervision(
             long_launch=event.side == "long",
             short_launch=event.side == "short",
@@ -798,6 +873,15 @@ def _materialize_market_targets(
                 else None
             )
             targets[row] = -1 if action is None else int(action)
+            if candidate.available:
+                long_good, short_good = event.opportunity_good[
+                    candidate.decision_offset
+                ]
+                opportunity_values[row] = (
+                    0.0,
+                    2.0 if long_good else -1.0,
+                    2.0 if short_good else -1.0,
+                )
             visible_outcomes = not candidate.censored
             metadata[row] = EntryTargetMetadata(
                 side=event.side,
@@ -821,8 +905,10 @@ def _materialize_market_targets(
                 unavailable_reason=candidate.unavailable_reason,
             )
     targets.setflags(write=False)
+    opportunity_values.setflags(write=False)
     return (
         targets,
+        opportunity_values,
         metadata,
         {
             "events": len(events),
@@ -878,6 +964,14 @@ def _target_digest(
     digest.update(json.dumps(
         payload, sort_keys=True, separators=(",", ":")
     ).encode())
+    return digest.hexdigest()
+
+
+def _opportunity_value_digest(opportunity_values: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    digest.update(opportunity_values.dtype.str.encode())
+    digest.update(str(opportunity_values.shape).encode())
+    digest.update(np.ascontiguousarray(opportunity_values).tobytes())
     return digest.hexdigest()
 
 

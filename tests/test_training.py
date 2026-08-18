@@ -2589,6 +2589,14 @@ def test_exact_entry_supervision_remains_active_after_imitation_autonomy() -> No
                 for sequence in sequences
                 for transition in sequence
             ))
+            self.replayed_opportunity_rows = getattr(
+                self, "replayed_opportunity_rows", []
+            )
+            self.replayed_opportunity_rows.append(sum(
+                transition.entry_opportunity_values is not None
+                for sequence in sequences
+                for transition in sequence
+            ))
             return super().train_batch(
                 sequences,
                 teacher_weight_scale=teacher_weight_scale,
@@ -2617,6 +2625,7 @@ def test_exact_entry_supervision_remains_active_after_imitation_autonomy() -> No
         ticker_seed=23,
         teacher_lookup=lambda ticker, index: np.ones(4, dtype=np.float32),
         entry_action_lookup=lambda ticker, index: Action.ENTER_SHORT_1,
+        entry_opportunity_lookup=lambda ticker, index: (0.0, -1.0, 2.0),
         teacher_loss_end_scale=0.0,
         teacher_guidance_dropout_start=0.0,
         teacher_guidance_dropout_end=0.0,
@@ -2632,6 +2641,7 @@ def test_exact_entry_supervision_remains_active_after_imitation_autonomy() -> No
     assert agent.teacher_weight_scales[8] == 0.0
     assert agent.entry_action_weight_scales[8] == 1.0
     assert agent.replayed_entry_rows[8] > 0
+    assert agent.replayed_opportunity_rows[8] > 0
     assert diagnostics[9]["teacher_weight_scale"] == 0.0
     assert diagnostics[9]["entry_action_weight_scale"] == 1.0
     assert agent.teacher_weight_scales[9] == 0.0

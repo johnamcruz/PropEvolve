@@ -188,6 +188,22 @@ def _entry_supervision_frozen_contract(
     }
 
 
+def _entry_opportunity_supervision_frozen_contract(
+    entry_action_targets,
+    specification: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Archive the adjunct value target without changing Entry identity."""
+
+    if entry_action_targets is None or specification is None:
+        return None
+    return {
+        "specification": _plain_contract_value(specification),
+        "manifest": _plain_contract_value(
+            entry_action_targets.opportunity_value_manifest
+        ),
+    }
+
+
 def _assert_recovery_entry_balance(
     agent,
     agent_settings: Mapping[str, object],
@@ -201,6 +217,12 @@ def _assert_recovery_entry_balance(
         "entry_action_loss_reduction", "population_weighted_mean_v1"
     ))
     expected_margin = float(agent_settings.get("entry_action_margin", 0.0))
+    expected_opportunity_weight = float(
+        agent_settings.get("entry_opportunity_value_loss_weight", 0.0)
+    )
+    expected_opportunity_temperature = float(
+        agent_settings.get("entry_opportunity_value_temperature", 1.0)
+    )
     if (
         agent.entry_action_class_weights != expected
         or getattr(
@@ -210,6 +232,10 @@ def _assert_recovery_entry_balance(
         )
         != expected_reduction
         or getattr(agent, "entry_action_margin", 0.0) != expected_margin
+        or getattr(agent, "entry_opportunity_value_loss_weight", 0.0)
+        != expected_opportunity_weight
+        or getattr(agent, "entry_opportunity_value_temperature", 1.0)
+        != expected_opportunity_temperature
     ):
         raise ValueError("training recovery entry balance drifted")
 
@@ -2503,6 +2529,7 @@ class HistoricalCandidateRunner:
                 markets=train_markets,
             )
         entry_supervision_spec = config.get("entry_supervision")
+        entry_opportunity_spec = config.get("entry_opportunity_supervision")
         entry_action_targets = None
         entry_action_balance_receipt = None
         if entry_supervision_spec is not None:
@@ -2613,6 +2640,13 @@ class HistoricalCandidateRunner:
         if entry_supervision_spec is not None:
             agent_settings["entry_action_loss_weight"] = float(
                 entry_supervision_spec["loss_weight"]
+            )
+        if entry_opportunity_spec is not None:
+            agent_settings["entry_opportunity_value_loss_weight"] = float(
+                entry_opportunity_spec["loss_weight"]
+            )
+            agent_settings["entry_opportunity_value_temperature"] = float(
+                entry_opportunity_spec["temperature"]
             )
         if entry_action_balance_receipt is not None:
             agent_settings["entry_action_class_weights"] = (
@@ -2901,6 +2935,14 @@ class HistoricalCandidateRunner:
                 if entry_action_targets is not None
                 else None
             ),
+            entry_opportunity_lookup=(
+                entry_action_targets.opportunity_values
+                if (
+                    entry_action_targets is not None
+                    and entry_opportunity_spec is not None
+                )
+                else None
+            ),
             teacher_loss_end_scale=float(
                 training_config.get("teacher_loss_end_scale", 1.0)
             ),
@@ -3154,6 +3196,12 @@ class HistoricalCandidateRunner:
             "entry_supervision": _entry_supervision_frozen_contract(
                 entry_action_targets,
                 entry_action_balance_receipt,
+            ),
+            "entry_opportunity_supervision": (
+                _entry_opportunity_supervision_frozen_contract(
+                    entry_action_targets,
+                    entry_opportunity_spec,
+                )
             ),
             "regime_selectivity": _regime_selectivity_frozen_contract(
                 regime_selectivity_spec
@@ -4111,6 +4159,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "mean_entry_action_loss": weighted(
             "mean_entry_action_loss", update_weights
         ),
+        "mean_entry_opportunity_value_loss": weighted(
+            "mean_entry_opportunity_value_loss", update_weights
+        ),
+        "mean_entry_opportunity_value_supervised_rows": weighted(
+            "mean_entry_opportunity_value_supervised_rows", update_weights
+        ),
         "mean_entry_action_supervised_rows": weighted(
             "mean_entry_action_supervised_rows", update_weights
         ),
@@ -4435,6 +4489,9 @@ def train_agent(
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
     teacher_channels: tuple[str, ...] | None = None,
     entry_action_lookup: Callable[[str, int], Action | None] | None = None,
+    entry_opportunity_lookup: Callable[
+        [str, int], tuple[float, float, float] | None
+    ] | None = None,
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
@@ -4805,6 +4862,26 @@ def train_agent(
                 )
                 else None
             )
+            entry_opportunity_values = (
+                entry_opportunity_lookup(episode_ticker, decision_index)
+                if (
+                    entry_opportunity_lookup is not None
+                    and flat_actions.issubset(valid)
+                )
+                else None
+            )
+            if entry_opportunity_values is not None:
+                entry_opportunity_values = np.asarray(
+                    entry_opportunity_values, dtype=np.float32
+                ).reshape(-1)
+                if (
+                    entry_opportunity_values.shape != (3,)
+                    or not np.isfinite(entry_opportunity_values).all()
+                    or entry_action_target is None
+                ):
+                    raise ValueError(
+                        "Entry opportunity-value lookup is invalid"
+                    )
             regime_selectivity_headroom_fraction = None
             if (
                 float(
@@ -4903,6 +4980,7 @@ def train_agent(
                 teacher_target=teacher_target,
                 teacher_imitation_visible=teacher_visible,
                 entry_action_target=entry_action_target,
+                entry_opportunity_values=entry_opportunity_values,
                 regime_selectivity_headroom_fraction=(
                     regime_selectivity_headroom_fraction
                 ),
@@ -5017,6 +5095,8 @@ def train_agent(
         episode_entry_search_losses = []
         episode_entry_action_losses = []
         episode_entry_action_rows = []
+        episode_entry_opportunity_losses = []
+        episode_entry_opportunity_rows = []
         learner_diagnostics: dict[str, list[float]] = {
             key: []
             for key in (
@@ -5149,6 +5229,16 @@ def train_agent(
                     episode_entry_action_rows.append(
                         float(train_metrics["entry_action_supervised_rows"])
                     )
+                if "entry_opportunity_value_loss" in train_metrics:
+                    episode_entry_opportunity_losses.append(float(
+                        train_metrics["entry_opportunity_value_loss"]
+                    ))
+                if "entry_opportunity_value_supervised_rows" in train_metrics:
+                    episode_entry_opportunity_rows.append(float(
+                        train_metrics[
+                            "entry_opportunity_value_supervised_rows"
+                        ]
+                    ))
                 for key in learner_diagnostics:
                     if key in train_metrics:
                         learner_diagnostics[key].append(float(train_metrics[key]))
@@ -5504,6 +5594,14 @@ def train_agent(
                 "mean_entry_action_supervised_rows": (
                     float(np.mean(episode_entry_action_rows))
                     if episode_entry_action_rows else None
+                ),
+                "mean_entry_opportunity_value_loss": (
+                    float(np.mean(episode_entry_opportunity_losses))
+                    if episode_entry_opportunity_losses else None
+                ),
+                "mean_entry_opportunity_value_supervised_rows": (
+                    float(np.mean(episode_entry_opportunity_rows))
+                    if episode_entry_opportunity_rows else None
                 ),
                 "entry_action_target_counts": {
                     action.name: entry_action_target_counts[action]

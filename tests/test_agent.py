@@ -10,6 +10,7 @@ from propevolve.agent import (
     RecurrentC51Agent,
     RecurrentC51Network,
     centered_entry_search_target,
+    entry_opportunity_value_kl_loss,
     resolve_device,
 )
 from propevolve.config import configure_runtime_environment
@@ -56,6 +57,22 @@ def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
 
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     assert resolve_device("auto").type == "cpu"
+
+
+def test_entry_opportunity_value_kl_rewards_the_full_economic_ranking() -> None:
+    teacher = torch.tensor([[0.0, 2.0, -1.0]])
+    unranked = torch.tensor([[0.0, 0.0, 0.0]])
+    aligned = torch.tensor([[0.0, 2.0, -1.0]])
+
+    unranked_loss = entry_opportunity_value_kl_loss(
+        unranked, teacher, temperature=1.0
+    )
+    aligned_loss = entry_opportunity_value_kl_loss(
+        aligned, teacher, temperature=1.0
+    )
+
+    assert aligned_loss.item() == pytest.approx(0.0, abs=1e-7)
+    assert unranked_loss.item() > aligned_loss.item()
 
 
 def test_compilation_failure_falls_back_to_eager(
@@ -1246,6 +1263,60 @@ def test_post_launch_entry_action_targets_have_no_effect_at_zero_auxiliary_scale
         torch.testing.assert_close(value, taught.online.state_dict()[key])
 
 
+def test_entry_opportunity_supervision_remains_active_when_imitation_is_hidden() -> None:
+    agent = _agent(
+        3,
+        seed=71,
+        entry_opportunity_value_loss_weight=1.0,
+        entry_opportunity_value_temperature=1.0,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.eye(3, dtype=np.float32)[index],
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=(
+                np.eye(3, dtype=np.float32)[index + 1]
+                if index < 2
+                else np.zeros(3, np.float32)
+            ),
+            terminated=index == 2,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(
+                () if index == 2 else (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                )
+            ),
+            teacher_imitation_visible=False,
+            entry_action_target=Action.ENTER_LONG_1,
+            entry_opportunity_values=np.array(
+                [0.0, 2.0, -1.0], np.float32
+            ),
+        )
+        for index in range(3)
+    )
+
+    agent.train_batch(
+        (sequence, sequence),
+        teacher_weight_scale=0.0,
+        entry_action_weight_scale=1.0,
+    )
+
+    assert agent.last_train_metrics[
+        "entry_opportunity_value_supervised_rows"
+    ] == 6.0
+    assert agent.last_train_metrics["entry_opportunity_value_loss"] > 0.0
+    agent.discard_teacher()
+    assert agent.entry_opportunity_value_loss_weight == 0.0
+    agent.assert_teacher_free()
+
+
 _FLAT_ENTRY_ACTIONS = (
     Action.WAIT,
     Action.ENTER_LONG_1,
@@ -1412,6 +1483,8 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
         entry_action_loss_weight=1.0,
         entry_action_loss_reduction="equal_present_class_mean_v1",
         entry_action_margin=0.25,
+        entry_opportunity_value_loss_weight=0.4,
+        entry_opportunity_value_temperature=0.75,
         regime_selectivity_chop_wait_margin=0.25,
         regime_selectivity_failed_confluence_margin=0.35,
     )
@@ -1427,6 +1500,8 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
 
     assert restored.entry_action_loss_reduction == "equal_present_class_mean_v1"
     assert restored.entry_action_margin == 0.25
+    assert restored.entry_opportunity_value_loss_weight == 0.4
+    assert restored.entry_opportunity_value_temperature == 0.75
     assert restored.regime_selectivity_chop_wait_margin == 0.25
     assert restored.regime_selectivity_failed_confluence_margin == 0.35
     restored.train_batch(rows)
