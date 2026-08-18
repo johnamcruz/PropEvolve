@@ -9,11 +9,10 @@ from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import run_evolution_campaign
+from tests.recipe_fixtures import stage2_recipe
 
 
-_CURRENT_CONFIG = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
-)
+_CURRENT_CONFIG = stage2_recipe(19, contains="paired_aplus_contrastive.json")
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )

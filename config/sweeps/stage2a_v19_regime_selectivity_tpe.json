@@ -1,9 +1,9 @@
 {
   "schema": "propevolve_optuna_sweep_v1",
-  "name": "stage2a_regime_selectivity_tpe_v2",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v10.json",
-  "screening_stage": "persistent_chop_association_100ep",
-  "study_root": "runs/stage2a_regime_selectivity_tpe_v2",
+  "name": "stage2a_v19_regime_selectivity_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive.json",
+  "screening_stage": "paired_aplus_contrastive_100ep",
+  "study_root": "runs/stage2a_v19_regime_selectivity_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,

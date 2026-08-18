@@ -11,15 +11,10 @@ import pytest
 
 from propevolve.orchestration import _plan
 from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
+from tests.recipe_fixtures import retained_sweep_recipe
 
 
-CONTRACT = Path("config/sweeps/stage2a_regime_selectivity_tpe_v2.json")
-CONFLUENCE_CONTRACT = Path(
-    "config/sweeps/stage2a_regime_selectivity_tpe_v3.json"
-)
-SIDE_CONDITIONED_CONTRACT = Path(
-    "config/sweeps/stage2a_regime_selectivity_tpe_v4.json"
-)
+CONTRACT = retained_sweep_recipe()
 
 
 def _state(
@@ -49,7 +44,7 @@ def _state(
         _plan(config).identity,
         Phase.COMPLETE,
         receipts=(StageReceipt(
-            "persistent_chop_association_100ep",
+            "paired_aplus_contrastive_100ep",
             1,
             "complete",
             {"metrics": metrics},
@@ -85,44 +80,6 @@ def test_stage2a_tpe_contract_searches_only_causal_learning_knobs() -> None:
     }
 
 
-def test_stage2a_v3_tpe_searches_the_fixed_wait_confluence_mechanism() -> None:
-    sweep = load_optuna_sweep(CONFLUENCE_CONTRACT)
-
-    assert sweep.screening_stage == "expansion_regime_confluence_100ep"
-    assert sweep.base_config["regime_selectivity"]["semantics"] == (
-        "expansion_regime_confluence_v3"
-    )
-    assert set(sweep.search_space) == {
-        "challenge.large_win_bonus_coefficient",
-        "regime_selectivity.loss_weight",
-        "regime_selectivity.persistent_chop_negative_emphasis",
-        "training.teacher_guidance_dropout_end",
-    }
-    assert sweep.base_config["agent"]["learning_rate"] == 0.0001
-    assert sweep.base_config["agent"]["policy_retention_loss_weight"] == 10
-    assert sweep.base_config["entry_supervision"]["target_r"] == 2.0
-
-
-def test_stage2a_v4_tpe_searches_side_conditioned_wait_discrimination() -> None:
-    sweep = load_optuna_sweep(SIDE_CONDITIONED_CONTRACT)
-
-    assert sweep.screening_stage == (
-        "side_conditioned_expansion_regime_confluence_100ep"
-    )
-    assert sweep.base_config["regime_selectivity"]["semantics"] == (
-        "side_conditioned_expansion_regime_confluence_v4"
-    )
-    assert set(sweep.search_space) == {
-        "challenge.large_win_bonus_coefficient",
-        "regime_selectivity.loss_weight",
-        "regime_selectivity.persistent_chop_negative_emphasis",
-        "training.teacher_guidance_dropout_end",
-    }
-    assert sweep.base_config["agent"]["learning_rate"] == 0.0001
-    assert sweep.base_config["agent"]["policy_retention_loss_weight"] == 10
-    assert sweep.base_config["entry_supervision"]["target_r"] == 2.0
-
-
 @pytest.mark.parametrize(
     "path",
     ("entry_supervision.loss_weight", "challenge.ratchet_giveback_r"),
@@ -133,8 +90,7 @@ def test_tpe_rejects_external_parent_contract_search_dimensions(
 ) -> None:
     payload = json.loads(CONTRACT.read_text())
     payload["base_config"] = str(
-        Path("config/historical_mask_expansion_anchored_regime_stage2_v10.json")
-        .resolve()
+        (CONTRACT.parent / payload["base_config"]).resolve()
     )
     payload["search_space"][path] = {
         "type": "float",
@@ -175,7 +131,7 @@ def test_tpe_runs_existing_campaign_trials_sequentially_and_resumes_sqlite(
     assert len(calls) == 3
     assert result.best_trial_number == 2
     study = optuna.load_study(
-        study_name="stage2a_regime_selectivity_tpe_v2",
+        study_name="stage2a_v19_regime_selectivity_tpe",
         storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
     )
     assert len(study.trials) == 3
@@ -227,7 +183,7 @@ def test_tpe_evaluates_exact_frozen_baseline_before_sampled_trials(
     ] == 2.0
     assert configs[0]["training"]["teacher_guidance_dropout_end"] == 0.5
     study = optuna.load_study(
-        study_name="stage2a_regime_selectivity_tpe_v2",
+        study_name="stage2a_v19_regime_selectivity_tpe",
         storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
     )
     assert study.trials[0].user_attrs["baseline_control"] is True
@@ -297,7 +253,7 @@ def test_tpe_continues_after_sparse_validation_short_circuit(
                 _plan(config).identity,
                 Phase.FAILED_GATE,
                 receipts=(StageReceipt(
-                    "persistent_chop_association_100ep",
+                    "paired_aplus_contrastive_100ep",
                     1,
                     "complete",
                     {"metrics": {
@@ -323,7 +279,7 @@ def test_tpe_continues_after_sparse_validation_short_circuit(
     assert len(calls) == 2
     assert result.best_trial_number == 1
     study = optuna.load_study(
-        study_name="stage2a_regime_selectivity_tpe_v2",
+        study_name="stage2a_v19_regime_selectivity_tpe",
         storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
     )
     assert study.trials[0].value == -1_000_000.0

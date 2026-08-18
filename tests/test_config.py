@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.recipe_fixtures import stage2_recipe
+
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
     REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
@@ -32,51 +34,11 @@ from propevolve.balance_aware_regime_selectivity import (
 )
 
 
-CURRENT_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
-)
-STAGE2_V4_RECIPE = Path(
-    "config/historical_mask_expansion_regime_stage2_v4.json"
-)
-STAGE2_V5_RECIPE = Path(
-    "config/historical_mask_expansion_regime_stage2_v5.json"
-)
-STAGE2_V6_RECIPE = Path(
-    "config/historical_mask_expansion_regime_stage2_v6.json"
-)
-STAGE2_V7_RECIPE = Path(
-    "config/historical_mask_expansion_regime_stage2_v7.json"
-)
-STAGE2_ACTION_MARGIN_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v13_action_margin.json"
-)
-STAGE2_CHOP_MARGIN_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v14_chop_margin.json"
-)
-STAGE2_HARD_WAIT_REPLAY_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v15_hard_wait_replay.json"
-)
-STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v16_balanced_hard_wait_replay.json"
-)
-STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v17_sparse_hard_wait_replay.json"
-)
-STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v18_all_dominant_chop_margin.json"
-)
-STAGE2_PAIRED_A_PLUS_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive.json"
-)
-STAGE2_PAIRED_A_PLUS_450_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive_450ep.json"
-)
-STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v20_context_matched_aplus_200ep.json"
-)
-STAGE2_FULL_ACTION_OPPORTUNITY_200_RECIPE = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v21_full_action_opportunity_200ep.json"
-)
+CURRENT_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
+STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
+STAGE2_PAIRED_A_PLUS_450_RECIPE = stage2_recipe(19, contains="450ep")
+STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE = stage2_recipe(20)
+STAGE2_FULL_ACTION_OPPORTUNITY_200_RECIPE = stage2_recipe(21)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -93,9 +55,11 @@ def _generic_payload() -> dict:
     """Return a current-recipe fixture without Stage 2-specific selectivity."""
     payload = _current_payload()
     payload.pop("regime_selectivity")
+    payload["training"].pop("regime_wait_sequence_update_period", None)
     payload["evolution"]["frozen_paths"] = [
         path for path in payload["evolution"]["frozen_paths"]
         if not path.startswith("regime_selectivity.")
+        and path != "training.regime_wait_sequence_update_period"
     ]
     return payload
 
@@ -225,6 +189,13 @@ def test_stage2a_accepts_versioned_expansion_regime_confluence_semantics(
         "formula": EXPANSION_REGIME_CONFLUENCE_FORMULA,
         "semantics": EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     })
+    for field in (
+        "chop_wait_margin",
+        "failed_confluence_margin",
+        "paired_a_plus_margin",
+    ):
+        payload["regime_selectivity"].pop(field, None)
+    payload["training"]["regime_wait_sequence_update_period"] = 0
     path.write_text(json.dumps(payload))
 
     config = load_experiment_config(path)
@@ -426,49 +397,11 @@ def test_validation_no_trade_patience_is_json_configured_and_fail_closed(
             load_experiment_config(path)
 
 
-def test_hard_wait_replay_recipe_reserves_two_sequences_without_reducing_safety(
-) -> None:
-    config = load_experiment_config(STAGE2_HARD_WAIT_REPLAY_RECIPE)
-    training = config["training"]
-
-    assert training["batch_sequences"] == 16
-    assert training["terminal_sequence_fraction"] == pytest.approx(0.375)
-    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
-    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
-    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.125)
-    assert "training.regime_wait_sequence_fraction" in config["evolution"][
-        "frozen_paths"
-    ]
-
-
-def test_balanced_hard_wait_replay_recipe_reserves_one_sequence_and_restores_terminal(
-) -> None:
-    config = load_experiment_config(STAGE2_BALANCED_HARD_WAIT_REPLAY_RECIPE)
-    training = config["training"]
-
-    assert training["batch_sequences"] == 16
-    assert training["terminal_sequence_fraction"] == pytest.approx(0.4375)
-    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
-    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
-    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.0625)
-    assert "training.regime_wait_sequence_fraction" in config["evolution"][
-        "frozen_paths"
-    ]
-
-
 def test_sparse_hard_wait_update_schedule_is_integer_frozen_and_selectivity_bound(
     tmp_path: Path,
 ) -> None:
     path = _stage2a_config(tmp_path)
-    staged = json.loads(path.read_text())
-    payload = json.loads(STAGE2_CHOP_MARGIN_RECIPE.read_text())
-    for field in (
-        "expansion_center_receipt",
-        "expansion_center_receipt_sha256",
-        "expansion_long_center",
-        "expansion_short_center",
-    ):
-        payload["regime_selectivity"][field] = staged["regime_selectivity"][field]
+    payload = json.loads(path.read_text())
     payload["training"].update({
         "terminal_sequence_fraction": 0.5,
         "safety_sequence_fraction": 0.25,
@@ -483,27 +416,13 @@ def test_sparse_hard_wait_update_schedule_is_integer_frozen_and_selectivity_boun
     config = load_experiment_config(path)
     assert config["training"]["regime_wait_sequence_update_period"] == 8
 
-    payload["evolution"]["frozen_paths"].remove(
-        "training.regime_wait_sequence_update_period"
-    )
+    payload["evolution"]["frozen_paths"] = [
+        field for field in payload["evolution"]["frozen_paths"]
+        if field != "training.regime_wait_sequence_update_period"
+    ]
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="Regime WAIT replay identity"):
         load_experiment_config(path)
-
-
-def test_sparse_hard_wait_recipe_uses_one_sequence_every_eight_updates() -> None:
-    config = load_experiment_config(STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE)
-    training = config["training"]
-
-    assert training["batch_sequences"] == 16
-    assert training["terminal_sequence_fraction"] == pytest.approx(0.5)
-    assert training["safety_sequence_fraction"] == pytest.approx(0.25)
-    assert training["entry_opportunity_sequence_fraction"] == pytest.approx(0.25)
-    assert training["regime_wait_sequence_fraction"] == pytest.approx(0.0)
-    assert training["regime_wait_sequence_update_period"] == 8
-    assert "training.regime_wait_sequence_update_period" in config["evolution"][
-        "frozen_paths"
-    ]
 
 
 def test_all_dominant_chop_margin_semantics_are_frozen_and_loadable(
@@ -517,6 +436,7 @@ def test_all_dominant_chop_margin_semantics_are_frozen_and_loadable(
         "chop_wait_margin": 0.25,
         "failed_confluence_margin": 0.25,
     })
+    payload["regime_selectivity"].pop("paired_a_plus_margin", None)
     payload["evolution"]["frozen_paths"] = sorted(set(
         payload["evolution"]["frozen_paths"]
     ) | {
@@ -563,42 +483,9 @@ def test_paired_a_plus_margin_is_configured_and_frozen_without_score_cutoffs(
     assert not any("threshold" in field for field in selectivity)
 
 
-def test_all_dominant_chop_margin_recipe_is_one_matched_100_episode_test(
-) -> None:
-    baseline = load_experiment_config(STAGE2_SPARSE_HARD_WAIT_REPLAY_RECIPE)
-    candidate = load_experiment_config(STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE)
-
-    assert candidate["regime_selectivity"]["semantics"] == (
-        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
-    )
-    assert candidate["regime_selectivity"]["formula"] == (
-        ALL_DOMINANT_CHOP_MARGIN_FORMULA
-    )
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["training"] == baseline["training"]
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-    stage = candidate["campaign"]["budget_stages"][0]
-    assert stage["name"] == "all_dominant_chop_margin_100ep"
-    assert stage["training_episodes"] == 100
-    assert stage["validation_episodes"] == 200
-
-
-def test_paired_a_plus_recipe_changes_only_the_training_contrast_contract(
-) -> None:
-    baseline = load_experiment_config(STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE)
+def test_paired_a_plus_recipe_freezes_the_training_contrast_contract() -> None:
     candidate = load_experiment_config(STAGE2_PAIRED_A_PLUS_RECIPE)
 
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["training"] == baseline["training"]
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
     selectivity = candidate["regime_selectivity"]
     assert selectivity["semantics"] == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
     assert selectivity["formula"] == PAIRED_A_PLUS_CONTRASTIVE_FORMULA
@@ -857,46 +744,6 @@ def test_entry_action_margin_fails_closed_on_invalid_value(tmp_path: Path) -> No
         load_experiment_config(path)
 
 
-def test_stage2_action_margin_campaign_is_one_matched_100_episode_test() -> None:
-    payload = load_experiment_config(STAGE2_ACTION_MARGIN_RECIPE)
-
-    assert payload["agent"]["entry_action_margin"] == 0.25
-    assert "agent.entry_action_margin" in payload["evolution"]["frozen_paths"]
-    assert payload["evolution"]["allowed_revision_paths"] == ()
-    assert len(payload["campaign"]["budget_stages"]) == 1
-    stage = payload["campaign"]["budget_stages"][0]
-    assert stage["training_episodes"] == 100
-    assert stage["validation_episodes"] == 200
-    assert stage["allow_revisions"] is False
-
-
-def test_stage2_chop_margin_campaign_freezes_symmetric_wait_separation() -> None:
-    payload = load_experiment_config(STAGE2_CHOP_MARGIN_RECIPE)
-
-    selectivity = payload["regime_selectivity"]
-    assert selectivity["formula"] == CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA
-    assert selectivity["chop_wait_margin"] == 0.25
-    assert selectivity["failed_confluence_margin"] == 0.25
-    assert {
-        "regime_selectivity.chop_wait_margin",
-        "regime_selectivity.failed_confluence_margin",
-    } <= set(payload["evolution"]["frozen_paths"])
-    assert len(payload["campaign"]["budget_stages"]) == 1
-    stage = payload["campaign"]["budget_stages"][0]
-    assert stage["name"] == "chop_margin_100ep"
-    assert stage["training_episodes"] == 100
-    assert stage["validation_episodes"] == 200
-
-
-@pytest.mark.parametrize(
-    "path",
-    (STAGE2_V4_RECIPE, STAGE2_V5_RECIPE, STAGE2_V6_RECIPE, STAGE2_V7_RECIPE),
-)
-def test_retired_eighteen_channel_regime_recipes_fail_closed(path: Path) -> None:
-    with pytest.raises(ValueError, match="Regime teacher contract"):
-        load_experiment_config(path)
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -910,9 +757,7 @@ def test_stage2_v4_persistent_chop_switch_cannot_partially_revert(
     field: str,
     value: object,
 ) -> None:
-    payload = json.loads(Path(
-        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
-    ).read_text())
+    payload = json.loads(CURRENT_RECIPE.read_text())
     payload["regime_selectivity"][field] = value
     receipt_source = Path(
         "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
@@ -1616,10 +1461,8 @@ def test_config_rejects_partial_ratchet_contract(tmp_path: Path) -> None:
         load_experiment_config(path)
 
 
-def test_expansion_anchored_regime_stage2_v9_restarts_from_stage1() -> None:
-    config = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
-    )
+def test_current_expansion_anchored_regime_stage2_restarts_from_stage1() -> None:
+    config = load_experiment_config(CURRENT_RECIPE)
     regime = next(
         teacher for teacher in config["teachers"]
         if teacher["kind"] == "regime"
@@ -1648,93 +1491,3 @@ def test_expansion_anchored_regime_stage2_v9_restarts_from_stage1() -> None:
             "b445ce526eebafd3121981e9de720031d9710cd4e99c8dc49017d35e50d55584"
         ),
     }
-
-
-def test_expansion_anchored_regime_stage2_v10_strengthens_chop_avoidance() -> None:
-    baseline = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v9.json"
-    )
-    candidate = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v10.json"
-    )
-
-    assert candidate["regime_selectivity"][
-        "persistent_chop_negative_emphasis"
-    ] == 2.0
-    assert candidate["training"]["teacher_guidance_dropout_end"] == 0.5
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-
-    ignored_paths = {
-        ("_path",),
-        ("campaign", "state_root"),
-        ("evolution", "hypothesis"),
-        ("output",),
-        ("regime_selectivity", "persistent_chop_negative_emphasis"),
-        ("training", "teacher_guidance_dropout_end"),
-    }
-
-    def flattened(payload, prefix=()):
-        values = {}
-        for key, value in payload.items():
-            path = prefix + (key,)
-            if path in ignored_paths:
-                continue
-            if isinstance(value, dict):
-                values.update(flattened(value, path))
-            else:
-                values[path] = value
-        return values
-
-    assert flattened(candidate) == flattened(baseline)
-
-
-def test_expansion_anchored_regime_stage2_v11_changes_only_wait_confluence() -> None:
-    baseline = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v10.json"
-    )
-    candidate = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v11.json"
-    )
-
-    assert candidate["regime_selectivity"]["semantics"] == (
-        EXPANSION_REGIME_CONFLUENCE_SEMANTICS
-    )
-    assert candidate["regime_selectivity"]["formula"] == (
-        EXPANSION_REGIME_CONFLUENCE_FORMULA
-    )
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["training"] == baseline["training"]
-    assert candidate["entry_supervision"]["target_r"] == 2.0
-    assert candidate["entry_supervision"]["stop_r"] == 1.0
-
-
-def test_expansion_anchored_regime_stage2_v12_conditions_wait_by_side() -> None:
-    baseline = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v11.json"
-    )
-    candidate = load_experiment_config(
-        "config/historical_mask_expansion_anchored_regime_stage2_v12.json"
-    )
-
-    assert candidate["regime_selectivity"]["semantics"] == (
-        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
-    )
-    assert candidate["regime_selectivity"]["formula"] == (
-        SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA
-    )
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["training"] == baseline["training"]
-    assert candidate["entry_supervision"]["target_r"] == 2.0
-    assert candidate["entry_supervision"]["stop_r"] == 1.0

@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from propevolve.runtime_benchmark import run_benchmark, runtime_benchmark_arms
+from tests.recipe_fixtures import stage2_recipe
 
 
 def test_runtime_benchmark_uses_exact_frozen_four_arm_comparison() -> None:
@@ -47,7 +48,7 @@ def test_runtime_benchmark_orchestrates_four_isolated_arms_and_gates_results(
     monkeypatch.setattr("subprocess.run", completed)
 
     report = run_benchmark(
-        "config/historical_mask_expansion_anchored_regime_stage2_v9.json",
+        stage2_recipe(19, contains="paired_aplus_contrastive.json"),
         observation_dim=8,
         warmup_updates=1,
         measured_updates=2,

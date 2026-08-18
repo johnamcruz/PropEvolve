@@ -45,6 +45,7 @@ from propevolve.training import (
     prop_safety_objective,
     train_agent,
 )
+from tests.recipe_fixtures import stage2_recipe
 
 
 def _recovery_curriculum_settings(*, fraction: float = 0.5) -> RecoveryCurriculumSettings:
@@ -1589,9 +1590,7 @@ def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable
         def discard_teacher() -> None:
             return None
 
-    recipe_path = Path(__file__).parents[1] / "config" / (
-        "historical_mask_expansion_anchored_regime_stage2_v9.json"
-    )
+    recipe_path = stage2_recipe(19, contains="paired_aplus_contrastive.json")
     config = json.loads(recipe_path.read_text())
     Targets.channels = tuple(
         channel
@@ -1636,9 +1635,10 @@ def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable
         "epsilon_end": 0.0,
         "management_epsilon_start": 0.0,
         "management_epsilon_end": 0.0,
-        "checkpoint_every_episodes": 0,
-        "prefetch_batches": 0,
-        "episode_coverage": None,
+            "checkpoint_every_episodes": 0,
+            "prefetch_batches": 0,
+            "regime_wait_sequence_update_period": 0,
+            "episode_coverage": None,
         "short_circuit": {
             "minimum_passes": minimum_passes,
             "maximum_blow_rate": 1.0,

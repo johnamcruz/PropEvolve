@@ -17,11 +17,10 @@ from propevolve.replay import (
     final_regime_probe_row_identity,
 )
 from propevolve.selectivity_analysis import analyze_selectivity_attempt
+from tests.recipe_fixtures import stage2_recipe
 
 
-_FULL_CONFIG = Path(
-    "config/historical_mask_expansion_anchored_regime_stage2_v11.json"
-)
+_FULL_CONFIG = stage2_recipe(19, contains="paired_aplus_contrastive.json")
 
 
 def _bind_attempt_to_config(attempt: Path, config: Path) -> Path:
