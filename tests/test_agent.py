@@ -75,6 +75,54 @@ def test_entry_opportunity_value_kl_rewards_the_full_economic_ranking() -> None:
     assert unranked_loss.item() > aligned_loss.item()
 
 
+@pytest.mark.parametrize(
+    ("opportunity", "entry_ranked"),
+    (
+        (
+            torch.tensor([[0.0, 2.0, -1.0]]),
+            torch.tensor([[0.0, 2.0, -1.0]]),
+        ),
+        (
+            torch.tensor([[0.0, -1.0, 2.0]]),
+            torch.tensor([[0.0, -1.0, 2.0]]),
+        ),
+    ),
+)
+def test_entry_opportunity_value_kl_defers_to_continuous_dominant_chop_wait(
+    opportunity: torch.Tensor,
+    entry_ranked: torch.Tensor,
+) -> None:
+    wait_ranked = torch.tensor([[2.0, -1.0, 0.0]])
+
+    nonchop_wait = entry_opportunity_value_kl_loss(
+        wait_ranked,
+        opportunity,
+        temperature=1.0,
+        dominant_chop_membership=torch.tensor([0.0]),
+    )
+    nonchop_entry = entry_opportunity_value_kl_loss(
+        entry_ranked,
+        opportunity,
+        temperature=1.0,
+        dominant_chop_membership=torch.tensor([0.0]),
+    )
+    full_chop_wait = entry_opportunity_value_kl_loss(
+        wait_ranked,
+        opportunity,
+        temperature=1.0,
+        dominant_chop_membership=torch.tensor([1.0]),
+    )
+    full_chop_entry = entry_opportunity_value_kl_loss(
+        entry_ranked,
+        opportunity,
+        temperature=1.0,
+        dominant_chop_membership=torch.tensor([1.0]),
+    )
+
+    assert nonchop_entry.item() < nonchop_wait.item()
+    assert full_chop_wait.item() < full_chop_entry.item()
+
+
 def test_compilation_failure_falls_back_to_eager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

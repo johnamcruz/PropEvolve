@@ -104,7 +104,7 @@
     }
   },
   "entry_opportunity_supervision": {
-    "schema": "post_launch_entry_opportunity_value_v1",
+    "schema": "post_launch_entry_opportunity_value_v2",
     "training_only": true,
     "source_entry_schema": "post_launch_entry_v1",
     "action_order": [
@@ -115,7 +115,7 @@
     "wait_value": 0.0,
     "winner_value": 2.0,
     "non_winner_value": -1.0,
-    "loss": "teacher_to_policy_kl_v1",
+    "loss": "regime_conditioned_teacher_to_policy_kl_v2",
     "loss_weight": 0.3,
     "temperature": 1.0
   },
@@ -330,7 +330,7 @@
     "budget_mode": "episodes"
   },
   "evolution": {
-    "hypothesis": "Starting from the unchanged v20 Stage 2A contract, adding one training-only full-action opportunity-value supervisor should teach the recurrent policy the relative economics of WAIT, Long, and Short on each exact Expansion-entry row and improve teacher-free A+ pass conversion without changing Entry labels, execution, replay sampling, or inference inputs.",
+    "hypothesis": "Starting from the unchanged v20 Stage 2A contract, a training-only full-action opportunity-value supervisor that continuously blends toward WAIT as dominant-chop evidence rises should teach relative WAIT, Long, and Short economics without conflicting with learned chop avoidance, changing Entry labels, replay, execution, or inference inputs.",
     "parent_candidate_ids": [
       "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0"
     ],
@@ -640,4 +640,3 @@
   },
   "output": "runs/historical_mask_expansion_anchored_regime_stage2_v21_full_action_opportunity_200ep"
 }
-

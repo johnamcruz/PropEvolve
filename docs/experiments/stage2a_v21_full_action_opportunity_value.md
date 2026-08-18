@@ -5,7 +5,7 @@
 - Process: `ML-RIGOR-v1`
 - Repository: PropEvolve
 - Opened: 2026-08-18
-- Status: `exploration`
+- Status: `r1 stopped at episode 37; regime-safe r2 implementation validated`
 - Parent experiment: Stage 2A v20 generic canonical A+
 - Baseline code: `7aeb7a9bdb00a1f0fd0b44a069dd3df06d30af08`
 - Baseline config SHA-256:
@@ -27,6 +27,40 @@ WAIT, or Long/Short collapse.
 
 Reject the mechanism if it improves supervised agreement but not teacher-free
 economics.
+
+## R1 failure and bounded correction
+
+R1 was stopped at training episode 37. Through episode 35 it had five passes,
+zero blows, and thirteen terminal near-blow timeouts. Short recall improved,
+but the latest eight-episode learner sample predicted Entry on 154 exact-WAIT
+dominant-chop rows, including 121 false Shorts versus 33 false Longs. This was
+not epsilon exploration: the diagnostic is reconstructed from greedy C51
+confusion counts.
+
+- R1 frozen config SHA-256:
+  `403fd53e5de9a4fd1d3cd2b2e8ef969c7c8ec771b3aa6cba4a782168ec599c55`
+- R2 corrected config SHA-256:
+  `e73741140ad2bf72b60711f47632d75996a7e48097bfa1e54eb132a0d388d59a`
+
+The first failed boundary was a training-objective conflict. On dominant-chop
+rows with a winning forced side, the raw opportunity vector taught Entry while
+the existing all-dominant-chop margin taught WAIT. R2 remains v21 and changes
+only how the new opportunity KL consumes the already-authenticated continuous
+Regime evidence:
+
+```text
+m = clamp(chop - max(transition, expansion_trend), 0, 1)
+p_economic = softmax([T_WAIT, T_LONG, T_SHORT] / temperature)
+p_training = (1 - m) * p_economic + m * [1, 0, 0]
+```
+
+At `m=0`, Long/Short economic supervision is unchanged. As chop dominance
+increases, the training target moves continuously toward WAIT for both sides.
+This is a training-only soft target, not an inference feature, threshold, hard
+gate, relabeling of exact Entry truth, or change to teacher-free evaluation.
+The config freezes this as
+`post_launch_entry_opportunity_value_v2` with
+`regime_conditioned_teacher_to_policy_kl_v2`.
 
 ## Executable target contract
 

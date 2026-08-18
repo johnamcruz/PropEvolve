@@ -218,8 +218,9 @@ def entry_opportunity_value_kl_loss(
     opportunity_values: torch.Tensor,
     *,
     temperature: float,
+    dominant_chop_membership: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Distill one training-only WAIT/Long/Short economic ranking."""
+    """Distill economic ranking while continuously preserving chop WAIT."""
 
     if (
         flat_action_values.ndim != 2
@@ -234,10 +235,26 @@ def entry_opportunity_value_kl_loss(
         or float(temperature) <= 0.0
     ):
         raise ValueError("Entry opportunity-value KL contract is invalid")
+    if dominant_chop_membership is not None and (
+        dominant_chop_membership.shape != flat_action_values.shape[:-1]
+        or not torch.is_floating_point(dominant_chop_membership)
+        or not torch.isfinite(dominant_chop_membership).all()
+        or bool((dominant_chop_membership < 0.0).any())
+        or bool((dominant_chop_membership > 1.0).any())
+    ):
+        raise ValueError("dominant-chop membership is invalid")
     scale = float(temperature)
     teacher_probabilities = nn.functional.softmax(
         opportunity_values / scale, dim=-1
     )
+    if dominant_chop_membership is not None:
+        wait_probabilities = torch.zeros_like(teacher_probabilities)
+        wait_probabilities[:, int(Action.WAIT)] = 1.0
+        teacher_probabilities = torch.lerp(
+            teacher_probabilities,
+            wait_probabilities,
+            dominant_chop_membership[:, None],
+        )
     policy_log_probabilities = nn.functional.log_softmax(
         flat_action_values / scale, dim=-1
     )
@@ -1595,6 +1612,9 @@ class RecurrentC51Agent:
         entry_opportunity_value_rows = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
+        entry_opportunity_value_dominant_chop_membership_sum = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         regime_selectivity_loss = teacher_loss
         regime_selectivity_rows = teacher_loss
         regime_selectivity_target_wait_mean = teacher_loss
@@ -1743,6 +1763,7 @@ class RecurrentC51Agent:
         policy_retention_loss = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
+        teacher_targets_tensor: torch.Tensor | None = None
         # Teacher dropout and its curriculum scale govern optional imitation
         # only. Exact action and Regime-confluence supervision remain training
         # labels and are never policy observations.
@@ -2808,11 +2829,46 @@ class RecurrentC51Agent:
                     ),
                     dim=-1,
                 )
+                dominant_chop_membership = None
+                if (
+                    self.regime_selectivity is not None
+                    and self.regime_selectivity_semantics
+                    in {
+                        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+                        PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+                    }
+                ):
+                    if teacher_targets_tensor is None:
+                        raise ValueError(
+                            "Entry opportunity-value Regime evidence is missing"
+                        )
+                    opportunity_teacher_targets = teacher_targets_tensor[
+                        :, :training_steps
+                    ]
+                    finite_teacher_rows = torch.isfinite(
+                        opportunity_teacher_targets
+                    ).all(-1)
+                    if bool(
+                        (finite_opportunity_rows & ~finite_teacher_rows).any()
+                    ):
+                        raise ValueError(
+                            "Entry opportunity-value Regime evidence is incomplete"
+                        )
+                    dominant_chop_membership = (
+                        self.regime_selectivity.dominant_chop_margin_membership(
+                            opportunity_teacher_targets[finite_opportunity_rows]
+                        )
+                    )
+                    entry_opportunity_value_dominant_chop_membership_sum = (
+                        dominant_chop_membership.sum()
+                    )
                 entry_opportunity_value_loss = (
                     entry_opportunity_value_kl_loss(
                         flat_q_values[finite_opportunity_rows],
                         selected_opportunity_values[finite_opportunity_rows],
                         temperature=self.entry_opportunity_value_temperature,
+                        dominant_chop_membership=dominant_chop_membership,
                     ).mean()
                 )
                 entry_opportunity_value_rows = finite_opportunity_rows.sum().to(
@@ -2932,6 +2988,7 @@ class RecurrentC51Agent:
             entry_action_margin_loss,
             entry_opportunity_value_loss,
             entry_opportunity_value_rows,
+            entry_opportunity_value_dominant_chop_membership_sum,
             regime_selectivity_loss,
             regime_selectivity_rows,
             regime_selectivity_target_wait_mean,
@@ -2994,6 +3051,7 @@ class RecurrentC51Agent:
             entry_action_margin_loss_value,
             entry_opportunity_value_loss_value,
             entry_opportunity_value_rows_value,
+            entry_opportunity_value_dominant_chop_membership_sum_value,
             regime_selectivity_loss_value,
             regime_selectivity_rows_value,
             regime_selectivity_target_wait_mean_value,
@@ -3386,6 +3444,12 @@ class RecurrentC51Agent:
             "entry_opportunity_value_loss": entry_opportunity_value_loss_value,
             "entry_opportunity_value_supervised_rows": (
                 entry_opportunity_value_rows_value
+            ),
+            "entry_opportunity_value_dominant_chop_membership_mean": (
+                entry_opportunity_value_dominant_chop_membership_sum_value
+                / entry_opportunity_value_rows_value
+                if entry_opportunity_value_rows_value > 0.0
+                else 0.0
             ),
             "regime_selectivity_loss": regime_selectivity_loss_value,
             "regime_selectivity_supervised_rows": regime_selectivity_rows_value,

@@ -564,14 +564,14 @@ def test_entry_opportunity_supervision_must_be_a_separate_frozen_contract(
     path = _stage2a_config(tmp_path)
     payload = json.loads(path.read_text())
     payload["entry_opportunity_supervision"] = {
-        "schema": "post_launch_entry_opportunity_value_v1",
+        "schema": "post_launch_entry_opportunity_value_v2",
         "training_only": True,
         "source_entry_schema": "post_launch_entry_v1",
         "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
         "wait_value": 0.0,
         "winner_value": 2.0,
         "non_winner_value": -1.0,
-        "loss": "teacher_to_policy_kl_v1",
+        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
         "loss_weight": 0.3,
         "temperature": 1.0,
     }
@@ -592,14 +592,14 @@ def test_entry_opportunity_supervision_preserves_the_existing_entry_contract(
     original_entry = payload["entry_supervision"]
     original_agent = load_experiment_config(path)["agent"]
     payload["entry_opportunity_supervision"] = {
-        "schema": "post_launch_entry_opportunity_value_v1",
+        "schema": "post_launch_entry_opportunity_value_v2",
         "training_only": True,
         "source_entry_schema": "post_launch_entry_v1",
         "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
         "wait_value": 0.0,
         "winner_value": 2.0,
         "non_winner_value": -1.0,
-        "loss": "teacher_to_policy_kl_v1",
+        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
         "loss_weight": 0.3,
         "temperature": 1.0,
     }
@@ -633,14 +633,14 @@ def test_full_action_opportunity_recipe_changes_only_the_new_training_lesson(
         "base_parent"
     ]
     assert candidate["entry_opportunity_supervision"] == {
-        "schema": "post_launch_entry_opportunity_value_v1",
+        "schema": "post_launch_entry_opportunity_value_v2",
         "training_only": True,
         "source_entry_schema": "post_launch_entry_v1",
         "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
         "wait_value": 0.0,
         "winner_value": 2.0,
         "non_winner_value": -1.0,
-        "loss": "teacher_to_policy_kl_v1",
+        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
         "loss_weight": 0.3,
         "temperature": 1.0,
     }

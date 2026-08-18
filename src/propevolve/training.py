@@ -4165,6 +4165,10 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "mean_entry_opportunity_value_supervised_rows": weighted(
             "mean_entry_opportunity_value_supervised_rows", update_weights
         ),
+        "mean_entry_opportunity_value_dominant_chop_membership": weighted(
+            "mean_entry_opportunity_value_dominant_chop_membership",
+            update_weights,
+        ),
         "mean_entry_action_supervised_rows": weighted(
             "mean_entry_action_supervised_rows", update_weights
         ),
@@ -5097,6 +5101,7 @@ def train_agent(
         episode_entry_action_rows = []
         episode_entry_opportunity_losses = []
         episode_entry_opportunity_rows = []
+        episode_entry_opportunity_chop_membership = []
         learner_diagnostics: dict[str, list[float]] = {
             key: []
             for key in (
@@ -5237,6 +5242,16 @@ def train_agent(
                     episode_entry_opportunity_rows.append(float(
                         train_metrics[
                             "entry_opportunity_value_supervised_rows"
+                        ]
+                    ))
+                if (
+                    "entry_opportunity_value_dominant_chop_membership_mean"
+                    in train_metrics
+                ):
+                    episode_entry_opportunity_chop_membership.append(float(
+                        train_metrics[
+                            "entry_opportunity_value_"
+                            "dominant_chop_membership_mean"
                         ]
                     ))
                 for key in learner_diagnostics:
@@ -5602,6 +5617,14 @@ def train_agent(
                 "mean_entry_opportunity_value_supervised_rows": (
                     float(np.mean(episode_entry_opportunity_rows))
                     if episode_entry_opportunity_rows else None
+                ),
+                "mean_entry_opportunity_value_"
+                "dominant_chop_membership": (
+                    float(np.mean(
+                        episode_entry_opportunity_chop_membership
+                    ))
+                    if episode_entry_opportunity_chop_membership
+                    else None
                 ),
                 "entry_action_target_counts": {
                     action.name: entry_action_target_counts[action]

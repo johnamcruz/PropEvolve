@@ -427,6 +427,12 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
 def _validate_entry_opportunity_supervision(payload: dict) -> None:
     """Validate the optional dense training-only flat-action ranking."""
 
+    from .balance_aware_regime_selectivity import (
+        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+        PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    )
+
     specification = payload.get("entry_opportunity_supervision")
     if specification is None:
         return
@@ -454,13 +460,21 @@ def _validate_entry_opportunity_supervision(payload: dict) -> None:
         or not isinstance(specification, dict)
         or set(specification) != required
         or specification.get("schema")
-        != "post_launch_entry_opportunity_value_v1"
+        != "post_launch_entry_opportunity_value_v2"
         or specification.get("training_only") is not True
         or specification.get("source_entry_schema")
         != payload["entry_supervision"].get("schema")
         or specification.get("action_order")
         != ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
-        or specification.get("loss") != "teacher_to_policy_kl_v1"
+        or specification.get("loss")
+        != "regime_conditioned_teacher_to_policy_kl_v2"
+        or not isinstance(payload.get("regime_selectivity"), dict)
+        or payload["regime_selectivity"].get("semantics")
+        not in {
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+        }
         or any(
             isinstance(specification[field], bool)
             or not isinstance(specification[field], (int, float))
