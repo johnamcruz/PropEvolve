@@ -1066,6 +1066,58 @@ def test_context_matched_paired_a_plus_training_uses_same_ticker_type_and_side(
     ] > 0.0
 
 
+def test_context_matched_a_plus_aligns_tickers_to_the_n_step_learning_window(
+) -> None:
+    agent = _agent(
+        seed=531,
+        selectivity_weight=1.0,
+        n_step_return=8,
+        recurrent_burn_in=64,
+        entry_action_weight=1.0,
+        selectivity_semantics=CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    teacher = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    ).numpy()
+    flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    sequence = tuple(
+        Transition(
+            observation=np.asarray((index, 0.0, 0.0), np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.asarray((index + 1, 0.0, 0.0), np.float32),
+            terminated=index == 95,
+            valid_actions=flat,
+            next_valid_actions=() if index == 95 else flat,
+            teacher_target=teacher,
+            teacher_imitation_visible=False,
+            entry_action_target=(
+                Action.ENTER_LONG_1 if index == 64 else Action.WAIT
+            ),
+            regime_selectivity_headroom_fraction=0.8,
+            source_ticker="NQ",
+        )
+        for index in range(96)
+    )
+
+    agent.train_batch((sequence,))
+
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_pair_mass"
+    ] > 0.0
+
+
 def test_paired_a_plus_teacher_free_checkpoint_round_trip_preserves_policy(
     tmp_path: Path,
 ) -> None:

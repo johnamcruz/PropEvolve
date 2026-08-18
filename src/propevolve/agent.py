@@ -1871,7 +1871,7 @@ class RecurrentC51Agent:
                                 dtype=torch.bool,
                             )
                             if selectivity_ticker_ids is None
-                            else selectivity_ticker_ids >= 0
+                            else selectivity_ticker_ids[:, :training_steps] >= 0
                         )
                         & (selectivity_action_targets_tensor >= int(Action.WAIT))
                         & (
