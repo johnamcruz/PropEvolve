@@ -10,6 +10,7 @@ import torch
 from propevolve.agent import RecurrentC51Agent
 from propevolve.balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
 )
@@ -617,6 +618,32 @@ def test_all_dominant_chop_probe_counts_economic_entry_predictions() -> None:
     )
 
     assert report.metrics["final_regime_probe_dominant_chop_rows"] == 32.0
+    assert (
+        report.metrics["final_regime_probe_dominant_chop_greedy_entry_rows"]
+        == 32.0
+    )
+
+
+def test_paired_a_plus_probe_counts_every_dominant_chop_prediction() -> None:
+    replay = _probe_replay()
+    policy = ScriptedFinalPolicy({
+        0: (3.0, 0.0, 0.0),
+        1: (1.0, 0.0, 0.0),
+        2: (0.0, 3.0, 0.0),
+        3: (0.0, 0.0, 3.0),
+    })
+
+    report = evaluate_final_regime_probe(
+        policy,
+        replay.final_regime_probe_sequences(samples_per_action=32),
+        teacher_channel_names=CHANNELS,
+        q_temperature=1.0,
+        regime_selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        regime_selectivity_expansion_centers=(0.1, 0.1),
+        source_period=("2021-01-01", "2025-01-01"),
+    )
+
+    assert report.metrics["final_regime_probe_dominant_chop_wait_rows"] == 48.0
     assert (
         report.metrics["final_regime_probe_dominant_chop_greedy_entry_rows"]
         == 32.0

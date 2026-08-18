@@ -950,6 +950,85 @@ def test_paired_a_plus_supervision_remains_active_after_teacher_dropout() -> Non
     ] > 0.0
 
 
+def test_paired_a_plus_teacher_free_checkpoint_round_trip_preserves_policy(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        seed=525,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    observation = np.asarray((0.25, -0.50, 0.75), dtype=np.float32)
+    _, _, expected_values = agent.select_action(
+        observation,
+        hidden=None,
+        valid_actions=(
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        ),
+        epsilon=0.0,
+        return_action_values=True,
+    )
+
+    agent.discard_teacher()
+    checkpoint = agent.save(tmp_path / "paired-a-plus-teacher-free.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    restored.assert_teacher_free()
+    _, _, actual_values = restored.select_action(
+        observation,
+        hidden=None,
+        valid_actions=(
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        ),
+        epsilon=0.0,
+        return_action_values=True,
+    )
+
+    assert restored.regime_selectivity_chop_wait_margin == 0.0
+    assert restored.regime_selectivity_failed_confluence_margin == 0.0
+    assert restored.regime_selectivity_paired_a_plus_margin == 0.0
+    np.testing.assert_array_equal(actual_values, expected_values)
+
+
+def test_load_normalizes_legacy_teacher_free_paired_a_plus_margins(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        seed=527,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        side_balance="equal_long_short_v1",
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    agent.discard_teacher()
+    # v19 stripped the teacher and semantics but serialized these inactive
+    # training-only values, making its otherwise valid policy unloadable.
+    agent.regime_selectivity_chop_wait_margin = 0.25
+    agent.regime_selectivity_failed_confluence_margin = 0.25
+    agent.regime_selectivity_paired_a_plus_margin = 0.25
+    checkpoint = agent.save(tmp_path / "legacy-paired-a-plus.pt", manifest={})
+
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    restored.assert_teacher_free()
+    assert restored.regime_selectivity_chop_wait_margin == 0.0
+    assert restored.regime_selectivity_failed_confluence_margin == 0.0
+    assert restored.regime_selectivity_paired_a_plus_margin == 0.0
+
+
 def test_paired_a_plus_pressure_is_additive_without_weakening_v18_losses() -> None:
     common = dict(
         selectivity_weight=1.0,

@@ -268,6 +268,23 @@ def test_chop_margin_candidate_rejects_any_teacher_free_dominant_chop_entry(
     })
 
 
+def test_paired_a_plus_gate_requires_decoupled_exact_action_supervision_active(
+) -> None:
+    gates = training_module._training_evaluation_gates(
+        regime_selectivity_active=True,
+        regime_selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        entry_action_supervision_active=True,
+    )
+    entry_scale_gate = next(
+        gate
+        for gate in gates
+        if gate.metric == "latest_entry_action_weight_scale"
+    )
+
+    assert entry_scale_gate.passes({"latest_entry_action_weight_scale": 1.0})
+    assert not entry_scale_gate.passes({"latest_entry_action_weight_scale": 0.0})
+
+
 def test_final_regime_probe_uses_frozen_selectivity_identity() -> None:
     assert training_module._regime_selectivity_probe_settings({
         "semantics": "persistent_chop_association_v2",

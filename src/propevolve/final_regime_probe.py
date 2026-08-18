@@ -15,6 +15,7 @@ from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     EXPANSION_CHANNELS,
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     REGIME_STATE_CHANNELS,
     REGIME_TRANSITION_CHANNELS,
@@ -275,7 +276,11 @@ def evaluate_final_regime_probe(
     dominant_chop = positive_rows & dominant_chop_state
     dominant_chop_wait = (
         dominant_chop_state
-        if regime_selectivity_semantics == ALL_DOMINANT_CHOP_MARGIN_SEMANTICS
+        if regime_selectivity_semantics
+        in {
+            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        }
         else (targets == int(Action.WAIT)) & dominant_chop_state
     )
     nonchop = positive_rows & ~dominant_chop

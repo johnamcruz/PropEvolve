@@ -1810,7 +1810,9 @@ def _training_evaluation_gates(
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
                 EvaluationGate(
-                    "latest_entry_action_weight_scale", "==", 0.0
+                    "latest_entry_action_weight_scale",
+                    "==",
+                    1.0 if entry_action_supervision_active else 0.0,
                 ),
             ))
             for side in ("long", "short"):

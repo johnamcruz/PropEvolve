@@ -3254,6 +3254,9 @@ class RecurrentC51Agent:
         self.teacher_entry_search_objective = "raw_probability"
         self.teacher_entry_search_centers = (0.5, 0.5)
         self.regime_selectivity_loss_weight = 0.0
+        self.regime_selectivity_chop_wait_margin = 0.0
+        self.regime_selectivity_failed_confluence_margin = 0.0
+        self.regime_selectivity_paired_a_plus_margin = 0.0
         self.regime_selectivity_side_balance = "none"
         self.regime_selectivity_semantics = STATIC_STATE_SEMANTICS
         self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
@@ -3549,6 +3552,21 @@ class RecurrentC51Agent:
         config.setdefault(
             "regime_selectivity_persistent_chop_negative_emphasis", 0.0
         )
+        if (
+            int(config["teacher_channels"]) == 0
+            and float(config["teacher_loss_weight"]) == 0.0
+            and float(config["teacher_entry_search_loss_weight"]) == 0.0
+            and float(config["entry_action_loss_weight"]) == 0.0
+            and float(config["regime_selectivity_loss_weight"]) == 0.0
+            and config["regime_selectivity_semantics"]
+            == STATIC_STATE_SEMANTICS
+        ):
+            # v19 serialized inactive training-only margins after stripping
+            # every teacher dependency. Normalize that legacy teacher-free
+            # metadata before constructor validation.
+            config["regime_selectivity_chop_wait_margin"] = 0.0
+            config["regime_selectivity_failed_confluence_margin"] = 0.0
+            config["regime_selectivity_paired_a_plus_margin"] = 0.0
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

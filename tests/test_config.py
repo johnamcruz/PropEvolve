@@ -66,6 +66,9 @@ STAGE2_ALL_DOMINANT_CHOP_MARGIN_RECIPE = Path(
 STAGE2_PAIRED_A_PLUS_RECIPE = Path(
     "config/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive.json"
 )
+STAGE2_PAIRED_A_PLUS_450_RECIPE = Path(
+    "config/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive_450ep.json"
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -599,6 +602,26 @@ def test_paired_a_plus_recipe_changes_only_the_training_contrast_contract(
     stage = candidate["campaign"]["budget_stages"][0]
     assert stage["training_episodes"] == 100
     assert stage["validation_episodes"] == 200
+
+
+def test_paired_a_plus_450_recipe_changes_only_budget_and_run_identity() -> None:
+    baseline = json.loads(STAGE2_PAIRED_A_PLUS_RECIPE.read_text())
+    candidate = json.loads(STAGE2_PAIRED_A_PLUS_450_RECIPE.read_text())
+
+    stage = candidate["campaign"]["budget_stages"][0]
+    assert stage["name"] == "paired_aplus_contrastive_450ep"
+    assert stage["training_episodes"] == 450
+    assert stage["validation_episodes"] == 200
+    assert candidate["output"].endswith("_450ep")
+    assert candidate["campaign"]["state_root"].endswith("_450ep/ml-loop-state")
+
+    candidate["campaign"]["budget_stages"][0]["name"] = (
+        baseline["campaign"]["budget_stages"][0]["name"]
+    )
+    candidate["campaign"]["budget_stages"][0]["training_episodes"] = 100
+    candidate["campaign"]["state_root"] = baseline["campaign"]["state_root"]
+    candidate["output"] = baseline["output"]
+    assert candidate == baseline
 
 
 def test_replay_fraction_contract_includes_hard_wait_quota(tmp_path: Path) -> None:
