@@ -1366,6 +1366,17 @@ def load_experiment_config(path: str | Path) -> dict:
             or not 0 < float(training["teacher_autonomy_start_fraction"]) <= 1
         ):
             raise ValueError("teacher autonomy start fraction is invalid")
+        teacher_schedule_episodes = training.get("teacher_schedule_episodes")
+        if teacher_schedule_episodes is not None and (
+            isinstance(teacher_schedule_episodes, bool)
+            or not isinstance(teacher_schedule_episodes, int)
+            or not 1
+            <= teacher_schedule_episodes
+            <= int(training.get("episodes", 0))
+            or "training.teacher_schedule_episodes"
+            not in payload.get("evolution", {}).get("frozen_paths", ())
+        ):
+            raise ValueError("teacher schedule episode horizon is invalid")
         payload["teachers"] = tuple(teachers)
     _validate_regime_selectivity(payload, config_path=path)
     temporal = payload.get("temporal") or {}
@@ -1734,6 +1745,11 @@ def load_experiment_config(path: str | Path) -> dict:
                 or not 1
                 <= stage["short_circuit_minimum_episodes"]
                 <= stage["training_episodes"]
+                or (
+                    training.get("teacher_schedule_episodes") is not None
+                    and int(training["teacher_schedule_episodes"])
+                    > stage["training_episodes"]
+                )
             ):
                 raise ValueError("campaign episode budget stage contract is invalid")
             budget = stage["training_episodes"]

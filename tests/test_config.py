@@ -604,16 +604,22 @@ def test_paired_a_plus_recipe_changes_only_the_training_contrast_contract(
     assert stage["validation_episodes"] == 200
 
 
-def test_paired_a_plus_450_recipe_changes_only_budget_and_run_identity() -> None:
+def test_paired_a_plus_450_recipe_preserves_v19_teacher_schedule_horizon() -> None:
     baseline = json.loads(STAGE2_PAIRED_A_PLUS_RECIPE.read_text())
     candidate = json.loads(STAGE2_PAIRED_A_PLUS_450_RECIPE.read_text())
 
     stage = candidate["campaign"]["budget_stages"][0]
-    assert stage["name"] == "paired_aplus_contrastive_450ep"
+    assert stage["name"] == "paired_aplus_contrastive_450ep_absolute_schedule"
     assert stage["training_episodes"] == 450
     assert stage["validation_episodes"] == 200
-    assert candidate["output"].endswith("_450ep")
-    assert candidate["campaign"]["state_root"].endswith("_450ep/ml-loop-state")
+    assert candidate["output"].endswith("_450ep_absolute_schedule")
+    assert candidate["campaign"]["state_root"].endswith(
+        "_450ep_absolute_schedule/ml-loop-state"
+    )
+    assert candidate["training"]["teacher_schedule_episodes"] == 100
+    assert "training.teacher_schedule_episodes" in candidate["evolution"][
+        "frozen_paths"
+    ]
 
     candidate["campaign"]["budget_stages"][0]["name"] = (
         baseline["campaign"]["budget_stages"][0]["name"]
@@ -621,6 +627,10 @@ def test_paired_a_plus_450_recipe_changes_only_budget_and_run_identity() -> None
     candidate["campaign"]["budget_stages"][0]["training_episodes"] = 100
     candidate["campaign"]["state_root"] = baseline["campaign"]["state_root"]
     candidate["output"] = baseline["output"]
+    del candidate["training"]["teacher_schedule_episodes"]
+    candidate["evolution"]["frozen_paths"].remove(
+        "training.teacher_schedule_episodes"
+    )
     assert candidate == baseline
 
 
