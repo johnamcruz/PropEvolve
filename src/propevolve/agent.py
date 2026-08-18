@@ -15,7 +15,10 @@ from torch import nn
 from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
+    CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
+    EXPANSION_CHANNELS,
+    PAIRED_A_PLUS_SEMANTICS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
@@ -389,13 +392,17 @@ def paired_a_plus_rank_loss(
     valid_long_membership: torch.Tensor,
     valid_short_membership: torch.Tensor,
     regime_probabilities: torch.Tensor,
+    expansion_probabilities: torch.Tensor | None = None,
+    headroom_fractions: torch.Tensor | None = None,
+    ticker_ids: torch.Tensor | None = None,
     margin: float,
 ) -> PairedAPlusRankResult:
     """Rank exact economic winners above matched same-side failures.
 
-    Each valid/failed pair must share side. Continuous three-state Regime
-    similarity and confluence memberships supply the pair weight. The policy
-    still receives no teacher channels as input.
+    Each valid/failed pair must share side. Context-matched callers also
+    require the same ticker and continuously weight Expansion, three-state
+    Regime, and account-headroom similarity. The policy still receives no
+    teacher channels as input.
     """
     memberships = (
         failed_long_membership,
@@ -404,6 +411,12 @@ def paired_a_plus_rank_loss(
         valid_short_membership,
     )
     row_shape = flat_action_values.shape[:-1]
+    context_values = (
+        expansion_probabilities,
+        headroom_fractions,
+        ticker_ids,
+    )
+    context_matching = any(value is not None for value in context_values)
     if (
         flat_action_values.ndim != 2
         or flat_action_values.shape[-1] != 3
@@ -414,6 +427,19 @@ def paired_a_plus_rank_loss(
         )
         or regime_probabilities.shape != (*row_shape, len(REGIME_STATE_NAMES))
         or not torch.is_floating_point(regime_probabilities)
+        or (
+            context_matching
+            and (
+                any(value is None for value in context_values)
+                or expansion_probabilities.shape != (*row_shape, 4)
+                or not torch.is_floating_point(expansion_probabilities)
+                or headroom_fractions.shape != row_shape
+                or not torch.is_floating_point(headroom_fractions)
+                or ticker_ids.shape != row_shape
+                or ticker_ids.dtype == torch.bool
+                or torch.is_floating_point(ticker_ids)
+            )
+        )
         or isinstance(margin, bool)
         or not math.isfinite(float(margin))
         or float(margin) < 0.0
@@ -422,6 +448,16 @@ def paired_a_plus_rank_loss(
     # Range/simplex validity is authenticated once at teacher-cache ingestion.
     # Repeating those reductions here would synchronize every MPS update.
     regime_memberships = regime_probabilities.to(flat_action_values.dtype)
+    context_expansion = (
+        None
+        if expansion_probabilities is None
+        else expansion_probabilities.to(flat_action_values.dtype)
+    )
+    context_headroom = (
+        None
+        if headroom_fractions is None
+        else headroom_fractions.to(flat_action_values.dtype)
+    )
     zero = torch.zeros(
         (), dtype=flat_action_values.dtype, device=flat_action_values.device
     )
@@ -450,10 +486,40 @@ def paired_a_plus_rank_loss(
     ):
         side_loss_sum = zero
         side_pair_mass = zero
-        side_pair_count = (
-            (valid > 0).sum().to(flat_action_values.dtype)
-            * (failed > 0).sum().to(flat_action_values.dtype)
-        )
+        side_pair_count = zero
+        if context_matching:
+            assert context_expansion is not None
+            assert context_headroom is not None
+            assert ticker_ids is not None
+            side_context_weights = (
+                (ticker_ids[:, None] == ticker_ids[None, :]).to(
+                    flat_action_values.dtype
+                )
+                * (
+                    1.0
+                    - torch.abs(
+                        context_expansion[:, None, :]
+                        - context_expansion[None, :, :]
+                    ).mean(-1)
+                ).clamp(0.0, 1.0)
+                * (
+                    1.0
+                    - torch.abs(
+                        context_headroom[:, None]
+                        - context_headroom[None, :]
+                    )
+                ).clamp(0.0, 1.0)
+            )
+            side_pair_count = (
+                (valid[:, None] > 0)
+                & (failed[None, :] > 0)
+                & (side_context_weights > 0)
+            ).sum().to(flat_action_values.dtype)
+        else:
+            side_pair_count = (
+                (valid > 0).sum().to(flat_action_values.dtype)
+                * (failed > 0).sum().to(flat_action_values.dtype)
+            )
         advantage = (
             flat_action_values[:, side_index]
             - flat_action_values[:, int(Action.WAIT)]
@@ -472,6 +538,10 @@ def paired_a_plus_rank_loss(
                 selected_good_weights[:, None]
                 * selected_bad_weights[None, :]
             )
+            if context_matching:
+                weights = weights * side_context_weights[good_rows][
+                    :, bad_rows
+                ]
             group_pair_mass = weights.sum()
             group_active = (group_pair_mass > 0).to(
                 flat_action_values.dtype
@@ -487,11 +557,11 @@ def paired_a_plus_rank_loss(
             )
             group_loss_sum = (pair_losses * weights).sum()
             group_good_advantage_sum = (
-                selected_good_advantage * selected_good_weights
-            ).sum() * selected_bad_weights.sum()
+                selected_good_advantage[:, None] * weights
+            ).sum()
             group_bad_advantage_sum = (
-                selected_bad_advantage * selected_bad_weights
-            ).sum() * selected_good_weights.sum()
+                selected_bad_advantage[None, :] * weights
+            ).sum()
             side_loss_sum = side_loss_sum + group_loss_sum
             side_pair_mass = side_pair_mass + group_pair_mass
             active_groups = active_groups + group_active
@@ -748,6 +818,7 @@ class RecurrentC51Agent:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -764,6 +835,7 @@ class RecurrentC51Agent:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }
             and regime_selectivity_side_balance != "equal_long_short_v1"
         ):
@@ -771,8 +843,7 @@ class RecurrentC51Agent:
                 "persistent-chop Regime selectivity requires equal Long/Short groups"
             )
         if (
-            regime_selectivity_semantics
-            == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+            regime_selectivity_semantics in PAIRED_A_PLUS_SEMANTICS
         ) != (float(regime_selectivity_paired_a_plus_margin) > 0.0):
             raise ValueError(
                 "paired A+ margin requires exactly the paired A+ semantics"
@@ -911,6 +982,19 @@ class RecurrentC51Agent:
                 int(Action.WAIT),
                 int(Action.ENTER_LONG_1),
                 int(Action.ENTER_SHORT_1),
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.expansion_teacher_channel_names = tuple(
+            channel
+            for channel in EXPANSION_CHANNELS
+            if channel in self.teacher_channel_names
+        )
+        self._expansion_teacher_channel_indices_tensor = torch.tensor(
+            tuple(
+                self.teacher_channel_names.index(channel)
+                for channel in self.expansion_teacher_channel_names
             ),
             dtype=torch.long,
             device=self.device,
@@ -1743,6 +1827,35 @@ class RecurrentC51Agent:
                         dtype=torch.float32,
                         device=self.device,
                     )[:, self.recurrent_burn_in:]
+                    selectivity_ticker_ids = None
+                    if (
+                        self.regime_selectivity_semantics
+                        == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
+                    ):
+                        ticker_names = sorted({
+                            item.source_ticker
+                            for sequence in sequences
+                            for item in sequence
+                            if item.source_ticker is not None
+                        })
+                        ticker_index = {
+                            ticker: index
+                            for index, ticker in enumerate(ticker_names)
+                        }
+                        ticker_rows = np.asarray([
+                            [
+                                -1
+                                if item.source_ticker is None
+                                else ticker_index[item.source_ticker]
+                                for item in sequence
+                            ]
+                            for sequence in sequences
+                        ], dtype=np.int64)
+                        selectivity_ticker_ids = torch.as_tensor(
+                            ticker_rows,
+                            dtype=torch.long,
+                            device=self.device,
+                        )[:, self.recurrent_burn_in:]
                     selectivity_action_targets_tensor = diagnostic_targets
                     selectivity_teacher_targets = teacher_targets_tensor[
                         :, :training_steps
@@ -1752,6 +1865,14 @@ class RecurrentC51Agent:
                         all_teacher_rows[:, :training_steps]
                         & learnable_rows
                         & torch.isfinite(selectivity_headroom)
+                        & (
+                            torch.ones_like(
+                                selectivity_headroom,
+                                dtype=torch.bool,
+                            )
+                            if selectivity_ticker_ids is None
+                            else selectivity_ticker_ids >= 0
+                        )
                         & (selectivity_action_targets_tensor >= int(Action.WAIT))
                         & (
                             selectivity_action_targets_tensor
@@ -1789,6 +1910,7 @@ class RecurrentC51Agent:
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1820,6 +1942,7 @@ class RecurrentC51Agent:
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1861,6 +1984,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                             }
                             else wait_mass
                         ).clamp_min(1.0)
@@ -1911,6 +2035,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                             }
                         ):
                             (
@@ -1942,6 +2067,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                             }
                         ):
                             (
@@ -1971,7 +2097,7 @@ class RecurrentC51Agent:
                         paired_a_plus_group_active = torch.zeros_like(wait_active)
                         if (
                             self.regime_selectivity_semantics
-                            == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+                            in PAIRED_A_PLUS_SEMANTICS
                         ):
                             regime_probabilities = selected_teachers.index_select(
                                 -1,
@@ -1988,6 +2114,28 @@ class RecurrentC51Agent:
                                 valid_long_membership=ready_long_membership,
                                 valid_short_membership=ready_short_membership,
                                 regime_probabilities=regime_probabilities,
+                                expansion_probabilities=(
+                                    selected_teachers.index_select(
+                                        -1,
+                                        self._expansion_teacher_channel_indices_tensor,
+                                    )
+                                    if self.regime_selectivity_semantics
+                                    == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
+                                    else None
+                                ),
+                                headroom_fractions=(
+                                    selected_headroom
+                                    if self.regime_selectivity_semantics
+                                    == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
+                                    else None
+                                ),
+                                ticker_ids=(
+                                    selectivity_ticker_ids[
+                                        :, :training_steps
+                                    ][selectivity_rows]
+                                    if selectivity_ticker_ids is not None
+                                    else None
+                                ),
                                 margin=self.regime_selectivity_paired_a_plus_margin,
                             )
                             regime_selectivity_paired_a_plus_loss = (
@@ -2023,6 +2171,7 @@ class RecurrentC51Agent:
                             in {
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                             }
                             else dead_membership
                         )
@@ -3270,6 +3419,12 @@ class RecurrentC51Agent:
             device=self.device,
         )
         self.regime_teacher_channel_names = ()
+        self.expansion_teacher_channel_names = ()
+        self._expansion_teacher_channel_indices_tensor = torch.empty(
+            0,
+            dtype=torch.long,
+            device=self.device,
+        )
         self._regime_teacher_channel_indices_tensor = torch.empty(
             0,
             dtype=torch.long,
@@ -3319,6 +3474,8 @@ class RecurrentC51Agent:
             or self.target.teacher_output is not None
             or self._teacher_channel_loss_weights_tensor.numel() != 0
             or self.regime_teacher_channel_names
+            or self.expansion_teacher_channel_names
+            or self._expansion_teacher_channel_indices_tensor.numel() != 0
             or self._regime_teacher_channel_indices_tensor.numel() != 0
         ):
             raise ValueError(

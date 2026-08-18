@@ -46,6 +46,28 @@ def test_replay_is_bounded_and_samples_whole_causal_sequences() -> None:
         assert values == list(range(values[0], values[0] + 4))
 
 
+def test_replay_derives_source_ticker_from_authenticated_episode() -> None:
+    replay = BalancedSequenceReplay(capacity_episodes=2, sequence_length=4, seed=7)
+    replay.add(_episode("NQ", "pass", "long", 0))
+
+    sequence = replay.sample(1)[0]
+
+    assert {item.source_ticker for item in sequence} == {"NQ"}
+
+    mismatched = _episode("NQ", "pass", "long", 10)
+    mismatched = Episode(
+        **{
+            **mismatched.__dict__,
+            "transitions": tuple(
+                Transition(**{**item.__dict__, "source_ticker": "ES"})
+                for item in mismatched.transitions
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="source ticker"):
+        replay.add(mismatched)
+
+
 def test_replay_balances_outcome_buckets_before_reusing_them() -> None:
     replay = BalancedSequenceReplay(capacity_episodes=20, sequence_length=2, seed=11)
     for i in range(8):

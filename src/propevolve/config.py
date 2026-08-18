@@ -560,8 +560,11 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_FORMULA,
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
+        CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA,
+        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         PAIRED_A_PLUS_CONTRASTIVE_FORMULA,
         PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        PAIRED_A_PLUS_SEMANTICS,
         SCHEMA,
         SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
         SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -645,6 +648,9 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS: (
             PAIRED_A_PLUS_CONTRASTIVE_FORMULA
         ),
+        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS: (
+            CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA
+        ),
     }
     expected_formula = expected_formulas.get(semantics)
     if (
@@ -672,6 +678,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }
         or (
             isinstance(specification, dict)
@@ -681,6 +688,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
                 ALL_DOMINANT_CHOP_MARGIN_FORMULA,
                 PAIRED_A_PLUS_CONTRASTIVE_FORMULA,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA,
             }
         )
         or require_positive_association is True
@@ -692,6 +700,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }
         or not isinstance(specification, dict)
         or set(specification) not in valid_required_sets
@@ -764,14 +773,15 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }
         or specification.get("formula") != expected_formula
         or (
-            semantics == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+            semantics in PAIRED_A_PLUS_SEMANTICS
             and set(specification) != required | margin_fields | paired_fields
         )
         or (
-            semantics != PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+            semantics not in PAIRED_A_PLUS_SEMANTICS
             and paired_margin_present
         )
         or (
@@ -810,7 +820,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         or float(specification.get("failed_confluence_margin", 0.0)) < 0.0
         or float(specification.get("paired_a_plus_margin", 0.0)) < 0.0
         or (
-            semantics == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+            semantics in PAIRED_A_PLUS_SEMANTICS
             and float(specification["paired_a_plus_margin"]) <= 0.0
         )
         or float(specification["q_temperature"]) <= 0.0
@@ -826,6 +836,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }
             and float(specification["persistent_chop_negative_emphasis"]) <= 0.0
         )
@@ -842,6 +853,7 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }
     ):
         raise ValueError(
@@ -1526,7 +1538,10 @@ def load_experiment_config(path: str | Path) -> dict:
                 valid_regime_identity = (
                     valid_regime_identity
                     and payload["regime_selectivity"].get("semantics")
-                    == "paired_a_plus_expansion_regime_contrastive_v6"
+                    in {
+                        "paired_a_plus_expansion_regime_contrastive_v6",
+                        "context_matched_paired_a_plus_expansion_regime_v7",
+                    }
                     and "regime_selectivity.paired_a_plus_margin" in frozen
                 )
         if not valid_regime_identity:

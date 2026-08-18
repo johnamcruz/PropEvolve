@@ -54,6 +54,13 @@ ALL_DOMINANT_CHOP_MARGIN_SEMANTICS = (
 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS = (
     "paired_a_plus_expansion_regime_contrastive_v6"
 )
+CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS = (
+    "context_matched_paired_a_plus_expansion_regime_v7"
+)
+PAIRED_A_PLUS_SEMANTICS = (
+    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
+)
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
     "-headroom_pressure*(1-mll_headroom_fraction)"
@@ -98,6 +105,14 @@ PAIRED_A_PLUS_CONTRASTIVE_FORMULA = (
     + "+equal_present_side_mean(regime_similarity_weighted_mean("
     "softplus(pair_margin+failed_side_q_minus_wait-"
     "valid_side_q_minus_wait)))"
+)
+CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA = (
+    ALL_DOMINANT_CHOP_MARGIN_FORMULA
+    + "+equal_present_side_mean(same_ticker*"
+    "continuous_expansion_type_similarity*"
+    "continuous_regime_similarity*continuous_headroom_similarity*"
+    "softplus(pair_margin+failed_side_q_minus_wait-"
+    "valid_side_q_minus_wait))"
 )
 
 
@@ -180,6 +195,7 @@ class BalanceAwareRegimeSelectivity:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             )
             or not np.isfinite(self.persistent_chop_negative_emphasis)
             or float(self.persistent_chop_negative_emphasis) < 0.0
@@ -192,6 +208,7 @@ class BalanceAwareRegimeSelectivity:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         } and any(
             channel not in names for channel in REGIME_TRANSITION_CHANNELS
         ):
@@ -229,6 +246,7 @@ class BalanceAwareRegimeSelectivity:
         if self.semantics not in {
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }:
             raise ValueError(
                 "all-action dominant-chop margin requires its frozen semantics"
@@ -377,6 +395,7 @@ class BalanceAwareRegimeSelectivity:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }:
             raise ValueError(
                 "exact WAIT negative weights require persistent-chop semantics"
@@ -417,6 +436,7 @@ class BalanceAwareRegimeSelectivity:
             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }:
             epsilon = float(self.probability_epsilon)
             long_score = (
@@ -453,6 +473,7 @@ class BalanceAwareRegimeSelectivity:
                     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                    CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                 }
             ):
                 evidence_sum = (
@@ -473,6 +494,7 @@ class BalanceAwareRegimeSelectivity:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }:
                 failed_setup_confluence = (
                     wait_rows
@@ -488,6 +510,7 @@ class BalanceAwareRegimeSelectivity:
                         SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                         ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                         PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
                     }
                 ):
                     failed_long_confluence = (
@@ -533,6 +556,9 @@ __all__ = [
     "PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS",
     "PAIRED_A_PLUS_CONTRASTIVE_FORMULA",
     "PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS",
+    "CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA",
+    "CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS",
+    "PAIRED_A_PLUS_SEMANTICS",
     "PersistentChopEvidence",
     "REGIME_STATE_CHANNELS",
     "REGIME_STATE_NAMES",
