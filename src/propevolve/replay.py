@@ -1403,7 +1403,11 @@ class BalancedSequenceReplay:
                         winner_context=winner_context,
                     ),
                 )
-                pair_id = (self._sample_calls << 32) | pair_offset
+                # Pair identity is consumed only within this sampled batch.
+                # Keep it backend-safe: MPS truncates large int64 values in
+                # unique/equality kernels, so a sample-call prefix can corrupt
+                # otherwise valid winner/failure pairs.
+                pair_id = pair_offset
                 pair_start = entry_start + pair_offset * 2
                 paired_entry_anchors[pair_start] = (
                     winner_episode,

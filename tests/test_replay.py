@@ -612,7 +612,7 @@ def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> No
     ]
     pair_ids = {anchor.paired_a_plus_pair_id for anchor in anchors}
     assert None not in pair_ids
-    assert len(pair_ids) == 2
+    assert pair_ids == {0, 1}
     for pair_id in pair_ids:
         pair = [anchor for anchor in anchors if anchor.paired_a_plus_pair_id == pair_id]
         assert len(pair) == 2
