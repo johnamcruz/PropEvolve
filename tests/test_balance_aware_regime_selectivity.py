@@ -225,6 +225,7 @@ def test_paired_recurrent_a_plus_uses_only_explicit_economic_pairs() -> None:
         pair_sides=torch.tensor([1, 1, 2, 2, -1]),
         economic_wins=torch.tensor([True, False, True, False, False]),
         margin=0.25,
+        action_margin=0.25,
     )
     gradient, = torch.autograd.grad(result.loss, action_values)
 
@@ -238,6 +239,35 @@ def test_paired_recurrent_a_plus_uses_only_explicit_economic_pairs() -> None:
     assert gradient[3, Action.ENTER_SHORT_1] > 0.0
 
 
+def test_paired_recurrent_a_plus_anchors_winner_and_failure_absolutely() -> None:
+    action_values = torch.tensor(
+        [
+            [0.0, 0.38, 0.0],  # Winner advantage already exceeds failure.
+            [0.0, 0.09, 0.0],  # Failure still incorrectly prefers ENTER.
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+
+    result = paired_recurrent_a_plus_rank_loss(
+        action_values,
+        pair_ids=torch.tensor([7, 7]),
+        pair_sides=torch.tensor([1, 1]),
+        economic_wins=torch.tensor([True, False]),
+        margin=0.25,
+        action_margin=0.25,
+    )
+    gradient, = torch.autograd.grad(result.loss, action_values)
+
+    # The worked three-term mean is:
+    # mean(softplus(-0.04), softplus(-0.13), softplus(0.34)).
+    assert result.loss.item() == pytest.approx(0.7270442627858384)
+    assert gradient[0, Action.ENTER_LONG_1] < 0.0
+    assert gradient[0, Action.WAIT] > 0.0
+    assert gradient[1, Action.ENTER_LONG_1] > 0.0
+    assert gradient[1, Action.WAIT] < 0.0
+
+
 def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> None:
     values = torch.zeros((2, 3), dtype=torch.float32)
 
@@ -248,6 +278,7 @@ def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> N
             pair_sides=torch.tensor([1, 2]),
             economic_wins=torch.tensor([True, False]),
             margin=0.25,
+            action_margin=0.25,
         )
     with pytest.raises(ValueError, match="explicit economic pair"):
         paired_recurrent_a_plus_rank_loss(
@@ -256,6 +287,7 @@ def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> N
             pair_sides=torch.tensor([1, 1]),
             economic_wins=torch.tensor([True, True]),
             margin=0.25,
+            action_margin=0.25,
         )
 
 
@@ -272,6 +304,7 @@ def test_paired_recurrent_a_plus_skips_an_orphaned_unlearnable_anchor() -> None:
         pair_sides=torch.tensor([1]),
         economic_wins=torch.tensor([True]),
         margin=0.25,
+        action_margin=0.25,
     )
     gradient, = torch.autograd.grad(result.loss, values)
 
@@ -298,6 +331,7 @@ def test_paired_recurrent_a_plus_keeps_complete_pairs_when_an_orphan_is_skipped(
         pair_sides=torch.tensor([1, 1, 2]),
         economic_wins=torch.tensor([True, False, True]),
         margin=0.25,
+        action_margin=0.25,
     )
     gradient, = torch.autograd.grad(result.loss, values)
 
@@ -315,6 +349,7 @@ def test_paired_recurrent_a_plus_rejects_more_than_two_rows_for_one_pair() -> No
             pair_sides=torch.tensor([1, 1, 1]),
             economic_wins=torch.tensor([True, False, False]),
             margin=0.25,
+            action_margin=0.25,
         )
 
 
@@ -924,6 +959,7 @@ def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None
     agent = _agent(
         seed=502,
         selectivity_weight=0.3,
+        entry_action_margin=0.25,
         side_balance="paired_recurrent_long_short_v1",
         selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
         persistent_chop_negative_emphasis=2.0,

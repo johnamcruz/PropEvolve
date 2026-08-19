@@ -531,8 +531,9 @@ def paired_recurrent_a_plus_rank_loss(
     pair_sides: torch.Tensor,
     economic_wins: torch.Tensor,
     margin: float,
+    action_margin: float,
 ) -> PairedAPlusRankResult:
-    """Rank only explicit same-side recurrent winner/failure pairs."""
+    """Rank and absolutely anchor explicit recurrent economic pairs."""
     row_shape = flat_action_values.shape[:-1]
     if (
         flat_action_values.ndim != 2
@@ -549,6 +550,9 @@ def paired_recurrent_a_plus_rank_loss(
         or isinstance(margin, bool)
         or not math.isfinite(float(margin))
         or float(margin) < 0.0
+        or isinstance(action_margin, bool)
+        or not math.isfinite(float(action_margin))
+        or float(action_margin) < 0.0
     ):
         raise ValueError("paired recurrent A+ loss contract is invalid")
     zero = flat_action_values.sum() * 0.0
@@ -593,9 +597,20 @@ def paired_recurrent_a_plus_rank_loss(
             flat_action_values[failure_index, side]
             - flat_action_values[failure_index, int(Action.WAIT)]
         )
-        side_losses[side].append(nn.functional.softplus(
+        relative_loss = nn.functional.softplus(
             float(margin) + bad_advantage - good_advantage
-        ))
+        )
+        winner_loss = nn.functional.softplus(
+            float(action_margin) - good_advantage
+        )
+        failure_loss = nn.functional.softplus(
+            float(action_margin) + bad_advantage
+        )
+        side_losses[side].append(torch.stack((
+            relative_loss,
+            winner_loss,
+            failure_loss,
+        )).mean())
         good_advantages.append(good_advantage)
         bad_advantages.append(bad_advantage)
     present_side_losses: list[torch.Tensor] = []
@@ -2221,6 +2236,7 @@ class RecurrentC51Agent:
                                     device=self.device,
                                 )[selectivity_rows],
                                 margin=self.regime_selectivity_paired_a_plus_margin,
+                                action_margin=self.entry_action_margin,
                             )
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss

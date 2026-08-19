@@ -473,6 +473,7 @@ def _paired_a_plus_episode(
     context: tuple[float, ...],
     offset: int,
     learner_evidence: bool = True,
+    outcome: str | None = None,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
@@ -509,7 +510,7 @@ def _paired_a_plus_episode(
     return Episode(
         episode_id=episode_id,
         ticker=ticker,
-        outcome="pass" if target != Action.WAIT else "timeout",
+        outcome=outcome or ("pass" if target != Action.WAIT else "timeout"),
         primary_side="flat",
         ended_at_ns=offset,
         transitions=transitions,
@@ -635,6 +636,73 @@ def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> No
         assert all(row.paired_a_plus_pair_id is None for row in sequence[:2])
         values = [int(row.observation[0]) for row in sequence]
         assert values == list(range(values[0], values[0] + 6))
+
+
+def test_paired_replay_preserves_winner_and_failure_from_pass_timeout_and_blow(
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=50,
+    )
+    examples = (
+        # Episode outcome is context only. The setup-level economic label is
+        # what determines whether ENTER or WAIT is the exact pair target.
+        ("long-pass-winner", "pass", Action.ENTER_LONG_1, True, 0),
+        ("long-timeout-failure", "timeout", Action.ENTER_LONG_1, False, 100),
+        ("short-pass-winner", "pass", Action.ENTER_SHORT_1, True, 200),
+        ("short-blow-failure", "blow", Action.ENTER_SHORT_1, False, 300),
+    )
+    for episode_id, outcome, side, economic_win, offset in examples:
+        target = side if economic_win else Action.WAIT
+        replay.add(_paired_a_plus_episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            target=target,
+            side=side,
+            economic_win=economic_win,
+            context=(
+                (0.90 if side == Action.ENTER_LONG_1 else 0.10),
+                (0.85 if side == Action.ENTER_LONG_1 else 0.10),
+                (0.10 if side == Action.ENTER_LONG_1 else 0.90),
+                (0.10 if side == Action.ENTER_LONG_1 else 0.85),
+                0.10,
+                0.70,
+                0.20,
+            ),
+            offset=offset,
+            outcome=outcome,
+        ))
+
+    anchors = [sequence[2] for sequence in replay.sample(4)]
+
+    assert {anchor.source_decision_index for anchor in anchors} == {
+        5,
+        105,
+        205,
+        305,
+    }
+    assert Counter(anchor.paired_a_plus_economic_win for anchor in anchors) == {
+        True: 2,
+        False: 2,
+    }
+    for pair_id in {anchor.paired_a_plus_pair_id for anchor in anchors}:
+        pair = [anchor for anchor in anchors if anchor.paired_a_plus_pair_id == pair_id]
+        assert len(pair) == 2
+        side = pair[0].paired_a_plus_pair_side
+        assert {anchor.paired_a_plus_pair_side for anchor in pair} == {side}
+        assert {anchor.entry_action_target for anchor in pair} == {
+            side,
+            Action.WAIT,
+        }
+        assert {anchor.paired_a_plus_economic_win for anchor in pair} == {
+            True,
+            False,
+        }
 
 
 @pytest.mark.parametrize(
