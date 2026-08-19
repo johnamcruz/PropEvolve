@@ -89,8 +89,8 @@
       "adverse_r": 0.25,
       "horizon_bars": 3
     },
-    "target_r": 2,
-    "stop_r": 1,
+    "target_r": 2.0,
+    "stop_r": 1.0,
     "horizon_bars": 150,
     "collision": "stop_first",
     "loss_weight": 0.3,
@@ -217,8 +217,8 @@
     "teacher_free": true,
     "minimum_pass_rate": 0.5,
     "minimum_per_market_pass_rate": 0.5,
-    "maximum_blow_rate": 0,
-    "minimum_expectancy_r": 0
+    "maximum_blow_rate": 0.0,
+    "minimum_expectancy_r": 0.0
   },
   "agent": {
     "hidden_dim": 128,

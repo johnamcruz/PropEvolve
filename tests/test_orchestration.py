@@ -18,6 +18,7 @@ from ml_training_loop.domain import SkillBootstrapReceipt, SkillStatus
 
 from propevolve.evolution import CandidateArchive
 from propevolve.orchestration import (
+    _assert_parent_causal_contract,
     _plan,
     _reasoning_prompt,
     _resolve_codex_executable,
@@ -27,6 +28,7 @@ from tests.recipe_fixtures import stage2_recipe
 
 
 _CURRENT_CONFIG = stage2_recipe(19, contains="paired_aplus_contrastive.json")
+_PAIRED_RECURRENT_V21_CONFIG = stage2_recipe(21)
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -438,6 +440,34 @@ def _register_external_stage1_parent(
         status=status,
     )
     return candidate, evaluation
+
+
+def test_v21_matches_frozen_parent_causal_recipe_identity(
+    tmp_path: Path,
+) -> None:
+    from propevolve.config import load_experiment_config
+
+    child_recipe = load_experiment_config(_PAIRED_RECURRENT_V21_CONFIG)
+    parent_recipe = json.loads(json.dumps(child_recipe))
+    parent_recipe["sealed_confirmation"]["maximum_blow_rate"] = 0.0
+    parent_recipe["sealed_confirmation"]["minimum_expectancy_r"] = 0.0
+    parent_recipe["entry_supervision"]["target_r"] = 2.0
+    parent_recipe["entry_supervision"]["stop_r"] = 1.0
+    candidate_path = tmp_path / "candidate"
+    candidate_path.mkdir()
+    (candidate_path / "recipe.json").write_text(json.dumps(parent_recipe))
+    (candidate_path / "contract.json").write_text(json.dumps({
+        "training_tickers": list(child_recipe["tickers"]),
+        "deployment_tickers": list(child_recipe["deployment_tickers"]),
+        "training_only_tickers": list(child_recipe["training_only_tickers"]),
+        "temporal": dict(child_recipe["temporal"]),
+        "sealed_holdout_touched": False,
+    }))
+
+    _assert_parent_causal_contract(
+        SimpleNamespace(path=candidate_path),
+        child_recipe,
+    )
 
 
 def test_fresh_campaign_warm_starts_first_stage_from_external_stage1_candidate(
