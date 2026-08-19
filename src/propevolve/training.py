@@ -1156,10 +1156,38 @@ def _paired_a_plus_diagnostic(
         side_bad_sum = sum(
             group["bad_advantage_sum"] for group in side_groups
         )
+        direct_prefix = f"regime_selectivity_paired_a_plus_{side}_"
+        direct_pair_mass = float(sum(update_metrics.get(
+            direct_prefix + "pair_mass", ()
+        )))
+        direct = {
+            field: float(sum(update_metrics.get(direct_prefix + field, ())))
+            for field in (
+                "pair_count",
+                "pair_mass",
+                "loss_sum",
+                "good_advantage_sum",
+                "bad_advantage_sum",
+                "winner_population_weight_sum",
+                "failure_population_weight_sum",
+            )
+        }
+        if direct_pair_mass:
+            side_mass = direct_pair_mass
+            side_good_sum = direct["good_advantage_sum"]
+            side_bad_sum = direct["bad_advantage_sum"]
         sides[side] = {
-            "pair_count": sum(group["pair_count"] for group in side_groups),
+            "pair_count": (
+                direct["pair_count"]
+                if direct_pair_mass
+                else sum(group["pair_count"] for group in side_groups)
+            ),
             "pair_mass": side_mass,
-            "loss_sum": sum(group["loss_sum"] for group in side_groups),
+            "loss_sum": (
+                direct["loss_sum"]
+                if direct_pair_mass
+                else sum(group["loss_sum"] for group in side_groups)
+            ),
             "good_advantage_sum": side_good_sum,
             "good_advantage_mean": (
                 side_good_sum / side_mass if side_mass else 0.0
@@ -1167,6 +1195,14 @@ def _paired_a_plus_diagnostic(
             "bad_advantage_sum": side_bad_sum,
             "bad_advantage_mean": (
                 side_bad_sum / side_mass if side_mass else 0.0
+            ),
+            "winner_population_weight_mean": (
+                direct["winner_population_weight_sum"] / side_mass
+                if direct_pair_mass else 1.0
+            ),
+            "failure_population_weight_mean": (
+                direct["failure_population_weight_sum"] / side_mass
+                if direct_pair_mass else 1.0
             ),
         }
     return {

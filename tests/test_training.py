@@ -48,7 +48,7 @@ from propevolve.training import (
     prop_safety_objective,
     train_agent,
 )
-from tests.recipe_fixtures import stage2_recipe
+from tests.recipe_fixtures import paired_aplus_recipe
 
 
 def _recovery_curriculum_settings(*, fraction: float = 0.5) -> RecoveryCurriculumSettings:
@@ -309,6 +309,46 @@ def test_paired_a_plus_diagnostics_preserve_side_and_regime_evidence() -> None:
     assert diagnostics["bad_advantage_mean"] == pytest.approx(-0.25)
     assert diagnostics["sides"]["long"]["pair_mass"] == pytest.approx(0.75)
     assert diagnostics["sides"]["short"]["pair_mass"] == pytest.approx(1.25)
+
+
+def test_paired_recurrent_diagnostics_expose_population_correction_by_side(
+) -> None:
+    prefix = "regime_selectivity_paired_a_plus_"
+    diagnostics = training_module._paired_a_plus_diagnostic({
+        prefix + "pair_mass": [2.0],
+        prefix + "long_pair_count": [1.0],
+        prefix + "long_pair_mass": [1.0],
+        prefix + "long_loss_sum": [0.7],
+        prefix + "long_good_advantage_sum": [0.2],
+        prefix + "long_bad_advantage_sum": [-0.1],
+        prefix + "long_winner_population_weight_sum": [0.4],
+        prefix + "long_failure_population_weight_sum": [1.6],
+        prefix + "short_pair_count": [1.0],
+        prefix + "short_pair_mass": [1.0],
+        prefix + "short_loss_sum": [0.8],
+        prefix + "short_good_advantage_sum": [0.1],
+        prefix + "short_bad_advantage_sum": [-0.2],
+        prefix + "short_winner_population_weight_sum": [0.35],
+        prefix + "short_failure_population_weight_sum": [1.65],
+    })
+
+    assert diagnostics["sides"]["long"] == pytest.approx({
+        "pair_count": 1.0,
+        "pair_mass": 1.0,
+        "loss_sum": 0.7,
+        "good_advantage_sum": 0.2,
+        "good_advantage_mean": 0.2,
+        "bad_advantage_sum": -0.1,
+        "bad_advantage_mean": -0.1,
+        "winner_population_weight_mean": 0.4,
+        "failure_population_weight_mean": 1.6,
+    })
+    assert diagnostics["sides"]["short"]["winner_population_weight_mean"] == (
+        pytest.approx(0.35)
+    )
+    assert diagnostics["sides"]["short"]["failure_population_weight_mean"] == (
+        pytest.approx(1.65)
+    )
 
 
 @pytest.mark.parametrize(
@@ -1662,7 +1702,7 @@ def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable
         def discard_teacher() -> None:
             return None
 
-    recipe_path = stage2_recipe(19, contains="paired_aplus_contrastive.json")
+    recipe_path = paired_aplus_recipe(100)
     config = json.loads(recipe_path.read_text())
     Targets.channels = tuple(
         channel

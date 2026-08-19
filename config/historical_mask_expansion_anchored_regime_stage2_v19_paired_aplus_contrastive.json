@@ -1,5 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
+  "workspace_root": "..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",

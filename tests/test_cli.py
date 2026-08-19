@@ -11,10 +11,10 @@ import propevolve.teachers.expansion
 import propevolve.teachers.regime
 import propevolve.teachers.trend
 from propevolve.cli import main
-from tests.recipe_fixtures import retained_sweep_recipe, stage2_recipe
+from tests.recipe_fixtures import paired_aplus_recipe, retained_sweep_recipe
 
 
-_STAGE2_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
+_STAGE2_RECIPE = paired_aplus_recipe(100)
 _SWEEP_RECIPE = retained_sweep_recipe()
 
 
@@ -86,6 +86,7 @@ def test_evolve_status_reads_durable_state_without_running_training(
     capsys,
 ) -> None:
     payload = json.loads(_STAGE2_RECIPE.read_text())
+    payload["workspace_root"] = "."
     payload["campaign"]["state_root"] = "runs/status-test/ml-loop-state"
     config_path = tmp_path / "experiment.json"
     receipt_source = Path(

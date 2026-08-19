@@ -11,7 +11,7 @@ from propevolve.training_health import (
     TrainingPolicyHealthSpec,
 )
 from propevolve.config import load_experiment_config
-from tests.recipe_fixtures import stage2_recipe
+from tests.recipe_fixtures import paired_aplus_recipe
 
 
 def _spec(
@@ -121,7 +121,7 @@ def test_policy_health_defers_transfer_failure_until_teacher_autonomy() -> None:
 
 def test_stage2_v7_defers_the_v6_wait_failure_until_episode_100() -> None:
     config = load_experiment_config(
-        stage2_recipe(19, contains="paired_aplus_contrastive.json")
+        paired_aplus_recipe(100)
     )
     spec = TrainingPolicyHealthSpec.from_config(
         config["training"]["short_circuit"]["policy_health"]

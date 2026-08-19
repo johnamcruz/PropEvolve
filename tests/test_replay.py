@@ -597,8 +597,9 @@ def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> No
             row.source_decision_index,
             row.entry_action_target,
             row.paired_a_plus_pair_id,
-            row.paired_a_plus_pair_side,
-            row.paired_a_plus_economic_win,
+                row.paired_a_plus_pair_side,
+                row.paired_a_plus_economic_win,
+                row.paired_a_plus_population_weight,
         )
         for row in resumed_anchors
     ] == [
@@ -606,8 +607,9 @@ def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> No
             row.source_decision_index,
             row.entry_action_target,
             row.paired_a_plus_pair_id,
-            row.paired_a_plus_pair_side,
-            row.paired_a_plus_economic_win,
+                row.paired_a_plus_pair_side,
+                row.paired_a_plus_economic_win,
+                row.paired_a_plus_population_weight,
         )
         for row in anchors
     ]
@@ -631,11 +633,69 @@ def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> No
         and anchor.entry_action_target == Action.WAIT
     )
     assert long_failure.source_decision_index == 105
+    population_weights = {
+        (
+            anchor.paired_a_plus_pair_side,
+            anchor.paired_a_plus_economic_win,
+        ): anchor.paired_a_plus_population_weight
+        for anchor in anchors
+    }
+    # Pair sampling is deliberately one winner/one failure, but its absolute
+    # action gradients must preserve the natural within-side anchor prevalence.
+    assert population_weights == {
+        (Action.ENTER_LONG_1, True): pytest.approx(2.0 / 3.0),
+        (Action.ENTER_LONG_1, False): pytest.approx(4.0 / 3.0),
+        (Action.ENTER_SHORT_1, True): pytest.approx(1.0),
+        (Action.ENTER_SHORT_1, False): pytest.approx(1.0),
+    }
     for sequence in sampled:
         assert len(sequence) == 6
         assert all(row.paired_a_plus_pair_id is None for row in sequence[:2])
         values = [int(row.observation[0]) for row in sequence]
         assert values == list(range(values[0], values[0] + 6))
+
+
+def test_paired_replay_population_correction_handles_one_available_side(
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=48,
+    )
+    examples = (
+        ("winner", True, 0),
+        ("failure-1", False, 100),
+        ("failure-2", False, 200),
+        ("failure-3", False, 300),
+    )
+    for episode_id, economic_win, offset in examples:
+        replay.add(_paired_a_plus_episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            target=(Action.ENTER_LONG_1 if economic_win else Action.WAIT),
+            side=Action.ENTER_LONG_1,
+            economic_win=economic_win,
+            context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+            offset=offset,
+        ))
+
+    anchors = [sequence[2] for sequence in replay.sample(2)]
+
+    assert {anchor.paired_a_plus_pair_side for anchor in anchors} == {
+        Action.ENTER_LONG_1
+    }
+    assert {
+        anchor.paired_a_plus_economic_win:
+        anchor.paired_a_plus_population_weight
+        for anchor in anchors
+    } == {
+        True: pytest.approx(0.5),
+        False: pytest.approx(1.5),
+    }
 
 
 def test_paired_replay_preserves_winner_and_failure_from_pass_timeout_and_blow(

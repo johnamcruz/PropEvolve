@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.recipe_fixtures import stage2_recipe
+from tests.recipe_fixtures import paired_aplus_recipe, paired_recurrent_aplus_recipe
 
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
@@ -34,10 +34,10 @@ from propevolve.balance_aware_regime_selectivity import (
 )
 
 
-CURRENT_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
+CURRENT_RECIPE = paired_aplus_recipe(100)
 STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
-STAGE2_PAIRED_A_PLUS_450_RECIPE = stage2_recipe(19, contains="450ep")
-STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE = stage2_recipe(21)
+STAGE2_PAIRED_A_PLUS_450_RECIPE = paired_aplus_recipe(450)
+STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE = paired_recurrent_aplus_recipe(200)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -533,6 +533,49 @@ def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
     payload["training"]["batch_sequences"] = 12
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="even positive pair stratum"):
+        load_experiment_config(path)
+
+
+def test_paired_recurrent_recipe_loading_is_independent_of_config_filename(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["workspace_root"] = ".."
+    payload["regime_selectivity"].update({
+        "semantics": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "formula": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA,
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.25,
+        "side_balance": {
+            "schema": "paired_recurrent_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+    })
+    path.write_text(json.dumps(payload))
+    renamed = tmp_path / "runtime-selected" / "anything.json"
+    renamed.parent.mkdir()
+    renamed.write_bytes(path.read_bytes())
+
+    original = load_experiment_config(path)
+    selected_at_runtime = load_experiment_config(renamed)
+
+    assert selected_at_runtime["regime_selectivity"] == original[
+        "regime_selectivity"
+    ]
+    assert selected_at_runtime["campaign"] == original["campaign"]
+    assert Path(selected_at_runtime["_path"]).name == renamed.name
+    assert Path(selected_at_runtime["_root"]) == tmp_path.resolve()
+
+
+def test_recipe_requires_explicit_workspace_root_key(tmp_path: Path) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload.pop("workspace_root")
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="workspace_root recipe field is required"):
         load_experiment_config(path)
 
 

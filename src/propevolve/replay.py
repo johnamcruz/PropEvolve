@@ -43,6 +43,7 @@ class Transition:
     paired_a_plus_economic_win: bool | None = None
     paired_a_plus_pair_id: int | None = None
     paired_a_plus_pair_side: Action | None = None
+    paired_a_plus_population_weight: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1341,7 +1342,7 @@ class BalancedSequenceReplay:
             )
         balanced_entry_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
         paired_entry_anchors: dict[
-            int, tuple[_StoredEpisode, int, int, Action]
+            int, tuple[_StoredEpisode, int, int, Action, float]
         ] = {}
         if (
             self.entry_opportunity_side_balance
@@ -1409,17 +1410,26 @@ class BalancedSequenceReplay:
                 # otherwise valid winner/failure pairs.
                 pair_id = pair_offset
                 pair_start = entry_start + pair_offset * 2
+                population_count = len(winners[side]) + len(failures[side])
+                winner_population_weight = (
+                    2.0 * len(winners[side]) / population_count
+                )
+                failure_population_weight = (
+                    2.0 * len(failures[side]) / population_count
+                )
                 paired_entry_anchors[pair_start] = (
                     winner_episode,
                     winner_index,
                     pair_id,
                     side,
+                    winner_population_weight,
                 )
                 paired_entry_anchors[pair_start + 1] = (
                     failure_episode,
                     failure_index,
                     pair_id,
                     side,
+                    failure_population_weight,
                 )
         if self.entry_opportunity_side_balance == "equal_long_short_v1":
             opportunity_episodes: dict[Action, list[_StoredEpisode]] = defaultdict(list)
@@ -1483,7 +1493,13 @@ class BalancedSequenceReplay:
                 continue
             paired_entry_anchor = paired_entry_anchors.get(index)
             if paired_entry_anchor is not None:
-                episode, anchor_index, pair_id, pair_side = paired_entry_anchor
+                (
+                    episode,
+                    anchor_index,
+                    pair_id,
+                    pair_side,
+                    population_weight,
+                ) = paired_entry_anchor
                 sequence = list(episode.target_anchored_sequence(
                     anchor_index=anchor_index,
                     length=self.sequence_length,
@@ -1494,6 +1510,7 @@ class BalancedSequenceReplay:
                     sequence[self.recurrent_burn_in],
                     paired_a_plus_pair_id=pair_id,
                     paired_a_plus_pair_side=pair_side,
+                    paired_a_plus_population_weight=population_weight,
                 )
                 sequences.append(tuple(sequence))
                 continue

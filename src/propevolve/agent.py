@@ -530,6 +530,7 @@ def paired_recurrent_a_plus_rank_loss(
     pair_ids: torch.Tensor,
     pair_sides: torch.Tensor,
     economic_wins: torch.Tensor,
+    population_weights: torch.Tensor,
     margin: float,
     action_margin: float,
 ) -> PairedAPlusRankResult:
@@ -555,9 +556,31 @@ def paired_recurrent_a_plus_rank_loss(
         or float(action_margin) < 0.0
     ):
         raise ValueError("paired recurrent A+ loss contract is invalid")
+    if (
+        population_weights.shape != row_shape
+        or not torch.is_floating_point(population_weights)
+        or not torch.isfinite(population_weights).all()
+    ):
+        raise ValueError("paired recurrent A+ population weights are invalid")
     zero = flat_action_values.sum() * 0.0
     active_pair_ids = torch.unique(pair_ids[pair_ids >= 0]).tolist()
     side_losses: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_good_advantages: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_bad_advantages: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_winner_population_weights: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_failure_population_weights: dict[int, list[torch.Tensor]] = {
         int(Action.ENTER_LONG_1): [],
         int(Action.ENTER_SHORT_1): [],
     }
@@ -576,6 +599,7 @@ def paired_recurrent_a_plus_rank_loss(
             continue
         sides = pair_sides.index_select(0, indices)
         wins = economic_wins.index_select(0, indices)
+        weights = population_weights.index_select(0, indices)
         if (
             indices.numel() != 2
             or int(sides[0].item())
@@ -586,9 +610,20 @@ def paired_recurrent_a_plus_rank_loss(
             raise ValueError(
                 "paired recurrent A+ requires one explicit economic pair"
             )
+        if (
+            bool((weights <= 0.0).any().item())
+            or not math.isclose(
+                float(weights.sum().item()), 2.0, rel_tol=1e-6, abs_tol=1e-6
+            )
+        ):
+            raise ValueError(
+                "paired recurrent A+ population weights are invalid"
+            )
         side = int(sides[0].item())
         winner_index = indices[torch.nonzero(wins, as_tuple=False)[0, 0]]
         failure_index = indices[torch.nonzero(~wins, as_tuple=False)[0, 0]]
+        winner_population_weight = population_weights[winner_index]
+        failure_population_weight = population_weights[failure_index]
         good_advantage = (
             flat_action_values[winner_index, side]
             - flat_action_values[winner_index, int(Action.WAIT)]
@@ -608,11 +643,15 @@ def paired_recurrent_a_plus_rank_loss(
         )
         side_losses[side].append(torch.stack((
             relative_loss,
-            winner_loss,
-            failure_loss,
+            winner_population_weight * winner_loss,
+            failure_population_weight * failure_loss,
         )).mean())
         good_advantages.append(good_advantage)
         bad_advantages.append(bad_advantage)
+        side_good_advantages[side].append(good_advantage)
+        side_bad_advantages[side].append(bad_advantage)
+        side_winner_population_weights[side].append(winner_population_weight)
+        side_failure_population_weights[side].append(failure_population_weight)
     present_side_losses: list[torch.Tensor] = []
     for side_name, side in (
         ("long", int(Action.ENTER_LONG_1)),
@@ -628,6 +667,27 @@ def paired_recurrent_a_plus_rank_loss(
         )
         group_metrics[f"{side_name}_loss_sum"] = (
             torch.stack(losses).sum() if losses else zero
+        )
+        group_metrics[f"{side_name}_pair_mass"] = torch.tensor(
+            float(len(losses)),
+            dtype=flat_action_values.dtype,
+            device=flat_action_values.device,
+        )
+        group_metrics[f"{side_name}_good_advantage_sum"] = (
+            torch.stack(side_good_advantages[side]).sum()
+            if losses else zero
+        )
+        group_metrics[f"{side_name}_bad_advantage_sum"] = (
+            torch.stack(side_bad_advantages[side]).sum()
+            if losses else zero
+        )
+        group_metrics[f"{side_name}_winner_population_weight_sum"] = (
+            torch.stack(side_winner_population_weights[side]).sum()
+            if losses else zero
+        )
+        group_metrics[f"{side_name}_failure_population_weight_sum"] = (
+            torch.stack(side_failure_population_weights[side]).sum()
+            if losses else zero
         )
     pair_count = torch.tensor(
         float(len(good_advantages)),
@@ -2184,14 +2244,21 @@ class RecurrentC51Agent:
                             economic_wins = np.zeros(
                                 observations.shape[:2], dtype=np.bool_
                             )
+                            population_weights = np.zeros(
+                                observations.shape[:2], dtype=np.float32
+                            )
                             for batch_index, sequence in enumerate(sequences):
                                 for time_index, transition in enumerate(sequence):
                                     if transition.paired_a_plus_pair_id is None:
                                         continue
+                                    population_weight = (
+                                        transition.paired_a_plus_population_weight
+                                    )
                                     if (
                                         transition.paired_a_plus_pair_side is None
                                         or transition.paired_a_plus_economic_win
                                         is None
+                                        or population_weight is None
                                     ):
                                         raise ValueError(
                                             "paired recurrent A+ batch evidence "
@@ -2205,6 +2272,9 @@ class RecurrentC51Agent:
                                     )
                                     economic_wins[batch_index, time_index] = bool(
                                         transition.paired_a_plus_economic_win
+                                    )
+                                    population_weights[batch_index, time_index] = (
+                                        float(population_weight)
                                     )
                             paired_result = paired_recurrent_a_plus_rank_loss(
                                 flat_q,
@@ -2235,6 +2305,15 @@ class RecurrentC51Agent:
                                     dtype=torch.bool,
                                     device=self.device,
                                 )[selectivity_rows],
+                                population_weights=torch.as_tensor(
+                                    population_weights[
+                                        :,
+                                        self.recurrent_burn_in:
+                                        self.recurrent_burn_in + training_steps,
+                                    ],
+                                    dtype=flat_q.dtype,
+                                    device=self.device,
+                                )[selectivity_rows],
                                 margin=self.regime_selectivity_paired_a_plus_margin,
                                 action_margin=self.entry_action_margin,
                             )
@@ -2256,6 +2335,10 @@ class RecurrentC51Agent:
                             regime_selectivity_paired_a_plus_bad_advantage_sum = (
                                 paired_result.bad_advantage_sum
                             )
+                            paired_a_plus_additive.update({
+                                "regime_selectivity_paired_a_plus_" + name: value
+                                for name, value in paired_result.group_metrics.items()
+                            })
                             paired_a_plus_group_active = (
                                 paired_result.active_groups > 0
                             ).to(exact_losses.dtype)

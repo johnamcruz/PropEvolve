@@ -111,11 +111,11 @@ def _market_from_paths(high: np.ndarray, low: np.ndarray) -> MarketSeries:
     )
 
 
-def _short_market(*, rows: int = 160) -> MarketSeries:
+def _short_market(*, rows: int = 160, economic_low: float = 95.9) -> MarketSeries:
     high = np.full(rows, 100.2)
     low = np.full(rows, 99.8)
     low[1] = 98.9
-    low[4] = 95.9
+    low[4] = economic_low
     return _market_from_paths(high, low)
 
 
@@ -473,6 +473,10 @@ def test_exact_two_r_label_builds_paired_winner_and_non_hit_training_evidence() 
             economic_stop_collision=True,
         )
     )
+    short_winner_targets = _build_targets(_short_market())
+    short_horizon_non_hit_targets = _build_targets(
+        _short_market(economic_low=96.0)
+    )
 
     winner = _paired_a_plus_transition_evidence(
         teacher_target=context,
@@ -492,6 +496,18 @@ def test_exact_two_r_label_builds_paired_winner_and_non_hit_training_evidence() 
         entry_action_target=stopped_non_hit_targets.target("NQ", 0),
         metadata=stopped_non_hit_targets.metadata("NQ", 0),
     )
+    short_winner = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=channels,
+        entry_action_target=short_winner_targets.target("NQ", 0),
+        metadata=short_winner_targets.metadata("NQ", 0),
+    )
+    short_horizon_non_hit = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=channels,
+        entry_action_target=short_horizon_non_hit_targets.target("NQ", 0),
+        metadata=short_horizon_non_hit_targets.metadata("NQ", 0),
+    )
 
     np.testing.assert_array_equal(winner[0], context)
     assert winner[1:] == (Action.ENTER_LONG_1, True)
@@ -499,6 +515,10 @@ def test_exact_two_r_label_builds_paired_winner_and_non_hit_training_evidence() 
     assert horizon_non_hit[1:] == (Action.ENTER_LONG_1, False)
     np.testing.assert_array_equal(stopped_non_hit[0], context)
     assert stopped_non_hit[1:] == (Action.ENTER_LONG_1, False)
+    np.testing.assert_array_equal(short_winner[0], context)
+    assert short_winner[1:] == (Action.ENTER_SHORT_1, True)
+    np.testing.assert_array_equal(short_horizon_non_hit[0], context)
+    assert short_horizon_non_hit[1:] == (Action.ENTER_SHORT_1, False)
 
 
 def test_economic_stop_wins_when_two_r_and_minus_one_r_touch_same_bar() -> None:

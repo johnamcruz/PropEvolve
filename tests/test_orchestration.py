@@ -24,11 +24,11 @@ from propevolve.orchestration import (
     _resolve_codex_executable,
     run_evolution_campaign,
 )
-from tests.recipe_fixtures import stage2_recipe
+from tests.recipe_fixtures import paired_aplus_recipe, paired_recurrent_aplus_recipe
 
 
-_CURRENT_CONFIG = stage2_recipe(19, contains="paired_aplus_contrastive.json")
-_PAIRED_RECURRENT_V21_CONFIG = stage2_recipe(21)
+_CURRENT_CONFIG = paired_aplus_recipe(100)
+_PAIRED_RECURRENT_V21_CONFIG = paired_recurrent_aplus_recipe(200)
 _ENTRY_CENTER_RECEIPT = Path(
     "config/receipts/expansion_entry_centers_9market_pre2025_v1.json"
 )
@@ -42,6 +42,7 @@ _GENERIC_REVISION_PATHS = (
 def _generic_v4_payload() -> dict:
     """Derive a revisable orchestration fixture from the active recipe."""
     payload = json.loads(_CURRENT_CONFIG.read_text())
+    payload["workspace_root"] = "."
     challenge_frozen_paths = [
         f"challenge.{field}"
         for field in payload["challenge"]
@@ -399,6 +400,7 @@ class ReasoningRejectsSurrogateProposal(ImproveHiddenDimension):
 
 def _config(tmp_path: Path) -> Path:
     payload = _generic_v4_payload()
+    payload["workspace_root"] = "."
     payload["output"] = "runs/evolution-test"
     payload["campaign"]["state_root"] = "runs/evolution-test/ml-loop-state"
     _write_entry_center_receipt(tmp_path)

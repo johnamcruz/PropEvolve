@@ -304,6 +304,20 @@ def _require_recipe_fields(payload: dict) -> None:
         )
 
 
+def _workspace_root(payload: dict, *, config_path: Path) -> Path:
+    """Resolve the repository root declared by recipe content."""
+    configured = payload.get("workspace_root")
+    if not isinstance(configured, str) or not configured.strip():
+        raise ValueError("workspace_root recipe field is required")
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        candidate = config_path.parent / candidate
+    try:
+        return candidate.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise ValueError("workspace_root does not exist") from error
+
+
 def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     """Validate the fully frozen, training-only post-launch action contract."""
     specification = payload.get("entry_supervision")
@@ -543,7 +557,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         raise ValueError("Stage-2 recovery challenge economics drifted")
 
 
-def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
+def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
     """Authenticate the optional Stage 2A training-only selectivity contract."""
     specification = payload.get("regime_selectivity")
     if specification is None:
@@ -894,11 +908,6 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
         raise ValueError(
             "Regime WAIT replay requires side-conditioned confluence semantics"
         )
-    root = (
-        config_path.parent.parent.resolve()
-        if config_path.parent.name == "config"
-        else config_path.parent.resolve()
-    )
     receipt_path = (
         root / str(specification["expansion_center_receipt"])
     ).resolve(strict=True)
@@ -923,10 +932,11 @@ def _validate_regime_selectivity(payload: dict, *, config_path: Path) -> None:
 
 
 def load_experiment_config(path: str | Path) -> dict:
-    path = Path(path)
+    path = Path(path).resolve(strict=True)
     payload = json.loads(path.read_text())
     if payload.get("schema") != "propevolve_historical_training_v1":
         raise ValueError("unsupported PropEvolve experiment schema")
+    root = _workspace_root(payload, config_path=path)
     # Schema-v1 recipes created before runtime tuning preserve their original
     # eager FP32 behavior. Current repository recipes serialize these fields.
     payload.setdefault("runtime", dict(DEFAULT_RUNTIME))
@@ -1414,7 +1424,7 @@ def load_experiment_config(path: str | Path) -> dict:
         ):
             raise ValueError("teacher autonomy start fraction is invalid")
         payload["teachers"] = tuple(teachers)
-    _validate_regime_selectivity(payload, config_path=path)
+    _validate_regime_selectivity(payload, root=root)
     temporal = payload.get("temporal") or {}
     ordered = [
         temporal.get("train_start"), temporal.get("train_end"),
@@ -1572,12 +1582,6 @@ def load_experiment_config(path: str | Path) -> dict:
             if paired_margin_frozen:
                 valid_regime_identity = (
                     valid_regime_identity
-                        and payload["regime_selectivity"].get("semantics")
-                            in {
-                                "paired_a_plus_expansion_regime_contrastive_v6",
-                                "paired_recurrent_a_plus_expansion_regime_"
-                                "absolute_contrastive_v8",
-                            }
                     and "regime_selectivity.paired_a_plus_margin" in frozen
                 )
         if not valid_regime_identity:
@@ -2094,10 +2098,6 @@ def load_experiment_config(path: str | Path) -> dict:
     payload["tickers"] = tickers
     payload["deployment_tickers"] = deployment
     payload["training_only_tickers"] = training_only
-    payload["_path"] = str(path.resolve())
-    payload["_root"] = str(
-        path.parent.parent.resolve()
-        if path.parent.name == "config"
-        else path.parent.resolve()
-    )
+    payload["_path"] = str(path)
+    payload["_root"] = str(root)
     return payload
