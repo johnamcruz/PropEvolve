@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Mapping, Protocol
@@ -48,6 +49,37 @@ from .reasoning import GepaReflectiveReasoningAdapter
 
 
 _STAGE_ADAPTER = "propevolve-candidate"
+
+
+def reserve_evolution_run_id(config: Mapping[str, object]) -> str:
+    """Atomically reserve the next revision for one frozen campaign config."""
+    root = Path(str(config["_root"]))
+    state_root = root / str(config["campaign"]["state_root"])
+    state_root.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(
+        r"[^A-Za-z0-9]+",
+        "-",
+        Path(str(config["output"])).name,
+    ).strip("-")
+    if not stem:
+        raise ValueError("campaign output must provide a run identity stem")
+    revision_pattern = re.compile(r"(?:^|-)r([1-9][0-9]*)(?:-|$)")
+    revision = 1 + max(
+        (
+            int(match.group(1))
+            for entry in state_root.iterdir()
+            if (match := revision_pattern.search(entry.name)) is not None
+        ),
+        default=0,
+    )
+    while True:
+        run_id = f"{stem}-r{revision}"
+        try:
+            (state_root / run_id).mkdir(exist_ok=False)
+        except FileExistsError:
+            revision += 1
+            continue
+        return run_id
 
 _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS = (
     "assets",

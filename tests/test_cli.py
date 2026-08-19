@@ -139,6 +139,48 @@ def test_evolve_command_dispatches_the_shared_training_loop(
     assert json.loads(capsys.readouterr().out)["phase"] == "COMPLETE"
 
 
+def test_evolve_command_auto_versions_repeated_frozen_config_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "any-config-name.json"
+    config = {
+        "_root": str(tmp_path),
+        "output": "runs/auto-version-test",
+        "campaign": {
+            "state_root": "runs/auto-version-test/ml-loop-state",
+        },
+    }
+    monkeypatch.setattr(
+        "propevolve.cli.load_experiment_config",
+        lambda path: config,
+    )
+    state_root = tmp_path / str(config["campaign"]["state_root"])
+    (state_root / "legacy-manual-r2-20260818").mkdir(parents=True)
+    (state_root / "legacy-manual-r6-20260819").mkdir()
+    calls = []
+
+    def fake_campaign(config_path, *, run_id, recover_reasoning=False):
+        calls.append((config_path, run_id, recover_reasoning))
+        return RunState(run_id, "plan", Phase.COMPLETE)
+
+    monkeypatch.setattr(
+        propevolve.orchestration,
+        "run_evolution_campaign",
+        fake_campaign,
+    )
+
+    assert main(["evolve", "--config", str(config_path)]) == 0
+    assert main(["evolve", "--config", str(config_path)]) == 0
+
+    assert calls == [
+        (str(config_path), "auto-version-test-r7", False),
+        (str(config_path), "auto-version-test-r8", False),
+    ]
+    assert (state_root / "auto-version-test-r7").is_dir()
+    assert (state_root / "auto-version-test-r8").is_dir()
+
+
 def test_evolve_command_can_recover_the_last_reasoning_checkpoint(
     monkeypatch,
 ) -> None:

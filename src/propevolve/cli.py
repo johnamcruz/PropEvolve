@@ -59,12 +59,20 @@ def _parser() -> argparse.ArgumentParser:
         "evolve", help="run or resume reasoning-guided offline evolution"
     )
     evolve.add_argument("--config", required=True)
-    evolve.add_argument("--run-id", required=True)
+    evolve.add_argument(
+        "--run-id",
+        help="explicit durable run identity to resume; omitted reserves the next rN",
+    )
     evolve.add_argument(
         "--recover-reasoning",
         action="store_true",
         help="resume from the latest durable NEEDS_REASONING checkpoint",
     )
+    launch_evolve = subparsers.add_parser(
+        "launch-evolve",
+        help="generate and bootstrap a versioned launchd job from a runtime config",
+    )
+    launch_evolve.add_argument("--config", required=True)
     optuna_sweep = subparsers.add_parser(
         "optuna-sweep",
         help="run or resume a constrained Optuna TPE study",
@@ -281,7 +289,8 @@ def _evolve_status(config: dict, run_id: str) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     if args.command == "setup-assets":
         contract = link_local_assets(
             args.workspace,
@@ -317,6 +326,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "result": str(result.result_path),
         }, sort_keys=True))
         return 0 if result.status == "COMPLETE" else 2
+    if args.command == "launch-evolve":
+        from .launchd import launch_evolution_config
+
+        launch = launch_evolution_config(args.config)
+        print(json.dumps({
+            "label": launch.label,
+            "run_id": launch.run_id,
+            "plist": str(launch.plist_path),
+            "stdout": str(launch.stdout_path),
+            "stderr": str(launch.stderr_path),
+        }, sort_keys=True))
+        return 0
     config = load_experiment_config(args.config)
     if args.command == "validate-config":
         print(f"VALID {config['_path']}")
@@ -343,9 +364,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(rendered, flush=True)
         return 0
     if args.command == "evolve":
+        run_id = args.run_id
+        if run_id is None:
+            if args.recover_reasoning:
+                parser.error("--recover-reasoning requires an explicit --run-id")
+            from .orchestration import reserve_evolution_run_id
+
+            run_id = reserve_evolution_run_id(config)
         return _evolve(
             args.config,
-            args.run_id,
+            run_id,
             recover_reasoning=args.recover_reasoning,
         )
     if args.command == "evolve-status":
