@@ -191,6 +191,11 @@ class _StoredEpisode:
         paired_a_plus_economic_wins = np.full(
             len(transitions), -1, dtype=np.int8
         )
+        flat_actions = {
+            Action.WAIT,
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
         for index, item in enumerate(transitions):
             evidence = (
                 item.paired_a_plus_context,
@@ -216,6 +221,9 @@ class _StoredEpisode:
                 or (context > 1.0).any()
                 or side not in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
                 or type(economic_win) is not bool
+                or item.teacher_target is None
+                or item.regime_selectivity_headroom_fraction is None
+                or not flat_actions.issubset(item.valid_actions)
                 or (
                     economic_win
                     and item.entry_action_target != side
@@ -226,7 +234,8 @@ class _StoredEpisode:
                 )
             ):
                 raise ValueError(
-                    "replay paired A+ economic outcome is invalid"
+                    "replay paired A+ economic outcome or learner evidence "
+                    "is invalid"
                 )
             paired_a_plus_contexts[index] = context
             paired_a_plus_sides[index] = int(side)
@@ -259,11 +268,6 @@ class _StoredEpisode:
         regime_selectivity_headroom_fractions = np.full(
             len(transitions), np.nan, dtype=np.float32
         )
-        flat_actions = {
-            Action.WAIT,
-            Action.ENTER_LONG_1,
-            Action.ENTER_SHORT_1,
-        }
         for index, item in enumerate(transitions):
             if item.entry_action_target is None:
                 continue

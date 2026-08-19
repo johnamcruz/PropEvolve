@@ -259,6 +259,65 @@ def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> N
         )
 
 
+def test_paired_recurrent_a_plus_skips_an_orphaned_unlearnable_anchor() -> None:
+    values = torch.tensor(
+        [[0.0, 1.0, 0.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    result = paired_recurrent_a_plus_rank_loss(
+        values,
+        pair_ids=torch.tensor([3]),
+        pair_sides=torch.tensor([1]),
+        economic_wins=torch.tensor([True]),
+        margin=0.25,
+    )
+    gradient, = torch.autograd.grad(result.loss, values)
+
+    assert result.pair_count.item() == 0.0
+    assert result.loss.item() == 0.0
+    assert gradient.abs().sum().item() == 0.0
+
+
+def test_paired_recurrent_a_plus_keeps_complete_pairs_when_an_orphan_is_skipped(
+) -> None:
+    values = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, -0.5, 0.0],
+            [0.0, 0.0, 9.0],
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+
+    result = paired_recurrent_a_plus_rank_loss(
+        values,
+        pair_ids=torch.tensor([3, 3, 4]),
+        pair_sides=torch.tensor([1, 1, 2]),
+        economic_wins=torch.tensor([True, False, True]),
+        margin=0.25,
+    )
+    gradient, = torch.autograd.grad(result.loss, values)
+
+    assert result.pair_count.item() == 1.0
+    assert result.group_metrics["long_pair_count"].item() == 1.0
+    assert result.group_metrics["short_pair_count"].item() == 0.0
+    assert gradient[2].abs().sum().item() == 0.0
+
+
+def test_paired_recurrent_a_plus_rejects_more_than_two_rows_for_one_pair() -> None:
+    with pytest.raises(ValueError, match="explicit economic pair"):
+        paired_recurrent_a_plus_rank_loss(
+            torch.zeros((3, 3), dtype=torch.float32),
+            pair_ids=torch.tensor([3, 3, 3]),
+            pair_sides=torch.tensor([1, 1, 1]),
+            economic_wins=torch.tensor([True, False, False]),
+            margin=0.25,
+        )
+
+
 def test_paired_a_plus_uses_continuous_regime_similarity_without_argmax() -> None:
     result = paired_a_plus_rank_loss(
         torch.tensor([
@@ -837,6 +896,7 @@ def _sequence(
     pair_id: int | None = None,
     pair_side: Action | None = None,
     economic_win: bool | None = None,
+    training_valid: bool = True,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     return (
@@ -855,6 +915,7 @@ def _sequence(
             paired_a_plus_pair_id=pair_id,
             paired_a_plus_pair_side=pair_side,
             paired_a_plus_economic_win=economic_win,
+            training_valid=training_valid,
         ),
     )
 
@@ -904,6 +965,55 @@ def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None
     assert agent.last_train_metrics[
         "regime_selectivity_paired_a_plus_pair_count"
     ] == 1.0
+
+
+def test_paired_recurrent_batch_keeps_td_when_one_pair_anchor_is_unlearnable() -> None:
+    agent = _agent(
+        seed=504,
+        selectivity_weight=0.3,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    teacher = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    winner = _sequence(
+        (1.0, 0.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=True,
+    )
+    unlearnable_failure = _sequence(
+        (0.0, 1.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+        training_valid=False,
+    )
+
+    agent.train_batch((winner, unlearnable_failure))
+
+    assert agent.last_train_metrics["sampled_valid_learning_rows"] == 1.0
+    assert agent.last_train_metrics["rl_loss"] > 0.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_pair_count"
+    ] == 0.0
 
 
 def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(

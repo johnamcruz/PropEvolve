@@ -562,6 +562,14 @@ def paired_recurrent_a_plus_rank_loss(
     group_metrics: dict[str, torch.Tensor] = {}
     for pair_id in active_pair_ids:
         indices = torch.nonzero(pair_ids == int(pair_id), as_tuple=False).flatten()
+        # Replay emits winner/failure anchors atomically, but the learner's
+        # causal n-step eligibility mask may remove either anchor at a batch
+        # boundary.  Never turn the surviving anchor into one-sided economic
+        # supervision: omit that pair from this auxiliary loss while leaving
+        # ordinary C51 learning intact.  Complete-but-malformed evidence still
+        # fails closed below.
+        if indices.numel() == 1:
+            continue
         sides = pair_sides.index_select(0, indices)
         wins = economic_wins.index_select(0, indices)
         if (

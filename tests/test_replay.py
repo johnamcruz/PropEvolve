@@ -472,6 +472,7 @@ def _paired_a_plus_episode(
     economic_win: bool,
     context: tuple[float, ...],
     offset: int,
+    learner_evidence: bool = True,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
@@ -488,6 +489,14 @@ def _paired_a_plus_episode(
             valid_actions=flat_actions,
             next_valid_actions=() if index == 11 else flat_actions,
             entry_action_target=target if index == 5 else None,
+            teacher_target=(
+                np.asarray(context, dtype=np.float32)
+                if index == 5 and learner_evidence
+                else None
+            ),
+            regime_selectivity_headroom_fraction=(
+                1.0 if index == 5 and learner_evidence else None
+            ),
             paired_a_plus_context=(
                 np.asarray(context, dtype=np.float32) if index == 5 else None
             ),
@@ -658,6 +667,30 @@ def test_paired_replay_rejects_winner_failure_economic_mismatch(
             economic_win=economic_win,
             context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
             offset=0,
+        ))
+
+
+def test_paired_replay_rejects_pair_without_complete_learner_evidence() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=49,
+    )
+
+    with pytest.raises(ValueError, match="learner evidence"):
+        replay.add(_paired_a_plus_episode(
+            episode_id="unlearnable-economic-pair",
+            ticker="NQ",
+            target=Action.ENTER_LONG_1,
+            side=Action.ENTER_LONG_1,
+            economic_win=True,
+            context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+            offset=0,
+            learner_evidence=False,
         ))
 
 
