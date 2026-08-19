@@ -37,6 +37,7 @@ from propevolve.balance_aware_regime_selectivity import (
 CURRENT_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
 STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
 STAGE2_PAIRED_A_PLUS_450_RECIPE = stage2_recipe(19, contains="450ep")
+STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE = stage2_recipe(21)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -533,6 +534,27 @@ def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="even positive pair stratum"):
         load_experiment_config(path)
+
+
+def test_v21_recipe_changes_only_paired_replay_and_uses_200_episode_stage() -> None:
+    baseline = load_experiment_config(STAGE2_PAIRED_A_PLUS_RECIPE)
+    candidate = load_experiment_config(STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE)
+
+    selectivity = candidate["regime_selectivity"]
+    assert selectivity["semantics"] == (
+        PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+    )
+    assert selectivity["formula"] == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA
+    assert selectivity["side_balance"] == {
+        "schema": "paired_recurrent_long_short_v1",
+        "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+    }
+    assert selectivity["paired_a_plus_margin"] == 0.25
+    stage = candidate["campaign"]["budget_stages"][0]
+    assert stage["training_episodes"] == 200
+    assert stage["validation_episodes"] == 200
+    for key in ("agent", "challenge", "entry_supervision", "teachers", "temporal"):
+        assert candidate[key] == baseline[key]
 
 
 def test_paired_a_plus_450_recipe_scales_v19_curriculum_proportionally() -> None:
