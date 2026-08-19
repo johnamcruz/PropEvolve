@@ -268,6 +268,60 @@ def test_paired_recurrent_a_plus_anchors_winner_and_failure_absolutely() -> None
     assert gradient[1, Action.WAIT] < 0.0
 
 
+def test_paired_economic_and_exact_action_losses_cover_full_decision_boundary(
+) -> None:
+    action_values = torch.tensor(
+        [
+            # The opposite entry is strongest on each winner. Both entries
+            # incorrectly beat WAIT on each failure.
+            [0.00, 0.38, 0.80],  # Long winner.
+            [0.00, 0.09, 0.60],  # Long failure.
+            [0.00, 0.70, 0.38],  # Short winner.
+            [0.00, 0.60, 0.09],  # Short failure.
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    targets = torch.tensor([
+        int(Action.ENTER_LONG_1),
+        int(Action.WAIT),
+        int(Action.ENTER_SHORT_1),
+        int(Action.WAIT),
+    ])
+
+    paired = paired_recurrent_a_plus_rank_loss(
+        action_values,
+        pair_ids=torch.tensor([10, 10, 11, 11]),
+        pair_sides=torch.tensor([1, 1, 2, 2]),
+        economic_wins=torch.tensor([True, False, True, False]),
+        margin=0.25,
+        action_margin=0.25,
+    )
+    exact = exact_action_margin_losses(
+        action_values,
+        targets,
+        margin=0.25,
+    )
+    gradient, = torch.autograd.grad(paired.loss + exact.mean(), action_values)
+
+    # Gradient descent raises the correct entry and suppresses WAIT plus the
+    # opposite side for both winner families.
+    assert gradient[0, Action.ENTER_LONG_1] < 0.0
+    assert gradient[0, Action.WAIT] > 0.0
+    assert gradient[0, Action.ENTER_SHORT_1] > 0.0
+    assert gradient[2, Action.ENTER_SHORT_1] < 0.0
+    assert gradient[2, Action.WAIT] > 0.0
+    assert gradient[2, Action.ENTER_LONG_1] > 0.0
+    # Gradient descent raises WAIT and suppresses both entries for failures,
+    # including the non-declared side that the paired loss does not address.
+    assert gradient[1, Action.WAIT] < 0.0
+    assert gradient[1, Action.ENTER_LONG_1] > 0.0
+    assert gradient[1, Action.ENTER_SHORT_1] > 0.0
+    assert gradient[3, Action.WAIT] < 0.0
+    assert gradient[3, Action.ENTER_LONG_1] > 0.0
+    assert gradient[3, Action.ENTER_SHORT_1] > 0.0
+
+
 def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> None:
     values = torch.zeros((2, 3), dtype=torch.float32)
 
