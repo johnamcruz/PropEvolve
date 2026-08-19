@@ -35,7 +35,6 @@ class Transition:
     regime_wait_priority: float = 0.0
     training_valid: bool = True
     source_decision_index: int | None = None
-    source_ticker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,12 +167,6 @@ class _StoredEpisode:
             for item in transitions
         ):
             raise ValueError("replay source decision index is invalid")
-        if any(
-            item.source_ticker is not None
-            and item.source_ticker != episode.ticker
-            for item in transitions
-        ):
-            raise ValueError("replay source ticker does not match its episode")
         for current, following in zip(transitions, transitions[1:]):
             if not np.array_equal(current.next_observation, following.observation):
                 raise ValueError("replay episode observations are not contiguous")
@@ -371,7 +364,6 @@ class _StoredEpisode:
                     if self.source_decision_indices[index] < 0
                     else int(self.source_decision_indices[index])
                 ),
-                source_ticker=self.ticker,
             )
             for index in range(start, stop)
         )

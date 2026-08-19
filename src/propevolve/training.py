@@ -23,9 +23,7 @@ from .assets import AssetContract
 from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
-    CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-    PAIRED_A_PLUS_SEMANTICS,
     REGIME_STATE_NAMES,
     REGIME_TEACHER_CHANNELS,
 )
@@ -1808,7 +1806,6 @@ def _training_evaluation_gates(
             "side_conditioned_expansion_regime_confluence_v4",
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1869,7 +1866,6 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
@@ -1884,7 +1880,6 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1902,7 +1897,6 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-                CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1955,7 +1949,7 @@ def _training_evaluation_gates(
                             0.0,
                         ),
                     ))
-            if regime_selectivity_semantics in PAIRED_A_PLUS_SEMANTICS:
+            if regime_selectivity_semantics == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS:
                 gates.extend((
                     EvaluationGate(
                         "regime_selectivity_paired_a_plus_pair_mass", ">", 0.0

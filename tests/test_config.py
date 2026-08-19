@@ -20,8 +20,6 @@ from propevolve.balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_FORMULA,
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA,
-    CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA,
-    CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
     EXPANSION_REGIME_CONFLUENCE_FORMULA,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     FORMULA as REGIME_SELECTIVITY_FORMULA,
@@ -37,7 +35,6 @@ from propevolve.balance_aware_regime_selectivity import (
 CURRENT_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
 STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
 STAGE2_PAIRED_A_PLUS_450_RECIPE = stage2_recipe(19, contains="450ep")
-STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE = stage2_recipe(20)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -523,38 +520,6 @@ def test_paired_a_plus_450_recipe_scales_v19_curriculum_proportionally() -> None
     candidate["campaign"]["state_root"] = baseline["campaign"]["state_root"]
     candidate["output"] = baseline["output"]
     assert candidate == baseline
-
-
-def test_context_matched_a_plus_recipe_is_one_200_episode_v19_ablation() -> None:
-    baseline = load_experiment_config(STAGE2_PAIRED_A_PLUS_RECIPE)
-    candidate = load_experiment_config(
-        STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE
-    )
-
-    selectivity = candidate["regime_selectivity"]
-    assert selectivity["semantics"] == CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS
-    assert selectivity["formula"] == CONTEXT_MATCHED_PAIRED_A_PLUS_FORMULA
-    assert selectivity["semantics"] == (
-        "generic_canonical_paired_a_plus_expansion_regime_v8"
-    )
-    assert "candidate_side_canonical" in selectivity["formula"]
-    assert "same_ticker" not in selectivity["formula"]
-    assert selectivity["paired_a_plus_margin"] == 0.25
-    stage = candidate["campaign"]["budget_stages"][0]
-    assert stage["name"] == "context_matched_aplus_200ep"
-    assert stage["training_episodes"] == 200
-    assert stage["validation_episodes"] == 200
-    assert candidate["training"] == baseline["training"]
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-    assert candidate["training"]["teacher_autonomy_start_fraction"] == 0.8
-    assert candidate["training"][
-        "entry_supervision_autonomy_start_fraction"
-    ] == 0.95
 
 
 def test_replay_fraction_contract_includes_hard_wait_quota(tmp_path: Path) -> None:
