@@ -38,7 +38,6 @@ CURRENT_RECIPE = stage2_recipe(19, contains="paired_aplus_contrastive.json")
 STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
 STAGE2_PAIRED_A_PLUS_450_RECIPE = stage2_recipe(19, contains="450ep")
 STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE = stage2_recipe(20)
-STAGE2_FULL_ACTION_OPPORTUNITY_200_RECIPE = stage2_recipe(21)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -556,100 +555,6 @@ def test_context_matched_a_plus_recipe_is_one_200_episode_v19_ablation() -> None
     assert candidate["training"][
         "entry_supervision_autonomy_start_fraction"
     ] == 0.95
-
-
-def test_entry_opportunity_supervision_must_be_a_separate_frozen_contract(
-    tmp_path: Path,
-) -> None:
-    path = _stage2a_config(tmp_path)
-    payload = json.loads(path.read_text())
-    payload["entry_opportunity_supervision"] = {
-        "schema": "post_launch_entry_opportunity_value_v2",
-        "training_only": True,
-        "source_entry_schema": "post_launch_entry_v1",
-        "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
-        "wait_value": 0.0,
-        "winner_value": 2.0,
-        "non_winner_value": -1.0,
-        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
-        "loss_weight": 0.3,
-        "temperature": 1.0,
-    }
-    path.write_text(json.dumps(payload))
-
-    with pytest.raises(
-        ValueError,
-        match="Entry opportunity supervision must be frozen",
-    ):
-        load_experiment_config(path)
-
-
-def test_entry_opportunity_supervision_preserves_the_existing_entry_contract(
-    tmp_path: Path,
-) -> None:
-    path = _stage2a_config(tmp_path)
-    payload = json.loads(path.read_text())
-    original_entry = payload["entry_supervision"]
-    original_agent = load_experiment_config(path)["agent"]
-    payload["entry_opportunity_supervision"] = {
-        "schema": "post_launch_entry_opportunity_value_v2",
-        "training_only": True,
-        "source_entry_schema": "post_launch_entry_v1",
-        "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
-        "wait_value": 0.0,
-        "winner_value": 2.0,
-        "non_winner_value": -1.0,
-        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
-        "loss_weight": 0.3,
-        "temperature": 1.0,
-    }
-    payload["evolution"]["frozen_paths"].append(
-        "entry_opportunity_supervision"
-    )
-    path.write_text(json.dumps(payload))
-
-    config = load_experiment_config(path)
-
-    assert config["entry_supervision"] == original_entry
-    assert config["agent"] == original_agent
-    assert config["entry_opportunity_supervision"]["loss_weight"] == 0.3
-
-
-def test_full_action_opportunity_recipe_changes_only_the_new_training_lesson(
-) -> None:
-    baseline = load_experiment_config(
-        STAGE2_CONTEXT_MATCHED_PAIRED_A_PLUS_200_RECIPE
-    )
-    candidate = load_experiment_config(
-        STAGE2_FULL_ACTION_OPPORTUNITY_200_RECIPE
-    )
-
-    assert candidate["entry_supervision"] == baseline["entry_supervision"]
-    assert candidate["agent"] == baseline["agent"]
-    assert candidate["training"] == baseline["training"]
-    assert candidate["teachers"] == baseline["teachers"]
-    assert candidate["regime_selectivity"] == baseline["regime_selectivity"]
-    assert candidate["evolution"]["base_parent"] == baseline["evolution"][
-        "base_parent"
-    ]
-    assert candidate["entry_opportunity_supervision"] == {
-        "schema": "post_launch_entry_opportunity_value_v2",
-        "training_only": True,
-        "source_entry_schema": "post_launch_entry_v1",
-        "action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
-        "wait_value": 0.0,
-        "winner_value": 2.0,
-        "non_winner_value": -1.0,
-        "loss": "regime_conditioned_teacher_to_policy_kl_v2",
-        "loss_weight": 0.3,
-        "temperature": 1.0,
-    }
-    assert "entry_opportunity_supervision" in candidate["evolution"][
-        "frozen_paths"
-    ]
-    stage = candidate["campaign"]["budget_stages"][0]
-    assert stage["training_episodes"] == 200
-    assert stage["validation_episodes"] == 200
 
 
 def test_replay_fraction_contract_includes_hard_wait_quota(tmp_path: Path) -> None:

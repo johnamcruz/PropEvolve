@@ -867,7 +867,6 @@ def _agent(
     n_step_return: int = 1,
     recurrent_burn_in: int = 0,
     entry_action_weight: float = 0.0,
-    entry_opportunity_weight: float = 0.0,
     entry_action_margin: float = 0.0,
     entry_action_loss_reduction: str = "population_weighted_mean_v1",
     side_balance: str | None = None,
@@ -910,8 +909,6 @@ def _agent(
         teacher_loss_weight=1e-6,
         teacher_entry_search_centers=expansion_centers,
         entry_action_loss_weight=entry_action_weight,
-        entry_opportunity_value_loss_weight=entry_opportunity_weight,
-        entry_opportunity_value_temperature=1.0,
         entry_action_margin=entry_action_margin,
         entry_action_loss_reduction=entry_action_loss_reduction,
         regime_selectivity_loss_weight=selectivity_weight,
@@ -931,7 +928,6 @@ def _sequence(
     target: Action,
     ticker: str = "NQ",
     teacher_imitation_visible: bool = True,
-    opportunity_values: tuple[float, float, float] | None = None,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     return (
@@ -946,11 +942,6 @@ def _sequence(
             teacher_target=teacher.numpy(),
             teacher_imitation_visible=teacher_imitation_visible,
             entry_action_target=target,
-            entry_opportunity_values=(
-                None
-                if opportunity_values is None
-                else np.asarray(opportunity_values, np.float32)
-            ),
             regime_selectivity_headroom_fraction=headroom,
             source_ticker=ticker,
         ),
@@ -1539,152 +1530,6 @@ def test_all_action_dominant_chop_margin_learns_wait_without_relabeling(
     assert margin_agent.last_train_metrics["regime_selectivity_loss"] > (
         baseline.last_train_metrics["regime_selectivity_loss"]
     )
-
-
-def test_full_action_opportunity_supervision_preserves_learned_chop_wait(
-) -> None:
-    agent = _agent(
-        seed=526,
-        selectivity_weight=0.3,
-        entry_action_weight=0.3,
-        entry_opportunity_weight=0.3,
-        selectivity_semantics=CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
-        side_balance="equal_long_short_v1",
-        persistent_chop_negative_emphasis=2.0,
-        chop_wait_margin=0.25,
-        failed_confluence_margin=0.25,
-        paired_a_plus_margin=0.25,
-    )
-    dominant_short = _sequence(
-        (1.0, 0.0, 0.0),
-        _teacher_row(
-            long_attempt=0.10,
-            long_clean=0.10,
-            short_attempt=0.90,
-            short_clean=0.90,
-            chop=1.0,
-            neutral=0.0,
-            trend=0.0,
-        ),
-        headroom=1.0,
-        target=Action.ENTER_SHORT_1,
-        teacher_imitation_visible=False,
-        opportunity_values=(0.0, -1.0, 2.0),
-    )
-    nonchop_short = _sequence(
-        (-1.0, 0.0, 0.0),
-        _teacher_row(
-            long_attempt=0.10,
-            long_clean=0.10,
-            short_attempt=0.90,
-            short_clean=0.90,
-            chop=0.0,
-            neutral=0.5,
-            trend=0.5,
-        ),
-        headroom=1.0,
-        target=Action.ENTER_SHORT_1,
-        teacher_imitation_visible=False,
-        opportunity_values=(0.0, -1.0, 2.0),
-    )
-
-    for _ in range(20):
-        agent.train_batch(
-            (dominant_short, nonchop_short),
-            teacher_weight_scale=0.0,
-            entry_action_weight_scale=1.0,
-        )
-
-    assert _greedy(agent, (1.0, 0.0, 0.0)) is Action.WAIT
-    assert _greedy(agent, (-1.0, 0.0, 0.0)) is Action.ENTER_SHORT_1
-    assert agent.last_train_metrics["teacher_loss"] == 0.0
-    assert agent.last_train_metrics["entry_opportunity_value_loss"] > 0.0
-
-
-@pytest.mark.parametrize(
-    ("target", "opportunity_values", "long_strength", "short_strength"),
-    (
-        (Action.ENTER_LONG_1, (0.0, 2.0, -1.0), 0.90, 0.10),
-        (Action.ENTER_SHORT_1, (0.0, -1.0, 2.0), 0.10, 0.90),
-    ),
-)
-def test_recurrent_learner_conditions_opportunity_value_on_dominant_chop(
-    target: Action,
-    opportunity_values: tuple[float, float, float],
-    long_strength: float,
-    short_strength: float,
-) -> None:
-    settings = dict(
-        seed=527,
-        selectivity_weight=0.3,
-        entry_opportunity_weight=0.3,
-        selectivity_semantics=CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
-        side_balance="equal_long_short_v1",
-        persistent_chop_negative_emphasis=2.0,
-        chop_wait_margin=0.25,
-        failed_confluence_margin=0.25,
-        paired_a_plus_margin=0.25,
-    )
-    dominant_agent = _agent(**settings)
-    nonchop_agent = _agent(**settings)
-    with torch.no_grad():
-        for agent in (dominant_agent, nonchop_agent):
-            for network in (agent.online, agent.target):
-                for parameter in network.parameters():
-                    parameter.zero_()
-    teacher = dict(
-        long_attempt=long_strength,
-        long_clean=long_strength,
-        short_attempt=short_strength,
-        short_clean=short_strength,
-    )
-    dominant_short = _sequence(
-        (1.0, 0.0, 0.0),
-        _teacher_row(
-            **teacher,
-            chop=1.0,
-            neutral=0.0,
-            trend=0.0,
-        ),
-        headroom=1.0,
-        target=target,
-        teacher_imitation_visible=False,
-        opportunity_values=opportunity_values,
-    )
-    nonchop_short = _sequence(
-        (1.0, 0.0, 0.0),
-        _teacher_row(
-            **teacher,
-            chop=0.0,
-            neutral=0.5,
-            trend=0.5,
-        ),
-        headroom=1.0,
-        target=target,
-        teacher_imitation_visible=False,
-        opportunity_values=opportunity_values,
-    )
-
-    dominant_agent.train_batch(
-        (dominant_short,),
-        teacher_weight_scale=0.0,
-        entry_action_weight_scale=1.0,
-    )
-    nonchop_agent.train_batch(
-        (nonchop_short,),
-        teacher_weight_scale=0.0,
-        entry_action_weight_scale=1.0,
-    )
-
-    assert dominant_agent.last_train_metrics[
-        "entry_opportunity_value_loss"
-    ] > nonchop_agent.last_train_metrics["entry_opportunity_value_loss"]
-    assert dominant_agent.last_train_metrics[
-        "entry_opportunity_value_dominant_chop_membership_mean"
-    ] == 1.0
-    assert nonchop_agent.last_train_metrics[
-        "entry_opportunity_value_dominant_chop_membership_mean"
-    ] == 0.0
 
 
 def test_chop_margin_cohorts_are_learned_after_recurrent_burn_in() -> None:

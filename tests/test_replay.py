@@ -286,7 +286,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 9
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -733,7 +733,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 9
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -927,69 +927,6 @@ def test_replay_preserves_explicit_entry_action_targets_and_censoring() -> None:
     sampled = replay.sample(1)[0]
 
     assert tuple(item.entry_action_target for item in sampled) == targets
-
-
-def test_replay_preserves_entry_opportunity_values_through_checkpoint() -> None:
-    episode = _episode("NQ", "pass", "long", 0)
-    flat_actions = (
-        Action.WAIT,
-        Action.ENTER_LONG_1,
-        Action.ENTER_SHORT_1,
-    )
-    values = (
-        np.array([0.0, -1.0, -1.0], np.float32),
-        np.array([0.0, 2.0, -1.0], np.float32),
-        None,
-        None,
-        None,
-        None,
-    )
-    taught = Episode(
-        episode_id=episode.episode_id,
-        ticker=episode.ticker,
-        outcome=episode.outcome,
-        primary_side=episode.primary_side,
-        ended_at_ns=episode.ended_at_ns,
-        transitions=tuple(
-            Transition(**{
-                **item.__dict__,
-                "valid_actions": flat_actions,
-                "next_valid_actions": () if item.terminated else flat_actions,
-                "entry_action_target": (
-                    Action.WAIT if index == 0 else
-                    Action.ENTER_LONG_1 if index == 1 else None
-                ),
-                "entry_opportunity_values": value,
-            })
-            for index, (item, value) in enumerate(
-                zip(episode.transitions, values, strict=True)
-            )
-        ),
-    )
-    replay = BalancedSequenceReplay(
-        capacity_episodes=2,
-        sequence_length=6,
-        seed=23,
-    )
-
-    replay.add(taught)
-    restored = BalancedSequenceReplay(
-        capacity_episodes=2,
-        sequence_length=6,
-        seed=23,
-    )
-    restored.load_state_dict(replay.state_dict())
-    sampled = restored.sample(1)[0]
-
-    np.testing.assert_array_equal(
-        sampled[0].entry_opportunity_values,
-        np.array([0.0, -1.0, -1.0], np.float32),
-    )
-    np.testing.assert_array_equal(
-        sampled[1].entry_opportunity_values,
-        np.array([0.0, 2.0, -1.0], np.float32),
-    )
-    assert all(item.entry_opportunity_values is None for item in sampled[2:])
 
 
 def test_replay_preserves_training_only_decision_headroom_for_regime_selectivity() -> None:
@@ -1238,7 +1175,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 9
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

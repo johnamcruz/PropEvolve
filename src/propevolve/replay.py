@@ -29,7 +29,6 @@ class Transition:
     teacher_target: np.ndarray | None = None
     teacher_imitation_visible: bool = True
     entry_action_target: Action | None = None
-    entry_opportunity_values: np.ndarray | None = None
     regime_selectivity_headroom_fraction: float | None = None
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
@@ -119,7 +118,6 @@ class _StoredEpisode:
     teacher_targets: np.ndarray | None
     teacher_imitation_visible: np.ndarray
     entry_action_targets: np.ndarray
-    entry_opportunity_values: np.ndarray
     entry_long_anchor_indices: np.ndarray
     entry_short_anchor_indices: np.ndarray
     regime_selectivity_headroom_fractions: np.ndarray
@@ -201,9 +199,6 @@ class _StoredEpisode:
                         raise ValueError("replay teacher target is invalid")
                     teacher_targets[index] = target
         entry_action_targets = np.full(len(transitions), -1, dtype=np.int8)
-        entry_opportunity_values = np.full(
-            (len(transitions), 3), np.nan, dtype=np.float32
-        )
         regime_selectivity_headroom_fractions = np.full(
             len(transitions), np.nan, dtype=np.float32
         )
@@ -224,23 +219,6 @@ class _StoredEpisode:
             ):
                 raise ValueError("replay entry target is invalid")
             entry_action_targets[index] = int(target)
-        for index, item in enumerate(transitions):
-            if item.entry_opportunity_values is None:
-                continue
-            values = np.asarray(
-                item.entry_opportunity_values, dtype=np.float32
-            ).reshape(-1)
-            if (
-                values.shape != (3,)
-                or not np.isfinite(values).all()
-                or not np.array_equal(values, np.where(values > 0, 2.0, values))
-                or values[0] != 0.0
-                or not np.isin(values[1:], (-1.0, 2.0)).all()
-                or item.entry_action_target is None
-                or not flat_actions.issubset(item.valid_actions)
-            ):
-                raise ValueError("replay Entry opportunity values are invalid")
-            entry_opportunity_values[index] = values
         for index, item in enumerate(transitions):
             if item.regime_selectivity_headroom_fraction is None:
                 continue
@@ -303,7 +281,6 @@ class _StoredEpisode:
                 np.bool_,
             ),
             entry_action_targets=entry_action_targets,
-            entry_opportunity_values=entry_opportunity_values,
             entry_long_anchor_indices=np.flatnonzero(
                 entry_action_targets == int(Action.ENTER_LONG_1)
             ).astype(np.int32, copy=False),
@@ -373,13 +350,6 @@ class _StoredEpisode:
                     None
                     if self.entry_action_targets[index] < 0
                     else Action(int(self.entry_action_targets[index]))
-                ),
-                entry_opportunity_values=(
-                    None
-                    if not np.isfinite(
-                        self.entry_opportunity_values[index]
-                    ).all()
-                    else self.entry_opportunity_values[index]
                 ),
                 regime_selectivity_headroom_fraction=(
                     None
@@ -777,7 +747,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 10,
+            "schema_version": 9,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -818,7 +788,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10}:
+        if schema_version not in {7, 8, 9}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -891,9 +861,6 @@ class BalancedSequenceReplay:
                     payload["teacher_imitation_visible"], dtype=np.bool_
                 )
                 raw_entry_action_targets = payload["entry_action_targets"]
-                raw_entry_opportunity_values = payload.get(
-                    "entry_opportunity_values"
-                )
                 raw_regime_selectivity_headroom = payload[
                     "regime_selectivity_headroom_fractions"
                 ]
@@ -913,11 +880,6 @@ class BalancedSequenceReplay:
                 else np.asarray(raw_teacher_targets, dtype=np.float32)
             )
             entry_action_targets = np.asarray(raw_entry_action_targets, dtype=np.int8)
-            entry_opportunity_values = (
-                np.full((count, 3), np.nan, dtype=np.float32)
-                if raw_entry_opportunity_values is None
-                else np.asarray(raw_entry_opportunity_values, dtype=np.float32)
-            )
             regime_selectivity_headroom = np.asarray(
                 raw_regime_selectivity_headroom, dtype=np.float32
             )
@@ -933,7 +895,6 @@ class BalancedSequenceReplay:
                 or recurrent_resets.shape != (count,)
                 or next_recurrent_resets.shape != (count,)
                 or entry_action_targets.shape != (count,)
-                or entry_opportunity_values.shape != (count, 3)
                 or teacher_imitation_visible.shape != (count,)
                 or regime_selectivity_headroom.shape != (count,)
                 or source_decision_indices.shape != (count,)
@@ -975,29 +936,6 @@ class BalancedSequenceReplay:
                 )
             ):
                 raise ValueError("replay checkpoint episode arrays are invalid")
-            valid_opportunity_rows = np.isfinite(
-                entry_opportunity_values
-            ).all(axis=1)
-            missing_opportunity_rows = np.isnan(
-                entry_opportunity_values
-            ).all(axis=1)
-            if (
-                not np.logical_or(
-                    valid_opportunity_rows, missing_opportunity_rows
-                ).all()
-                or np.any(
-                    valid_opportunity_rows
-                    & (entry_action_targets < 0)
-                )
-                or np.any(entry_opportunity_values[valid_opportunity_rows, 0] != 0.0)
-                or not np.isin(
-                    entry_opportunity_values[valid_opportunity_rows, 1:],
-                    (-1.0, 2.0),
-                ).all()
-            ):
-                raise ValueError(
-                    "replay checkpoint Entry opportunity values are invalid"
-                )
             if teacher_targets is not None:
                 if teacher_targets.ndim != 2 or teacher_targets.shape[1] < 1:
                     raise ValueError("replay checkpoint teacher targets are invalid")
@@ -1047,7 +985,6 @@ class BalancedSequenceReplay:
                 teacher_targets=teacher_targets,
                 teacher_imitation_visible=teacher_imitation_visible,
                 entry_action_targets=entry_action_targets,
-                entry_opportunity_values=entry_opportunity_values,
                 entry_long_anchor_indices=np.flatnonzero(
                     entry_action_targets == int(Action.ENTER_LONG_1)
                 ).astype(np.int32, copy=False),
@@ -1089,7 +1026,7 @@ class BalancedSequenceReplay:
             isinstance(sample_calls, bool)
             or not isinstance(sample_calls, int)
             or sample_calls < 0
-            or (schema_version in {9, 10} and "sample_calls" not in state)
+            or (schema_version == 9 and "sample_calls" not in state)
         ):
             raise ValueError("replay checkpoint sample schedule is invalid")
         self._episodes = restored

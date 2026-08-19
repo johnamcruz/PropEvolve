@@ -424,72 +424,6 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         raise ValueError("entry supervision schedule must be frozen")
 
 
-def _validate_entry_opportunity_supervision(payload: dict) -> None:
-    """Validate the optional dense training-only flat-action ranking."""
-
-    from .balance_aware_regime_selectivity import (
-        ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
-        CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
-        PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-    )
-
-    specification = payload.get("entry_opportunity_supervision")
-    if specification is None:
-        return
-    required = {
-        "schema",
-        "training_only",
-        "source_entry_schema",
-        "action_order",
-        "wait_value",
-        "winner_value",
-        "non_winner_value",
-        "loss",
-        "loss_weight",
-        "temperature",
-    }
-    numeric_fields = (
-        "wait_value",
-        "winner_value",
-        "non_winner_value",
-        "loss_weight",
-        "temperature",
-    )
-    if (
-        payload.get("entry_supervision") is None
-        or not isinstance(specification, dict)
-        or set(specification) != required
-        or specification.get("schema")
-        != "post_launch_entry_opportunity_value_v2"
-        or specification.get("training_only") is not True
-        or specification.get("source_entry_schema")
-        != payload["entry_supervision"].get("schema")
-        or specification.get("action_order")
-        != ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
-        or specification.get("loss")
-        != "regime_conditioned_teacher_to_policy_kl_v2"
-        or not isinstance(payload.get("regime_selectivity"), dict)
-        or payload["regime_selectivity"].get("semantics")
-        not in {
-            ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
-            PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-            CONTEXT_MATCHED_PAIRED_A_PLUS_SEMANTICS,
-        }
-        or any(
-            isinstance(specification[field], bool)
-            or not isinstance(specification[field], (int, float))
-            or not math.isfinite(float(specification[field]))
-            for field in numeric_fields
-        )
-        or float(specification["wait_value"]) != 0.0
-        or float(specification["winner_value"]) != 2.0
-        or float(specification["non_winner_value"]) != -1.0
-        or float(specification["loss_weight"]) <= 0.0
-        or float(specification["temperature"]) <= 0.0
-    ):
-        raise ValueError("Entry opportunity supervision contract is invalid")
-
-
 def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     """Authenticate the optional one-shot Stage-2 recovery contract."""
     curriculum = payload.get("recovery_curriculum")
@@ -1034,7 +968,6 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("trade risk and ratchet fields are invalid")
     _validate_entry_supervision(payload, challenge)
-    _validate_entry_opportunity_supervision(payload)
     _validate_recovery_curriculum(payload, challenge)
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
@@ -1559,11 +1492,6 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("evolution allowlist overlaps the frozen contract")
     if payload.get("entry_supervision") is not None and "entry_supervision" not in frozen:
         raise ValueError("entry supervision must be frozen for the campaign")
-    if (
-        payload.get("entry_opportunity_supervision") is not None
-        and "entry_opportunity_supervision" not in frozen
-    ):
-        raise ValueError("Entry opportunity supervision must be frozen")
     if (
         isinstance(training.get("short_circuit"), dict)
         and training["short_circuit"].get("policy_health") is not None

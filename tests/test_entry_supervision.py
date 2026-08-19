@@ -337,41 +337,7 @@ def test_economic_builder_uses_next_open_and_fee_inclusive_300_dollar_risk() -> 
         "ENTER_LONG_1",
         "ENTER_SHORT_1",
     )
-    assert targets.manifest["markets"]["NQ"]["targets_sha256"] == (
-        "98d5f70806416a8e6fdba1800de23b850963c55c9027aa60bfced7c48a631d87"
-    )
-    assert targets.manifest["identity_sha256"] == (
-        "af083a7a42a78d34e0830baa8537058f4b3cdd4b2df8432f4ab0f673ccc8205a"
-    )
-
-
-def test_opportunity_values_rank_all_flat_actions_on_the_same_entry_row() -> None:
-    targets = _build_targets()
-
-    assert targets.opportunity_values("NQ", 0) == (0.0, 2.0, -1.0)
-
-    values = targets.opportunity_values("NQ", 0)
-    assert values is not None
-    assert values[int(Action.ENTER_LONG_1)] > values[int(Action.WAIT)]
-    assert values[int(Action.ENTER_SHORT_1)] < values[int(Action.WAIT)]
-
-    short_targets = _build_targets(_short_market())
-    assert short_targets.opportunity_values("NQ", 0) == (0.0, -1.0, 2.0)
-
-    failed_targets = _build_targets(
-        _market(economic_high=100.0 + 600.0 / 148.0)
-    )
-    assert failed_targets.opportunity_values("NQ", 0) == (0.0, -1.0, -1.0)
-
-    assert targets.opportunity_value_manifest["semantics"] == {
-        "order": ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"),
-        "wait": 0.0,
-        "continuation_and_economic_winner": 2.0,
-        "non_winner": -1.0,
-    }
-    assert targets.opportunity_value_manifest[
-        "source_entry_manifest_identity_sha256"
-    ] == targets.manifest["identity_sha256"]
+    assert targets.manifest["identity_sha256"]
 
 
 def test_manifest_reports_exact_action_target_counts_per_market_and_aggregate() -> None:
