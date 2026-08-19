@@ -264,7 +264,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 9
+    assert state["schema_version"] == 10
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -461,6 +461,204 @@ def test_replay_side_balances_entry_anchors_inside_the_learnable_window() -> Non
         Action.ENTER_LONG_1: 2,
         Action.ENTER_SHORT_1: 2,
     }
+
+
+def _paired_a_plus_episode(
+    *,
+    episode_id: str,
+    ticker: str,
+    target: Action,
+    side: Action,
+    economic_win: bool,
+    context: tuple[float, ...],
+    offset: int,
+) -> Episode:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    transitions = tuple(
+        Transition(
+            observation=np.array([offset + index], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([offset + index + 1], np.float32),
+            terminated=index == 11,
+            valid_actions=flat_actions,
+            next_valid_actions=() if index == 11 else flat_actions,
+            entry_action_target=target if index == 5 else None,
+            paired_a_plus_context=(
+                np.asarray(context, dtype=np.float32) if index == 5 else None
+            ),
+            paired_a_plus_side=side if index == 5 else None,
+            paired_a_plus_economic_win=economic_win if index == 5 else None,
+            source_decision_index=offset + index,
+        )
+        for index in range(12)
+    )
+    return Episode(
+        episode_id=episode_id,
+        ticker=ticker,
+        outcome="pass" if target != Action.WAIT else "timeout",
+        primary_side="flat",
+        ended_at_ns=offset,
+        transitions=transitions,
+    )
+
+
+def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=47,
+    )
+    # Expansion channels are Long attempt/retention then Short attempt/retention;
+    # the final three values are the complete Regime probability vector.
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-good",
+        ticker="NQ",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-near-failure",
+        ticker="ES",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.88, 0.82, 0.12, 0.11, 0.12, 0.68, 0.20),
+        offset=100,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-far-failure",
+        ticker="CL",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.15, 0.10, 0.80, 0.75, 0.90, 0.05, 0.05),
+        offset=200,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="short-good",
+        ticker="GC",
+        target=Action.ENTER_SHORT_1,
+        side=Action.ENTER_SHORT_1,
+        economic_win=True,
+        context=(0.08, 0.09, 0.91, 0.86, 0.08, 0.72, 0.20),
+        offset=300,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="short-near-failure",
+        ticker="YM",
+        target=Action.WAIT,
+        side=Action.ENTER_SHORT_1,
+        economic_win=False,
+        context=(0.10, 0.11, 0.89, 0.83, 0.10, 0.70, 0.20),
+        offset=400,
+    ))
+
+    state = replay.state_dict()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    restored.load_state_dict(state)
+
+    sampled = replay.sample(4)
+    resumed_sample = restored.sample(4)
+
+    anchors = [sequence[2] for sequence in sampled]
+    resumed_anchors = [sequence[2] for sequence in resumed_sample]
+    assert [
+        (
+            row.source_decision_index,
+            row.entry_action_target,
+            row.paired_a_plus_pair_id,
+            row.paired_a_plus_pair_side,
+            row.paired_a_plus_economic_win,
+        )
+        for row in resumed_anchors
+    ] == [
+        (
+            row.source_decision_index,
+            row.entry_action_target,
+            row.paired_a_plus_pair_id,
+            row.paired_a_plus_pair_side,
+            row.paired_a_plus_economic_win,
+        )
+        for row in anchors
+    ]
+    pair_ids = {anchor.paired_a_plus_pair_id for anchor in anchors}
+    assert None not in pair_ids
+    assert len(pair_ids) == 2
+    for pair_id in pair_ids:
+        pair = [anchor for anchor in anchors if anchor.paired_a_plus_pair_id == pair_id]
+        assert len(pair) == 2
+        sides = {anchor.paired_a_plus_pair_side for anchor in pair}
+        assert len(sides) == 1
+        side = sides.pop()
+        assert {anchor.entry_action_target for anchor in pair} == {
+            Action.WAIT,
+            side,
+        }
+    long_failure = next(
+        anchor
+        for anchor in anchors
+        if anchor.paired_a_plus_pair_side == Action.ENTER_LONG_1
+        and anchor.entry_action_target == Action.WAIT
+    )
+    assert long_failure.source_decision_index == 105
+    for sequence in sampled:
+        assert len(sequence) == 6
+        assert all(row.paired_a_plus_pair_id is None for row in sequence[:2])
+        values = [int(row.observation[0]) for row in sequence]
+        assert values == list(range(values[0], values[0] + 6))
+
+
+@pytest.mark.parametrize(
+    ("target", "economic_win"),
+    (
+        (Action.ENTER_LONG_1, False),
+        (Action.WAIT, True),
+    ),
+)
+def test_paired_replay_rejects_winner_failure_economic_mismatch(
+    target: Action,
+    economic_win: bool,
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=48,
+    )
+
+    with pytest.raises(ValueError, match="economic outcome"):
+        replay.add(_paired_a_plus_episode(
+            episode_id="invalid-economic-pair",
+            ticker="NQ",
+            target=target,
+            side=Action.ENTER_LONG_1,
+            economic_win=economic_win,
+            context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+            offset=0,
+        ))
 
 
 def test_replay_side_balance_falls_back_to_the_only_authentic_side() -> None:
@@ -711,7 +909,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 9
+    assert state["schema_version"] == 10
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1153,7 +1351,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 9
+    assert state["schema_version"] == 10
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

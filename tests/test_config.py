@@ -25,6 +25,8 @@ from propevolve.balance_aware_regime_selectivity import (
     FORMULA as REGIME_SELECTIVITY_FORMULA,
     PAIRED_A_PLUS_CONTRASTIVE_FORMULA,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA,
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
     SCHEMA as REGIME_SELECTIVITY_SCHEMA,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_FORMULA,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -493,6 +495,44 @@ def test_paired_a_plus_recipe_freezes_the_training_contrast_contract() -> None:
     stage = candidate["campaign"]["budget_stages"][0]
     assert stage["training_episodes"] == 100
     assert stage["validation_episodes"] == 200
+
+
+def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"].update({
+        "semantics": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "formula": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA,
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.25,
+        "side_balance": {
+            "schema": "paired_recurrent_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+    })
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["regime_selectivity"]["semantics"] == (
+        PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+    )
+    payload["regime_selectivity"]["side_balance"]["schema"] = (
+        "equal_long_short_v1"
+    )
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="paired recurrent"):
+        load_experiment_config(path)
+    payload["regime_selectivity"]["side_balance"]["schema"] = (
+        "paired_recurrent_long_short_v1"
+    )
+    payload["training"]["batch_sequences"] = 12
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="even positive pair stratum"):
+        load_experiment_config(path)
 
 
 def test_paired_a_plus_450_recipe_scales_v19_curriculum_proportionally() -> None:

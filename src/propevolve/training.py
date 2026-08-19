@@ -24,6 +24,8 @@ from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+    EXPANSION_CHANNELS,
     REGIME_STATE_NAMES,
     REGIME_TEACHER_CHANNELS,
 )
@@ -350,6 +352,59 @@ def _regime_selectivity_replay_settings(
             else str(side_balance["schema"])
         )
     }
+
+
+def _paired_a_plus_transition_evidence(
+    *,
+    teacher_target: np.ndarray | None,
+    teacher_channels: Sequence[str] | None,
+    entry_action_target: Action | None,
+    metadata: object | None,
+) -> tuple[np.ndarray | None, Action | None, bool | None]:
+    """Bind one exact economic winner/failure to continuous teacher context."""
+    if metadata is None or entry_action_target is None:
+        return None, None, None
+    context_channels = (*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS)
+    if (
+        teacher_target is None
+        or teacher_channels is None
+        or tuple(teacher_channels[: len(context_channels)]) != context_channels
+    ):
+        raise ValueError("paired recurrent A+ row lacks teacher context")
+    side_action = {
+        "long": Action.ENTER_LONG_1,
+        "short": Action.ENTER_SHORT_1,
+    }.get(getattr(metadata, "side", None))
+    economic_win = getattr(metadata, "economic_win", None)
+    economic_good = getattr(metadata, "economic_good", None)
+    is_winner = (
+        side_action is not None
+        and economic_win is True
+        and economic_good is True
+        and entry_action_target == side_action
+    )
+    is_failure = (
+        side_action is not None
+        and economic_win is False
+        and entry_action_target == Action.WAIT
+    )
+    if (
+        getattr(metadata, "available", None) is not True
+        or getattr(metadata, "censored", None) is not False
+        or not (is_winner or is_failure)
+    ):
+        return None, None, None
+    context = np.asarray(teacher_target, dtype=np.float32).reshape(-1)[
+        : len(context_channels)
+    ]
+    if (
+        context.shape != (len(context_channels),)
+        or not np.isfinite(context).all()
+        or (context < 0.0).any()
+        or (context > 1.0).any()
+    ):
+        raise ValueError("paired recurrent A+ context is invalid")
+    return context.copy(), side_action, bool(is_winner)
 
 
 def _with_regime_wait_replay_priorities(
@@ -1806,6 +1861,7 @@ def _training_evaluation_gates(
             "side_conditioned_expansion_regime_confluence_v4",
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
         }:
             gates.extend((
                 EvaluationGate("latest_teacher_weight_scale", "==", 0.0),
@@ -1866,6 +1922,7 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend(
                     EvaluationGate(metric, ">", 0.0)
@@ -1880,6 +1937,7 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1897,6 +1955,7 @@ def _training_evaluation_gates(
                 "side_conditioned_expansion_regime_confluence_v4",
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }:
                 gates.extend((
                     EvaluationGate(
@@ -1949,7 +2008,10 @@ def _training_evaluation_gates(
                             0.0,
                         ),
                     ))
-            if regime_selectivity_semantics == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS:
+            if regime_selectivity_semantics in {
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+            }:
                 gates.extend((
                     EvaluationGate(
                         "regime_selectivity_paired_a_plus_pair_mass", ">", 0.0
@@ -2892,6 +2954,11 @@ class HistoricalCandidateRunner:
             ),
             entry_action_lookup=(
                 entry_action_targets.target
+                if entry_action_targets is not None
+                else None
+            ),
+            entry_action_metadata_lookup=(
+                entry_action_targets.metadata
                 if entry_action_targets is not None
                 else None
             ),
@@ -4429,6 +4496,7 @@ def train_agent(
     teacher_lookup: Callable[[str, int], np.ndarray | None] | None = None,
     teacher_channels: tuple[str, ...] | None = None,
     entry_action_lookup: Callable[[str, int], Action | None] | None = None,
+    entry_action_metadata_lookup: Callable[[str, int], object | None] | None = None,
     teacher_loss_end_scale: float = 1.0,
     teacher_guidance_dropout_start: float = 0.0,
     teacher_guidance_dropout_end: float = 0.0,
@@ -4569,6 +4637,23 @@ def train_agent(
     entry_supervision_autonomy_start_fraction = float(
         entry_supervision_autonomy_start_fraction
     )
+    paired_recurrent_a_plus = (
+        getattr(agent, "regime_selectivity_semantics", None)
+        == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+    )
+    paired_context_channels = (*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS)
+    if paired_recurrent_a_plus and (
+        teacher_channels is None
+        or tuple(teacher_channels[: len(paired_context_channels)])
+        != paired_context_channels
+        or entry_action_lookup is None
+        or entry_action_metadata_lookup is None
+        or replay.entry_opportunity_side_balance
+        != "paired_recurrent_long_short_v1"
+    ):
+        raise ValueError(
+            "paired recurrent A+ training evidence contract is incomplete"
+        )
     ticker_schedule = _balanced_ticker_schedule(
         episode_tickers,
         episodes=episodes,
@@ -4879,6 +4964,24 @@ def train_agent(
                 selected_teacher_targets.append(
                     np.asarray(teacher_target, dtype=np.float32).reshape(-1)
                 )
+            paired_a_plus_context = None
+            paired_a_plus_side = None
+            paired_a_plus_economic_win = None
+            if paired_recurrent_a_plus and entry_action_target is not None:
+                assert entry_action_metadata_lookup is not None
+                metadata = entry_action_metadata_lookup(
+                    episode_ticker, decision_index
+                )
+                (
+                    paired_a_plus_context,
+                    paired_a_plus_side,
+                    paired_a_plus_economic_win,
+                ) = _paired_a_plus_transition_evidence(
+                    teacher_target=teacher_target,
+                    teacher_channels=teacher_channels,
+                    entry_action_target=entry_action_target,
+                    metadata=metadata,
+                )
             transitions.append(Transition(
                 observation=observation,
                 action=Action(action),
@@ -4905,6 +5008,9 @@ def train_agent(
                 ),
                 entry_opportunity_priority=entry_opportunity_priority,
                 source_decision_index=decision_index,
+                paired_a_plus_context=paired_a_plus_context,
+                paired_a_plus_side=paired_a_plus_side,
+                paired_a_plus_economic_win=paired_a_plus_economic_win,
             ))
             total_reward += reward
             observation, valid = next_observation, next_valid

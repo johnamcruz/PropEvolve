@@ -7,11 +7,16 @@ import pytest
 
 import propevolve.entry_supervision as entry_supervision_module
 from propevolve.decision import Action
+from propevolve.balance_aware_regime_selectivity import (
+    EXPANSION_CHANNELS,
+    REGIME_TEACHER_CHANNELS,
+)
 from propevolve.entry_supervision import (
     build_entry_action_targets,
     build_post_launch_entry_supervision,
 )
 from propevolve.environment import MarketSeries
+from propevolve.training import _paired_a_plus_transition_evidence
 
 
 def _entry_spec() -> dict[str, object]:
@@ -451,6 +456,49 @@ def test_net_two_r_including_round_trip_fee_satisfies_economic_target() -> None:
 
     assert targets.target("NQ", 0) == Action.ENTER_LONG_1
     assert targets.metadata("NQ", 0).economic_win is True
+
+
+def test_exact_two_r_label_builds_paired_winner_and_non_hit_training_evidence() -> None:
+    channels = (*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS)
+    context = np.asarray((0.85, 0.10, 0.15, 0.05, 0.10, 0.35, 0.55), dtype=np.float32)
+    winner_targets = _build_targets(
+        _market(economic_high=100.0 + 604.0 / 148.0)
+    )
+    horizon_non_hit_targets = _build_targets(
+        _market(economic_high=100.0 + 600.0 / 148.0)
+    )
+    stopped_non_hit_targets = _build_targets(
+        _market(
+            economic_high=100.0 + 604.0 / 148.0,
+            economic_stop_collision=True,
+        )
+    )
+
+    winner = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=channels,
+        entry_action_target=winner_targets.target("NQ", 0),
+        metadata=winner_targets.metadata("NQ", 0),
+    )
+    horizon_non_hit = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=channels,
+        entry_action_target=horizon_non_hit_targets.target("NQ", 0),
+        metadata=horizon_non_hit_targets.metadata("NQ", 0),
+    )
+    stopped_non_hit = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=channels,
+        entry_action_target=stopped_non_hit_targets.target("NQ", 0),
+        metadata=stopped_non_hit_targets.metadata("NQ", 0),
+    )
+
+    np.testing.assert_array_equal(winner[0], context)
+    assert winner[1:] == (Action.ENTER_LONG_1, True)
+    np.testing.assert_array_equal(horizon_non_hit[0], context)
+    assert horizon_non_hit[1:] == (Action.ENTER_LONG_1, False)
+    np.testing.assert_array_equal(stopped_non_hit[0], context)
+    assert stopped_non_hit[1:] == (Action.ENTER_LONG_1, False)
 
 
 def test_economic_stop_wins_when_two_r_and_minus_one_r_touch_same_bar() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import random
 from typing import Mapping
@@ -12,6 +12,9 @@ from typing import Mapping
 import numpy as np
 
 from .decision import Action
+
+
+PAIRED_A_PLUS_CONTEXT_WIDTH = 7
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,11 @@ class Transition:
     regime_wait_priority: float = 0.0
     training_valid: bool = True
     source_decision_index: int | None = None
+    paired_a_plus_context: np.ndarray | None = None
+    paired_a_plus_side: Action | None = None
+    paired_a_plus_economic_win: bool | None = None
+    paired_a_plus_pair_id: int | None = None
+    paired_a_plus_pair_side: Action | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +135,13 @@ class _StoredEpisode:
     regime_wait_anchor_cumulative_priorities: np.ndarray
     regime_wait_priority_sum: float
     source_decision_indices: np.ndarray
+    paired_a_plus_contexts: np.ndarray
+    paired_a_plus_sides: np.ndarray
+    paired_a_plus_economic_wins: np.ndarray
+    paired_a_plus_long_winner_anchor_indices: np.ndarray
+    paired_a_plus_long_failure_anchor_indices: np.ndarray
+    paired_a_plus_short_winner_anchor_indices: np.ndarray
+    paired_a_plus_short_failure_anchor_indices: np.ndarray
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -167,6 +182,55 @@ class _StoredEpisode:
             for item in transitions
         ):
             raise ValueError("replay source decision index is invalid")
+        paired_a_plus_contexts = np.full(
+            (len(transitions), PAIRED_A_PLUS_CONTEXT_WIDTH),
+            np.nan,
+            dtype=np.float32,
+        )
+        paired_a_plus_sides = np.full(len(transitions), -1, dtype=np.int8)
+        paired_a_plus_economic_wins = np.full(
+            len(transitions), -1, dtype=np.int8
+        )
+        for index, item in enumerate(transitions):
+            evidence = (
+                item.paired_a_plus_context,
+                item.paired_a_plus_side,
+                item.paired_a_plus_economic_win,
+            )
+            if all(value is None for value in evidence):
+                continue
+            if any(value is None for value in evidence):
+                raise ValueError("replay paired A+ evidence is incomplete")
+            context = np.asarray(
+                item.paired_a_plus_context, dtype=np.float32
+            ).reshape(-1)
+            try:
+                side = Action(item.paired_a_plus_side)
+            except (TypeError, ValueError) as error:
+                raise ValueError("replay paired A+ side is invalid") from error
+            economic_win = item.paired_a_plus_economic_win
+            if (
+                context.shape != (PAIRED_A_PLUS_CONTEXT_WIDTH,)
+                or not np.isfinite(context).all()
+                or (context < 0.0).any()
+                or (context > 1.0).any()
+                or side not in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                or type(economic_win) is not bool
+                or (
+                    economic_win
+                    and item.entry_action_target != side
+                )
+                or (
+                    not economic_win
+                    and item.entry_action_target != Action.WAIT
+                )
+            ):
+                raise ValueError(
+                    "replay paired A+ economic outcome is invalid"
+                )
+            paired_a_plus_contexts[index] = context
+            paired_a_plus_sides[index] = int(side)
+            paired_a_plus_economic_wins[index] = int(economic_win)
         for current, following in zip(transitions, transitions[1:]):
             if not np.array_equal(current.next_observation, following.observation):
                 raise ValueError("replay episode observations are not contiguous")
@@ -308,6 +372,25 @@ class _StoredEpisode:
                 ],
                 np.int64,
             ),
+            paired_a_plus_contexts=paired_a_plus_contexts,
+            paired_a_plus_sides=paired_a_plus_sides,
+            paired_a_plus_economic_wins=paired_a_plus_economic_wins,
+            paired_a_plus_long_winner_anchor_indices=np.flatnonzero(
+                (paired_a_plus_sides == int(Action.ENTER_LONG_1))
+                & (paired_a_plus_economic_wins == 1)
+            ).astype(np.int32, copy=False),
+            paired_a_plus_long_failure_anchor_indices=np.flatnonzero(
+                (paired_a_plus_sides == int(Action.ENTER_LONG_1))
+                & (paired_a_plus_economic_wins == 0)
+            ).astype(np.int32, copy=False),
+            paired_a_plus_short_winner_anchor_indices=np.flatnonzero(
+                (paired_a_plus_sides == int(Action.ENTER_SHORT_1))
+                & (paired_a_plus_economic_wins == 1)
+            ).astype(np.int32, copy=False),
+            paired_a_plus_short_failure_anchor_indices=np.flatnonzero(
+                (paired_a_plus_sides == int(Action.ENTER_SHORT_1))
+                & (paired_a_plus_economic_wins == 0)
+            ).astype(np.int32, copy=False),
         )
 
     def sequence(self, start: int, length: int) -> tuple[Transition, ...]:
@@ -363,6 +446,23 @@ class _StoredEpisode:
                     None
                     if self.source_decision_indices[index] < 0
                     else int(self.source_decision_indices[index])
+                ),
+                paired_a_plus_context=(
+                    None
+                    if not np.isfinite(
+                        self.paired_a_plus_contexts[index]
+                    ).all()
+                    else self.paired_a_plus_contexts[index]
+                ),
+                paired_a_plus_side=(
+                    None
+                    if self.paired_a_plus_sides[index] < 0
+                    else Action(int(self.paired_a_plus_sides[index]))
+                ),
+                paired_a_plus_economic_win=(
+                    None
+                    if self.paired_a_plus_economic_wins[index] < 0
+                    else bool(self.paired_a_plus_economic_wins[index])
                 ),
             )
             for index in range(start, stop)
@@ -620,6 +720,7 @@ class BalancedSequenceReplay:
         if entry_opportunity_side_balance not in {
             "none",
             "equal_long_short_v1",
+            "paired_recurrent_long_short_v1",
         }:
             raise ValueError("replay entry opportunity side balance is invalid")
         self.entry_opportunity_side_balance = entry_opportunity_side_balance
@@ -739,7 +840,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 9,
+            "schema_version": 10,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -771,6 +872,10 @@ class BalancedSequenceReplay:
                         "regime_wait_anchor_indices",
                         "regime_wait_anchor_cumulative_priorities",
                         "regime_wait_priority_sum",
+                        "paired_a_plus_long_winner_anchor_indices",
+                        "paired_a_plus_long_failure_anchor_indices",
+                        "paired_a_plus_short_winner_anchor_indices",
+                        "paired_a_plus_short_failure_anchor_indices",
                     }
                 }
                 for episode in self._episodes.values()
@@ -780,7 +885,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9}:
+        if schema_version not in {7, 8, 9, 10}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -863,6 +968,31 @@ class BalancedSequenceReplay:
                     ),
                     dtype=np.int64,
                 )
+                paired_a_plus_contexts = np.asarray(
+                    payload.get(
+                        "paired_a_plus_contexts",
+                        np.full(
+                            (actions.size, PAIRED_A_PLUS_CONTEXT_WIDTH),
+                            np.nan,
+                            dtype=np.float32,
+                        ),
+                    ),
+                    dtype=np.float32,
+                )
+                paired_a_plus_sides = np.asarray(
+                    payload.get(
+                        "paired_a_plus_sides",
+                        np.full(actions.size, -1, dtype=np.int8),
+                    ),
+                    dtype=np.int8,
+                )
+                paired_a_plus_economic_wins = np.asarray(
+                    payload.get(
+                        "paired_a_plus_economic_wins",
+                        np.full(actions.size, -1, dtype=np.int8),
+                    ),
+                    dtype=np.int8,
+                )
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("replay checkpoint episode is malformed") from error
             count = int(actions.size)
@@ -893,6 +1023,10 @@ class BalancedSequenceReplay:
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
                 or regime_wait_priorities.shape != (count,)
+                or paired_a_plus_contexts.shape
+                != (count, PAIRED_A_PLUS_CONTEXT_WIDTH)
+                or paired_a_plus_sides.shape != (count,)
+                or paired_a_plus_economic_wins.shape != (count,)
                 or (teacher_targets is not None and teacher_targets.shape[0] != count)
                 or not np.isfinite(observations).all()
                 or not np.isfinite(rewards).all()
@@ -907,6 +1041,10 @@ class BalancedSequenceReplay:
                 or (entry_action_targets < -1).any()
                 or (entry_action_targets > int(Action.ENTER_SHORT_1)).any()
                 or (source_decision_indices < -1).any()
+                or (paired_a_plus_sides < -1).any()
+                or (paired_a_plus_sides > int(Action.ENTER_SHORT_1)).any()
+                or (paired_a_plus_economic_wins < -1).any()
+                or (paired_a_plus_economic_wins > 1).any()
                 or not np.logical_or(
                     np.isnan(regime_selectivity_headroom),
                     (
@@ -931,6 +1069,34 @@ class BalancedSequenceReplay:
             if teacher_targets is not None:
                 if teacher_targets.ndim != 2 or teacher_targets.shape[1] < 1:
                     raise ValueError("replay checkpoint teacher targets are invalid")
+            paired_rows = paired_a_plus_sides >= 0
+            missing_paired_rows = paired_a_plus_sides < 0
+            if (
+                not np.array_equal(
+                    paired_rows, paired_a_plus_economic_wins >= 0
+                )
+                or not np.isfinite(paired_a_plus_contexts[paired_rows]).all()
+                or (paired_a_plus_contexts[paired_rows] < 0.0).any()
+                or (paired_a_plus_contexts[paired_rows] > 1.0).any()
+                or not np.isnan(
+                    paired_a_plus_contexts[missing_paired_rows]
+                ).all()
+                or np.any(
+                    paired_rows
+                    & (paired_a_plus_sides == int(Action.WAIT))
+                )
+                or np.any(
+                    paired_rows
+                    & (paired_a_plus_economic_wins == 1)
+                    & (entry_action_targets != paired_a_plus_sides)
+                )
+                or np.any(
+                    paired_rows
+                    & (paired_a_plus_economic_wins == 0)
+                    & (entry_action_targets != int(Action.WAIT))
+                )
+            ):
+                raise ValueError("replay checkpoint paired A+ evidence is invalid")
                 valid_teacher_rows = np.isfinite(teacher_targets).all(axis=1)
                 missing_teacher_rows = np.isnan(teacher_targets).all(axis=1)
                 if not np.logical_or(valid_teacher_rows, missing_teacher_rows).all():
@@ -999,6 +1165,25 @@ class BalancedSequenceReplay:
                     else float(regime_wait_anchor_cumulative_priorities[-1])
                 ),
                 source_decision_indices=source_decision_indices,
+                paired_a_plus_contexts=paired_a_plus_contexts,
+                paired_a_plus_sides=paired_a_plus_sides,
+                paired_a_plus_economic_wins=paired_a_plus_economic_wins,
+                paired_a_plus_long_winner_anchor_indices=np.flatnonzero(
+                    (paired_a_plus_sides == int(Action.ENTER_LONG_1))
+                    & (paired_a_plus_economic_wins == 1)
+                ).astype(np.int32, copy=False),
+                paired_a_plus_long_failure_anchor_indices=np.flatnonzero(
+                    (paired_a_plus_sides == int(Action.ENTER_LONG_1))
+                    & (paired_a_plus_economic_wins == 0)
+                ).astype(np.int32, copy=False),
+                paired_a_plus_short_winner_anchor_indices=np.flatnonzero(
+                    (paired_a_plus_sides == int(Action.ENTER_SHORT_1))
+                    & (paired_a_plus_economic_wins == 1)
+                ).astype(np.int32, copy=False),
+                paired_a_plus_short_failure_anchor_indices=np.flatnonzero(
+                    (paired_a_plus_sides == int(Action.ENTER_SHORT_1))
+                    & (paired_a_plus_economic_wins == 0)
+                ).astype(np.int32, copy=False),
             )
             if not episode.ticker or not episode.outcome or not episode.primary_side:
                 raise ValueError("replay checkpoint episode metadata is invalid")
@@ -1018,7 +1203,7 @@ class BalancedSequenceReplay:
             isinstance(sample_calls, bool)
             or not isinstance(sample_calls, int)
             or sample_calls < 0
-            or (schema_version == 9 and "sample_calls" not in state)
+            or (schema_version in {9, 10} and "sample_calls" not in state)
         ):
             raise ValueError("replay checkpoint sample schedule is invalid")
         self._episodes = restored
@@ -1151,6 +1336,83 @@ class BalancedSequenceReplay:
                 int(episode.regime_wait_anchor_indices[anchor_offset]),
             )
         balanced_entry_anchors: dict[int, tuple[_StoredEpisode, int]] = {}
+        paired_entry_anchors: dict[
+            int, tuple[_StoredEpisode, int, int, Action]
+        ] = {}
+        if (
+            self.entry_opportunity_side_balance
+            == "paired_recurrent_long_short_v1"
+        ):
+            if entry_count % 2:
+                raise ValueError(
+                    "paired recurrent replay requires an even entry stratum"
+                )
+            winners: dict[
+                Action, list[tuple[_StoredEpisode, int]]
+            ] = defaultdict(list)
+            failures: dict[
+                Action, list[tuple[_StoredEpisode, int]]
+            ] = defaultdict(list)
+            for stored in self._episodes.values():
+                for side, winner_indices, failure_indices in (
+                    (
+                        Action.ENTER_LONG_1,
+                        stored.paired_a_plus_long_winner_anchor_indices,
+                        stored.paired_a_plus_long_failure_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        stored.paired_a_plus_short_winner_anchor_indices,
+                        stored.paired_a_plus_short_failure_anchor_indices,
+                    ),
+                ):
+                    winners[side].extend(
+                        (stored, int(index)) for index in winner_indices
+                    )
+                    failures[side].extend(
+                        (stored, int(index)) for index in failure_indices
+                    )
+            available_sides = [
+                side
+                for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+                if winners[side] and failures[side]
+            ]
+            if len(available_sides) == 2:
+                self._random.shuffle(available_sides)
+            entry_start = terminal_count + safety_count + regime_wait_count
+            for pair_offset in range(entry_count // 2):
+                if not available_sides:
+                    break
+                side = available_sides[pair_offset % len(available_sides)]
+                winner_episode, winner_index = self._random.choice(
+                    winners[side]
+                )
+                winner_context = self._paired_context_for_side(
+                    winner_episode.paired_a_plus_contexts[winner_index],
+                    side,
+                )
+                failure_episode, failure_index = min(
+                    failures[side],
+                    key=lambda candidate: self._paired_failure_rank(
+                        candidate,
+                        side=side,
+                        winner_context=winner_context,
+                    ),
+                )
+                pair_id = (self._sample_calls << 32) | pair_offset
+                pair_start = entry_start + pair_offset * 2
+                paired_entry_anchors[pair_start] = (
+                    winner_episode,
+                    winner_index,
+                    pair_id,
+                    side,
+                )
+                paired_entry_anchors[pair_start + 1] = (
+                    failure_episode,
+                    failure_index,
+                    pair_id,
+                    side,
+                )
         if self.entry_opportunity_side_balance == "equal_long_short_v1":
             opportunity_episodes: dict[Action, list[_StoredEpisode]] = defaultdict(list)
             cumulative_counts: dict[Action, list[int]] = defaultdict(list)
@@ -1211,6 +1473,22 @@ class BalancedSequenceReplay:
                     n_step_return=self.n_step_return,
                 ))
                 continue
+            paired_entry_anchor = paired_entry_anchors.get(index)
+            if paired_entry_anchor is not None:
+                episode, anchor_index, pair_id, pair_side = paired_entry_anchor
+                sequence = list(episode.target_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                ))
+                sequence[self.recurrent_burn_in] = replace(
+                    sequence[self.recurrent_burn_in],
+                    paired_a_plus_pair_id=pair_id,
+                    paired_a_plus_pair_side=pair_side,
+                )
+                sequences.append(tuple(sequence))
+                continue
             balanced_entry_anchor = balanced_entry_anchors.get(index)
             if balanced_entry_anchor is not None:
                 episode, anchor_index = balanced_entry_anchor
@@ -1262,3 +1540,33 @@ class BalancedSequenceReplay:
                 start = self._random.randint(0, last_start)
             sequences.append(episode.sequence(start, self.sequence_length))
         return tuple(sequences)
+
+    @staticmethod
+    def _paired_context_for_side(
+        context: np.ndarray,
+        side: Action,
+    ) -> np.ndarray:
+        """Canonicalize direction while preserving continuous market geometry."""
+        context = np.asarray(context, dtype=np.float32)
+        if context.shape != (PAIRED_A_PLUS_CONTEXT_WIDTH,):
+            raise ValueError("paired A+ context is invalid")
+        if side == Action.ENTER_LONG_1:
+            return context
+        if side == Action.ENTER_SHORT_1:
+            return context[[2, 3, 0, 1, 4, 5, 6]]
+        raise ValueError("paired A+ side is invalid")
+
+    @classmethod
+    def _paired_failure_rank(
+        cls,
+        candidate: tuple[_StoredEpisode, int],
+        *,
+        side: Action,
+        winner_context: np.ndarray,
+    ) -> tuple[float, str, int]:
+        episode, anchor_index = candidate
+        failure_context = cls._paired_context_for_side(
+            episode.paired_a_plus_contexts[anchor_index], side
+        )
+        distance = float(np.square(winner_context - failure_context).sum())
+        return distance, episode.episode_id, anchor_index

@@ -11,6 +11,7 @@ from propevolve.balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     STATIC_STATE_SEMANTICS,
@@ -19,6 +20,7 @@ from propevolve.agent import (
     RecurrentC51Agent,
     exact_action_margin_losses,
     paired_a_plus_rank_loss,
+    paired_recurrent_a_plus_rank_loss,
     side_conditioned_wait_rank_loss,
     chop_specific_wait_margin_losses,
 )
@@ -202,6 +204,59 @@ def test_paired_a_plus_rank_loss_requires_good_long_to_outrank_matched_failure(
     assert result.good_advantage_sum.item() == 1.0
     assert result.bad_advantage_sum.item() == -0.5
     assert result.loss.item() == pytest.approx(0.2519290813453729)
+
+
+def test_paired_recurrent_a_plus_uses_only_explicit_economic_pairs() -> None:
+    action_values = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],   # Long economic winner.
+            [0.0, -0.5, 0.0],  # Matched Long economic failure.
+            [0.0, 0.0, 0.8],   # Short economic winner.
+            [0.0, 0.0, -0.2],  # Matched Short economic failure.
+            [0.0, 9.0, 9.0],   # Unpaired row must not affect this loss.
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+
+    result = paired_recurrent_a_plus_rank_loss(
+        action_values,
+        pair_ids=torch.tensor([10, 10, 11, 11, -1]),
+        pair_sides=torch.tensor([1, 1, 2, 2, -1]),
+        economic_wins=torch.tensor([True, False, True, False, False]),
+        margin=0.25,
+    )
+    gradient, = torch.autograd.grad(result.loss, action_values)
+
+    assert result.pair_count.item() == 2.0
+    assert result.good_advantage_sum.item() == pytest.approx(1.8)
+    assert result.bad_advantage_sum.item() == pytest.approx(-0.7)
+    assert gradient[4].abs().sum().item() == 0.0
+    assert gradient[0, Action.ENTER_LONG_1] < 0.0
+    assert gradient[1, Action.ENTER_LONG_1] > 0.0
+    assert gradient[2, Action.ENTER_SHORT_1] < 0.0
+    assert gradient[3, Action.ENTER_SHORT_1] > 0.0
+
+
+def test_paired_recurrent_a_plus_rejects_cross_side_or_non_economic_pairs() -> None:
+    values = torch.zeros((2, 3), dtype=torch.float32)
+
+    with pytest.raises(ValueError, match="explicit economic pair"):
+        paired_recurrent_a_plus_rank_loss(
+            values,
+            pair_ids=torch.tensor([3, 3]),
+            pair_sides=torch.tensor([1, 2]),
+            economic_wins=torch.tensor([True, False]),
+            margin=0.25,
+        )
+    with pytest.raises(ValueError, match="explicit economic pair"):
+        paired_recurrent_a_plus_rank_loss(
+            values,
+            pair_ids=torch.tensor([3, 3]),
+            pair_sides=torch.tensor([1, 1]),
+            economic_wins=torch.tensor([True, True]),
+            margin=0.25,
+        )
 
 
 def test_paired_a_plus_uses_continuous_regime_similarity_without_argmax() -> None:
@@ -779,6 +834,9 @@ def _sequence(
     headroom: float,
     target: Action,
     teacher_imitation_visible: bool = True,
+    pair_id: int | None = None,
+    pair_side: Action | None = None,
+    economic_win: bool | None = None,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     return (
@@ -794,8 +852,58 @@ def _sequence(
             teacher_imitation_visible=teacher_imitation_visible,
             entry_action_target=target,
             regime_selectivity_headroom_fraction=headroom,
+            paired_a_plus_pair_id=pair_id,
+            paired_a_plus_pair_side=pair_side,
+            paired_a_plus_economic_win=economic_win,
         ),
     )
+
+
+def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None:
+    agent = _agent(
+        seed=502,
+        selectivity_weight=0.3,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+    )
+    ready = dict(chop=0.05, neutral=0.45, trend=0.50)
+    teacher = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        **ready,
+    )
+    winner = _sequence(
+        (1.0, 0.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=True,
+    )
+    failure = _sequence(
+        (0.0, 1.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+    )
+
+    agent.train_batch((winner, failure))
+
+    assert agent.last_train_metrics["sampled_valid_learning_rows"] == 2.0
+    assert agent.last_train_metrics["rl_loss"] > 0.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_paired_a_plus_pair_count"
+    ] == 1.0
 
 
 def test_teacher_dropout_only_disables_imitation_not_exact_or_confluence_losses(

@@ -17,6 +17,7 @@ from .balance_aware_regime_selectivity import (
     BalanceAwareRegimeSelectivity,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
     PERSISTENT_CHOP_ASSOCIATION_SEMANTICS,
     PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS,
     REGIME_STATE_NAMES,
@@ -523,6 +524,116 @@ def paired_a_plus_rank_loss(
     )
 
 
+def paired_recurrent_a_plus_rank_loss(
+    flat_action_values: torch.Tensor,
+    *,
+    pair_ids: torch.Tensor,
+    pair_sides: torch.Tensor,
+    economic_wins: torch.Tensor,
+    margin: float,
+) -> PairedAPlusRankResult:
+    """Rank only explicit same-side recurrent winner/failure pairs."""
+    row_shape = flat_action_values.shape[:-1]
+    if (
+        flat_action_values.ndim != 2
+        or flat_action_values.shape[-1] != 3
+        or not torch.is_floating_point(flat_action_values)
+        or pair_ids.shape != row_shape
+        or pair_sides.shape != row_shape
+        or economic_wins.shape != row_shape
+        or pair_ids.dtype == torch.bool
+        or torch.is_floating_point(pair_ids)
+        or pair_sides.dtype == torch.bool
+        or torch.is_floating_point(pair_sides)
+        or economic_wins.dtype != torch.bool
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+        or float(margin) < 0.0
+    ):
+        raise ValueError("paired recurrent A+ loss contract is invalid")
+    zero = flat_action_values.sum() * 0.0
+    active_pair_ids = torch.unique(pair_ids[pair_ids >= 0]).tolist()
+    side_losses: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    good_advantages: list[torch.Tensor] = []
+    bad_advantages: list[torch.Tensor] = []
+    group_metrics: dict[str, torch.Tensor] = {}
+    for pair_id in active_pair_ids:
+        indices = torch.nonzero(pair_ids == int(pair_id), as_tuple=False).flatten()
+        sides = pair_sides.index_select(0, indices)
+        wins = economic_wins.index_select(0, indices)
+        if (
+            indices.numel() != 2
+            or int(sides[0].item())
+            not in {int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)}
+            or not torch.equal(sides, sides[0].expand_as(sides))
+            or int(wins.sum().item()) != 1
+        ):
+            raise ValueError(
+                "paired recurrent A+ requires one explicit economic pair"
+            )
+        side = int(sides[0].item())
+        winner_index = indices[torch.nonzero(wins, as_tuple=False)[0, 0]]
+        failure_index = indices[torch.nonzero(~wins, as_tuple=False)[0, 0]]
+        good_advantage = (
+            flat_action_values[winner_index, side]
+            - flat_action_values[winner_index, int(Action.WAIT)]
+        )
+        bad_advantage = (
+            flat_action_values[failure_index, side]
+            - flat_action_values[failure_index, int(Action.WAIT)]
+        )
+        side_losses[side].append(nn.functional.softplus(
+            float(margin) + bad_advantage - good_advantage
+        ))
+        good_advantages.append(good_advantage)
+        bad_advantages.append(bad_advantage)
+    present_side_losses: list[torch.Tensor] = []
+    for side_name, side in (
+        ("long", int(Action.ENTER_LONG_1)),
+        ("short", int(Action.ENTER_SHORT_1)),
+    ):
+        losses = side_losses[side]
+        if losses:
+            present_side_losses.append(torch.stack(losses).mean())
+        group_metrics[f"{side_name}_pair_count"] = torch.tensor(
+            float(len(losses)),
+            dtype=flat_action_values.dtype,
+            device=flat_action_values.device,
+        )
+        group_metrics[f"{side_name}_loss_sum"] = (
+            torch.stack(losses).sum() if losses else zero
+        )
+    pair_count = torch.tensor(
+        float(len(good_advantages)),
+        dtype=flat_action_values.dtype,
+        device=flat_action_values.device,
+    )
+    return PairedAPlusRankResult(
+        loss=(
+            torch.stack(present_side_losses).mean()
+            if present_side_losses
+            else zero
+        ),
+        active_groups=torch.tensor(
+            float(len(present_side_losses)),
+            dtype=flat_action_values.dtype,
+            device=flat_action_values.device,
+        ),
+        pair_count=pair_count,
+        pair_mass=pair_count,
+        good_advantage_sum=(
+            torch.stack(good_advantages).sum() if good_advantages else zero
+        ),
+        bad_advantage_sum=(
+            torch.stack(bad_advantages).sum() if bad_advantages else zero
+        ),
+        group_metrics=group_metrics,
+    )
+
+
 class RecurrentC51Network(nn.Module):
     """Compact market/account encoder with recurrent C51 action values."""
 
@@ -736,6 +847,7 @@ class RecurrentC51Agent:
         if regime_selectivity_side_balance not in {
             "none",
             "equal_long_short_v1",
+            "paired_recurrent_long_short_v1",
         }:
             raise ValueError("Regime selectivity side balance is invalid")
         if (
@@ -748,6 +860,7 @@ class RecurrentC51Agent:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }
             or not np.isfinite(
                 regime_selectivity_persistent_chop_negative_emphasis
@@ -764,18 +877,33 @@ class RecurrentC51Agent:
                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }
-            and regime_selectivity_side_balance != "equal_long_short_v1"
+            and regime_selectivity_side_balance
+            not in {"equal_long_short_v1", "paired_recurrent_long_short_v1"}
         ):
             raise ValueError(
                 "persistent-chop Regime selectivity requires equal Long/Short groups"
             )
         if (
             regime_selectivity_semantics
-            == PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS
+            in {
+                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+            }
         ) != (float(regime_selectivity_paired_a_plus_margin) > 0.0):
             raise ValueError(
                 "paired A+ margin requires exactly the paired A+ semantics"
+            )
+        if (
+            regime_selectivity_semantics
+            == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+        ) != (
+            regime_selectivity_side_balance
+            == "paired_recurrent_long_short_v1"
+        ):
+            raise ValueError(
+                "paired recurrent A+ semantics require paired recurrent replay"
             )
         torch.manual_seed(seed)
         self.seed = int(seed)
@@ -1789,6 +1917,7 @@ class RecurrentC51Agent:
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                         }
                         else positive_rows_mask
                     )
@@ -1820,6 +1949,7 @@ class RecurrentC51Agent:
                             SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                         }
                     ):
                         compiler = self.regime_selectivity
@@ -1861,6 +1991,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                             else wait_mass
                         ).clamp_min(1.0)
@@ -1911,6 +2042,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                         ):
                             (
@@ -1942,6 +2074,7 @@ class RecurrentC51Agent:
                                 SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                         ):
                             (
@@ -2015,6 +2148,93 @@ class RecurrentC51Agent:
                             paired_a_plus_group_active = (
                                 paired_result.active_groups > 0
                             ).to(exact_losses.dtype)
+                        elif (
+                            self.regime_selectivity_semantics
+                            == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+                        ):
+                            pair_ids = np.full(
+                                observations.shape[:2], -1, dtype=np.int64
+                            )
+                            pair_sides = np.full(
+                                observations.shape[:2], -1, dtype=np.int64
+                            )
+                            economic_wins = np.zeros(
+                                observations.shape[:2], dtype=np.bool_
+                            )
+                            for batch_index, sequence in enumerate(sequences):
+                                for time_index, transition in enumerate(sequence):
+                                    if transition.paired_a_plus_pair_id is None:
+                                        continue
+                                    if (
+                                        transition.paired_a_plus_pair_side is None
+                                        or transition.paired_a_plus_economic_win
+                                        is None
+                                    ):
+                                        raise ValueError(
+                                            "paired recurrent A+ batch evidence "
+                                            "is incomplete"
+                                        )
+                                    pair_ids[batch_index, time_index] = int(
+                                        transition.paired_a_plus_pair_id
+                                    )
+                                    pair_sides[batch_index, time_index] = int(
+                                        Action(transition.paired_a_plus_pair_side)
+                                    )
+                                    economic_wins[batch_index, time_index] = bool(
+                                        transition.paired_a_plus_economic_win
+                                    )
+                            paired_result = paired_recurrent_a_plus_rank_loss(
+                                flat_q,
+                                pair_ids=torch.as_tensor(
+                                    pair_ids[
+                                        :,
+                                        self.recurrent_burn_in:
+                                        self.recurrent_burn_in + training_steps,
+                                    ],
+                                    dtype=torch.long,
+                                    device=self.device,
+                                )[selectivity_rows],
+                                pair_sides=torch.as_tensor(
+                                    pair_sides[
+                                        :,
+                                        self.recurrent_burn_in:
+                                        self.recurrent_burn_in + training_steps,
+                                    ],
+                                    dtype=torch.long,
+                                    device=self.device,
+                                )[selectivity_rows],
+                                economic_wins=torch.as_tensor(
+                                    economic_wins[
+                                        :,
+                                        self.recurrent_burn_in:
+                                        self.recurrent_burn_in + training_steps,
+                                    ],
+                                    dtype=torch.bool,
+                                    device=self.device,
+                                )[selectivity_rows],
+                                margin=self.regime_selectivity_paired_a_plus_margin,
+                            )
+                            regime_selectivity_paired_a_plus_loss = (
+                                paired_result.loss
+                            )
+                            regime_selectivity_paired_a_plus_active_groups = (
+                                paired_result.active_groups
+                            )
+                            regime_selectivity_paired_a_plus_pair_count = (
+                                paired_result.pair_count
+                            )
+                            regime_selectivity_paired_a_plus_pair_mass = (
+                                paired_result.pair_mass
+                            )
+                            regime_selectivity_paired_a_plus_good_advantage_sum = (
+                                paired_result.good_advantage_sum
+                            )
+                            regime_selectivity_paired_a_plus_bad_advantage_sum = (
+                                paired_result.bad_advantage_sum
+                            )
+                            paired_a_plus_group_active = (
+                                paired_result.active_groups > 0
+                            ).to(exact_losses.dtype)
                         dominant_chop_margin_membership = (
                             compiler.dominant_chop_margin_membership(
                                 selected_teachers
@@ -2023,6 +2243,7 @@ class RecurrentC51Agent:
                             in {
                                 ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
                                 PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
                             }
                             else dead_membership
                         )

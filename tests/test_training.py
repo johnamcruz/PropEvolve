@@ -15,6 +15,7 @@ import propevolve.training as training_module
 from propevolve.balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
+    EXPANSION_CHANNELS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     REGIME_TEACHER_CHANNELS,
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
@@ -22,6 +23,7 @@ from propevolve.balance_aware_regime_selectivity import (
 from propevolve.cache import build_embedding_cache
 from propevolve.decision import Action, PositionSide, RecoveryEntryPermit
 from propevolve.environment import ChallengeSpec, ChallengeStartState, MarketSeries
+from propevolve.entry_supervision import EntryTargetMetadata
 from propevolve.observation import TradeManagementObservationSpec
 from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import (
@@ -39,6 +41,7 @@ from propevolve.training import (
     _recovery_curriculum_from_config,
     _selection_evaluation_gates,
     _plain_contract_value,
+    _paired_a_plus_transition_evidence,
     assert_temporal_role,
     evaluate_agent,
     evaluate_recovery_stress,
@@ -163,6 +166,75 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
             "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
         },
     }) == {"entry_opportunity_side_balance": "equal_long_short_v1"}
+
+
+@pytest.mark.parametrize(
+    ("side", "target", "economic_win", "economic_good", "expected_win"),
+    (
+        ("long", Action.ENTER_LONG_1, True, True, True),
+        ("short", Action.WAIT, False, False, False),
+    ),
+)
+def test_paired_a_plus_transition_binds_exact_economic_winner_and_failure(
+    side: str,
+    target: Action,
+    economic_win: bool,
+    economic_good: bool,
+    expected_win: bool,
+) -> None:
+    context = np.array(
+        [0.9, 0.8, 0.1, 0.1, 0.1, 0.7, 0.2], np.float32
+    )
+    metadata = EntryTargetMetadata(
+        side=side,
+        event_anchor_rows=(10,),
+        candidate_decision_offset=0,
+        fill_offset=1,
+        continuation=economic_good,
+        economic_win=economic_win,
+        economic_good=economic_good,
+        available=True,
+        censored=False,
+        unavailable_reason=None,
+    )
+
+    actual_context, actual_side, actual_win = _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=(*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS),
+        entry_action_target=target,
+        metadata=metadata,
+    )
+
+    np.testing.assert_array_equal(actual_context, context)
+    assert actual_side == (
+        Action.ENTER_LONG_1 if side == "long" else Action.ENTER_SHORT_1
+    )
+    assert actual_win is expected_win
+
+
+def test_paired_a_plus_transition_does_not_call_nonwinning_setup_a_failure() -> None:
+    context = np.array(
+        [0.9, 0.8, 0.1, 0.1, 0.1, 0.7, 0.2], np.float32
+    )
+    metadata = EntryTargetMetadata(
+        side="long",
+        event_anchor_rows=(10,),
+        candidate_decision_offset=0,
+        fill_offset=1,
+        continuation=False,
+        economic_win=True,
+        economic_good=False,
+        available=True,
+        censored=False,
+        unavailable_reason=None,
+    )
+
+    assert _paired_a_plus_transition_evidence(
+        teacher_target=context,
+        teacher_channels=(*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS),
+        entry_action_target=Action.WAIT,
+        metadata=metadata,
+    ) == (None, None, None)
 
 
 def test_stage2a_recipe_projects_chop_specific_wait_margins() -> None:
