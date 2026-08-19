@@ -112,7 +112,7 @@
       "ENTER_LONG_1",
       "ENTER_SHORT_1"
     ],
-    "formula": "equal_present_group_mean(exact_wait_expansion_regime_confluence_weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_present_side_mean(softplus(pair_margin+matched_economic_failure_side_q_minus_wait-matched_economic_winner_side_q_minus_wait))",
+    "formula": "equal_present_group_mean(exact_wait_expansion_regime_confluence_weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_present_side_mean(mean(softplus(pair_margin+matched_economic_failure_side_q_minus_wait-matched_economic_winner_side_q_minus_wait),softplus(action_margin-matched_economic_winner_side_q_minus_wait),softplus(action_margin+matched_economic_failure_side_q_minus_wait)))",
     "loss_weight": 0.3,
     "expansion_center_receipt": "config/receipts/expansion_entry_centers_9market_pre2025_v1.json",
     "expansion_center_receipt_sha256": "fe53640956e74413ad3316e8783dc09dfafb82f6559009b24ed58f24adc959ba",
@@ -122,7 +122,7 @@
     "headroom_pressure": 1,
     "dominant_chop_pressure": 2,
     "q_temperature": 1,
-    "semantics": "paired_recurrent_a_plus_expansion_regime_contrastive_v7",
+    "semantics": "paired_recurrent_a_plus_expansion_regime_absolute_contrastive_v8",
     "persistent_chop_negative_emphasis": 2,
     "side_balance": {
       "schema": "paired_recurrent_long_short_v1",

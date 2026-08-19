@@ -55,7 +55,7 @@ PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS = (
     "paired_a_plus_expansion_regime_contrastive_v6"
 )
 PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS = (
-    "paired_recurrent_a_plus_expansion_regime_contrastive_v7"
+    "paired_recurrent_a_plus_expansion_regime_absolute_contrastive_v8"
 )
 FORMULA = (
     "wait_vs_declared_side_softmax(relative_expansion_log_odds"
@@ -104,9 +104,11 @@ PAIRED_A_PLUS_CONTRASTIVE_FORMULA = (
 )
 PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA = (
     ALL_DOMINANT_CHOP_MARGIN_FORMULA
-    + "+equal_present_side_mean(softplus(pair_margin+"
+    + "+equal_present_side_mean(mean(softplus(pair_margin+"
     "matched_economic_failure_side_q_minus_wait-"
-    "matched_economic_winner_side_q_minus_wait))"
+    "matched_economic_winner_side_q_minus_wait),"
+    "softplus(action_margin-matched_economic_winner_side_q_minus_wait),"
+    "softplus(action_margin+matched_economic_failure_side_q_minus_wait)))"
 )
 
 

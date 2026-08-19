@@ -545,6 +545,13 @@ def test_v21_recipe_changes_only_paired_replay_and_uses_200_episode_stage() -> N
         PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
     )
     assert selectivity["formula"] == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA
+    assert "softplus(action_margin-matched_economic_winner" in selectivity[
+        "formula"
+    ]
+    assert "softplus(action_margin+matched_economic_failure" in selectivity[
+        "formula"
+    ]
+    assert not selectivity["semantics"].endswith("_v7")
     assert selectivity["side_balance"] == {
         "schema": "paired_recurrent_long_short_v1",
         "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
@@ -555,6 +562,36 @@ def test_v21_recipe_changes_only_paired_replay_and_uses_200_episode_stage() -> N
     assert stage["validation_episodes"] == 200
     for key in ("agent", "challenge", "entry_supervision", "teachers", "temporal"):
         assert candidate[key] == baseline[key]
+
+
+def test_relative_only_paired_recurrent_v7_recipe_is_rejected(tmp_path: Path) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"]["semantics"] = (
+        "paired_recurrent_a_plus_expansion_regime_contrastive_v7"
+    )
+    payload["regime_selectivity"]["formula"] = (
+        "equal_present_group_mean(exact_wait_expansion_regime_confluence_"
+        "weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_"
+        "wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_"
+        "short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_"
+        "wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_"
+        "present_side_mean(softplus(pair_margin+matched_economic_failure_side_"
+        "q_minus_wait-matched_economic_winner_side_q_minus_wait))"
+    )
+    payload["regime_selectivity"].update({
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.25,
+        "side_balance": {
+            "schema": "paired_recurrent_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+    })
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="semantics|contract"):
+        load_experiment_config(path)
 
 
 def test_paired_a_plus_450_recipe_scales_v19_curriculum_proportionally() -> None:

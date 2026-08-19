@@ -1573,10 +1573,11 @@ def load_experiment_config(path: str | Path) -> dict:
                 valid_regime_identity = (
                     valid_regime_identity
                         and payload["regime_selectivity"].get("semantics")
-                        in {
-                            "paired_a_plus_expansion_regime_contrastive_v6",
-                            "paired_recurrent_a_plus_expansion_regime_contrastive_v7",
-                        }
+                            in {
+                                "paired_a_plus_expansion_regime_contrastive_v6",
+                                "paired_recurrent_a_plus_expansion_regime_"
+                                "absolute_contrastive_v8",
+                            }
                     and "regime_selectivity.paired_a_plus_margin" in frozen
                 )
         if not valid_regime_identity:
