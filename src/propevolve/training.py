@@ -5467,10 +5467,24 @@ def train_agent(
                 reasons.append(
                     f"passes {progress.passes} < {short_circuit_minimum_passes}"
                 )
-            blow_rate = progress.blows / progress.completed_episodes
+            blow_count = progress.blows
+            blow_episode_count = progress.completed_episodes
+            blow_rate_name = "blow rate"
+            if recovery_curriculum is not None:
+                # Recovery failures are training evidence. Preserve the
+                # Stage 2A safety stop over ordinary episodes while allowing
+                # recovery sequences to reach replay and optimizer updates.
+                blow_count -= progress.recovery_blows
+                blow_episode_count -= progress.recovery_episodes
+                blow_rate_name = "ordinary blow rate"
+            blow_rate = (
+                blow_count / blow_episode_count
+                if blow_episode_count
+                else 0.0
+            )
             if blow_rate > short_circuit_maximum_blow_rate:
                 reasons.append(
-                    f"blow rate {blow_rate:.6f} > "
+                    f"{blow_rate_name} {blow_rate:.6f} > "
                     f"{short_circuit_maximum_blow_rate:.6f}"
                 )
         collapse_short_circuit_boundary_reached = (

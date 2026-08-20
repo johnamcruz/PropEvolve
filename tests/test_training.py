@@ -3441,6 +3441,71 @@ def test_training_short_circuits_only_when_blow_rate_exceeds_ceiling() -> None:
     assert result.short_circuit_reason == "blow rate 0.500000 > 0.100000"
 
 
+def test_recovery_failures_reach_replay_without_weakening_ordinary_blow_gate() -> None:
+    class MixedRecoveryEnvironment:
+        def __init__(self) -> None:
+            self.recovery = False
+
+        def reset(self, *, options=None):
+            self.recovery = bool(options and "challenge_start_state" in options)
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 0,
+                "end": 1,
+            }
+
+        def step(self, action):
+            outcome = "blow" if self.recovery else "timeout"
+            return np.array([1.0], np.float32), -1.0, True, False, {
+                "valid_actions": (),
+                "fill_index": 1,
+                "outcome": outcome,
+                "ticker": "NQ",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": -3_000.0 if self.recovery else 0.0,
+                **(
+                    {"recovery_status": "not_recovered"}
+                    if self.recovery
+                    else {}
+                ),
+            }
+
+    result = train_agent(
+        Agent(),
+        MixedRecoveryEnvironment(),
+        episodes=4,
+        minimum_environment_steps=4,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=8,
+            sequence_length=1,
+            recovery_sequence_fraction=0.5,
+            seed=71,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=1,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=71,
+        recovery_curriculum=_recovery_curriculum_settings(fraction=0.5),
+        short_circuit_minimum_episodes=4,
+        short_circuit_minimum_passes=0,
+        short_circuit_maximum_blow_rate=0.0,
+    )
+
+    assert result.episodes == 4
+    assert result.blows == 2
+    assert result.recovery_blows == 2
+    assert result.short_circuited is False
+
+
 def test_episode_budget_activates_safety_short_circuit_at_completed_episode_boundary(
 ) -> None:
     class BlowEnvironment:

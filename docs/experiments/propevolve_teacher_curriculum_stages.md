@@ -194,6 +194,10 @@ contract. Change only the deterministic mixture of ordinary and -$2,700
 recovery episodes under a fresh experiment identity. Evaluate both the
 ordinary chronological 2025 NQ challenge distribution and a separately
 declared teacher-free -$2,700 recovery stress set. Neither path may touch 2026.
+Training recovery blows remain replay evidence and do not trip the ordinary
+Stage 2A blow-rate short circuit. Ordinary training episodes retain their frozen
+zero-blow ceiling, while both teacher-free selection and recovery stress still
+require zero blows for acceptance.
 
 #### Required diagnostics
 

@@ -272,7 +272,7 @@
     "teacher_autonomy_start_fraction": 0.8,
     "entry_supervision_autonomy_start_fraction": 0.95,
     "short_circuit": {
-      "minimum_passes": 1,
+      "minimum_passes": 0,
       "maximum_blow_rate": 0,
       "collapse": {
         "window_episodes": 5,
