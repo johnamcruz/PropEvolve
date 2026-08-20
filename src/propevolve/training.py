@@ -2173,8 +2173,7 @@ class TrainingResult:
     short_circuit_reason: str | None = None
     recovery_episodes: int = 0
     recovery_successes: int = 0
-    recovery_survived_not_recovered: int = 0
-    recovery_wait_timeouts: int = 0
+    recovery_not_recovered: int = 0
     recovery_blows: int = 0
 
     @property
@@ -2304,10 +2303,11 @@ class RecoveryCurriculumSettings:
 @dataclass(frozen=True)
 class RecoveryStressResult:
     episodes: int
-    recovery_successes: int
-    survived_not_recovered: int
-    wait_timeouts: int
+    passes: int
+    timeouts: int
     blows: int
+    recovery_successes: int
+    recovery_not_recovered: int
     mean_terminal_pnl: float
     mean_wait_decisions: float
     entries_used: int
@@ -2479,8 +2479,7 @@ class TrainingProgress:
     short_circuit_reason: str | None = None
     recovery_episodes: int = 0
     recovery_successes: int = 0
-    recovery_survived_not_recovered: int = 0
-    recovery_wait_timeouts: int = 0
+    recovery_not_recovered: int = 0
     recovery_blows: int = 0
 
     def result(self) -> TrainingResult:
@@ -2518,10 +2517,7 @@ class TrainingProgress:
             short_circuit_reason=self.short_circuit_reason,
             recovery_episodes=self.recovery_episodes,
             recovery_successes=self.recovery_successes,
-            recovery_survived_not_recovered=(
-                self.recovery_survived_not_recovered
-            ),
-            recovery_wait_timeouts=self.recovery_wait_timeouts,
+            recovery_not_recovered=self.recovery_not_recovered,
             recovery_blows=self.recovery_blows,
         )
 
@@ -3379,10 +3375,9 @@ class HistoricalCandidateRunner:
                 "recovery_episodes": float(training.recovery_episodes),
                 "recovery_successes": float(training.recovery_successes),
                 "recovery_success_rate": training.recovery_success_rate,
-                "recovery_survived_not_recovered": float(
-                    training.recovery_survived_not_recovered
+                "recovery_not_recovered": float(
+                    training.recovery_not_recovered
                 ),
-                "recovery_wait_timeouts": float(training.recovery_wait_timeouts),
                 "recovery_blows": float(training.recovery_blows),
                 "short_circuited": float(training.short_circuited),
                 "retained_pass_policy_restored": float(
@@ -3510,17 +3505,11 @@ class HistoricalCandidateRunner:
                 "episodes": float(recovery_stress.episodes),
                 "recovery_successes": float(recovery_stress.recovery_successes),
                 "recovery_success_rate": recovery_stress.recovery_success_rate,
-                "survived_not_recovered": float(
-                    recovery_stress.survived_not_recovered
+                "recovery_not_recovered": float(
+                    recovery_stress.recovery_not_recovered
                 ),
-                "survived_not_recovered_rate": (
-                    recovery_stress.survived_not_recovered
-                    / recovery_stress.episodes
-                ),
-                "wait_timeouts": float(recovery_stress.wait_timeouts),
-                "wait_timeout_rate": (
-                    recovery_stress.wait_timeouts / recovery_stress.episodes
-                ),
+                "passes": float(recovery_stress.passes),
+                "timeouts": float(recovery_stress.timeouts),
                 "blows": float(recovery_stress.blows),
                 "blow_rate": recovery_stress.blow_rate,
                 "mean_terminal_pnl": recovery_stress.mean_terminal_pnl,
@@ -5115,21 +5104,21 @@ def train_agent(
         ) * teacher_schedule_progress
         entry_action_weight_scale = 1.0
         outcome = str(terminal_info["outcome"])
-        ordinary_outcomes = {"pass", "blow", "timeout"}
-        recovery_outcomes = {
-            "pass",
-            "recovery_success",
-            "survived_not_recovered",
-            "wait_timeout",
-            "blow",
-        }
-        expected_outcomes = recovery_outcomes if recovery_episode else ordinary_outcomes
-        if outcome not in expected_outcomes:
+        if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
+        recovery_status = str(
+            terminal_info.get("recovery_status", "not_applicable")
+        )
+        if recovery_episode and recovery_status not in {
+            "recovered", "not_recovered"
+        }:
+            raise ValueError(
+                f"unknown terminal recovery status: {recovery_status}"
+            )
         recovery_success = bool(
             recovery_episode
+            and recovery_status == "recovered"
             and terminal_info.get("recovery_success", False)
-            and outcome in {"pass", "recovery_success"}
         )
         if recovery_episode and outcome == "pass" and not recovery_success:
             raise ValueError(
@@ -5453,13 +5442,12 @@ def train_agent(
                 progress.recovery_successes
                 + int(recovery_success)
             ),
-            recovery_survived_not_recovered=(
-                progress.recovery_survived_not_recovered
-                + int(recovery_episode and outcome == "survived_not_recovered")
-            ),
-            recovery_wait_timeouts=(
-                progress.recovery_wait_timeouts
-                + int(recovery_episode and outcome == "wait_timeout")
+            recovery_not_recovered=(
+                progress.recovery_not_recovered
+                + int(
+                    recovery_episode
+                    and recovery_status == "not_recovered"
+                )
             ),
             recovery_blows=(
                 progress.recovery_blows
@@ -5617,6 +5605,7 @@ def train_agent(
                 "recovery_success": bool(
                     terminal_info.get("recovery_success", False)
                 ),
+                "recovery_status": recovery_status,
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
                 ),
@@ -5771,6 +5760,9 @@ def train_agent(
                 "cumulative_average_balance": cumulative_average_balance,
                 "cumulative_recovery_episodes": progress.recovery_episodes,
                 "cumulative_recovery_successes": progress.recovery_successes,
+                "cumulative_recovery_not_recovered": (
+                    progress.recovery_not_recovered
+                ),
                 "cumulative_recovery_success_rate": (
                     progress.recovery_successes / progress.recovery_episodes
                     if progress.recovery_episodes else 0.0
@@ -6387,12 +6379,8 @@ def evaluate_recovery_stress(
         episodes=episodes,
         seed=settings.schedule_seed,
     )
-    outcomes = {
-        "recovery_success": 0,
-        "survived_not_recovered": 0,
-        "wait_timeout": 0,
-        "blow": 0,
-    }
+    outcomes = {"pass": 0, "timeout": 0, "blow": 0}
+    recovery_statuses = {"recovered": 0, "not_recovered": 0}
     terminal_pnls: list[float] = []
     wait_decisions: list[int] = []
     entries_used = 0
@@ -6444,37 +6432,33 @@ def evaluate_recovery_stress(
             if terminated:
                 break
         outcome = str(info.get("outcome"))
-        normalized_outcome = outcome
-        if outcome == "pass":
-            if not (
-                info.get("recovery_success", False)
-                and episode_entries == 1
-            ):
-                raise ValueError(
-                    "recovery stress pass did not satisfy breakeven recovery"
-                )
-            normalized_outcome = "recovery_success"
-        if normalized_outcome not in outcomes:
+        recovery_status = str(info.get("recovery_status"))
+        if outcome not in outcomes:
             raise ValueError(f"unknown recovery stress outcome: {outcome}")
-        if (
-            normalized_outcome in {
-                "recovery_success", "survived_not_recovered"
-            }
-            and episode_entries != 1
-        ) or (
-            normalized_outcome == "wait_timeout" and episode_entries != 0
+        if recovery_status not in recovery_statuses:
+            raise ValueError(
+                f"unknown recovery stress status: {recovery_status}"
+            )
+        if outcome == "pass" and recovery_status != "recovered":
+            raise ValueError(
+                "recovery stress pass did not satisfy breakeven recovery"
+            )
+        if recovery_status == "recovered" and (
+            not info.get("recovery_success", False) or episode_entries != 1
         ):
             raise ValueError("recovery stress outcome violates its entry contract")
-        outcomes[normalized_outcome] += 1
+        outcomes[outcome] += 1
+        recovery_statuses[recovery_status] += 1
         entries_used += episode_entries
         terminal_pnls.append(float(info["equity_pnl"]))
         wait_decisions.append(int(info.get("recovery_wait_decisions", 0)))
     result = RecoveryStressResult(
         episodes=episodes,
-        recovery_successes=outcomes["recovery_success"],
-        survived_not_recovered=outcomes["survived_not_recovered"],
-        wait_timeouts=outcomes["wait_timeout"],
+        passes=outcomes["pass"],
+        timeouts=outcomes["timeout"],
         blows=outcomes["blow"],
+        recovery_successes=recovery_statuses["recovered"],
+        recovery_not_recovered=recovery_statuses["not_recovered"],
         mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_wait_decisions=float(np.mean(wait_decisions)),
         entries_used=entries_used,
@@ -6487,8 +6471,9 @@ def evaluate_recovery_stress(
     print(
         "[recovery-stress] COMPLETE "
         f"episodes={episodes} success={result.recovery_successes} "
-        f"survived={result.survived_not_recovered} "
-        f"wait_timeout={result.wait_timeouts} blow={result.blows} "
+        f"pass={result.passes} timeout={result.timeouts} "
+        f"not_recovered={result.recovery_not_recovered} "
+        f"blow={result.blows} "
         f"success_rate={result.recovery_success_rate:.1%} "
         f"mean_pnl={result.mean_terminal_pnl:+.2f} "
         f"requested_entry={result.requested_entry_decisions} "

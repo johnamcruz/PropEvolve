@@ -657,7 +657,7 @@ def test_short_recovery_strata_train_early_entry_and_late_terminal_boundaries() 
     replay.add(Episode(
         episode_id="NQ-short-recovery",
         ticker="NQ",
-        outcome="recovery_success",
+        outcome="timeout",
         primary_side="long",
         ended_at_ns=71,
         transitions=transitions,

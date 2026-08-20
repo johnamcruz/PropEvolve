@@ -423,7 +423,7 @@ class _StoredEpisode:
                 ),
                 recurrent_reset=bool(self.recurrent_resets[index]),
                 next_recurrent_reset=bool(self.next_recurrent_resets[index]),
-                competence_anchor=self.outcome in {"pass", "recovery_success"},
+                competence_anchor=self.outcome == "pass",
                 recovery_episode=self.recovery,
                 teacher_target=(
                     None

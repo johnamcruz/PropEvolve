@@ -83,7 +83,7 @@ def test_recovery_replay_uses_exact_four_of_sixteen_without_growing_batch() -> N
     for index in range(12):
         replay.add(_episode("NQ", "timeout", "long", index * 10))
     for index in range(4):
-        ordinary = _episode("NQ", "survived_not_recovered", "long", 200 + index * 10)
+        ordinary = _episode("NQ", "timeout", "long", 200 + index * 10)
         replay.add(Episode(
             episode_id=ordinary.episode_id,
             ticker=ordinary.ticker,
@@ -1497,11 +1497,11 @@ def test_replay_marks_only_demonstrated_pass_episodes_as_competence() -> None:
 
 
 def test_replay_preserves_short_recovery_trace_with_explicit_invalid_padding() -> None:
-    original = _episode("NQ", "recovery_success", "long", 0)
+    original = _episode("NQ", "timeout", "long", 0)
     short = Episode(
         episode_id="NQ-recovery-short",
         ticker="NQ",
-        outcome="recovery_success",
+        outcome="timeout",
         primary_side="long",
         ended_at_ns=2,
         recovery=True,
@@ -1534,11 +1534,11 @@ def test_replay_preserves_short_recovery_trace_with_explicit_invalid_padding() -
 
 
 def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() -> None:
-    original = _episode("NQ", "recovery_success", "long", 0)
+    original = _episode("NQ", "timeout", "long", 0)
     short = Episode(
         episode_id="NQ-recovery-short",
         ticker="NQ",
-        outcome="recovery_success",
+        outcome="timeout",
         primary_side="long",
         ended_at_ns=2,
         recovery=True,
@@ -1613,7 +1613,7 @@ def test_short_recovery_entry_and_terminal_strata_keep_both_boundaries_learnable
     episode = Episode(
         episode_id="NQ-recovery-71",
         ticker="NQ",
-        outcome="recovery_success",
+        outcome="timeout",
         primary_side="long",
         ended_at_ns=71,
         transitions=tuple(transitions),

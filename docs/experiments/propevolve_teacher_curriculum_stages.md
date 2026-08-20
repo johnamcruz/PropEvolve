@@ -171,19 +171,21 @@ floor -$3,000, session PnL -$2,700, no passmark lock, and exactly $300 of MLL
 headroom. It carries one challenge-lifetime Entry permit. WAIT does not consume
 the permit, but the first Long or Short Entry does.
 
-The recovery episode terminates when that first trade closes. Crossing to
--$2,500 restores the ordinary $500 Entry headroom and is `recovery_success`.
-Closing below -$2,500 without touching the MLL floor is
-`survived_not_recovered`. A full fee-inclusive -1R stop reaches -$3,000 and is a
-blowout. If the agent never finds a valid opportunity, it may WAIT until the
-ordinary challenge horizon and receives `wait_timeout` rather than artificial
-credit for inactivity.
+Crossing to -$2,500 restores the ordinary $500 Entry headroom, but recovery
+continues until realized PnL reaches $0. At breakeven the recovery status becomes
+`recovered`, the exception is removed, and the same challenge continues under
+ordinary Stage 2A behavior. The episode itself still ends only as `pass`, `blow`,
+or `timeout`; a recovery episode that terminates before breakeven records the
+orthogonal recovery status `not_recovered`. A full fee-inclusive -1R stop reaches
+-$3,000 and is a blowout. Waiting to the ordinary challenge horizon remains a
+timeout and receives no artificial credit for inactivity.
 
 Position size remains one, risk remains $300 including fees, and the ordinary
 $500 minimum-headroom guard remains unchanged. The permit is a recovery-only
-training and stress-evaluation seam; it does not lower the ordinary guard or
-create a second trade. The initial matched experiment uses this single exact
-start rather than a ladder of starting balances so its evidence is attributable.
+training and stress-evaluation seam; it does not lower the ordinary guard after
+the single emergency entry. The initial matched experiment uses this single
+exact start rather than a ladder of starting balances so its evidence is
+attributable.
 
 #### Matched comparison
 

@@ -2309,6 +2309,7 @@ def test_training_deterministically_mixes_complete_recovery_starts_and_keeps_sho
                 "recovery_entry_used": recovery,
                 "recovery_trade_closed": recovery,
                 "recovery_success": recovery,
+                "recovery_status": "recovered" if recovery else "not_applicable",
                 "recovery_wait_decisions": 0,
                 "recovery_entry_permit_remaining": 0,
             }
@@ -2403,18 +2404,19 @@ def test_recovery_diagnostics_separate_requested_short_from_masked_wait() -> Non
                 "valid_actions": (),
                 "ticker": "NQ",
                 "fill_index": 1,
-                "outcome": "wait_timeout",
+                "outcome": "timeout",
                 "primary_side": "flat",
                 "equity_pnl": -2_700.0,
                 "recovery_entry_used": False,
                 "recovery_success": False,
+                "recovery_status": "not_recovered",
                 "recovery_wait_decisions": 1,
                 "recovery_entry_permit_remaining": 1,
             }
 
     diagnostics: list[dict[str, object]] = []
     settings = _recovery_curriculum_settings(fraction=1.0)
-    train_agent(
+    result = train_agent(
         RequestedShortAgent(),
         LowHeadroomEnvironment(),
         episodes=1,
@@ -2442,6 +2444,8 @@ def test_recovery_diagnostics_separate_requested_short_from_masked_wait() -> Non
     assert row["requested_flat_action_counts"]["ENTER_SHORT_1"] == 1
     assert row["executed_flat_action_counts"]["WAIT"] == 1
     assert row["blocked_requested_action_counts"]["ENTER_SHORT_1"] == 1
+    assert result.timeouts == 1
+    assert result.recovery_not_recovered == 1
 
 
 def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
@@ -2459,7 +2463,7 @@ def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
             return np.ones(1, np.float32), 0.0, True, False, {
                 "valid_actions": (),
                 "ticker": "NQ",
-                "outcome": "wait_timeout" if recovery else "timeout",
+                "outcome": "timeout",
                 "primary_side": "flat",
                 "trade_count": 0,
                 "win_count": 0,
@@ -2467,6 +2471,9 @@ def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
                 "equity_pnl": -2_700.0 if recovery else 0.0,
                 "recovery_wait_decisions": int(recovery),
                 "recovery_entry_permit_remaining": int(recovery),
+                "recovery_status": (
+                    "not_recovered" if recovery else "not_applicable"
+                ),
             }
 
     def run(environment, minimum_steps, *, resume=None, checkpoints=None):
@@ -4931,25 +4938,23 @@ def test_teacher_free_recovery_stress_reports_distinct_outcomes_and_one_entry() 
             }
 
         def step(self, action):
-            outcome = (
-                "pass",
-                "survived_not_recovered",
-                "wait_timeout",
-                "blow",
-            )[self.episode]
-            entered = outcome != "wait_timeout"
+            outcomes = ("pass", "timeout", "timeout", "blow")
+            recovery_statuses = (
+                "recovered", "not_recovered", "not_recovered", "not_recovered"
+            )
+            outcome = outcomes[self.episode]
+            recovery_status = recovery_statuses[self.episode]
+            entered = self.episode != 2
             return np.ones(1, np.float32), 0.0, True, False, {
                 "valid_actions": (),
                 "outcome": outcome,
-                "equity_pnl": {
-                    "pass": 6_000.0,
-                    "survived_not_recovered": -2_650.0,
-                    "wait_timeout": -2_700.0,
-                    "blow": -3_000.0,
-                }[outcome],
+                "equity_pnl": (6_000.0, -2_650.0, -2_700.0, -3_000.0)[
+                    self.episode
+                ],
                 "recovery_entry_used": entered,
                 "recovery_trade_closed": entered,
                 "recovery_success": outcome == "pass",
+                "recovery_status": recovery_status,
                 "recovery_wait_decisions": int(not entered),
             }
 
@@ -4964,8 +4969,9 @@ def test_teacher_free_recovery_stress_reports_distinct_outcomes_and_one_entry() 
 
     assert isinstance(result, RecoveryStressResult)
     assert result.recovery_successes == 1
-    assert result.survived_not_recovered == 1
-    assert result.wait_timeouts == 1
+    assert result.recovery_not_recovered == 3
+    assert result.passes == 1
+    assert result.timeouts == 2
     assert result.blows == 1
     assert result.recovery_success_rate == 0.25
     assert result.blow_rate == 0.25
@@ -5005,9 +5011,11 @@ def test_recovery_stress_fails_closed_on_a_second_entry() -> None:
             terminated = self.step_index == 2
             return np.ones(1, np.float32), 0.0, terminated, False, {
                 "valid_actions": () if terminated else (Action.WAIT,),
-                "outcome": "recovery_success" if terminated else None,
+                "outcome": "timeout" if terminated else None,
                 "equity_pnl": -2_500.0,
                 "recovery_entry_used": True,
+                "recovery_success": terminated,
+                "recovery_status": "recovered" if terminated else "active",
             }
 
     with pytest.raises(ValueError, match="one-entry contract"):

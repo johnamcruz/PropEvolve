@@ -135,6 +135,7 @@ def test_recovery_start_allows_one_entry_and_wait_does_not_consume_it() -> None:
     assert reset_info["mll_headroom"] == 300.0
     assert reset_info["mll_headroom_fraction"] == 0.1
     assert reset_info["recovery_entry_permit_remaining"] == 1
+    assert reset_info["recovery_status"] == "active"
 
     _, _, terminated, _, wait_info = env.step(Action.WAIT)
 
@@ -180,6 +181,7 @@ def test_first_recovery_trade_restores_ordinary_entries_without_ending_recovery(
     assert recovered["mll_headroom"] == 500.0
     assert recovered["mll_headroom_fraction"] == pytest.approx(1.0 / 6.0)
     assert recovered["recovery_success"] is False
+    assert recovered["recovery_status"] == "active"
     assert recovered["ordinary_entry_eligible"] is True
     assert recovered["outcome"] is None
     assert recovered["valid_actions"] == (
@@ -216,6 +218,7 @@ def test_first_short_recovery_trade_mirrors_long_recovery_eligibility() -> None:
     assert not terminated
     assert recovered["realized_pnl"] == -2_500.0
     assert recovered["recovery_success"] is False
+    assert recovered["recovery_status"] == "active"
     assert recovered["ordinary_entry_eligible"] is True
     assert recovered["valid_actions"] == (
         Action.WAIT,
@@ -295,6 +298,7 @@ def test_huge_first_recovery_winner_is_a_pass_and_records_recovery_success() -> 
     assert recovered["realized_pnl"] == 7_300.0
     assert recovered["recovery_trade_closed"] is True
     assert recovered["recovery_success"] is True
+    assert recovered["recovery_status"] == "recovered"
     assert recovered["outcome"] == "pass"
     assert reward == pytest.approx(10_000.0 / 3_000.0 + 250.0 / 1_000.0)
 
@@ -325,6 +329,7 @@ def test_consumed_recovery_permit_blocks_second_exception_but_episode_continues(
     assert not terminated
     assert closed["realized_pnl"] == -2_700.0
     assert closed["recovery_success"] is False
+    assert closed["recovery_status"] == "active"
     assert closed["ordinary_entry_eligible"] is False
     assert closed["outcome"] is None
     assert closed["valid_actions"] == (Action.WAIT,)
@@ -361,11 +366,23 @@ def test_recovery_continues_across_ordinary_trades_until_breakeven() -> None:
         _, _, closed_done, _, info = env.step(Action.CLOSE)
         assert not entered_done
         assert info["realized_pnl"] == realized
-        assert closed_done is (trade == 2)
+        assert not closed_done
 
     assert info["recovery_success"] is True
-    assert info["outcome"] == "recovery_success"
-    assert info["valid_actions"] == ()
+    assert info["recovery_status"] == "recovered"
+    assert info["outcome"] is None
+    assert info["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    _, _, terminated, _, terminal = env.step(Action.WAIT)
+
+    assert terminated
+    assert terminal["outcome"] == "timeout"
+    assert terminal["recovery_status"] == "recovered"
+    assert terminal["recovery_success"] is True
 
 
 def test_recovery_episode_can_wait_until_normal_challenge_timeout() -> None:
@@ -392,7 +409,9 @@ def test_recovery_episode_can_wait_until_normal_challenge_timeout() -> None:
         assert info["recovery_wait_decisions"] == decision
         assert terminated is (decision == 7)
 
-    assert info["outcome"] == "wait_timeout"
+    assert info["outcome"] == "timeout"
+    assert info["recovery_status"] == "not_recovered"
+    assert info["recovery_success"] is False
     assert info["recovery_entry_permit_remaining"] == 1
     assert info["valid_actions"] == ()
     assert reward == pytest.approx(-2.0 / 1_000.0)
@@ -431,6 +450,7 @@ def test_recovery_stop_is_fee_inclusive_and_blows_at_the_mll_floor() -> None:
     assert stopped["fees_paid"] == 4.0
     assert stopped["recovery_entry_permit_remaining"] == 0
     assert stopped["recovery_success"] is False
+    assert stopped["recovery_status"] == "not_recovered"
 
 
 def test_recovery_stop_allows_realistic_gap_through_beyond_max_loss() -> None:
@@ -612,12 +632,14 @@ def test_action_is_filled_on_next_bar_and_can_pass_challenge() -> None:
         seed=1,
     )
     observation, info = env.reset(options={"ticker": "NQ", "start": 0})
+    assert info["recovery_status"] == "not_applicable"
 
     _, reward, terminated, truncated, info = env.step(Action.ENTER_LONG_1)
 
     assert observation.shape == (14,)
     assert terminated and not truncated
     assert info["outcome"] == "pass"
+    assert info["recovery_status"] == "not_applicable"
     assert info["fill_price"] == 101.0
     assert info["equity_pnl"] == 20.0
     assert info["trade_count"] == 1

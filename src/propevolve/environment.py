@@ -377,6 +377,7 @@ class HistoricalChallengeEnv:
         self._recovery_entry_permit: RecoveryEntryPermit | None = None
         self._recovery_entry_open = False
         self._recovery_success_pnl: float | None = None
+        self._recovery_status = "not_applicable"
         self._recovery_wait_decisions = 0
 
     @property
@@ -476,6 +477,7 @@ class HistoricalChallengeEnv:
         self._recovery_entry_permit = None
         self._recovery_entry_open = False
         self._recovery_success_pnl = None
+        self._recovery_status = "not_applicable"
         self._recovery_wait_decisions = 0
         start_state = options.get("challenge_start_state")
         if start_state is not None:
@@ -490,6 +492,7 @@ class HistoricalChallengeEnv:
             self._trading_days_elapsed = start_state.trading_days_elapsed
             self._recovery_entry_permit = start_state.recovery_entry_permit
             self._recovery_success_pnl = start_state.recovery_success_pnl
+            self._recovery_status = "active"
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
         return self._observation(), {
@@ -506,6 +509,7 @@ class HistoricalChallengeEnv:
             "passmark_locked": self._account.passmark_locked,
             "valid_actions": self.valid_actions(),
             "recovery_entry_permit_remaining": self._recovery_permit_remaining,
+            "recovery_status": self._recovery_status,
             "recovery_wait_decisions": self._recovery_wait_decisions,
         }
 
@@ -603,7 +607,8 @@ class HistoricalChallengeEnv:
             if self._account.outcome(current_equity) == "pass":
                 info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
-                info["recovery_success"] = self._recovery_success_pnl is not None
+                if self._recovery_status == "active":
+                    self._recovery_status = "recovered"
                 outcome = "pass"
             elif (
                 self._recovery_success_pnl is not None
@@ -613,22 +618,15 @@ class HistoricalChallengeEnv:
                 self._liquidate(float(self._market.close[self._index]), info)
                 current_equity = self._equity(float(self._market.close[self._index]))
                 if self._account.realized_pnl >= self._recovery_success_pnl:
-                    info["recovery_success"] = True
-                    outcome = "recovery_success"
+                    self._recovery_status = "recovered"
+                    self._recovery_success_pnl = None
+                    self._recovery_entry_permit = None
             if outcome is None and self._index >= self._end:
                 info.setdefault("exit_reason", "episode_timeout")
                 self._liquidate(float(self._market.close[self._index]), info)
-                outcome = (
-                    "wait_timeout"
-                    if (
-                        self._recovery_success_pnl is not None
-                        and self._recovery_entry_permit is not None
-                        and self._recovery_entry_permit.remaining_entries == 1
-                    )
-                    else "survived_not_recovered"
-                    if self._recovery_success_pnl is not None
-                    else "timeout"
-                )
+                outcome = "timeout"
+        if outcome is not None and self._recovery_status == "active":
+            self._recovery_status = "not_recovered"
         if outcome is None and self._position is not None:
             self._update_ratchet(next_index, info)
 
@@ -654,7 +652,7 @@ class HistoricalChallengeEnv:
             ) / self.spec.reward_scale
         elif outcome == "blow":
             reward += self.spec.terminal_blow_reward / self.spec.reward_scale
-        elif outcome in {"timeout", "wait_timeout", "survived_not_recovered"}:
+        elif outcome == "timeout":
             reward += self.spec.terminal_timeout_reward / self.spec.reward_scale
         self._terminated = outcome is not None
         mll_headroom = self._account.mll_headroom(equity)
@@ -678,6 +676,8 @@ class HistoricalChallengeEnv:
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
             "recovery_entry_permit_remaining": self._recovery_permit_remaining,
+            "recovery_status": self._recovery_status,
+            "recovery_success": self._recovery_status == "recovered",
             "recovery_wait_decisions": self._recovery_wait_decisions,
             **shaping_info,
             **self._trade_statistics(),
