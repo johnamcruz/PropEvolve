@@ -12,7 +12,6 @@ from propevolve.environment import (
     HistoricalChallengeEnv,
     MarketSeries,
     PropChallengeAccount,
-    RecoveryEntryPermit,
 )
 from propevolve.observation import (
     AccountState,
@@ -65,11 +64,6 @@ def _recovery_start_state() -> ChallengeStartState:
         session_pnl=-2_700.0,
         trading_days_elapsed=1,
         recovery_success_pnl=0.0,
-        recovery_entry_permit=RecoveryEntryPermit(
-            remaining_entries=1,
-            exception_headroom=300.0,
-            ordinary_entry_resume_pnl=-2_500.0,
-        ),
     )
 
 
@@ -105,7 +99,7 @@ def _recovery_market(
     )
 
 
-def test_recovery_start_allows_one_entry_and_wait_does_not_consume_it() -> None:
+def test_recovery_start_keeps_wait_long_and_short_available_while_flat() -> None:
     env = HistoricalChallengeEnv(
         {"NQ": _market()},
         round_trip_fees={"NQ": 0.0},
@@ -134,12 +128,10 @@ def test_recovery_start_allows_one_entry_and_wait_does_not_consume_it() -> None:
     assert reset_info["equity_pnl"] == -2_700.0
     assert reset_info["mll_headroom"] == 300.0
     assert reset_info["mll_headroom_fraction"] == 0.1
-    assert reset_info["recovery_entry_permit_remaining"] == 1
 
     _, _, terminated, _, wait_info = env.step(Action.WAIT)
 
     assert not terminated
-    assert wait_info["recovery_entry_permit_remaining"] == 1
     assert wait_info["mll_headroom"] == 300.0
     assert wait_info["mll_headroom_fraction"] == 0.1
     assert wait_info["recovery_wait_decisions"] == 1
@@ -150,8 +142,8 @@ def test_recovery_start_allows_one_entry_and_wait_does_not_consume_it() -> None:
     )
 
 
-def test_first_recovery_trade_consumes_permit_and_restores_ordinary_entries() -> None:
-    market = _recovery_market(opens=(100.0, 100.0, 110.0, 110.0, 110.0, 110.0))
+def test_recovery_can_take_multiple_selective_entries_until_breakeven() -> None:
+    market = _recovery_market(opens=(100.0, 100.0, 104.0, 104.0, 235.0, 235.0))
     env = HistoricalChallengeEnv(
         {"NQ": market},
         round_trip_fees={"NQ": 0.0},
@@ -170,25 +162,39 @@ def test_first_recovery_trade_consumes_permit_and_restores_ordinary_entries() ->
         "challenge_start_state": _recovery_start_state(),
     })
 
-    _, _, terminated, _, entered = env.step(Action.ENTER_LONG_1)
-    _, recovered_reward, terminated, _, recovered = env.step(Action.CLOSE)
+    _, _, terminated, _, first_entry = env.step(Action.ENTER_LONG_1)
+    _, first_reward, terminated, _, first_close = env.step(Action.CLOSE)
 
     assert not terminated
-    assert entered["recovery_entry_permit_remaining"] == 0
-    assert entered["recovery_entry_used"] is True
-    assert recovered["realized_pnl"] == -2_500.0
-    assert recovered["mll_headroom"] == 500.0
-    assert recovered["mll_headroom_fraction"] == pytest.approx(1.0 / 6.0)
-    assert recovered["recovery_success"] is False
-    assert recovered["ordinary_entry_eligible"] is True
-    assert recovered["outcome"] is None
-    assert "recovery_status" not in recovered
-    assert recovered["valid_actions"] == (
+    assert first_entry["recovery_entry_used"] is True
+    assert first_close["realized_pnl"] == -2_620.0
+    assert first_close["mll_headroom"] == 380.0
+    assert first_close["recovery_success"] is False
+    assert first_close["ordinary_entry_eligible"] is False
+    assert first_close["outcome"] is None
+    assert "recovery_status" not in first_close
+    assert first_close["valid_actions"] == (
         Action.WAIT,
         Action.ENTER_LONG_1,
         Action.ENTER_SHORT_1,
     )
-    assert recovered_reward == pytest.approx(200.0 / 3_000.0)
+    assert first_reward == pytest.approx(80.0 / 3_000.0)
+
+    _, _, terminated, _, second_entry = env.step(Action.ENTER_LONG_1)
+    _, second_reward, terminated, _, second_close = env.step(Action.CLOSE)
+
+    assert not terminated
+    assert second_entry["recovery_entry_used"] is True
+    assert second_close["realized_pnl"] == 0.0
+    assert second_close["recovery_success"] is True
+    assert second_close["recovery_status"] == "recovered"
+    assert second_close["outcome"] is None
+    assert second_close["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    assert second_reward == pytest.approx(2_620.0 / 3_000.0)
 
 
 def test_reaching_breakeven_records_recovery_and_continues_the_challenge() -> None:
@@ -301,7 +307,7 @@ def test_huge_first_recovery_winner_is_a_pass_and_records_recovery_success() -> 
     assert reward == pytest.approx(10_000.0 / 3_000.0 + 250.0 / 1_000.0)
 
 
-def test_consumed_recovery_permit_rejects_a_second_exception_entry() -> None:
+def test_nonrecovering_trade_keeps_all_flat_recovery_choices_available() -> None:
     market = _recovery_market(opens=(100.0,) * 6)
     env = HistoricalChallengeEnv(
         {"NQ": market},
@@ -330,10 +336,15 @@ def test_consumed_recovery_permit_rejects_a_second_exception_entry() -> None:
     assert closed["ordinary_entry_eligible"] is False
     assert closed["outcome"] is None
     assert "recovery_status" not in closed
-    assert closed["valid_actions"] == (Action.WAIT,)
+    assert closed["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
     assert recovery_reward == 0.0
-    with pytest.raises(ValueError, match="invalid"):
-        env.step(Action.ENTER_LONG_1)
+    _, _, terminated, _, second_entry = env.step(Action.ENTER_LONG_1)
+    assert not terminated
+    assert second_entry["recovery_entry_used"] is True
 
 
 def test_recovery_episode_can_wait_until_normal_challenge_timeout() -> None:
@@ -363,7 +374,6 @@ def test_recovery_episode_can_wait_until_normal_challenge_timeout() -> None:
     assert info["outcome"] == "timeout"
     assert info["recovery_status"] == "not_recovered"
     assert info["recovery_success"] is False
-    assert info["recovery_entry_permit_remaining"] == 1
     assert info["valid_actions"] == ()
     assert reward == pytest.approx(-2.0 / 1_000.0)
 
@@ -399,7 +409,6 @@ def test_recovery_stop_is_fee_inclusive_and_blows_at_the_mll_floor() -> None:
     assert stopped["exit_reason"] == "initial_stop"
     assert stopped["realized_pnl"] == pytest.approx(-3_000.0)
     assert stopped["fees_paid"] == 4.0
-    assert stopped["recovery_entry_permit_remaining"] == 0
     assert stopped["recovery_success"] is False
     assert stopped["recovery_status"] == "not_recovered"
 
@@ -465,23 +474,8 @@ def test_recovery_start_state_rejects_incomplete_account_state(
         ({"peak_equity_pnl": 100.0}, "peak equity must be zero"),
         (
             {
-                "recovery_entry_permit": RecoveryEntryPermit(
-                    remaining_entries=1,
-                    exception_headroom=300.0,
-                    ordinary_entry_resume_pnl=-2_400.0,
-                )
-            },
-            "ordinary-entry PnL must restore exactly",
-        ),
-        (
-            {
                 "realized_pnl": -2_600.0,
                 "equity_pnl": -2_600.0,
-                "recovery_entry_permit": RecoveryEntryPermit(
-                    remaining_entries=1,
-                    exception_headroom=400.0,
-                    ordinary_entry_resume_pnl=-2_500.0,
-                ),
             },
             "headroom must equal per-trade risk",
         ),

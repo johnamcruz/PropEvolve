@@ -7,7 +7,6 @@ from propevolve.decision import (
     Action,
     ActionMasker,
     PositionSide,
-    RecoveryEntryPermit,
 )
 from propevolve.observation import (
     AccountState,
@@ -103,7 +102,7 @@ def test_risk_mask_exposes_only_state_valid_actions() -> None:
     assert masker.valid_actions(long) == (Action.HOLD, Action.CLOSE)
 
 
-def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
+def test_recovery_mode_keeps_wait_long_and_short_available_until_terminal() -> None:
     masker = ActionMasker(
         max_position_size=1,
         max_loss=3_000,
@@ -118,11 +117,7 @@ def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
     assert masker.valid_actions(near_mll) == (Action.WAIT,)
     assert masker.valid_actions(
         near_mll,
-        recovery_entry_permit=RecoveryEntryPermit(
-            remaining_entries=1,
-            exception_headroom=300,
-            ordinary_entry_resume_pnl=-2_500,
-        ),
+        recovery_active=True,
     ) == (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -134,17 +129,9 @@ def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
             mll_headroom=400,
             position_side=PositionSide.FLAT,
         ),
-        recovery_entry_permit=RecoveryEntryPermit(
-            remaining_entries=1,
-            exception_headroom=300,
-            ordinary_entry_resume_pnl=-2_500,
-        ),
-    ) == (Action.WAIT,)
-    assert masker.valid_actions(
-        near_mll,
-        recovery_entry_permit=RecoveryEntryPermit(
-            remaining_entries=0,
-            exception_headroom=300,
-            ordinary_entry_resume_pnl=-2_500,
-        ),
-    ) == (Action.WAIT,)
+        recovery_active=True,
+    ) == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )

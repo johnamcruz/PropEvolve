@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from .decision import Action, ActionMasker, PositionSide, RecoveryEntryPermit
+from .decision import Action, ActionMasker, PositionSide
 from .episode_coverage import (
     DeterministicEpisodeCoverage,
     FullDataEpisodeCoverageSpec,
@@ -107,7 +107,6 @@ class ChallengeStartState:
     session_pnl: float
     trading_days_elapsed: int
     recovery_success_pnl: float
-    recovery_entry_permit: RecoveryEntryPermit
 
     def __post_init__(self) -> None:
         values = (
@@ -136,8 +135,6 @@ class ChallengeStartState:
             or self.trading_days_elapsed < 1
         ):
             raise ValueError("trading_days_elapsed must be a positive integer")
-        if not isinstance(self.recovery_entry_permit, RecoveryEntryPermit):
-            raise TypeError("recovery_entry_permit must be a RecoveryEntryPermit")
 
 
 @dataclass(frozen=True)
@@ -374,7 +371,6 @@ class HistoricalChallengeEnv:
         self._primary_side = "flat"
         self._closed_trade_pnls: list[float] = []
         self._trading_days_elapsed = 0
-        self._recovery_entry_permit: RecoveryEntryPermit | None = None
         self._recovery_entry_open = False
         self._recovery_success_pnl: float | None = None
         self._recovery_status: str | None = None
@@ -474,7 +470,6 @@ class HistoricalChallengeEnv:
         self._closed_trade_pnls = []
         self._closed_trades: list[_ClosedTrade] = []
         self._trading_days_elapsed = 1
-        self._recovery_entry_permit = None
         self._recovery_entry_open = False
         self._recovery_success_pnl = None
         self._recovery_status = None
@@ -490,7 +485,6 @@ class HistoricalChallengeEnv:
             self._account.passmark_locked = start_state.passmark_locked
             self._peak_equity = start_state.peak_equity_pnl
             self._trading_days_elapsed = start_state.trading_days_elapsed
-            self._recovery_entry_permit = start_state.recovery_entry_permit
             self._recovery_success_pnl = start_state.recovery_success_pnl
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
@@ -507,50 +501,28 @@ class HistoricalChallengeEnv:
             ),
             "passmark_locked": self._account.passmark_locked,
             "valid_actions": self.valid_actions(),
-            "recovery_entry_permit_remaining": self._recovery_permit_remaining,
             "recovery_wait_decisions": self._recovery_wait_decisions,
         }
 
     def valid_actions(self) -> tuple[Action, ...]:
         return self._masker.valid_actions(
             self._account_state(),
-            recovery_entry_permit=self._recovery_entry_permit,
-        )
-
-    @property
-    def _recovery_permit_remaining(self) -> int:
-        return (
-            0
-            if self._recovery_entry_permit is None
-            else self._recovery_entry_permit.remaining_entries
+            recovery_active=self._recovery_success_pnl is not None,
         )
 
     def _validate_challenge_start_state(self, state: ChallengeStartState) -> None:
-        permit = state.recovery_entry_permit
         if not math.isclose(state.mll_floor_pnl, -self.spec.max_loss):
             raise ValueError("recovery start MLL floor must equal negative max_loss")
         if not math.isclose(state.peak_equity_pnl, 0.0):
             raise ValueError("recovery start peak equity must be zero")
-        if not math.isclose(
-            state.equity_pnl - state.mll_floor_pnl,
-            permit.exception_headroom,
-        ):
-            raise ValueError("recovery start headroom must match its entry permit")
         if (
             self.spec.per_trade_risk_dollars is None
             or not math.isclose(
-                permit.exception_headroom,
+                state.equity_pnl - state.mll_floor_pnl,
                 self.spec.per_trade_risk_dollars,
             )
         ):
             raise ValueError("recovery headroom must equal per-trade risk")
-        if not math.isclose(
-            permit.ordinary_entry_resume_pnl - state.mll_floor_pnl,
-            self.spec.minimum_mll_headroom,
-        ):
-            raise ValueError(
-                "recovery ordinary-entry PnL must restore exactly eligibility"
-            )
         if not math.isclose(state.recovery_success_pnl, 0.0):
             raise ValueError("recovery success PnL must be breakeven")
         if state.trading_days_elapsed > self.spec.episode_days:
@@ -578,8 +550,7 @@ class HistoricalChallengeEnv:
         }
         if (
             action == Action.WAIT
-            and self._recovery_entry_permit is not None
-            and self._recovery_entry_permit.remaining_entries == 1
+            and self._recovery_success_pnl is not None
         ):
             self._recovery_wait_decisions += 1
         if self._session_keys[self._ticker][next_index] != self._session_keys[self._ticker][self._index]:
@@ -607,7 +578,6 @@ class HistoricalChallengeEnv:
                 if self._recovery_success_pnl is not None:
                     self._recovery_status = "recovered"
                     self._recovery_success_pnl = None
-                    self._recovery_entry_permit = None
                 outcome = "pass"
             elif (
                 self._recovery_success_pnl is not None
@@ -619,7 +589,6 @@ class HistoricalChallengeEnv:
                 if self._account.realized_pnl >= self._recovery_success_pnl:
                     self._recovery_status = "recovered"
                     self._recovery_success_pnl = None
-                    self._recovery_entry_permit = None
             if outcome is None and self._index >= self._end:
                 info.setdefault("exit_reason", "episode_timeout")
                 self._liquidate(float(self._market.close[self._index]), info)
@@ -677,7 +646,6 @@ class HistoricalChallengeEnv:
             "timestamp": str(self._market.timestamps[self._index]),
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
-            "recovery_entry_permit_remaining": self._recovery_permit_remaining,
             "recovery_success": self._recovery_status == "recovered",
             "recovery_wait_decisions": self._recovery_wait_decisions,
             **shaping_info,
@@ -751,20 +719,7 @@ class HistoricalChallengeEnv:
             if action in entries:
                 side, size = entries[action]
                 assert self._account is not None
-                if (
-                    self._account.mll_headroom()
-                    < self.spec.minimum_mll_headroom
-                    and self._recovery_entry_permit is not None
-                    and self._recovery_entry_permit.remaining_entries == 1
-                ):
-                    permit = self._recovery_entry_permit
-                    self._recovery_entry_permit = RecoveryEntryPermit(
-                        remaining_entries=0,
-                        exception_headroom=permit.exception_headroom,
-                        ordinary_entry_resume_pnl=(
-                            permit.ordinary_entry_resume_pnl
-                        ),
-                    )
+                if self._recovery_success_pnl is not None:
                     self._recovery_entry_open = True
                     info["recovery_entry_used"] = True
                 initial_risk_points = None

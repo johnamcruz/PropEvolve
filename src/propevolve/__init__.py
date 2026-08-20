@@ -1,7 +1,7 @@
 """PropEvolve public package."""
 
 from .balance_aware_regime_selectivity import BalanceAwareRegimeSelectivity
-from .decision import Action, ActionMasker, PositionSide, RecoveryEntryPermit
+from .decision import Action, ActionMasker, PositionSide
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
@@ -41,7 +41,6 @@ __all__ = [
     "PositionSide",
     "PropChallengeAccount",
     "RecoveryCurriculumSettings",
-    "RecoveryEntryPermit",
     "RecoveryStressResult",
     "RevisionPolicy",
     "evaluate_recovery_stress",

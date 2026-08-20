@@ -329,11 +329,6 @@
       "session_pnl": -2700,
       "trading_days_elapsed": 1
     },
-    "entry_permit": {
-      "remaining_entries": 1,
-      "exception_headroom": 300,
-      "ordinary_entry_resume_pnl": -2500
-    },
     "action_value_supervision": {
       "loss_weight": 0.25,
       "temperature": 1,
@@ -342,7 +337,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins exactly at -$2,700 and uses training-only same-state WAIT, Long, and Short recovery values to improve recovery to breakeven and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins exactly at -$2,700 and keeps WAIT, Long, and Short available while flat until breakeven, using training-only same-state recovery values to learn selective recovery and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -384,7 +379,6 @@
       "recovery_curriculum.stress_evaluation_episodes",
       "recovery_curriculum.recovery_success_pnl",
       "recovery_curriculum.start_state",
-      "recovery_curriculum.entry_permit",
       "recovery_curriculum.action_value_supervision",
       "regime_selectivity.action_order",
       "regime_selectivity.chop_wait_margin",

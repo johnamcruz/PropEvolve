@@ -69,7 +69,6 @@ RECOVERY_CURRICULUM_FROZEN_PATHS = (
     "recovery_curriculum.stress_evaluation_episodes",
     "recovery_curriculum.recovery_success_pnl",
     "recovery_curriculum.start_state",
-    "recovery_curriculum.entry_permit",
     "recovery_curriculum.action_value_supervision",
 )
 RECOVERY_CURRICULUM_REVISION_PATHS: tuple[str, ...] = ()
@@ -439,7 +438,7 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
 
 
 def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
-    """Authenticate the optional one-shot Stage-2 recovery contract."""
+    """Authenticate the optional learned Stage-2 recovery contract."""
     curriculum = payload.get("recovery_curriculum")
     if curriculum is None:
         return
@@ -448,7 +447,6 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "stress_evaluation_episodes",
         "recovery_success_pnl",
         "start_state",
-        "entry_permit",
         "action_value_supervision",
     }
     start_fields = {
@@ -462,11 +460,6 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "session_pnl",
         "trading_days_elapsed",
     }
-    permit_fields = {
-        "remaining_entries",
-        "exception_headroom",
-        "ordinary_entry_resume_pnl",
-    }
     supervision_fields = {
         "loss_weight",
         "temperature",
@@ -476,13 +469,10 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
     start = curriculum["start_state"]
-    permit = curriculum["entry_permit"]
     supervision = curriculum["action_value_supervision"]
     if (
         not isinstance(start, dict)
         or set(start) != start_fields
-        or not isinstance(permit, dict)
-        or set(permit) != permit_fields
         or not isinstance(supervision, dict)
         or set(supervision) != supervision_fields
     ):
@@ -493,7 +483,6 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         start["position_side"],
         start["position_size"],
         start["trading_days_elapsed"],
-        permit["remaining_entries"],
         supervision["store_capacity"],
         supervision["target_every_episodes"],
     )
@@ -504,8 +493,6 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         start["peak_equity_pnl"],
         start["mll_floor_pnl"],
         start["session_pnl"],
-        permit["exception_headroom"],
-        permit["ordinary_entry_resume_pnl"],
         supervision["loss_weight"],
         supervision["temperature"],
     )
@@ -544,23 +531,12 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "session_pnl": -2_700.0,
         "trading_days_elapsed": 1,
     }
-    exact_permit = {
-        "remaining_entries": 1,
-        "exception_headroom": 300.0,
-        "ordinary_entry_resume_pnl": -2_500.0,
-    }
     if any(
         isinstance(expected, float)
         and not math.isclose(float(start[field]), expected)
         or not isinstance(expected, float)
         and start[field] != expected
         for field, expected in exact_start.items()
-    ) or any(
-        isinstance(expected, float)
-        and not math.isclose(float(permit[field]), expected)
-        or not isinstance(expected, float)
-        and permit[field] != expected
-        for field, expected in exact_permit.items()
     ) or not math.isclose(float(curriculum["recovery_success_pnl"]), 0.0):
         raise ValueError("Stage-2 recovery start contract drifted")
     if (

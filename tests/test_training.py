@@ -21,7 +21,7 @@ from propevolve.balance_aware_regime_selectivity import (
     SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
 )
 from propevolve.cache import build_embedding_cache
-from propevolve.decision import Action, PositionSide, RecoveryEntryPermit
+from propevolve.decision import Action, PositionSide
 from propevolve.environment import ChallengeSpec, ChallengeStartState, MarketSeries
 from propevolve.entry_supervision import EntryTargetMetadata
 from propevolve.observation import TradeManagementObservationSpec
@@ -70,11 +70,6 @@ def _recovery_curriculum_settings() -> RecoveryCurriculumSettings:
             session_pnl=-2_700.0,
             trading_days_elapsed=1,
             recovery_success_pnl=0.0,
-            recovery_entry_permit=RecoveryEntryPermit(
-                remaining_entries=1,
-                exception_headroom=300.0,
-                ordinary_entry_resume_pnl=-2_500.0,
-            ),
         ),
     )
 
@@ -100,11 +95,6 @@ def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> N
             "position_size": 0,
             "session_pnl": -2_700.0,
             "trading_days_elapsed": 1,
-        },
-        "entry_permit": {
-            "remaining_entries": 1,
-            "exception_headroom": 300.0,
-            "ordinary_entry_resume_pnl": -2_500.0,
         },
     })
 
@@ -137,11 +127,6 @@ def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
                 "position_size": 0,
                 "session_pnl": -2_600.0,
                 "trading_days_elapsed": 1,
-            },
-            "entry_permit": {
-                "remaining_entries": 1,
-                "exception_headroom": 300.0,
-                "ordinary_entry_resume_pnl": -2_500.0,
             },
             "stress_evaluation_episodes": 200,
         })
@@ -2299,7 +2284,6 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
                 "winning_r_sum": 0.0,
                 "equity_pnl": 6_000.0,
                 "recovery_wait_decisions": 0,
-                "recovery_entry_permit_remaining": 0,
             }
 
     class SidecarEnvironment:

@@ -35,7 +35,7 @@ from .config import (
     agent_runtime_settings,
     configure_runtime_environment,
 )
-from .decision import Action, PositionSide, RecoveryEntryPermit
+from .decision import Action, PositionSide
 from .environment import (
     ChallengeSpec,
     ChallengeStartState,
@@ -2270,7 +2270,6 @@ class RecoveryCurriculumSettings:
     start_state: ChallengeStartState
 
     def __post_init__(self) -> None:
-        permit = self.start_state.recovery_entry_permit
         if isinstance(self.schedule_seed, bool) or not isinstance(
             self.schedule_seed, int
         ):
@@ -2293,10 +2292,7 @@ class RecoveryCurriculumSettings:
             and math.isclose(self.start_state.peak_equity_pnl, 0.0)
             and math.isclose(self.start_state.mll_floor_pnl, -3_000.0)
             and math.isclose(self.start_state.session_pnl, -2_700.0)
-            and permit.remaining_entries == 1
-            and math.isclose(permit.exception_headroom, 300.0)
             and math.isclose(self.start_state.recovery_success_pnl, 0.0)
-            and math.isclose(permit.ordinary_entry_resume_pnl, -2_500.0)
         ):
             raise ValueError("Stage-2 recovery start contract drifted")
 
@@ -2333,7 +2329,6 @@ def _recovery_curriculum_from_config(
         "recovery_success_pnl",
         "action_value_supervision",
         "start_state",
-        "entry_permit",
         "stress_evaluation_episodes",
     }
     if set(value) != required:
@@ -2354,13 +2349,6 @@ def _recovery_curriculum_from_config(
     }
     if set(start) != start_required:
         raise ValueError("recovery curriculum start-state fields are invalid")
-    permit = value["entry_permit"]
-    if not isinstance(permit, Mapping) or set(permit) != {
-        "remaining_entries",
-        "exception_headroom",
-        "ordinary_entry_resume_pnl",
-    }:
-        raise ValueError("recovery curriculum entry permit is invalid")
     supervision = value["action_value_supervision"]
     if not isinstance(supervision, Mapping) or set(supervision) != {
         "loss_weight",
@@ -2374,7 +2362,6 @@ def _recovery_curriculum_from_config(
         start["position_side"],
         start["position_size"],
         start["trading_days_elapsed"],
-        permit["remaining_entries"],
         value["stress_evaluation_episodes"],
         supervision["store_capacity"],
         supervision["target_every_episodes"],
@@ -2386,8 +2373,6 @@ def _recovery_curriculum_from_config(
         start["peak_equity_pnl"],
         start["mll_floor_pnl"],
         start["session_pnl"],
-        permit["exception_headroom"],
-        permit["ordinary_entry_resume_pnl"],
         supervision["loss_weight"],
         supervision["temperature"],
     )
@@ -2420,13 +2405,6 @@ def _recovery_curriculum_from_config(
             session_pnl=float(start["session_pnl"]),
             trading_days_elapsed=int(start["trading_days_elapsed"]),
             recovery_success_pnl=float(value["recovery_success_pnl"]),
-            recovery_entry_permit=RecoveryEntryPermit(
-                remaining_entries=int(permit["remaining_entries"]),
-                exception_headroom=float(permit["exception_headroom"]),
-                ordinary_entry_resume_pnl=float(
-                    permit["ordinary_entry_resume_pnl"]
-                ),
-            ),
         ),
     )
     stress_episodes = int(value["stress_evaluation_episodes"])
@@ -5666,9 +5644,6 @@ def train_agent(
                 ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
-                ),
-                "recovery_entry_permit_remaining": int(
-                    terminal_info.get("recovery_entry_permit_remaining", 0)
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,
