@@ -84,8 +84,8 @@ executed actions, by:
 - MLL-headroom bucket: low, middle, and healthy;
 - Regime: dominant chop, transition, and expansion/trend;
 - Expansion strength and Long/Short side;
-- pass, blow, and timeout outcome; recovered/not-recovered result; and near-blow
-  incidence.
+- pass, timeout, recovery-success, survived-not-recovered, near-blow, and blow
+  outcome.
 
 The Stage 2B child must demonstrate:
 

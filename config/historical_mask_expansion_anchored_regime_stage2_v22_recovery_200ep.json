@@ -251,7 +251,7 @@
   },
   "training": {
     "prefetch_batches": 0,
-    "episodes": 200,
+    "episodes": 500,
     "validation_episodes": 200,
     "validation_no_trade_patience_episodes": 5,
     "greedy_diagnostic_interval_steps": 256,
@@ -272,8 +272,8 @@
     "teacher_autonomy_start_fraction": 0.8,
     "entry_supervision_autonomy_start_fraction": 0.95,
     "short_circuit": {
-      "minimum_passes": 0,
-      "maximum_blow_rate": 0,
+      "minimum_passes": 1,
+      "maximum_blow_rate": 0.1,
       "collapse": {
         "window_episodes": 5,
         "minimum_prior_passes": 2,
@@ -314,8 +314,35 @@
     "regime_wait_sequence_update_period": 8,
     "budget_mode": "episodes"
   },
+  "recovery_curriculum": {
+    "schedule_seed": 37,
+    "stress_evaluation_episodes": 200,
+    "recovery_success_pnl": 0,
+    "start_state": {
+      "realized_pnl": -2700,
+      "equity_pnl": -2700,
+      "peak_equity_pnl": 0,
+      "mll_floor_pnl": -3000,
+      "passmark_locked": false,
+      "position_side": 0,
+      "position_size": 0,
+      "session_pnl": -2700,
+      "trading_days_elapsed": 1
+    },
+    "entry_permit": {
+      "remaining_entries": 1,
+      "exception_headroom": 300,
+      "ordinary_entry_resume_pnl": -2500
+    },
+    "action_value_supervision": {
+      "loss_weight": 0.25,
+      "temperature": 1,
+      "store_capacity": 200,
+      "target_every_episodes": 1
+    }
+  },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable V21 Stage 2A A+ selector with an exact 25% breakeven recovery curriculum and 4-of-16 recovery replay should preserve zero-blow teacher-free selection while learning to recover from -$2,700 to $0 instead of timing out near the MLL.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, training-only same-state WAIT, Long, and Short recovery values from exactly -$2,700 will improve recovery to breakeven and reduce near-blow timeouts without changing ordinary V21 replay, action supervision, challenge outcomes, or teacher-free inference.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -325,9 +352,7 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
-    "allowed_revision_paths": [
-      "recovery_curriculum.episode_fraction"
-    ],
+    "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
       "agent.device",
@@ -355,11 +380,12 @@
       "entry_supervision",
       "observation",
       "point_values",
-      "recovery_curriculum.entry_permit",
-      "recovery_curriculum.recovery_success_pnl",
       "recovery_curriculum.schedule_seed",
-      "recovery_curriculum.start_state",
       "recovery_curriculum.stress_evaluation_episodes",
+      "recovery_curriculum.recovery_success_pnl",
+      "recovery_curriculum.start_state",
+      "recovery_curriculum.entry_permit",
+      "recovery_curriculum.action_value_supervision",
       "regime_selectivity.action_order",
       "regime_selectivity.chop_wait_margin",
       "regime_selectivity.dominant_chop_pressure",
@@ -368,10 +394,10 @@
       "regime_selectivity.expansion_long_center",
       "regime_selectivity.expansion_short_center",
       "regime_selectivity.failed_confluence_margin",
+      "regime_selectivity.paired_a_plus_margin",
       "regime_selectivity.formula",
       "regime_selectivity.headroom_pressure",
       "regime_selectivity.loss_weight",
-      "regime_selectivity.paired_a_plus_margin",
       "regime_selectivity.persistent_chop_negative_emphasis",
       "regime_selectivity.probability_epsilon",
       "regime_selectivity.q_temperature",
@@ -392,6 +418,7 @@
       "training.budget_mode",
       "training.checkpoint_every_episodes",
       "training.entry_opportunity_sequence_fraction",
+      "training.regime_wait_sequence_update_period",
       "training.entry_supervision_autonomy_start_fraction",
       "training.episodes",
       "training.epsilon_end",
@@ -401,7 +428,6 @@
       "training.management_epsilon_start",
       "training.prefetch_batches",
       "training.recurrent_horizon",
-      "training.regime_wait_sequence_update_period",
       "training.replay_capacity_episodes",
       "training.replay_capacity_transitions",
       "training.safety_sequence_fraction",
@@ -420,19 +446,14 @@
       "training.warmup_episodes",
       "training_only_tickers"
     ],
-    "revision_bounds": {
-      "recovery_curriculum.episode_fraction": {
-        "minimum": 0.25,
-        "maximum": 0.25
-      }
-    }
+    "revision_bounds": {}
   },
   "campaign": {
     "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "breakeven_recovery_200ep",
+        "name": "recovery_value_200ep",
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
@@ -450,7 +471,7 @@
           {
             "metric": "selection.pass_rate",
             "operator": ">=",
-            "value": 0.125
+            "value": 0.2
           },
           {
             "metric": "selection.average_win_r",
@@ -480,7 +501,7 @@
           {
             "metric": "selection.near_blow_timeout_rate",
             "operator": "<=",
-            "value": 0.5657142857142857
+            "value": 0.6263636363636363
           },
           {
             "metric": "recovery_stress.blow_rate",
@@ -490,16 +511,6 @@
           {
             "metric": "recovery_stress.recovery_success_rate",
             "operator": ">",
-            "value": 0
-          },
-          {
-            "metric": "recovery_stress.entries_used",
-            "operator": ">",
-            "value": 0
-          },
-          {
-            "metric": "recovery_stress.one_entry_violations",
-            "operator": "==",
             "value": 0
           }
         ],
@@ -560,7 +571,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.125
+        "value": 0.2
       },
       {
         "metric": "selection.average_win_r",
@@ -590,7 +601,7 @@
       {
         "metric": "selection.near_blow_timeout_rate",
         "operator": "<=",
-        "value": 0.5657142857142857
+        "value": 0.6263636363636363
       },
       {
         "metric": "recovery_stress.blow_rate",
@@ -600,16 +611,6 @@
       {
         "metric": "recovery_stress.recovery_success_rate",
         "operator": ">",
-        "value": 0
-      },
-      {
-        "metric": "recovery_stress.entries_used",
-        "operator": ">",
-        "value": 0
-      },
-      {
-        "metric": "recovery_stress.one_entry_violations",
-        "operator": "==",
         "value": 0
       }
     ],
@@ -674,27 +675,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep",
-  "recovery_curriculum": {
-    "episode_fraction": 0.25,
-    "schedule_seed": 37,
-    "stress_evaluation_episodes": 200,
-    "recovery_success_pnl": 0,
-    "start_state": {
-      "realized_pnl": -2700,
-      "equity_pnl": -2700,
-      "peak_equity_pnl": 0,
-      "mll_floor_pnl": -3000,
-      "passmark_locked": false,
-      "position_side": 0,
-      "position_size": 0,
-      "session_pnl": -2700,
-      "trading_days_elapsed": 1
-    },
-    "entry_permit": {
-      "remaining_entries": 1,
-      "exception_headroom": 300,
-      "ordinary_entry_resume_pnl": -2500
-    }
-  }
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep"
 }

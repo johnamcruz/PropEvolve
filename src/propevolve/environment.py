@@ -565,7 +565,6 @@ class HistoricalChallengeEnv:
         if self._episode_coverage is not None:
             self._episode_coverage.record_decision(self._ticker, self._index)
         previous_equity = self._equity(self._market.close[self._index])
-        was_exposed = self._position is not None
         closed_trade_count = len(self._closed_trade_pnls)
         next_index = self._index + 1
         fill = float(self._market.open[next_index])
@@ -639,7 +638,6 @@ class HistoricalChallengeEnv:
         shaping_reward, shaping_info = self._reward_shaping(
             equity,
             closed_trade_count=closed_trade_count,
-            exposed_during_step=was_exposed or self._position is not None,
         )
         reward += shaping_reward
         self._peak_equity = max(self._peak_equity, equity)
@@ -694,11 +692,10 @@ class HistoricalChallengeEnv:
         equity: float,
         *,
         closed_trade_count: int,
-        exposed_during_step: bool,
     ) -> tuple[float, dict[str, float]]:
         proximity_penalty = 0.0
         lead_giveback_penalty = 0.0
-        if exposed_during_step and self._account is not None:
+        if self._account is not None:
             cushion_fraction = min(
                 1.0,
                 max(

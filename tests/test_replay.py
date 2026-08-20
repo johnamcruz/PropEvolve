@@ -70,52 +70,6 @@ def test_replay_balances_outcomes_across_a_multi_market_population() -> None:
     assert outcomes == {"pass": 5, "timeout": 5}
 
 
-def test_recovery_replay_uses_exact_four_of_sixteen_without_growing_batch() -> None:
-    replay = BalancedSequenceReplay(
-        capacity_episodes=32,
-        sequence_length=3,
-        terminal_sequence_fraction=0.5,
-        safety_sequence_fraction=0.25,
-        entry_opportunity_sequence_fraction=0.25,
-        recovery_sequence_fraction=0.25,
-        seed=47,
-    )
-    for index in range(12):
-        replay.add(_episode("NQ", "timeout", "long", index * 10))
-    for index in range(4):
-        ordinary = _episode("NQ", "timeout", "long", 200 + index * 10)
-        replay.add(Episode(
-            episode_id=ordinary.episode_id,
-            ticker=ordinary.ticker,
-            outcome=ordinary.outcome,
-            primary_side=ordinary.primary_side,
-            ended_at_ns=ordinary.ended_at_ns,
-            recovery=True,
-            transitions=ordinary.transitions,
-        ))
-
-    batch = replay.sample(16)
-
-    assert len(batch) == 16
-    assert sum(any(row.recovery_episode for row in sequence) for sequence in batch) == 4
-    assert all(len(sequence) == 3 for sequence in batch)
-    assert replay.last_sample_receipt == {
-        "schema": "propevolve_recovery_replay_sample_v1",
-        "batch_sequences": 16,
-        "requested_recovery_sequences": 4,
-        "recovery_sequences": 4,
-        "ordinary_sequences": 12,
-        "authentic_recovery_learning_rows": 12,
-        "recovery_learning_action_counts": {
-            "WAIT": 12,
-            "ENTER_LONG_1": 0,
-            "ENTER_SHORT_1": 0,
-            "HOLD": 0,
-            "CLOSE": 0,
-        },
-    }
-
-
 def test_replay_anchors_declared_fraction_of_sequences_at_terminal_outcomes() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,
@@ -310,7 +264,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 10
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -1116,7 +1070,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 10
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1163,7 +1117,6 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
     legacy["schema_version"] = 7
     legacy["contract"].pop("regime_wait_sequence_fraction")
     legacy["contract"].pop("regime_wait_sequence_update_period")
-    legacy["contract"].pop("recovery_sequence_fraction")
     legacy.pop("sample_calls")
     for payload in legacy["episodes"]:
         payload.pop("regime_wait_priorities")
@@ -1496,15 +1449,14 @@ def test_replay_marks_only_demonstrated_pass_episodes_as_competence() -> None:
     assert competence_by_origin == {0: True, 100: False}
 
 
-def test_replay_preserves_short_recovery_trace_with_explicit_invalid_padding() -> None:
-    original = _episode("NQ", "timeout", "long", 0)
+def test_replay_preserves_short_pass_trace_with_explicit_invalid_padding() -> None:
+    original = _episode("NQ", "pass", "long", 0)
     short = Episode(
         episode_id="NQ-recovery-short",
         ticker="NQ",
-        outcome="timeout",
+        outcome="pass",
         primary_side="long",
         ended_at_ns=2,
-        recovery=True,
         transitions=original.transitions[:1] + (
             Transition(**{
                 **original.transitions[1].__dict__,
@@ -1533,15 +1485,14 @@ def test_replay_preserves_short_recovery_trace_with_explicit_invalid_padding() -
     assert all(not row.competence_anchor for row in sequence if not row.training_valid)
 
 
-def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() -> None:
-    original = _episode("NQ", "timeout", "long", 0)
+def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> None:
+    original = _episode("NQ", "pass", "long", 0)
     short = Episode(
         episode_id="NQ-recovery-short",
         ticker="NQ",
-        outcome="timeout",
+        outcome="pass",
         primary_side="long",
         ended_at_ns=2,
-        recovery=True,
         transitions=original.transitions[:2],
     )
     replay = BalancedSequenceReplay(
@@ -1561,7 +1512,7 @@ def test_short_recovery_replay_checkpoint_round_trip_is_exact_and_versioned() ->
         seed=999,
     )
 
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 10
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]
@@ -1613,7 +1564,7 @@ def test_short_recovery_entry_and_terminal_strata_keep_both_boundaries_learnable
     episode = Episode(
         episode_id="NQ-recovery-71",
         ticker="NQ",
-        outcome="timeout",
+        outcome="pass",
         primary_side="long",
         ended_at_ns=71,
         transitions=tuple(transitions),

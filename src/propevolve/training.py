@@ -55,6 +55,10 @@ from .final_regime_probe import (
 )
 from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
+from .recovery import (
+    RecoveryValueStore,
+    build_recovery_value_target,
+)
 from .teachers import agent_teacher_settings
 from .training_health import (
     TrainingHealthDetector,
@@ -2171,18 +2175,6 @@ class TrainingResult:
     entry_advantage_probe_count: int = 0
     short_circuited: bool = False
     short_circuit_reason: str | None = None
-    recovery_episodes: int = 0
-    recovery_successes: int = 0
-    recovery_not_recovered: int = 0
-    recovery_blows: int = 0
-
-    @property
-    def recovery_success_rate(self) -> float:
-        return (
-            self.recovery_successes / self.recovery_episodes
-            if self.recovery_episodes else 0.0
-        )
-
     @property
     def trade_win_rate(self) -> float:
         return self.win_count / self.trade_count if self.trade_count else 0.0
@@ -2268,24 +2260,33 @@ class TrainingResult:
 
 @dataclass(frozen=True)
 class RecoveryCurriculumSettings:
-    """Frozen Stage-2 schedule and complete one-shot recovery account state."""
+    """Frozen additive Stage-2 recovery-value supervision contract."""
 
-    episode_fraction: float
     schedule_seed: int
+    recovery_value_loss_weight: float
+    recovery_value_temperature: float
+    recovery_value_store_capacity: int
+    target_every_episodes: int
     start_state: ChallengeStartState
 
     def __post_init__(self) -> None:
         permit = self.start_state.recovery_entry_permit
-        if (
-            isinstance(self.episode_fraction, bool)
-            or not np.isfinite(self.episode_fraction)
-            or not 0.0 <= self.episode_fraction <= 1.0
-        ):
-            raise ValueError("recovery episode fraction must be between zero and one")
         if isinstance(self.schedule_seed, bool) or not isinstance(
             self.schedule_seed, int
         ):
             raise ValueError("recovery schedule seed must be an integer")
+        if (
+            isinstance(self.recovery_value_loss_weight, bool)
+            or not 0.0 < self.recovery_value_loss_weight <= 1.0
+            or isinstance(self.recovery_value_temperature, bool)
+            or not np.isfinite(self.recovery_value_temperature)
+            or self.recovery_value_temperature <= 0.0
+            or isinstance(self.recovery_value_store_capacity, bool)
+            or self.recovery_value_store_capacity < 1
+            or isinstance(self.target_every_episodes, bool)
+            or self.target_every_episodes < 1
+        ):
+            raise ValueError("recovery action-value supervision is invalid")
         if not (
             math.isclose(self.start_state.realized_pnl, -2_700.0)
             and math.isclose(self.start_state.equity_pnl, -2_700.0)
@@ -2294,8 +2295,8 @@ class RecoveryCurriculumSettings:
             and math.isclose(self.start_state.session_pnl, -2_700.0)
             and permit.remaining_entries == 1
             and math.isclose(permit.exception_headroom, 300.0)
-            and math.isclose(permit.ordinary_entry_resume_pnl, -2_500.0)
             and math.isclose(self.start_state.recovery_success_pnl, 0.0)
+            and math.isclose(permit.ordinary_entry_resume_pnl, -2_500.0)
         ):
             raise ValueError("Stage-2 recovery start contract drifted")
 
@@ -2303,23 +2304,19 @@ class RecoveryCurriculumSettings:
 @dataclass(frozen=True)
 class RecoveryStressResult:
     episodes: int
+    recovered: int
+    not_recovered: int
     passes: int
     timeouts: int
     blows: int
-    recovery_successes: int
-    recovery_not_recovered: int
     mean_terminal_pnl: float
     mean_wait_decisions: float
     entries_used: int
-    one_entry_violations: int
     environment_steps: int
-    requested_entry_decisions: int
-    executed_entry_decisions: int
-    blocked_requested_entry_decisions: int
 
     @property
     def recovery_success_rate(self) -> float:
-        return self.recovery_successes / self.episodes
+        return self.recovered / self.episodes
 
     @property
     def blow_rate(self) -> float:
@@ -2332,12 +2329,12 @@ def _recovery_curriculum_from_config(
     if value is None:
         return None, 0
     required = {
-        "episode_fraction",
         "schedule_seed",
+        "recovery_success_pnl",
+        "action_value_supervision",
         "start_state",
         "entry_permit",
         "stress_evaluation_episodes",
-        "recovery_success_pnl",
     }
     if set(value) != required:
         raise ValueError("recovery curriculum fields are invalid")
@@ -2364,6 +2361,14 @@ def _recovery_curriculum_from_config(
         "ordinary_entry_resume_pnl",
     }:
         raise ValueError("recovery curriculum entry permit is invalid")
+    supervision = value["action_value_supervision"]
+    if not isinstance(supervision, Mapping) or set(supervision) != {
+        "loss_weight",
+        "temperature",
+        "store_capacity",
+        "target_every_episodes",
+    }:
+        raise ValueError("recovery action-value supervision is invalid")
     integer_fields = (
         value["schedule_seed"],
         start["position_side"],
@@ -2371,9 +2376,11 @@ def _recovery_curriculum_from_config(
         start["trading_days_elapsed"],
         permit["remaining_entries"],
         value["stress_evaluation_episodes"],
+        supervision["store_capacity"],
+        supervision["target_every_episodes"],
     )
     numeric_fields = (
-        value["episode_fraction"],
+        value["recovery_success_pnl"],
         start["realized_pnl"],
         start["equity_pnl"],
         start["peak_equity_pnl"],
@@ -2381,7 +2388,8 @@ def _recovery_curriculum_from_config(
         start["session_pnl"],
         permit["exception_headroom"],
         permit["ordinary_entry_resume_pnl"],
-        value["recovery_success_pnl"],
+        supervision["loss_weight"],
+        supervision["temperature"],
     )
     if (
         any(
@@ -2396,8 +2404,11 @@ def _recovery_curriculum_from_config(
     ):
         raise ValueError("recovery curriculum scalar types are invalid")
     settings = RecoveryCurriculumSettings(
-        episode_fraction=float(value["episode_fraction"]),
         schedule_seed=int(value["schedule_seed"]),
+        recovery_value_loss_weight=float(supervision["loss_weight"]),
+        recovery_value_temperature=float(supervision["temperature"]),
+        recovery_value_store_capacity=int(supervision["store_capacity"]),
+        target_every_episodes=int(supervision["target_every_episodes"]),
         start_state=ChallengeStartState(
             realized_pnl=float(start["realized_pnl"]),
             equity_pnl=float(start["equity_pnl"]),
@@ -2477,10 +2488,6 @@ class TrainingProgress:
     recent_average_hold_bars: tuple[float, ...] = ()
     recent_voluntary_close_rates: tuple[float, ...] = ()
     short_circuit_reason: str | None = None
-    recovery_episodes: int = 0
-    recovery_successes: int = 0
-    recovery_not_recovered: int = 0
-    recovery_blows: int = 0
 
     def result(self) -> TrainingResult:
         if self.completed_episodes < 1 or self.terminal_pnl_count < 1:
@@ -2515,10 +2522,6 @@ class TrainingProgress:
             near_blow_timeout_count=self.near_blow_timeout_count,
             short_circuited=self.short_circuit_reason is not None,
             short_circuit_reason=self.short_circuit_reason,
-            recovery_episodes=self.recovery_episodes,
-            recovery_successes=self.recovery_successes,
-            recovery_not_recovered=self.recovery_not_recovered,
-            recovery_blows=self.recovery_blows,
         )
 
 
@@ -2731,6 +2734,7 @@ class HistoricalCandidateRunner:
         )
         resume = None
         replay_state = None
+        recovery_value_store_state = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
                 recovery_path, device=agent_settings["device"]
@@ -2775,6 +2779,9 @@ class HistoricalCandidateRunner:
             replay_state = manifest.get("replay_state")
             if not manifest.get("replay_restored", False) or replay_state is None:
                 raise ValueError("training recovery is missing replay state")
+            recovery_value_store_state = manifest.get(
+                "recovery_value_store_state"
+            )
             _assert_recovery_entry_balance(loaded, agent_settings)
             _assert_recovery_regime_selectivity(loaded, agent_settings)
             agent = loaded
@@ -2821,6 +2828,47 @@ class HistoricalCandidateRunner:
         recovery_curriculum, recovery_stress_episodes = (
             _recovery_curriculum_from_config(config.get("recovery_curriculum"))
         )
+        recovery_value_policy = None
+        recovery_value_environment = None
+        recovery_value_store = None
+        if recovery_curriculum is not None:
+            warm_start = config.get("_warm_start_model")
+            if warm_start is None:
+                raise ValueError(
+                    "Stage-2 recovery requires the frozen V21 parent policy"
+                )
+            warm_path = Path(str(warm_start["model_path"])).resolve(strict=True)
+            if _path_sha256(warm_path) != str(warm_start["model_sha256"]):
+                raise ValueError("recovery supervisor identity drifted")
+            recovery_value_policy, _ = RecurrentC51Agent.load(
+                warm_path,
+                device=agent_settings["device"],
+            )
+            assert_teacher_free = getattr(
+                recovery_value_policy, "assert_teacher_free", None
+            )
+            if assert_teacher_free is not None:
+                assert_teacher_free()
+            recovery_value_environment = HistoricalChallengeEnv(
+                train_markets,
+                tick_values=config["point_values"],
+                round_trip_fees=config["round_trip_fees"],
+                spec=challenge,
+                observation_spec=observation_spec,
+                seed=recovery_curriculum.schedule_seed,
+            )
+            recovery_value_store = RecoveryValueStore(
+                capacity=recovery_curriculum.recovery_value_store_capacity,
+                seed=recovery_curriculum.schedule_seed,
+            )
+            if recovery_value_store_state is not None:
+                recovery_value_store.load_state_dict(
+                    recovery_value_store_state
+                )
+        elif recovery_value_store_state is not None:
+            raise ValueError(
+                "V21 recovery checkpoint unexpectedly contains Stage-2B state"
+            )
         replay = BalancedSequenceReplay(
             capacity_episodes=int(training_config["replay_capacity_episodes"]),
             capacity_transitions=int(
@@ -2835,11 +2883,6 @@ class HistoricalCandidateRunner:
             ),
             entry_opportunity_sequence_fraction=float(
                 training_config.get("entry_opportunity_sequence_fraction", 0.0)
-            ),
-            recovery_sequence_fraction=(
-                0.0
-                if recovery_curriculum is None
-                else recovery_curriculum.episode_fraction
             ),
             regime_wait_sequence_fraction=float(
                 training_config.get("regime_wait_sequence_fraction", 0.0)
@@ -2980,6 +3023,11 @@ class HistoricalCandidateRunner:
                 progress=progress,
                 environment_rng_state=train_environment.rng_state(),
                 replay_state=replay.state_dict(),
+                recovery_value_store_state=(
+                    None
+                    if recovery_value_store is None
+                    else recovery_value_store.state_dict()
+                ),
                 policy_health_probe_path=(
                     policy_health_probe_path
                     if policy_health_config is not None
@@ -3091,6 +3139,12 @@ class HistoricalCandidateRunner:
             training_health_callback=policy_health_monitor,
             near_blow_loss_threshold=near_blow_loss_threshold,
             recovery_curriculum=recovery_curriculum,
+            recovery_value_policy=recovery_value_policy,
+            recovery_value_environment=recovery_value_environment,
+            recovery_value_store=recovery_value_store,
+            recovery_value_source_identity_sha256=(
+                resume_identity if recovery_curriculum is not None else None
+            ),
         )
         episode_coverage_receipt = None
         episode_coverage_path = output / "episode-coverage-receipt.json"
@@ -3372,13 +3426,6 @@ class HistoricalCandidateRunner:
                     training.near_blow_timeout_count
                 ),
                 "near_blow_timeout_rate": training.near_blow_timeout_rate,
-                "recovery_episodes": float(training.recovery_episodes),
-                "recovery_successes": float(training.recovery_successes),
-                "recovery_success_rate": training.recovery_success_rate,
-                "recovery_not_recovered": float(
-                    training.recovery_not_recovered
-                ),
-                "recovery_blows": float(training.recovery_blows),
                 "short_circuited": float(training.short_circuited),
                 "retained_pass_policy_restored": float(
                     retained_policy_restored
@@ -3503,10 +3550,11 @@ class HistoricalCandidateRunner:
             assert recovery_stress is not None
             return {
                 "episodes": float(recovery_stress.episodes),
-                "recovery_successes": float(recovery_stress.recovery_successes),
+                "recovered": float(recovery_stress.recovered),
                 "recovery_success_rate": recovery_stress.recovery_success_rate,
-                "recovery_not_recovered": float(
-                    recovery_stress.recovery_not_recovered
+                "not_recovered": float(recovery_stress.not_recovered),
+                "not_recovered_rate": (
+                    recovery_stress.not_recovered / recovery_stress.episodes
                 ),
                 "passes": float(recovery_stress.passes),
                 "timeouts": float(recovery_stress.timeouts),
@@ -3515,19 +3563,13 @@ class HistoricalCandidateRunner:
                 "mean_terminal_pnl": recovery_stress.mean_terminal_pnl,
                 "mean_wait_decisions": recovery_stress.mean_wait_decisions,
                 "entries_used": float(recovery_stress.entries_used),
-                "one_entry_violations": float(
-                    recovery_stress.one_entry_violations
+                "outcome_accounted": float(
+                    recovery_stress.passes
+                    + recovery_stress.timeouts
+                    + recovery_stress.blows
+                    == recovery_stress.episodes
                 ),
                 "environment_steps": float(recovery_stress.environment_steps),
-                "requested_entry_decisions": float(
-                    recovery_stress.requested_entry_decisions
-                ),
-                "executed_entry_decisions": float(
-                    recovery_stress.executed_entry_decisions
-                ),
-                "blocked_requested_entry_decisions": float(
-                    recovery_stress.blocked_requested_entry_decisions
-                ),
             }
 
         stages = [
@@ -3614,7 +3656,7 @@ def _selection_evaluation_gates(
 
 def _recovery_stress_integrity_gates() -> tuple[EvaluationGate, ...]:
     """Gate evaluator integrity; campaign requirements own economic acceptance."""
-    return (EvaluationGate("one_entry_violations", "==", 0.0),)
+    return (EvaluationGate("outcome_accounted", "==", 1.0),)
 
 
 def _training_resume_identity(
@@ -3678,6 +3720,7 @@ def _save_training_recovery(
     progress: TrainingProgress,
     environment_rng_state: dict,
     replay_state: dict[str, object],
+    recovery_value_store_state: dict[str, object] | None = None,
     policy_health_probe_path: Path | None = None,
 ) -> None:
     policy_health_probe_corpus = None
@@ -3704,6 +3747,7 @@ def _save_training_recovery(
             "environment_rng_state": environment_rng_state,
             "replay_state": replay_state,
             "replay_restored": True,
+            "recovery_value_store_state": recovery_value_store_state,
             "policy_health_probe_corpus": policy_health_probe_corpus,
         },
     )
@@ -4565,6 +4609,10 @@ def train_agent(
     collapse_maximum_average_hold_bars: float = math.inf,
     collapse_minimum_voluntary_close_rate: float = 1.0,
     recovery_curriculum: RecoveryCurriculumSettings | None = None,
+    recovery_value_policy: RecurrentC51Agent | None = None,
+    recovery_value_environment: HistoricalChallengeEnv | None = None,
+    recovery_value_store: RecoveryValueStore | None = None,
+    recovery_value_source_identity_sha256: str | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -4654,6 +4702,24 @@ def train_agent(
         or not all(isinstance(channel, str) and channel for channel in teacher_channels)
     ):
         raise ValueError("teacher diagnostic channels are invalid")
+    recovery_components = (
+        recovery_value_policy,
+        recovery_value_environment,
+        recovery_value_store,
+        recovery_value_source_identity_sha256,
+    )
+    if recovery_curriculum is None:
+        if any(component is not None for component in recovery_components):
+            raise ValueError("recovery-value components require a curriculum")
+    elif (
+        any(component is None for component in recovery_components)
+        or len(str(recovery_value_source_identity_sha256)) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(recovery_value_source_identity_sha256)
+        )
+    ):
+        raise ValueError("recovery-value supervision contract is incomplete")
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -4707,18 +4773,6 @@ def train_agent(
         episodes=episodes,
         seed=ticker_seed,
     )
-    recovery_schedule = _recovery_episode_schedule(
-        recovery_curriculum,
-        episodes=episodes,
-    )
-    expected_recovery_replay_fraction = (
-        0.0 if recovery_curriculum is None else recovery_curriculum.episode_fraction
-    )
-    if not math.isclose(
-        replay.recovery_sequence_fraction,
-        expected_recovery_replay_fraction,
-    ):
-        raise ValueError("recovery replay dosage drifted from episode curriculum")
     if checkpoint_every_episodes < 0:
         raise ValueError("checkpoint interval cannot be negative")
     if checkpoint_every_episodes and checkpoint_callback is None:
@@ -4738,13 +4792,12 @@ def train_agent(
     if progress.short_circuit_reason is not None:
         return progress.result()
     for episode_index in range(progress.completed_episodes, episodes):
-        recovery_episode = recovery_schedule[episode_index]
+        # Stage 2B never replaces an ordinary V21 challenge. Recovery values
+        # are generated in a separate environment and enter only as an
+        # additive loss on the existing optimizer step.
         reset_options = {}
         if ticker_schedule is not None:
             reset_options["ticker"] = ticker_schedule[episode_index]
-        if recovery_episode:
-            assert recovery_curriculum is not None
-            reset_options["challenge_start_state"] = recovery_curriculum.start_state
         if not reset_options:
             observation, reset_info = environment.reset()
         else:
@@ -4766,12 +4819,36 @@ def train_agent(
                 )
             episode_end_index = int(episode_end_index)
         episode_ticker = str(reset_info.get("ticker", ""))
+        if (
+            recovery_curriculum is not None
+            and episode_index % recovery_curriculum.target_every_episodes == 0
+        ):
+            assert recovery_value_policy is not None
+            assert recovery_value_environment is not None
+            assert recovery_value_store is not None
+            assert recovery_value_source_identity_sha256 is not None
+            recovery_value_store.add(build_recovery_value_target(
+                recovery_value_policy,
+                recovery_value_environment,
+                reset_options={
+                    "ticker": episode_ticker,
+                    "start": episode_start_index,
+                    "challenge_start_state": recovery_curriculum.start_state,
+                },
+                recurrent_horizon=recurrent_horizon,
+                start_pnl=recovery_curriculum.start_state.realized_pnl,
+                recovery_success_pnl=(
+                    recovery_curriculum.start_state.recovery_success_pnl
+                ),
+                source_role="training",
+                source_identity_sha256=(
+                    recovery_value_source_identity_sha256
+                ),
+            ))
         hidden = None
         transitions = []
         action_counts = {action: 0 for action in Action}
         greedy_flat_action_counts = {action: 0 for action in Action}
-        executed_flat_action_counts = {action: 0 for action in Action}
-        blocked_requested_action_counts = {action: 0 for action in Action}
         greedy_flat_probe_count = 0
         greedy_flat_entry_advantages: list[float] = []
         selected_entry_teacher_targets: list[tuple[float, float]] = []
@@ -4867,9 +4944,8 @@ def train_agent(
                 Action.ENTER_LONG_1,
                 Action.ENTER_SHORT_1,
             }
-            flat_decision = Action.WAIT in valid and set(valid).issubset(flat_actions)
             diagnostic_probe = (
-                flat_decision
+                flat_actions.issubset(valid)
                 and (progress.environment_steps + step_index)
                 % greedy_diagnostic_interval_steps == 0
             )
@@ -4881,15 +4957,11 @@ def train_agent(
                 return_action_values=diagnostic_probe,
             )
             action_counts[Action(action)] += 1
-            if diagnostic_probe and action_values is not None:
+            if diagnostic_probe:
+                assert action_values is not None
                 values = np.asarray(action_values, dtype=np.float64)
-                requested_action = max(
-                    flat_actions, key=lambda item: values[int(item)]
-                )
-                greedy_flat_action_counts[Action(requested_action)] += 1
-                executed_flat_action_counts[Action(action)] += 1
-                if requested_action not in valid:
-                    blocked_requested_action_counts[Action(requested_action)] += 1
+                greedy_action = max(valid, key=lambda item: values[int(item)])
+                greedy_flat_action_counts[Action(greedy_action)] += 1
                 greedy_flat_probe_count += 1
                 greedy_flat_entry_advantages.append(
                     max(
@@ -4899,8 +4971,6 @@ def train_agent(
                 )
             next_observation, reward, terminated, _, info = environment.step(action)
             recovery_entries_used += int(info.get("recovery_entry_used", False))
-            if recovery_episode and recovery_entries_used > 1:
-                raise ValueError("recovery episode violated its one-entry contract")
             next_valid = tuple(info["valid_actions"])
             if budget_mode == "environment_steps":
                 decision_progress = min(
@@ -5106,22 +5176,6 @@ def train_agent(
         outcome = str(terminal_info["outcome"])
         if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
-        recovery_status = terminal_info.get("recovery_status")
-        if recovery_episode and recovery_status not in {
-            "recovered", "not_recovered"
-        }:
-            raise ValueError(
-                f"unknown terminal recovery status: {recovery_status}"
-            )
-        recovery_success = bool(
-            recovery_episode
-            and recovery_status == "recovered"
-            and terminal_info.get("recovery_success", False)
-        )
-        if recovery_episode and outcome == "pass" and not recovery_success:
-            raise ValueError(
-                "recovery pass did not satisfy the breakeven recovery contract"
-            )
         terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
         if outcome == "pass" and retention_checkpoint_callback is not None:
             # Preserve the exact policy that produced the pass before replay
@@ -5169,7 +5223,6 @@ def train_agent(
             outcome=outcome,
             primary_side=str(terminal_info["primary_side"]),
             ended_at_ns=time.time_ns(),
-            recovery=recovery_episode,
             transitions=replay_transitions,
         ))
         episode_losses = []
@@ -5224,6 +5277,11 @@ def train_agent(
                 "regime_selectivity_paired_a_plus_bad_advantage_sum",
                 "regime_selectivity_dead_wait_minus_"
                 "transition_positive_model_wait",
+                "recovery_value_loss",
+                "recovery_value_rows",
+                "recovery_value_top1_concurrence",
+                "recovery_wait_minus_long_q",
+                "recovery_wait_minus_short_q",
                 *(
                     f"regime_selectivity_association_{cohort}_{field}"
                     for cohort in _REGIME_ASSOCIATION_COHORTS
@@ -5286,11 +5344,27 @@ def train_agent(
             ))
         if len(replay) >= warmup_episodes:
             def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
-                episode_losses.append(agent.train_batch(
-                    batch,
-                    teacher_weight_scale=teacher_weight_scale,
-                    entry_action_weight_scale=entry_action_weight_scale,
-                ))
+                recovery_target = (
+                    recovery_value_store.sample()
+                    if recovery_value_store is not None
+                    and len(recovery_value_store) > 0
+                    else None
+                )
+                train_kwargs: dict[str, object] = {
+                    "teacher_weight_scale": teacher_weight_scale,
+                    "entry_action_weight_scale": entry_action_weight_scale,
+                }
+                if recovery_curriculum is not None:
+                    train_kwargs.update({
+                        "recovery_target": recovery_target,
+                        "recovery_value_loss_weight": (
+                            recovery_curriculum.recovery_value_loss_weight
+                        ),
+                        "recovery_value_temperature": (
+                            recovery_curriculum.recovery_value_temperature
+                        ),
+                    })
+                episode_losses.append(agent.train_batch(batch, **train_kwargs))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
                     episode_rl_losses.append(float(train_metrics["rl_loss"]))
@@ -5338,7 +5412,7 @@ def train_agent(
         recent_close_rates = (
             progress.recent_voluntary_close_rates if collapse_window_episodes else ()
         )
-        if collapse_window_episodes and not recovery_episode:
+        if collapse_window_episodes:
             recent_outcomes = (
                 *tuple(progress.recent_outcomes),
                 outcome,
@@ -5433,24 +5507,6 @@ def train_agent(
             recent_outcomes=recent_outcomes,
             recent_average_hold_bars=recent_hold_bars,
             recent_voluntary_close_rates=recent_close_rates,
-            recovery_episodes=(
-                progress.recovery_episodes + int(recovery_episode)
-            ),
-            recovery_successes=(
-                progress.recovery_successes
-                + int(recovery_success)
-            ),
-            recovery_not_recovered=(
-                progress.recovery_not_recovered
-                + int(
-                    recovery_episode
-                    and recovery_status == "not_recovered"
-                )
-            ),
-            recovery_blows=(
-                progress.recovery_blows
-                + int(recovery_episode and outcome == "blow")
-            ),
         )
         reasons = []
         outcome_short_circuit_boundary_reached = (
@@ -5467,24 +5523,10 @@ def train_agent(
                 reasons.append(
                     f"passes {progress.passes} < {short_circuit_minimum_passes}"
                 )
-            blow_count = progress.blows
-            blow_episode_count = progress.completed_episodes
-            blow_rate_name = "blow rate"
-            if recovery_curriculum is not None:
-                # Recovery failures are training evidence. Preserve the
-                # Stage 2A safety stop over ordinary episodes while allowing
-                # recovery sequences to reach replay and optimizer updates.
-                blow_count -= progress.recovery_blows
-                blow_episode_count -= progress.recovery_episodes
-                blow_rate_name = "ordinary blow rate"
-            blow_rate = (
-                blow_count / blow_episode_count
-                if blow_episode_count
-                else 0.0
-            )
+            blow_rate = progress.blows / progress.completed_episodes
             if blow_rate > short_circuit_maximum_blow_rate:
                 reasons.append(
-                    f"{blow_rate_name} {blow_rate:.6f} > "
+                    f"blow rate {blow_rate:.6f} > "
                     f"{short_circuit_maximum_blow_rate:.6f}"
                 )
         collapse_short_circuit_boundary_reached = (
@@ -5552,7 +5594,7 @@ def train_agent(
                 "episode": progress.completed_episodes,
                 "ticker": str(terminal_info["ticker"]),
                 "outcome": outcome,
-                "episode_kind": "recovery" if recovery_episode else "ordinary",
+                "episode_kind": "ordinary",
                 "reward": total_reward,
                 "environment_steps": progress.environment_steps,
                 "budget_mode": budget_mode,
@@ -5617,18 +5659,12 @@ def train_agent(
                 "recovery_success": bool(
                     terminal_info.get("recovery_success", False)
                 ),
-                **(
-                    {"recovery_status": recovery_status}
-                    if recovery_episode
-                    else {}
-                ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
                 ),
                 "recovery_entry_permit_remaining": int(
                     terminal_info.get("recovery_entry_permit_remaining", 0)
                 ),
-                "recovery_replay_sample": replay.last_sample_receipt,
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
@@ -5774,32 +5810,11 @@ def train_agent(
                 "cumulative_pass_rate": progress.passes / progress.completed_episodes,
                 "cumulative_blow_rate": progress.blows / progress.completed_episodes,
                 "cumulative_average_balance": cumulative_average_balance,
-                "cumulative_recovery_episodes": progress.recovery_episodes,
-                "cumulative_recovery_successes": progress.recovery_successes,
-                "cumulative_recovery_not_recovered": (
-                    progress.recovery_not_recovered
-                ),
-                "cumulative_recovery_success_rate": (
-                    progress.recovery_successes / progress.recovery_episodes
-                    if progress.recovery_episodes else 0.0
-                ),
                 "action_counts": {
                     action.name: action_counts[action] for action in Action
                 },
                 "greedy_flat_action_counts": {
                     action.name: greedy_flat_action_counts[action]
-                    for action in Action
-                },
-                "requested_flat_action_counts": {
-                    action.name: greedy_flat_action_counts[action]
-                    for action in Action
-                },
-                "executed_flat_action_counts": {
-                    action.name: executed_flat_action_counts[action]
-                    for action in Action
-                },
-                "blocked_requested_action_counts": {
-                    action.name: blocked_requested_action_counts[action]
                     for action in Action
                 },
                 "greedy_flat_entry_rate": (
@@ -5951,26 +5966,6 @@ def _balanced_ticker_schedule(
         random.shuffle(cycle)
         schedule.extend(cycle)
     return tuple(schedule[:episodes])
-
-
-def _recovery_episode_schedule(
-    settings: RecoveryCurriculumSettings | None,
-    *,
-    episodes: int,
-) -> tuple[bool, ...]:
-    """Build one immutable, resume-stable mixed curriculum schedule."""
-    if settings is None or settings.episode_fraction == 0.0:
-        return (False,) * episodes
-    count = min(
-        episodes,
-        int(math.floor(episodes * settings.episode_fraction + 0.5)),
-    )
-    selected = set(
-        np.random.default_rng(settings.schedule_seed)
-        .permutation(episodes)[:count]
-        .tolist()
-    )
-    return tuple(index in selected for index in range(episodes))
 
 
 def evaluate_agent(
@@ -6384,10 +6379,7 @@ def evaluate_recovery_stress(
     settings: RecoveryCurriculumSettings,
     episode_tickers: tuple[str, ...] | None = None,
 ) -> RecoveryStressResult:
-    """Run a greedy, teacher-free one-shot recovery stress evaluation."""
-    assert_teacher_free = getattr(agent, "assert_teacher_free", None)
-    if assert_teacher_free is not None:
-        assert_teacher_free()
+    """Run fixed-window recovery starts with normal challenge outcomes."""
     if episodes < 1 or recurrent_horizon < 1:
         raise ValueError("recovery stress budget must be positive")
     ticker_schedule = _balanced_ticker_schedule(
@@ -6395,20 +6387,12 @@ def evaluate_recovery_stress(
         episodes=episodes,
         seed=settings.schedule_seed,
     )
-    outcomes = {"pass": 0, "timeout": 0, "blow": 0}
-    recovery_statuses = {"recovered": 0, "not_recovered": 0}
+    outcomes = {"pass": 0, "blow": 0, "timeout": 0}
+    statuses = {"recovered": 0, "not_recovered": 0}
     terminal_pnls: list[float] = []
     wait_decisions: list[int] = []
     entries_used = 0
     environment_steps = 0
-    requested_entry_decisions = 0
-    executed_entry_decisions = 0
-    blocked_requested_entry_decisions = 0
-    flat_actions = (
-        Action.WAIT,
-        Action.ENTER_LONG_1,
-        Action.ENTER_SHORT_1,
-    )
     for episode_index in range(episodes):
         options: dict[str, object] = {
             "challenge_start_state": settings.start_state,
@@ -6418,83 +6402,54 @@ def evaluate_recovery_stress(
         observation, info = environment.reset(options=options)
         valid = tuple(info["valid_actions"])
         hidden = None
-        episode_entries = 0
         step_index = 0
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
-            action, hidden, action_values = agent.select_action(
+            action, hidden, _ = agent.select_action(
                 observation,
                 hidden=hidden,
                 valid_actions=valid,
                 epsilon=0.0,
-                return_action_values=True,
             )
-            if Action.WAIT in valid and action_values is not None:
-                values = np.asarray(action_values, dtype=np.float64)
-                requested = max(flat_actions, key=lambda item: values[int(item)])
-                requested_entry_decisions += int(requested != Action.WAIT)
-                executed_entry_decisions += int(action != Action.WAIT)
-                blocked_requested_entry_decisions += int(requested not in valid)
             observation, _, terminated, _, info = environment.step(action)
             valid = tuple(info["valid_actions"])
-            episode_entries += int(info.get("recovery_entry_used", False))
-            if episode_entries > 1:
-                raise ValueError(
-                    "recovery stress violated its challenge-lifetime one-entry contract"
-                )
             step_index += 1
             environment_steps += 1
             if terminated:
                 break
         outcome = str(info.get("outcome"))
-        recovery_status = str(info.get("recovery_status"))
+        status = str(info.get("recovery_status"))
         if outcome not in outcomes:
             raise ValueError(f"unknown recovery stress outcome: {outcome}")
-        if recovery_status not in recovery_statuses:
-            raise ValueError(
-                f"unknown recovery stress status: {recovery_status}"
-            )
-        if outcome == "pass" and recovery_status != "recovered":
-            raise ValueError(
-                "recovery stress pass did not satisfy breakeven recovery"
-            )
-        if recovery_status == "recovered" and (
-            not info.get("recovery_success", False) or episode_entries != 1
-        ):
-            raise ValueError("recovery stress outcome violates its entry contract")
+        if status not in statuses:
+            raise ValueError(f"unknown recovery status: {status}")
+        if outcome == "blow" and status == "recovered":
+            raise ValueError("a blown recovery episode cannot be recovered")
         outcomes[outcome] += 1
-        recovery_statuses[recovery_status] += 1
-        entries_used += episode_entries
+        statuses[status] += 1
+        entries_used += int(info.get("trade_count", 0))
         terminal_pnls.append(float(info["equity_pnl"]))
         wait_decisions.append(int(info.get("recovery_wait_decisions", 0)))
     result = RecoveryStressResult(
         episodes=episodes,
+        recovered=statuses["recovered"],
+        not_recovered=statuses["not_recovered"],
         passes=outcomes["pass"],
         timeouts=outcomes["timeout"],
         blows=outcomes["blow"],
-        recovery_successes=recovery_statuses["recovered"],
-        recovery_not_recovered=recovery_statuses["not_recovered"],
         mean_terminal_pnl=float(np.mean(terminal_pnls)),
         mean_wait_decisions=float(np.mean(wait_decisions)),
         entries_used=entries_used,
-        one_entry_violations=0,
         environment_steps=environment_steps,
-        requested_entry_decisions=requested_entry_decisions,
-        executed_entry_decisions=executed_entry_decisions,
-        blocked_requested_entry_decisions=blocked_requested_entry_decisions,
     )
     print(
         "[recovery-stress] COMPLETE "
-        f"episodes={episodes} success={result.recovery_successes} "
-        f"pass={result.passes} timeout={result.timeouts} "
-        f"not_recovered={result.recovery_not_recovered} "
-        f"blow={result.blows} "
+        f"episodes={episodes} recovered={result.recovered} "
+        f"not_recovered={result.not_recovered} "
+        f"pass={result.passes} timeout={result.timeouts} blow={result.blows} "
         f"success_rate={result.recovery_success_rate:.1%} "
-        f"mean_pnl={result.mean_terminal_pnl:+.2f} "
-        f"requested_entry={result.requested_entry_decisions} "
-        f"executed_entry={result.executed_entry_decisions} "
-        f"blocked_request={result.blocked_requested_entry_decisions}",
+        f"mean_pnl={result.mean_terminal_pnl:+.2f}",
         flush=True,
     )
     return result

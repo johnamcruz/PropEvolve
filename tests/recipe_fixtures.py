@@ -25,12 +25,7 @@ def retained_stage2_recipes() -> tuple[Path, ...]:
     return tuple(sorted(recipes))
 
 
-def stage2_recipe(
-    *,
-    semantics: str,
-    training_episodes: int,
-    recovery_episode_fraction: float = 0.0,
-) -> Path:
+def stage2_recipe(*, semantics: str, training_episodes: int) -> Path:
     candidates = []
     for path in retained_stage2_recipes():
         payload = json.loads(path.read_text())
@@ -39,18 +34,13 @@ def stage2_recipe(
             payload["regime_selectivity"].get("semantics") == semantics
             and len(stages) == 1
             and stages[0].get("training_episodes") == training_episodes
-            and float(
-                payload.get("recovery_curriculum", {}).get(
-                    "episode_fraction", 0.0
-                )
-            ) == recovery_episode_fraction
+            and payload.get("recovery_curriculum") is None
         ):
             candidates.append(path)
     if len(candidates) != 1:
         raise AssertionError(
             "expected one retained Stage 2 recipe for "
             f"semantics={semantics!r}, training_episodes={training_episodes}; "
-            f"recovery_episode_fraction={recovery_episode_fraction}; "
             f"got {tuple(candidates)}"
         )
     return candidates[0]
