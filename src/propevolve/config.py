@@ -664,11 +664,8 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
         and semantics == SIDE_CONDITIONED_EXPANSION_REGIME_CONFLUENCE_SEMANTICS
     ):
         expected_formula = CHOP_MARGIN_EXPANSION_REGIME_CONFLUENCE_FORMULA
-    policy_health = (
-        payload.get("training", {})
-        .get("short_circuit", {})
-        .get("policy_health", {})
-    )
+    short_circuit = payload.get("training", {}).get("short_circuit") or {}
+    policy_health = short_circuit.get("policy_health", {})
     require_positive_association = (
         policy_health.get(
             "require_positive_persistent_regime_association", False
@@ -710,7 +707,6 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
         or not isinstance(specification, dict)
         or set(specification) not in valid_required_sets
         or specification.get("formula") != expected_formula
-        or require_positive_association is not True
     ):
         raise ValueError("persistent-chop association contract is invalid")
     teachers = tuple(payload.get("teachers") or ())
@@ -1078,6 +1074,7 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("runtime benchmark loss drift must be between zero and one")
     training = payload["training"]
+    training.setdefault("short_circuit", None)
     training.setdefault("terminal_sequence_fraction", 0.0)
     training.setdefault("safety_sequence_fraction", 0.0)
     training.setdefault("entry_opportunity_sequence_fraction", 0.0)
@@ -1706,17 +1703,19 @@ def load_experiment_config(path: str | Path) -> dict:
                 "selection_requirements": requirements,
             }]
         else:
-            short_circuit = training.get("short_circuit") or {}
-            budget_stages = [{
+            stage_short_circuit = training.get("short_circuit")
+            stage = {
                 "name": "historical_candidate",
                 "budget_mode": "episodes",
                 "training_episodes": int(training["episodes"]),
                 "validation_episodes": int(training["validation_episodes"]),
-                "short_circuit_minimum_episodes": int(
-                    short_circuit["minimum_completed_episodes"]
-                ),
                 "selection_requirements": requirements,
-            }]
+            }
+            if stage_short_circuit:
+                stage["short_circuit_minimum_episodes"] = int(
+                    stage_short_circuit["minimum_completed_episodes"]
+                )
+            budget_stages = [stage]
     if not isinstance(budget_stages, list) or not budget_stages:
         raise ValueError("campaign budget stages must be a nonempty array")
     names = []
@@ -1763,6 +1762,9 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError("campaign step budget stage contract is invalid")
             budget = stage["minimum_environment_steps"]
         else:
+            stage_short_circuit = stage.get(
+                "short_circuit_minimum_episodes"
+            )
             if (
                 "minimum_environment_steps" in stage
                 or isinstance(stage.get("training_episodes"), bool)
@@ -1772,15 +1774,20 @@ def load_experiment_config(path: str | Path) -> dict:
                 or isinstance(stage.get("validation_episodes"), bool)
                 or not isinstance(stage.get("validation_episodes"), int)
                 or stage["validation_episodes"] < 1
-                or isinstance(
-                    stage.get("short_circuit_minimum_episodes"), bool
+                or (
+                    short_circuit is None
+                    and "short_circuit_minimum_episodes" in stage
                 )
-                or not isinstance(
-                    stage.get("short_circuit_minimum_episodes"), int
+                or (
+                    short_circuit is not None
+                    and (
+                        isinstance(stage_short_circuit, bool)
+                        or not isinstance(stage_short_circuit, int)
+                        or not 1
+                        <= stage_short_circuit
+                        <= stage["training_episodes"]
+                    )
                 )
-                or not 1
-                <= stage["short_circuit_minimum_episodes"]
-                <= stage["training_episodes"]
             ):
                 raise ValueError("campaign episode budget stage contract is invalid")
             budget = stage["training_episodes"]

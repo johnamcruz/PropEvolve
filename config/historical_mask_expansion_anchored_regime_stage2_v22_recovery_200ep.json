@@ -271,41 +271,7 @@
     "teacher_guidance_dropout_end": 0.5,
     "teacher_autonomy_start_fraction": 0.8,
     "entry_supervision_autonomy_start_fraction": 0.95,
-    "short_circuit": {
-      "minimum_passes": 1,
-      "maximum_blow_rate": 0.1,
-      "collapse": {
-        "window_episodes": 5,
-        "minimum_prior_passes": 2,
-        "maximum_recent_passes": 0,
-        "maximum_average_hold_bars": 4,
-        "minimum_voluntary_close_rate": 0.8
-      },
-      "minimum_completed_episodes": 18,
-      "policy_health": {
-        "schema": "propevolve_training_policy_health_v1",
-        "minimum_completed_episodes": 100,
-        "probe_interval_episodes": 100,
-        "minimum_probe_recall": {
-          "WAIT": 0.35,
-          "ENTER_LONG_1": 0.3,
-          "ENTER_SHORT_1": 0.3
-        },
-        "entry_mass_fraction": {
-          "minimum": 0.3,
-          "maximum": 0.36
-        },
-        "require_zero_positive_entry_soft_wait_veto": true,
-        "require_positive_persistent_regime_association": true,
-        "economic_futility": {
-          "minimum_completed_episodes": 100,
-          "maximum_near_blow_timeout_rate": 0.75,
-          "maximum_mean_terminal_pnl": -1500,
-          "maximum_expectancy_r": -0.15,
-          "minimum_failed_conditions": 2
-        }
-      }
-    },
+    "short_circuit": null,
     "seed": 314159,
     "checkpoint_every_episodes": 5,
     "terminal_sequence_fraction": 0.5,
@@ -451,7 +417,6 @@
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
-        "short_circuit_minimum_episodes": 18,
         "allow_revisions": false,
         "warm_start_parent": true,
         "curriculum_override": {},

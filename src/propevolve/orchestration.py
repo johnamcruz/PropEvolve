@@ -198,10 +198,11 @@ def _budget_stage_fields(stage: Mapping) -> dict[str, object]:
             "budget_mode": mode,
             "training_episodes": int(stage["training_episodes"]),
             "validation_episodes": int(stage["validation_episodes"]),
-            "short_circuit_minimum_episodes": int(
-                stage["short_circuit_minimum_episodes"]
-            ),
         }
+        if stage.get("short_circuit_minimum_episodes") is not None:
+            fields["short_circuit_minimum_episodes"] = int(
+                stage["short_circuit_minimum_episodes"]
+            )
         if stage.get("episode_coverage") is not None:
             fields["episode_coverage"] = dict(stage["episode_coverage"])
         return fields
@@ -368,12 +369,20 @@ class _CandidateStageAdapter:
                 seed_config["training"]["validation_episodes"] = int(
                     request.stage.config["validation_episodes"]
                 )
-                short_circuit = dict(seed_config["training"]["short_circuit"])
-                short_circuit.pop("minimum_environment_steps", None)
-                short_circuit["minimum_completed_episodes"] = int(
-                    request.stage.config["short_circuit_minimum_episodes"]
+                stage_short_circuit = request.stage.config.get(
+                    "short_circuit_minimum_episodes"
                 )
-                seed_config["training"]["short_circuit"] = short_circuit
+                if stage_short_circuit is None:
+                    seed_config["training"]["short_circuit"] = None
+                else:
+                    short_circuit = dict(
+                        seed_config["training"]["short_circuit"]
+                    )
+                    short_circuit.pop("minimum_environment_steps", None)
+                    short_circuit["minimum_completed_episodes"] = int(
+                        stage_short_circuit
+                    )
+                    seed_config["training"]["short_circuit"] = short_circuit
                 episode_coverage = request.stage.config.get("episode_coverage")
                 if episode_coverage is None:
                     seed_config["training"].pop("episode_coverage", None)

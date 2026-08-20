@@ -2705,9 +2705,10 @@ class HistoricalCandidateRunner:
         policy_health_probe_path = output / "training-policy-health-probe.pkl"
         validation_diagnostics_path = output / "validation-diagnostics.jsonl"
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
+        active_short_circuit = training_config.get("short_circuit")
         policy_health_config = (
-            training_config.get("short_circuit", {}).get("policy_health")
-            if training_config.get("short_circuit") is not None
+            active_short_circuit.get("policy_health")
+            if active_short_circuit is not None
             else None
         )
         resume = None
@@ -3053,9 +3054,9 @@ class HistoricalCandidateRunner:
                 )
             ),
             short_circuit_minimum_environment_steps=(
-                int(training_config["short_circuit"]["minimum_environment_steps"])
+                int(active_short_circuit["minimum_environment_steps"])
                 if (
-                    training_config.get("short_circuit") is not None
+                    active_short_circuit is not None
                     and training_config.get(
                         "budget_mode", "environment_steps"
                     ) == "environment_steps"
@@ -3064,12 +3065,12 @@ class HistoricalCandidateRunner:
             ),
             short_circuit_minimum_episodes=(
                 int(
-                    training_config["short_circuit"][
+                    active_short_circuit[
                         "minimum_completed_episodes"
                     ]
                 )
                 if (
-                    training_config.get("short_circuit") is not None
+                    active_short_circuit is not None
                     and training_config.get(
                         "budget_mode", "environment_steps"
                     ) == "episodes"
@@ -3077,37 +3078,37 @@ class HistoricalCandidateRunner:
                 else None
             ),
             short_circuit_minimum_passes=(
-                int(training_config["short_circuit"]["minimum_passes"])
-                if training_config.get("short_circuit") is not None
+                int(active_short_circuit["minimum_passes"])
+                if active_short_circuit is not None
                 else 0
             ),
             short_circuit_maximum_blow_rate=(
-                float(training_config["short_circuit"]["maximum_blow_rate"])
-                if training_config.get("short_circuit") is not None
+                float(active_short_circuit["maximum_blow_rate"])
+                if active_short_circuit is not None
                 else 1.0
             ),
             collapse_window_episodes=int(
-                training_config.get("short_circuit", {})
+                (active_short_circuit or {})
                 .get("collapse", {})
                 .get("window_episodes", 0)
             ),
             collapse_minimum_prior_passes=int(
-                training_config.get("short_circuit", {})
+                (active_short_circuit or {})
                 .get("collapse", {})
                 .get("minimum_prior_passes", 0)
             ),
             collapse_maximum_recent_passes=int(
-                training_config.get("short_circuit", {})
+                (active_short_circuit or {})
                 .get("collapse", {})
                 .get("maximum_recent_passes", 0)
             ),
             collapse_maximum_average_hold_bars=float(
-                training_config.get("short_circuit", {})
+                (active_short_circuit or {})
                 .get("collapse", {})
                 .get("maximum_average_hold_bars", math.inf)
             ),
             collapse_minimum_voluntary_close_rate=float(
-                training_config.get("short_circuit", {})
+                (active_short_circuit or {})
                 .get("collapse", {})
                 .get("minimum_voluntary_close_rate", 1.0)
             ),

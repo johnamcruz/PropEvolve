@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.recipe_fixtures import paired_aplus_recipe, paired_recurrent_aplus_recipe
+from tests.recipe_fixtures import (
+    paired_aplus_recipe,
+    paired_recurrent_aplus_recipe,
+)
 
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
@@ -605,6 +608,42 @@ def test_v21_recipe_changes_only_paired_replay_and_uses_200_episode_stage() -> N
     assert stage["validation_episodes"] == 200
     for key in ("agent", "challenge", "entry_supervision", "teachers", "temporal"):
         assert candidate[key] == baseline[key]
+
+
+@pytest.mark.parametrize("declaration", ("missing", "null"))
+def test_episode_recipe_parses_disabled_short_circuit_from_json(
+    tmp_path: Path,
+    declaration: str,
+) -> None:
+    payload = _episode_budget_payload()
+    payload["training"]["episodes"] = 200
+    payload["training"]["validation_episodes"] = 200
+    if declaration == "missing":
+        payload["training"].pop("short_circuit")
+    else:
+        payload["training"]["short_circuit"] = None
+    payload["campaign"]["budget_stages"] = [{
+        "name": "complete_training_budget",
+        "budget_mode": "episodes",
+        "training_episodes": 200,
+        "validation_episodes": 200,
+        "allow_revisions": False,
+        "warm_start_parent": True,
+        "revision_paths": [],
+        "selection_requirements": list(
+            payload["campaign"]["selection_requirements"]
+        ),
+    }]
+    path = tmp_path / "runtime-selected-recipe.json"
+    path.write_text(json.dumps(payload))
+
+    recipe = load_experiment_config(path)
+    stage = recipe["campaign"]["budget_stages"][0]
+
+    assert recipe["training"]["short_circuit"] is None
+    assert stage["training_episodes"] == 200
+    assert stage["validation_episodes"] == 200
+    assert "short_circuit_minimum_episodes" not in stage
 
 
 def test_relative_only_paired_recurrent_v7_recipe_is_rejected(tmp_path: Path) -> None:
