@@ -377,7 +377,7 @@ class HistoricalChallengeEnv:
         self._recovery_entry_permit: RecoveryEntryPermit | None = None
         self._recovery_entry_open = False
         self._recovery_success_pnl: float | None = None
-        self._recovery_status = "not_applicable"
+        self._recovery_status: str | None = None
         self._recovery_wait_decisions = 0
 
     @property
@@ -477,7 +477,7 @@ class HistoricalChallengeEnv:
         self._recovery_entry_permit = None
         self._recovery_entry_open = False
         self._recovery_success_pnl = None
-        self._recovery_status = "not_applicable"
+        self._recovery_status = None
         self._recovery_wait_decisions = 0
         start_state = options.get("challenge_start_state")
         if start_state is not None:
@@ -492,7 +492,6 @@ class HistoricalChallengeEnv:
             self._trading_days_elapsed = start_state.trading_days_elapsed
             self._recovery_entry_permit = start_state.recovery_entry_permit
             self._recovery_success_pnl = start_state.recovery_success_pnl
-            self._recovery_status = "active"
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
         return self._observation(), {
@@ -509,7 +508,6 @@ class HistoricalChallengeEnv:
             "passmark_locked": self._account.passmark_locked,
             "valid_actions": self.valid_actions(),
             "recovery_entry_permit_remaining": self._recovery_permit_remaining,
-            "recovery_status": self._recovery_status,
             "recovery_wait_decisions": self._recovery_wait_decisions,
         }
 
@@ -607,8 +605,10 @@ class HistoricalChallengeEnv:
             if self._account.outcome(current_equity) == "pass":
                 info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
-                if self._recovery_status == "active":
+                if self._recovery_success_pnl is not None:
                     self._recovery_status = "recovered"
+                    self._recovery_success_pnl = None
+                    self._recovery_entry_permit = None
                 outcome = "pass"
             elif (
                 self._recovery_success_pnl is not None
@@ -625,7 +625,11 @@ class HistoricalChallengeEnv:
                 info.setdefault("exit_reason", "episode_timeout")
                 self._liquidate(float(self._market.close[self._index]), info)
                 outcome = "timeout"
-        if outcome is not None and self._recovery_status == "active":
+        if (
+            outcome is not None
+            and self._recovery_status is None
+            and self._recovery_success_pnl is not None
+        ):
             self._recovery_status = "not_recovered"
         if outcome is None and self._position is not None:
             self._update_ratchet(next_index, info)
@@ -676,12 +680,13 @@ class HistoricalChallengeEnv:
             "trading_days_elapsed": self._trading_days_elapsed,
             "valid_actions": () if self._terminated else self.valid_actions(),
             "recovery_entry_permit_remaining": self._recovery_permit_remaining,
-            "recovery_status": self._recovery_status,
             "recovery_success": self._recovery_status == "recovered",
             "recovery_wait_decisions": self._recovery_wait_decisions,
             **shaping_info,
             **self._trade_statistics(),
         })
+        if self._recovery_status in {"recovered", "not_recovered"}:
+            info["recovery_status"] = self._recovery_status
         return self._observation(), float(reward), self._terminated, False, info
 
     def _reward_shaping(

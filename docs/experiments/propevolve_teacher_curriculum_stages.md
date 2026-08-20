@@ -197,8 +197,8 @@ declared teacher-free -$2,700 recovery stress set. Neither path may touch 2026.
 
 #### Required diagnostics
 
-- recovery-success, survived-not-recovered, wait-timeout, and blow rates from
-  exactly -$2,700;
+- pass, blow, and timeout rates plus the orthogonal recovered/not-recovered
+  result from exactly -$2,700;
 - mean terminal PnL and mean WAIT decisions before the one permitted Entry;
 - recovery Entry count and one-Entry contract violations;
 - training-only low-headroom selectivity targets and Long/Short action balance;

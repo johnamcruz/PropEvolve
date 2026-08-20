@@ -5106,9 +5106,7 @@ def train_agent(
         outcome = str(terminal_info["outcome"])
         if outcome not in {"pass", "blow", "timeout"}:
             raise ValueError(f"unknown terminal outcome: {outcome}")
-        recovery_status = str(
-            terminal_info.get("recovery_status", "not_applicable")
-        )
+        recovery_status = terminal_info.get("recovery_status")
         if recovery_episode and recovery_status not in {
             "recovered", "not_recovered"
         }:
@@ -5605,7 +5603,11 @@ def train_agent(
                 "recovery_success": bool(
                     terminal_info.get("recovery_success", False)
                 ),
-                "recovery_status": recovery_status,
+                **(
+                    {"recovery_status": recovery_status}
+                    if recovery_episode
+                    else {}
+                ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
                 ),

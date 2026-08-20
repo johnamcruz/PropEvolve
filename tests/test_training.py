@@ -2309,7 +2309,7 @@ def test_training_deterministically_mixes_complete_recovery_starts_and_keeps_sho
                 "recovery_entry_used": recovery,
                 "recovery_trade_closed": recovery,
                 "recovery_success": recovery,
-                "recovery_status": "recovered" if recovery else "not_applicable",
+                **({"recovery_status": "recovered"} if recovery else {}),
                 "recovery_wait_decisions": 0,
                 "recovery_entry_permit_remaining": 0,
             }
@@ -2471,9 +2471,7 @@ def test_mixed_recovery_schedule_resumes_by_episode_index_exactly() -> None:
                 "equity_pnl": -2_700.0 if recovery else 0.0,
                 "recovery_wait_decisions": int(recovery),
                 "recovery_entry_permit_remaining": int(recovery),
-                "recovery_status": (
-                    "not_recovered" if recovery else "not_applicable"
-                ),
+                **({"recovery_status": "not_recovered"} if recovery else {}),
             }
 
     def run(environment, minimum_steps, *, resume=None, checkpoints=None):
@@ -5015,7 +5013,7 @@ def test_recovery_stress_fails_closed_on_a_second_entry() -> None:
                 "equity_pnl": -2_500.0,
                 "recovery_entry_used": True,
                 "recovery_success": terminated,
-                "recovery_status": "recovered" if terminated else "active",
+                **({"recovery_status": "recovered"} if terminated else {}),
             }
 
     with pytest.raises(ValueError, match="one-entry contract"):
