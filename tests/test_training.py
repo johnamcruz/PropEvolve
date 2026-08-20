@@ -60,14 +60,14 @@ def _recovery_curriculum_settings() -> RecoveryCurriculumSettings:
         recovery_value_store_capacity=200,
         target_every_episodes=1,
         start_state=ChallengeStartState(
-            realized_pnl=-2_700.0,
-            equity_pnl=-2_700.0,
+            realized_pnl=-2_000.0,
+            equity_pnl=-2_000.0,
             peak_equity_pnl=0.0,
             mll_floor_pnl=-3_000.0,
             passmark_locked=False,
             position_side=PositionSide.FLAT,
             position_size=0,
-            session_pnl=-2_700.0,
+            session_pnl=-2_000.0,
             trading_days_elapsed=1,
             recovery_success_pnl=0.0,
         ),
@@ -86,14 +86,14 @@ def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> N
             "target_every_episodes": 1,
         },
         "start_state": {
-            "realized_pnl": -2_700.0,
-            "equity_pnl": -2_700.0,
+            "realized_pnl": -2_000.0,
+            "equity_pnl": -2_000.0,
             "peak_equity_pnl": 0.0,
             "mll_floor_pnl": -3_000.0,
             "passmark_locked": False,
             "position_side": 0,
             "position_size": 0,
-            "session_pnl": -2_700.0,
+            "session_pnl": -2_000.0,
             "trading_days_elapsed": 1,
         },
     })
@@ -118,14 +118,14 @@ def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
                 "target_every_episodes": 1,
             },
             "start_state": {
-                "realized_pnl": -2_600.0,
-                "equity_pnl": -2_600.0,
+                "realized_pnl": -2_100.0,
+                "equity_pnl": -2_100.0,
                 "peak_equity_pnl": 0.0,
                 "mll_floor_pnl": -3_000.0,
                 "passmark_locked": False,
                 "position_side": 0,
                 "position_size": 0,
-                "session_pnl": -2_600.0,
+                "session_pnl": -2_100.0,
                 "trading_days_elapsed": 1,
             },
             "stress_evaluation_episodes": 200,
@@ -2355,7 +2355,7 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
     )
 
     assert environment.recovery_flags == [True] * 4
-    assert environment.starting_realized_pnls == [-2_700.0] * 4
+    assert environment.starting_realized_pnls == [-2_000.0] * 4
     assert sidecar.resets == 12
     assert len(store) == 4
     assert result.passes == 4

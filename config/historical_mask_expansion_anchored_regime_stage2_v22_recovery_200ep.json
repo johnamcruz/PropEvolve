@@ -319,14 +319,14 @@
     "stress_evaluation_episodes": 200,
     "recovery_success_pnl": 0,
     "start_state": {
-      "realized_pnl": -2700,
-      "equity_pnl": -2700,
+      "realized_pnl": -2000,
+      "equity_pnl": -2000,
       "peak_equity_pnl": 0,
       "mll_floor_pnl": -3000,
       "passmark_locked": false,
       "position_side": 0,
       "position_size": 0,
-      "session_pnl": -2700,
+      "session_pnl": -2000,
       "trading_days_elapsed": 1
     },
     "action_value_supervision": {
@@ -337,7 +337,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins exactly at -$2,700 and keeps WAIT, Long, and Short available while flat until breakeven, using training-only same-state recovery values to learn selective recovery and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven, using training-only same-state recovery values to learn selective recovery and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],

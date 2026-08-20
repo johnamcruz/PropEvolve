@@ -2287,11 +2287,11 @@ class RecoveryCurriculumSettings:
         ):
             raise ValueError("recovery action-value supervision is invalid")
         if not (
-            math.isclose(self.start_state.realized_pnl, -2_700.0)
-            and math.isclose(self.start_state.equity_pnl, -2_700.0)
+            math.isclose(self.start_state.realized_pnl, -2_000.0)
+            and math.isclose(self.start_state.equity_pnl, -2_000.0)
             and math.isclose(self.start_state.peak_equity_pnl, 0.0)
             and math.isclose(self.start_state.mll_floor_pnl, -3_000.0)
-            and math.isclose(self.start_state.session_pnl, -2_700.0)
+            and math.isclose(self.start_state.session_pnl, -2_000.0)
             and math.isclose(self.start_state.recovery_success_pnl, 0.0)
         ):
             raise ValueError("Stage-2 recovery start contract drifted")

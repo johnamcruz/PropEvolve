@@ -7,8 +7,9 @@ Date: 2026-08-20
 ## Implementation amendment
 
 The V22 campaign uses the frozen recovery start state for **every main training
-episode**: realized and equity P&L begin at `-$2,700`, the MLL floor remains
-`-$3,000`, recovery is reached at `$0`, and the same episode then continues
+episode**: realized and equity P&L begin at `-$2,000`, leaving exactly `$1,000`
+of headroom above the unchanged `-$3,000` MLL floor. Recovery is reached at
+`$0`, and the same episode then continues
 toward the ordinary `+$6,000` pass target. While recovery is active and the
 account is flat, `WAIT`, `ENTER_LONG`, and `ENTER_SHORT` remain available; no
 one-entry quota or `-$2,500` unlock threshold forces the policy to wait. The
@@ -17,6 +18,16 @@ uses its ordinary start state. This amendment supersedes later wording that
 describes V22 main episodes as ordinary-start episodes; it does not change the
 V21 model, optimizer, replay sampler, A+ losses, public outcomes, or
 teacher-free inference contract.
+
+This start replaces the falsified `-$2,700` start and changes no other V21 or
+V22 learning mechanic. Run r7 at code identity
+`5b7614620790f3dbb30a79487c294c7f0b62a32d` was stopped after 16 episodes with
+15 blows, one timeout, zero recoveries, and empty stderr. The sole full-window
+survivor improved from `-$2,700` to `-$2,520.60`. At episode 10, recovery-value
+top-1 concurrence was `0.9375` and model Q(WAIT) exceeded both entry actions,
+while entry exploration remained about `0.24`. The evidence falsifies `$300`
+headroom as a useful first recovery curriculum: an ordinary `-$300` full-risk
+loss can terminate an episode before the learned recovery ranking is expressed.
 
 ## Decision
 
@@ -140,7 +151,10 @@ The [EarnHFT paper](https://arxiv.org/abs/2309.12891) motivates the full-action 
 
 ### 1. Recovery training states
 
-Use the exact frozen Stage 2B start state already agreed for the first falsifying experiment: realized PnL of `-$2,700`, $300 above the `-$3,000` MLL floor. This is an experimental start distribution, not an inference rule and not a gate.
+Use the exact frozen Stage 2B start state selected after the first falsifying
+run: realized PnL of `-$2,000`, exactly `$1,000` above the `-$3,000` MLL floor.
+This is an experimental start distribution and learned state-conditioning
+point, not an inference rule or action gate.
 
 Recovery target rollouts use authenticated training windows only. Validation and sealed rows may never be used to construct targets.
 
@@ -171,7 +185,7 @@ G_rec(s, a) = +1                                      if recovered
                    / (0 - start_pnl), -1, +1)         if not_recovered
 ```
 
-For the frozen first experiment, `start_pnl = -2700`.
+For the frozen revised experiment, `start_pnl = -2000`.
 
 This produces the required credit without inventing an A+ score:
 
@@ -296,7 +310,7 @@ The requested-action report is decisive. If executed actions look safe but raw p
 
 ## One experiment and one falsifier
 
-Run one matched candidate from the exact V21 checkpoint, using the exact V21 ordinary data, seeds, schedule, gates, and 200-episode teacher-free validation. The only delta is the separate recovery store plus `L_recovery` on exact `-$2,700` recovery starts.
+Run one matched candidate from the exact V21 checkpoint, using the exact V21 ordinary data, seeds, schedule, gates, and 200-episode teacher-free validation. The only delta is the separate recovery store plus `L_recovery` on exact `-$2,000` recovery starts, which represent the learned recovery activation point with `$1,000` of remaining MLL headroom.
 
 **Primary falsifier:** reject Stage 2B if it does not improve teacher-free `recovered` rate—or, when the baseline has zero recoveries, mean terminal recovery PnL—at **zero recovery blows**, while preserving every unchanged V21 ordinary gate and showing positive lift in raw requested-action agreement with the full-action recovery target.
 
@@ -316,7 +330,7 @@ Constrained Policy Optimization and CVaR methods are useful evidence that safety
 - no replacement of V21 replay slots;
 - no change to V21 rewards, A+ losses, margins, optimizer, teacher schedule, or health gates;
 - no PPO, hierarchical EarnHFT, or constrained-RL migration;
-- no random recovery-start range until the exact `-$2,700` MVP is falsified or accepted;
+- no random recovery-start range until the exact `-$2,000` MVP is falsified or accepted;
 - no status beyond `recovered`/`not_recovered`, and no outcome beyond `pass`/`blow`/`timeout`;
 - no claim of learning based only on executed actions.
 

@@ -521,14 +521,14 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     ):
         raise ValueError("recovery action-value supervision is invalid")
     exact_start = {
-        "realized_pnl": -2_700.0,
-        "equity_pnl": -2_700.0,
+        "realized_pnl": -2_000.0,
+        "equity_pnl": -2_000.0,
         "peak_equity_pnl": 0.0,
         "mll_floor_pnl": -3_000.0,
         "passmark_locked": False,
         "position_side": 0,
         "position_size": 0,
-        "session_pnl": -2_700.0,
+        "session_pnl": -2_000.0,
         "trading_days_elapsed": 1,
     }
     if any(
