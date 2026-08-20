@@ -74,64 +74,18 @@ V22 additionally altered ordinary behavior by making the MLL-proximity penalty c
 
 Evidence: the V21 baseline is commit [`827c492`](https://github.com/johnamcruz/PropEvolve/commit/827c492202de6a3ba2d3cedfb1b3dbe088c2ca03); the rejected Stage 2B addition is commit [`8244721`](https://github.com/johnamcruz/PropEvolve/commit/8244721ae6e438dad59d5fb530bee92f9c03d625). The latter changes replay, environment, decision, agent, training, configuration, and gates together, rather than adding one isolated recovery objective.
 
-## What AlgoTraderAI actually teaches
+## PropEvolve recovery requirements
 
-AlgoTraderAI is the closest operational recovery reference, but its active solution is a hybrid of learned policy behavior and hard execution controls. Those two mechanisms must not be conflated.
-
-### Exact active snapshot
-
-The audited active recipe is `configs/sweep/combine_v11_pivot.json` at commit `7048522`:
-
-| Boundary | Active behavior |
-|---|---|
-| Parent/training | Warm-starts a proven trial; PPO trains for 2,000,000 steps at learning rate `5e-5` on NQ/ES/GC/RTY/YM |
-| Start-state curriculum | Samples starting cushion continuously from `U[$500, $3,000]`; each episode is 30 days |
-| Policy account inputs | Normalized balance, equity, drawdown/headroom, session PnL, time/progress, position, and market/setup context |
-| Training entry pressure | `risk_penalty` mode with coefficient `3.0` and margin `0.35`; it penalizes deficient requested entries but does not positively reward clean entries |
-| Breakeven milestone | The environment supports a one-time milestone, but the active recipe sets `term_breakeven_reward = 0.0`; active recovery learning therefore does **not** depend on that bonus |
-| Hard recovery envelope | Deficit proba floor `0.90`, deficit max size `1`, balance safety fraction `0.5`, minimum balance/risk ratio `1.5`, max stop cost `$600`, soft/hard daily loss `$750/$1,500`, loss-streak cooldown `2/65` |
-| Public accounting | Episodes retain normal terminal outcomes; breakeven milestone, when enabled elsewhere, is internal and the episode continues |
-| Evaluation boundary | 200 episodes at fixed `$3,000` cushion over 2021–2025, three seeds, fail-fast on blow; the file explicitly labels this in-sample selection and leaves 2026 held out |
-| Diagnostics | Separately measures the raw policy's requested deficit-entry quality before environment enforcement |
-
-This matters: the active recipe's fixed-$3,000 evaluation is not direct evidence of low-headroom recovery, and much of its active zero-blow envelope is hard enforcement. Its transferable lesson is the state-dependent curriculum and policy-first diagnostic seam—not its recovery result as a matched PropEvolve benchmark.
-
-### Learned mechanisms worth transferring
-
-1. **Account state is observable.** The policy observes normalized balance, drawdown/headroom, session PnL, time, position, and market evidence. PropEvolve already has the equivalent account-state seam; it does not need new observations.
-2. **Recovery starts are explicit.** The active combine config samples recovery starts over a configured balance interval. This makes low-headroom states common enough to learn from rather than waiting for rare accidental drawdowns.
-3. **Breakeven is a training milestone, not a public episode outcome.** AlgoTraderAI can award a one-time breakeven reward and then continue the episode. This maps cleanly to `recovered`/`not_recovered` plus unchanged `pass`/`blow`/`timeout`.
-4. **The policy receives soft training pressure against poor entry context.** Its active `risk_penalty` mode penalizes an entry whose setup evidence is below its context margin. This is training pressure, not itself an inference mask.
-5. **Diagnostics separate requested behavior from enforced behavior.** Its deficit diagnostics measure the policy's requested A+ preference before environment controls. That is essential proof that the policy learned recovery selectivity.
-
-Primary local source at audited commit [`7048522`](https://github.com/johnamcruz/algoTraderAI/tree/7048522f6ed93849d19ef77726d7c1dc94788aeb): [active combine configuration](https://github.com/johnamcruz/algoTraderAI/blob/7048522f6ed93849d19ef77726d7c1dc94788aeb/configs/sweep/combine_v11_pivot.json), [start-state and environment implementation](https://github.com/johnamcruz/algoTraderAI/blob/7048522f6ed93849d19ef77726d7c1dc94788aeb/rl/environments/prop_firm.py), and [policy-first diagnostics](https://github.com/johnamcruz/algoTraderAI/blob/7048522f6ed93849d19ef77726d7c1dc94788aeb/scripts/diagnose_rl.py).
-
-### Hard-gated mechanisms that must not transfer
-
-AlgoTraderAI also blocks or clamps actions through:
-
-- a deficit setup-probability floor;
-- a soft-daily-loss entry block and cooldown;
-- ADX/setup gates;
-- deficit size caps;
-- minimum balance-to-risk and maximum stop-cost checks;
-- pyramid eligibility rules.
-
-These can protect the account, but they do not prove the policy learned `WAIT`. The clearest example is `soft_daily_loss_blocks_entry`, which rejects a non-A+ requested entry before execution ([source](https://github.com/johnamcruz/algoTraderAI/blob/7048522f6ed93849d19ef77726d7c1dc94788aeb/utils/risk_policy.py#L21-L38)). PropEvolve must not import the Pivot probability, ADX, or other hand-coded inference gates. It must teach recovery economically and verify the raw requested action.
-
-### Exact transfer boundary
-
-| AlgoTraderAI mechanism | Learned or enforced? | PropEvolve decision |
-|---|---|---|
-| Balance/headroom observations | Learned input | Already present; keep unchanged |
-| Low-headroom training starts | Curriculum | Use only in a separate recovery training stream |
-| One-time breakeven credit | Training reward/credit | Transfer as `recovered`; episode continues |
-| Entry-context penalty | Training-only learning signal | Replace fixed proba margin with full economic action values |
-| Requested-vs-executed diagnostics | Proof seam | Transfer |
-| Deficit proba/ADX thresholds | Hard gate | Do not copy |
-| Daily-loss/cooldown blocks | Hard gate | Do not copy as evidence of learning |
-| Size, stop-cost, pyramid clamps | Execution/risk envelope | Do not add in this Stage 2B experiment |
-| PPO architecture and warm-start machinery | Different RL stack | Do not copy |
+- The existing policy already observes normalized balance, equity, drawdown,
+  MLL headroom, session PnL, time, position, and causal market context.
+- Recovery starts must make low-headroom states common enough to learn without
+  changing the ordinary V21 replay or selector.
+- Breakeven is recorded as `recovered`; it is not a public episode outcome and
+  the episode continues toward pass, blow, or timeout.
+- Training may add economic pressure against poor entry context, but validation
+  and inference remain teacher-free and use no new action gate.
+- Diagnostics must report the raw requested action separately from execution so
+  safety handling is never credited as learned recovery selectivity.
 
 ## What EarnHFT contributes
 
@@ -336,6 +290,8 @@ Constrained Policy Optimization and CVaR methods are useful evidence that safety
 
 ## Bottom line
 
-AlgoTraderAI proves that account-aware recovery can be trained and that breakeven should be an internal milestone, but most of its safety is enforced by hard gates. EarnHFT supplies the missing teaching pattern: compare the economic value of every action in the same state during training. R2D2 supplies the recurrent integrity requirements.
+Account-aware recovery requires a training signal that compares the economic
+value of every action in the same state. EarnHFT supplies that teaching pattern,
+while R2D2 supplies the recurrent integrity requirements.
 
 The correct PropEvolve synthesis is narrow: preserve V21 completely, create same-state WAIT/LONG/SHORT recovery values on training data, distill that ranking into the existing policy through a separate recovery-only recurrent update, and prove the raw teacher-free policy—not an action gate—learned to choose the safest productive A+ recovery action.

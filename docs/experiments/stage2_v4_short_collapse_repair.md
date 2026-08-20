@@ -277,7 +277,7 @@ diagnostics. They do not replace the binding gates above.
 |---|---|---|
 | Frozen Mask checkpoint and representation contract | FFM | existing authenticated encoder/cache SHA identities |
 | Bar-1-through-5 Entry labels, RL policy, recipe, simulator, metrics, and candidate archive | PropEvolve | v4 recipe plus archived hashes/receipts |
-| Live execution/risk integration | algoTraderAI | N/A; outside v4 |
+| Live execution/risk integration | Out of scope | N/A; outside v4 |
 
 Search is `N/A`: v4 is one predeclared two-boundary lifecycle repair with one
 seed, one budget, no tuning, no pruning, and no reasoning revisions. The known

@@ -36,7 +36,7 @@ complete, pruned, failed, and infeasible trial and supports bounded resume.
 
 ## Objective and feasibility
 
-The scalar objective mirrors the established algoTraderRL approach:
+The scalar objective prioritizes pass conversion and winner quality:
 
 `100*pass_rate + 8*min(average_win_r,8)`.
 
