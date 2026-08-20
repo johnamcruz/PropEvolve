@@ -2259,7 +2259,7 @@ def test_episode_budget_drives_learning_schedules_by_episode_position() -> None:
     ] == pytest.approx([0.25, 0.75])
 
 
-def test_training_keeps_v21_episodes_ordinary_and_builds_recovery_targets_sidecar() -> None:
+def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_targets() -> None:
     class RecoveryAgent(Agent):
         recurrent_burn_in = 64
         n_step_return = 8
@@ -2267,12 +2267,18 @@ def test_training_keeps_v21_episodes_ordinary_and_builds_recovery_targets_sideca
     class OrdinaryEnvironment:
         def __init__(self) -> None:
             self.recovery_flags: list[bool] = []
+            self.starting_realized_pnls: list[float] = []
             self.ticker = "NQ"
 
         def reset(self, *, options=None):
             options = options or {}
             recovery = "challenge_start_state" in options
             self.recovery_flags.append(recovery)
+            self.starting_realized_pnls.append(
+                float(options["challenge_start_state"].realized_pnl)
+                if recovery
+                else 0.0
+            )
             self.ticker = str(options.get("ticker", "NQ"))
             return np.zeros(1, np.float32), {
                 "valid_actions": (Action.WAIT,),
@@ -2364,14 +2370,15 @@ def test_training_keeps_v21_episodes_ordinary_and_builds_recovery_targets_sideca
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    assert environment.recovery_flags == [False] * 4
+    assert environment.recovery_flags == [True] * 4
+    assert environment.starting_realized_pnls == [-2_700.0] * 4
     assert sidecar.resets == 12
     assert len(store) == 4
     assert result.passes == 4
     assert replay.transition_count == 4
     assert len(replay) == 4
     assert Counter(item["episode_kind"] for item in diagnostics) == {
-        "ordinary": 4,
+        "recovery": 4,
     }
 
 def test_teacher_curriculum_is_gradual_and_deterministic() -> None:

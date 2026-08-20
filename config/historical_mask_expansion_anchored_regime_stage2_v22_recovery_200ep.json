@@ -342,7 +342,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, training-only same-state WAIT, Long, and Short recovery values from exactly -$2,700 will improve recovery to breakeven and reduce near-blow timeouts without changing ordinary V21 replay, action supervision, challenge outcomes, or teacher-free inference.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins exactly at -$2,700 and uses training-only same-state WAIT, Long, and Short recovery values to improve recovery to breakeven and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],

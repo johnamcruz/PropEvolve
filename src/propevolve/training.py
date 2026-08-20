@@ -4792,12 +4792,13 @@ def train_agent(
     if progress.short_circuit_reason is not None:
         return progress.result()
     for episode_index in range(progress.completed_episodes, episodes):
-        # Stage 2B never replaces an ordinary V21 challenge. Recovery values
-        # are generated in a separate environment and enter only as an
-        # additive loss on the existing optimizer step.
         reset_options = {}
         if ticker_schedule is not None:
             reset_options["ticker"] = ticker_schedule[episode_index]
+        if recovery_curriculum is not None:
+            reset_options["challenge_start_state"] = (
+                recovery_curriculum.start_state
+            )
         if not reset_options:
             observation, reset_info = environment.reset()
         else:
@@ -5594,7 +5595,11 @@ def train_agent(
                 "episode": progress.completed_episodes,
                 "ticker": str(terminal_info["ticker"]),
                 "outcome": outcome,
-                "episode_kind": "ordinary",
+                "episode_kind": (
+                    "recovery"
+                    if recovery_curriculum is not None
+                    else "ordinary"
+                ),
                 "reward": total_reward,
                 "environment_steps": progress.environment_steps,
                 "budget_mode": budget_mode,

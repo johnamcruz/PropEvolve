@@ -4,6 +4,17 @@ Status: research decision; no implementation, configuration, run, checkpoint, or
 
 Date: 2026-08-20
 
+## Implementation amendment
+
+The V22 campaign uses the frozen recovery start state for **every main training
+episode**: realized and equity P&L begin at `-$2,700`, the MLL floor remains
+`-$3,000`, recovery is reached at `$0`, and the same episode then continues
+toward the ordinary `+$6,000` pass target. The recovery-disabled V21 path still
+uses its ordinary start state. This amendment supersedes later wording that
+describes V22 main episodes as ordinary-start episodes; it does not change the
+V21 model, optimizer, replay sampler, A+ losses, public outcomes, or
+teacher-free inference contract.
+
 ## Decision
 
 Stage 2B should be rebuilt as one **additive, training-only, low-headroom full-action recovery-value objective** on top of the immutable V21 policy.
