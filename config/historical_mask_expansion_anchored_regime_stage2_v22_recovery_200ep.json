@@ -251,7 +251,7 @@
   },
   "training": {
     "prefetch_batches": 0,
-    "episodes": 500,
+    "episodes": 200,
     "validation_episodes": 200,
     "validation_no_trade_patience_episodes": 5,
     "greedy_diagnostic_interval_steps": 256,

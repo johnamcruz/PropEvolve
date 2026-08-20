@@ -35,9 +35,9 @@ threshold.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/algoTraderAI/strategies/strategy_mantis.py:511-516`
-- `/Volumes/CRUZ SSD/algoTraderAI/strategies/strategy_mantis.py:571-577`
-- `/Volumes/CRUZ SSD/algoTraderAI/strategies/strategy_mantis.py:823-835`
+- `algoTraderAI/strategies/strategy_mantis.py:511-516`
+- `algoTraderAI/strategies/strategy_mantis.py:571-577`
+- `algoTraderAI/strategies/strategy_mantis.py:823-835`
 
 ### Recovery learning comes from continuous account state and sampled starts
 
@@ -49,11 +49,11 @@ and pass progress. There is no learned recovery on/off observation.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/algoTraderAI/configs/sweep/combine_v11_pivot.json:31-37`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:900-930`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:2077-2093`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:2148-2174`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/tests/test_combine_rules.py:337-355`
+- `algoTraderAI/configs/sweep/combine_v11_pivot.json:31-37`
+- `algoTraderAI/rl/environments/prop_firm.py:900-930`
+- `algoTraderAI/rl/environments/prop_firm.py:2077-2093`
+- `algoTraderAI/rl/environments/prop_firm.py:2148-2174`
+- `algoTraderAI/rl/tests/test_combine_rules.py:337-355`
 
 ### Its immediate-red behavior is mostly hard enforcement
 
@@ -71,14 +71,14 @@ for deficit-start episodes and continues the episode after breakeven.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/algoTraderAI/configs/sweep/combine_v11_pivot.json:86-147`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:357-363`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:384-416`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:454-472`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:1089-1102`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:1286-1309`
-- `/Volumes/CRUZ SSD/algoTraderAI/rl/environments/prop_firm.py:1609-1650`
-- `/Volumes/CRUZ SSD/algoTraderAI/strategies/strategy_mantis.py:837-939`
+- `algoTraderAI/configs/sweep/combine_v11_pivot.json:86-147`
+- `algoTraderAI/rl/environments/prop_firm.py:357-363`
+- `algoTraderAI/rl/environments/prop_firm.py:384-416`
+- `algoTraderAI/rl/environments/prop_firm.py:454-472`
+- `algoTraderAI/rl/environments/prop_firm.py:1089-1102`
+- `algoTraderAI/rl/environments/prop_firm.py:1286-1309`
+- `algoTraderAI/rl/environments/prop_firm.py:1609-1650`
+- `algoTraderAI/strategies/strategy_mantis.py:837-939`
 
 algoTraderAI separately measures the policy's raw deficit actions before
 environment enforcement. That separation is important because safe executed
@@ -86,9 +86,9 @@ actions can otherwise conceal a policy that still requests bad entries.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/algoTraderAI/scripts/diagnose_rl.py:38-56`
-- `/Volumes/CRUZ SSD/algoTraderAI/scripts/diagnose_rl.py:250-266`
-- `/Volumes/CRUZ SSD/algoTraderAI/scripts/diagnose_rl.py:391-419`
+- `algoTraderAI/scripts/diagnose_rl.py:38-56`
+- `algoTraderAI/scripts/diagnose_rl.py:250-266`
+- `algoTraderAI/scripts/diagnose_rl.py:391-419`
 
 ## Current PropEvolve V22 boundary
 
@@ -98,8 +98,8 @@ headroom, drawdown, session/challenge time, and position state.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/observation.py:81-100`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/observation.py:103-159`
+- `src/propevolve/observation.py:81-100`
+- `src/propevolve/observation.py:103-159`
 
 V22 currently differs from the desired immediate-red contract in two ways:
 
@@ -115,10 +115,10 @@ V22 currently differs from the desired immediate-red contract in two ways:
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/PropEvolve/config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:317-340`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/training.py:4772-4826`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/environment.py:473-510`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/environment.py:582-601`
+- `config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:317-340`
+- `src/propevolve/training.py:4772-4826`
+- `src/propevolve/environment.py:473-510`
+- `src/propevolve/environment.py:582-601`
 
 The existing `ActionMasker` uses `recovery_active` only to keep native actions
 available below the ordinary minimum-headroom boundary. That is not the learned
@@ -127,7 +127,7 @@ selection gate.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/decision.py:26-62`
+- `src/propevolve/decision.py:26-62`
 
 ## P0: r8 cannot produce interpretable training evidence
 
@@ -143,11 +143,11 @@ an episode; stderr was empty only because it had not reached that reset.
 
 Evidence:
 
-- `/Volumes/CRUZ SSD/PropEvolve/config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:150-170`
-- `/Volumes/CRUZ SSD/PropEvolve/config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:317-337`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/config.py:523-549`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/training.py:2289-2297`
-- `/Volumes/CRUZ SSD/PropEvolve/src/propevolve/environment.py:513-527`
+- `config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:150-170`
+- `config/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep.json:317-337`
+- `src/propevolve/config.py:523-549`
+- `src/propevolve/training.py:2289-2297`
+- `src/propevolve/environment.py:513-527`
 
 Decision: **stop r8 before further preprocessing**. It is not an economic
 failure or a recovery-learning experiment; it is an executable-contract
