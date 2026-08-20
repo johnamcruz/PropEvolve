@@ -197,6 +197,9 @@ def test_stage2a_accepts_versioned_expansion_regime_confluence_semantics(
         "paired_a_plus_margin",
     ):
         payload["regime_selectivity"].pop(field, None)
+        frozen_path = f"regime_selectivity.{field}"
+        if frozen_path in payload["evolution"]["frozen_paths"]:
+            payload["evolution"]["frozen_paths"].remove(frozen_path)
     payload["training"]["regime_wait_sequence_update_period"] = 0
     path.write_text(json.dumps(payload))
 
@@ -439,6 +442,9 @@ def test_all_dominant_chop_margin_semantics_are_frozen_and_loadable(
         "failed_confluence_margin": 0.25,
     })
     payload["regime_selectivity"].pop("paired_a_plus_margin", None)
+    payload["evolution"]["frozen_paths"].remove(
+        "regime_selectivity.paired_a_plus_margin"
+    )
     payload["evolution"]["frozen_paths"] = sorted(set(
         payload["evolution"]["frozen_paths"]
     ) | {
@@ -622,6 +628,11 @@ def test_episode_recipe_parses_disabled_short_circuit_from_json(
         payload["training"].pop("short_circuit")
     else:
         payload["training"]["short_circuit"] = None
+    payload["evolution"]["frozen_paths"] = [
+        path
+        for path in payload["evolution"]["frozen_paths"]
+        if path != TRAINING_POLICY_HEALTH_FROZEN_PATH
+    ]
     payload["campaign"]["budget_stages"] = [{
         "name": "complete_training_budget",
         "budget_mode": "episodes",
@@ -644,6 +655,22 @@ def test_episode_recipe_parses_disabled_short_circuit_from_json(
     assert stage["training_episodes"] == 200
     assert stage["validation_episodes"] == 200
     assert "short_circuit_minimum_episodes" not in stage
+
+
+def test_config_rejects_frozen_path_removed_by_runtime_json(tmp_path: Path) -> None:
+    payload = _episode_budget_payload()
+    payload["training"]["short_circuit"] = None
+    for stage in payload["campaign"]["budget_stages"]:
+        stage.pop("short_circuit_minimum_episodes")
+    path = tmp_path / "stale-frozen-path.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="frozen recipe path does not exist: "
+        "training.short_circuit.policy_health",
+    ):
+        load_experiment_config(path)
 
 
 def test_relative_only_paired_recurrent_v7_recipe_is_rejected(tmp_path: Path) -> None:
@@ -918,6 +945,7 @@ def test_centered_entry_distillation_rejects_unauthenticated_centers(
 def test_teacher_curriculum_is_explicit_and_fail_closed(tmp_path: Path) -> None:
     payload = _generic_payload()
     payload.pop("entry_supervision")
+    payload["evolution"]["frozen_paths"].remove("entry_supervision")
     payload["training"].update({
         "teacher_loss_end_scale": 0.1,
         "teacher_guidance_dropout_start": 0.0,
@@ -1482,6 +1510,7 @@ def test_config_rejects_revision_allowlist_that_overlaps_frozen_contract(
 def test_config_preserves_declared_trade_risk_and_ratchet_fields(tmp_path: Path) -> None:
     payload = _generic_payload()
     payload.pop("entry_supervision")
+    payload["evolution"]["frozen_paths"].remove("entry_supervision")
     payload["challenge"].update({
         "per_trade_risk_dollars": 200.0,
         "ratchet_activation_r": 2.0,

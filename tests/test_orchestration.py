@@ -1125,6 +1125,44 @@ def test_episode_stage_plan_preserves_budget_units_without_step_aliases(
     assert "minimum_environment_steps" not in stage.config
 
 
+def test_episode_stage_plan_accepts_configured_full_budget_without_short_circuit(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    payload = json.loads(config_path.read_text())
+    payload["training"]["budget_mode"] = "episodes"
+    payload["training"]["episodes"] = 200
+    payload["training"]["short_circuit"] = None
+    payload["training"].pop("minimum_environment_steps", None)
+    payload["evolution"]["frozen_paths"] = [
+        path
+        for path in payload["evolution"]["frozen_paths"]
+        if path not in {
+            "training.minimum_environment_steps",
+            "training.short_circuit.policy_health",
+        }
+    ]
+    payload["campaign"]["budget_stages"] = [{
+        "name": "complete_200_episode_budget",
+        "budget_mode": "episodes",
+        "training_episodes": 200,
+        "validation_episodes": 200,
+        "selection_requirements": payload["campaign"][
+            "selection_requirements"
+        ],
+    }]
+    config_path.write_text(json.dumps(payload))
+
+    from propevolve.config import load_experiment_config
+
+    stage = _plan(load_experiment_config(config_path)).stages[0]
+
+    assert stage.config["budget_mode"] == "episodes"
+    assert stage.config["training_episodes"] == 200
+    assert stage.config["validation_episodes"] == 200
+    assert "short_circuit_minimum_episodes" not in stage.config
+
+
 def test_v4_reasoning_prompt_names_current_stage_and_empty_revision_surface() -> None:
     request = SimpleNamespace(
         stage=SimpleNamespace(

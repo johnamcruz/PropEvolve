@@ -317,6 +317,15 @@ def _workspace_root(payload: dict, *, config_path: Path) -> Path:
         raise ValueError("workspace_root does not exist") from error
 
 
+def _recipe_path_exists(payload: dict, path: str) -> bool:
+    value: object = payload
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return True
+
+
 def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     """Validate the fully frozen, training-only post-launch action contract."""
     specification = payload.get("entry_supervision")
@@ -1624,6 +1633,14 @@ def load_experiment_config(path: str | Path) -> dict:
             raise ValueError(f"revision bounds are invalid for {revision_path}")
     evolution["allowed_revision_paths"] = allowed
     evolution["frozen_paths"] = frozen
+    missing_frozen_paths = tuple(
+        path for path in frozen if not _recipe_path_exists(payload, path)
+    )
+    if missing_frozen_paths:
+        raise ValueError(
+            "frozen recipe path does not exist: "
+            + ", ".join(missing_frozen_paths)
+        )
     evolution["parent_candidate_ids"] = tuple(
         str(value) for value in evolution.get("parent_candidate_ids", ())
     )

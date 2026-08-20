@@ -394,7 +394,6 @@
       "training.seed",
       "training.sequence_length",
       "training.short_circuit",
-      "training.short_circuit.policy_health",
       "training.teacher_autonomy_start_fraction",
       "training.teacher_guidance_dropout_end",
       "training.teacher_guidance_dropout_start",
