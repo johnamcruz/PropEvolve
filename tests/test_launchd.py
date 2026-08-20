@@ -80,3 +80,39 @@ def test_launch_evolution_config_generates_plist_from_passed_config(
     assert payload["StandardOutPath"] == str(result.stdout_path)
     assert payload["StandardErrorPath"] == str(result.stderr_path)
     assert payload["RunAtLoad"] is True
+
+
+def test_launch_evolution_config_skips_stale_plist_when_state_tree_is_absent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "recipes" / "recovery.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    stale = agents / "com.johnmcruz.propevolve.recovery-r1.plist"
+    stale.write_bytes(b"stale")
+    config = {
+        "_root": str(tmp_path),
+        "_path": str(config_path),
+        "output": "runs/recovery",
+        "campaign": {"state_root": "runs/recovery/ml-loop-state"},
+    }
+    monkeypatch.setattr(
+        propevolve.launchd,
+        "load_experiment_config",
+        lambda path: config,
+    )
+
+    result = propevolve.launchd.launch_evolution_config(
+        config_path,
+        launch_agents_root=agents,
+        log_root=tmp_path / "Logs",
+        python_executable=tmp_path / ".venv/bin/python",
+        user_id=501,
+        launchctl=lambda command: None,
+    )
+
+    assert result.run_id == "recovery-r2"
+    assert stale.read_bytes() == b"stale"

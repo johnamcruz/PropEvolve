@@ -6,12 +6,16 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import sys
 from typing import Callable, Sequence
 
 from .config import load_experiment_config
 from .orchestration import reserve_evolution_run_id
+
+
+_VERSIONED_RUN_ID = re.compile(r"^(?P<stem>.+)-r(?P<revision>[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,6 @@ def launch_evolution_config(
     root = Path(str(config["_root"]))
     resolved_config_path = Path(str(config["_path"])).resolve()
     run_id = reserve_evolution_run_id(config)
-    label = f"com.johnmcruz.propevolve.{run_id}"
     agents = (
         Path.home() / "Library/LaunchAgents"
         if launch_agents_root is None
@@ -54,9 +57,23 @@ def launch_evolution_config(
     )
     agents.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
-    plist_path = agents / f"{label}.plist"
-    stdout_path = logs / f"{run_id}.stdout.log"
-    stderr_path = logs / f"{run_id}.stderr.log"
+    match = _VERSIONED_RUN_ID.fullmatch(run_id)
+    if match is None:
+        raise ValueError("reserved campaign run identity is not versioned")
+    stem = match.group("stem")
+    revision = int(match.group("revision"))
+    for revision in range(revision, revision + 10_000):
+        run_id = f"{stem}-r{revision}"
+        label = f"com.johnmcruz.propevolve.{run_id}"
+        plist_path = agents / f"{label}.plist"
+        stdout_path = logs / f"{run_id}.stdout.log"
+        stderr_path = logs / f"{run_id}.stderr.log"
+        if not any(
+            path.exists() for path in (plist_path, stdout_path, stderr_path)
+        ):
+            break
+    else:
+        raise RuntimeError("no free versioned launch identity is available")
     interpreter = Path(sys.executable) if python_executable is None else python_executable
     payload = {
         "Label": label,
