@@ -515,14 +515,8 @@ class HistoricalChallengeEnv:
             raise ValueError("recovery start MLL floor must equal negative max_loss")
         if not math.isclose(state.peak_equity_pnl, 0.0):
             raise ValueError("recovery start peak equity must be zero")
-        if (
-            self.spec.per_trade_risk_dollars is None
-            or not math.isclose(
-                state.equity_pnl - state.mll_floor_pnl,
-                self.spec.per_trade_risk_dollars,
-            )
-        ):
-            raise ValueError("recovery headroom must equal per-trade risk")
+        if self.spec.per_trade_risk_dollars is None:
+            raise ValueError("recovery start requires declared per-trade risk")
         if not math.isclose(state.recovery_success_pnl, 0.0):
             raise ValueError("recovery success PnL must be breakeven")
         if state.trading_days_elapsed > self.spec.episode_days:

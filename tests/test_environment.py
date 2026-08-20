@@ -99,6 +99,57 @@ def _recovery_market(
     )
 
 
+def test_recovery_start_accepts_one_thousand_dollars_of_mll_headroom() -> None:
+    """The real environment accepts and recovers the frozen V22 start."""
+    market = _recovery_market(
+        opens=(100.0, 100.0, 200.0, 200.0, 200.0, 200.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    start_state = replace(
+        _recovery_start_state(),
+        realized_pnl=-2_000.0,
+        equity_pnl=-2_000.0,
+        session_pnl=-2_000.0,
+    )
+
+    _, reset_info = env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": start_state,
+    })
+
+    assert reset_info["realized_pnl"] == -2_000.0
+    assert reset_info["equity_pnl"] == -2_000.0
+    assert reset_info["mll_headroom"] == 1_000.0
+    assert reset_info["valid_actions"] == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    _, _, entered_terminated, _, entered = env.step(Action.ENTER_LONG_1)
+    _, _, recovered_terminated, _, recovered = env.step(Action.CLOSE)
+
+    assert entered_terminated is False
+    assert entered["recovery_entry_used"] is True
+    assert recovered_terminated is False
+    assert recovered["realized_pnl"] == 0.0
+    assert recovered["outcome"] is None
+    assert recovered["recovery_status"] == "recovered"
+    assert recovered["recovery_success"] is True
+
+
 def test_recovery_start_keeps_wait_long_and_short_available_while_flat() -> None:
     env = HistoricalChallengeEnv(
         {"NQ": _market()},
@@ -472,13 +523,6 @@ def test_recovery_start_state_rejects_incomplete_account_state(
     [
         ({"mll_floor_pnl": -3_100.0}, "MLL floor"),
         ({"peak_equity_pnl": 100.0}, "peak equity must be zero"),
-        (
-            {
-                "realized_pnl": -2_600.0,
-                "equity_pnl": -2_600.0,
-            },
-            "headroom must equal per-trade risk",
-        ),
     ],
 )
 def test_environment_rejects_recovery_state_inconsistent_with_challenge(
@@ -503,6 +547,23 @@ def test_environment_rejects_recovery_state_inconsistent_with_challenge(
             "ticker": "NQ",
             "start": 0,
             "challenge_start_state": replace(_recovery_start_state(), **changes),
+        })
+
+
+def test_environment_recovery_start_requires_declared_trade_risk() -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _recovery_market(opens=(100.0,) * 6)},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(),
+        seed=1,
+    )
+
+    with pytest.raises(ValueError, match="requires declared per-trade risk"):
+        env.reset(options={
+            "ticker": "NQ",
+            "start": 0,
+            "challenge_start_state": _recovery_start_state(),
         })
 
 
