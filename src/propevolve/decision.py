@@ -31,7 +31,7 @@ class RecoveryEntryPermit:
 
     remaining_entries: int
     exception_headroom: float
-    success_pnl: float
+    ordinary_entry_resume_pnl: float
 
     def __post_init__(self) -> None:
         if self.remaining_entries not in (0, 1):
@@ -39,7 +39,7 @@ class RecoveryEntryPermit:
         if (
             not math.isfinite(self.exception_headroom)
             or self.exception_headroom <= 0
-            or not math.isfinite(self.success_pnl)
+            or not math.isfinite(self.ordinary_entry_resume_pnl)
         ):
             raise ValueError("recovery permit economics must be finite and valid")
     def permits(self, mll_headroom: float) -> bool:

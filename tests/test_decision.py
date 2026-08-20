@@ -121,7 +121,7 @@ def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
         recovery_entry_permit=RecoveryEntryPermit(
             remaining_entries=1,
             exception_headroom=300,
-            success_pnl=-2_500,
+            ordinary_entry_resume_pnl=-2_500,
         ),
     ) == (
         Action.WAIT,
@@ -137,7 +137,7 @@ def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
         recovery_entry_permit=RecoveryEntryPermit(
             remaining_entries=1,
             exception_headroom=300,
-            success_pnl=-2_500,
+            ordinary_entry_resume_pnl=-2_500,
         ),
     ) == (Action.WAIT,)
     assert masker.valid_actions(
@@ -145,6 +145,6 @@ def test_recovery_permit_does_not_lower_the_ordinary_entry_guard() -> None:
         recovery_entry_permit=RecoveryEntryPermit(
             remaining_entries=0,
             exception_headroom=300,
-            success_pnl=-2_500,
+            ordinary_entry_resume_pnl=-2_500,
         ),
     ) == (Action.WAIT,)

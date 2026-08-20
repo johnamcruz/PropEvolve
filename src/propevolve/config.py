@@ -69,6 +69,7 @@ RECOVERY_CURRICULUM_FROZEN_PATHS = (
     "recovery_curriculum.stress_evaluation_episodes",
     "recovery_curriculum.start_state",
     "recovery_curriculum.entry_permit",
+    "recovery_curriculum.recovery_success_pnl",
 )
 RECOVERY_CURRICULUM_REVISION_PATHS = (
     "recovery_curriculum.episode_fraction",
@@ -449,6 +450,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "stress_evaluation_episodes",
         "start_state",
         "entry_permit",
+        "recovery_success_pnl",
     }
     start_fields = {
         "realized_pnl",
@@ -464,7 +466,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     permit_fields = {
         "remaining_entries",
         "exception_headroom",
-        "success_pnl",
+        "ordinary_entry_resume_pnl",
     }
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
@@ -493,7 +495,8 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         start["mll_floor_pnl"],
         start["session_pnl"],
         permit["exception_headroom"],
-        permit["success_pnl"],
+        permit["ordinary_entry_resume_pnl"],
+        curriculum["recovery_success_pnl"],
     )
     if (
         any(
@@ -531,7 +534,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     exact_permit = {
         "remaining_entries": 1,
         "exception_headroom": 300.0,
-        "success_pnl": -2_500.0,
+        "ordinary_entry_resume_pnl": -2_500.0,
     }
     if any(
         isinstance(expected, float)
@@ -547,6 +550,8 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         for field, expected in exact_permit.items()
     ):
         raise ValueError("Stage-2 recovery start contract drifted")
+    if not math.isclose(float(curriculum["recovery_success_pnl"]), 0.0):
+        raise ValueError("Stage-2 recovery success must be breakeven")
     if (
         not math.isclose(float(challenge["max_loss"]), 3_000.0)
         or not math.isclose(float(challenge["minimum_mll_headroom"]), 500.0)

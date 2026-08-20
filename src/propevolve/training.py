@@ -2295,7 +2295,8 @@ class RecoveryCurriculumSettings:
             and math.isclose(self.start_state.session_pnl, -2_700.0)
             and permit.remaining_entries == 1
             and math.isclose(permit.exception_headroom, 300.0)
-            and math.isclose(permit.success_pnl, -2_500.0)
+            and math.isclose(permit.ordinary_entry_resume_pnl, -2_500.0)
+            and math.isclose(self.start_state.recovery_success_pnl, 0.0)
         ):
             raise ValueError("Stage-2 recovery start contract drifted")
 
@@ -2312,6 +2313,9 @@ class RecoveryStressResult:
     entries_used: int
     one_entry_violations: int
     environment_steps: int
+    requested_entry_decisions: int
+    executed_entry_decisions: int
+    blocked_requested_entry_decisions: int
 
     @property
     def recovery_success_rate(self) -> float:
@@ -2333,6 +2337,7 @@ def _recovery_curriculum_from_config(
         "start_state",
         "entry_permit",
         "stress_evaluation_episodes",
+        "recovery_success_pnl",
     }
     if set(value) != required:
         raise ValueError("recovery curriculum fields are invalid")
@@ -2356,7 +2361,7 @@ def _recovery_curriculum_from_config(
     if not isinstance(permit, Mapping) or set(permit) != {
         "remaining_entries",
         "exception_headroom",
-        "success_pnl",
+        "ordinary_entry_resume_pnl",
     }:
         raise ValueError("recovery curriculum entry permit is invalid")
     integer_fields = (
@@ -2375,7 +2380,8 @@ def _recovery_curriculum_from_config(
         start["mll_floor_pnl"],
         start["session_pnl"],
         permit["exception_headroom"],
-        permit["success_pnl"],
+        permit["ordinary_entry_resume_pnl"],
+        value["recovery_success_pnl"],
     )
     if (
         any(
@@ -2402,10 +2408,13 @@ def _recovery_curriculum_from_config(
             position_size=int(start["position_size"]),
             session_pnl=float(start["session_pnl"]),
             trading_days_elapsed=int(start["trading_days_elapsed"]),
+            recovery_success_pnl=float(value["recovery_success_pnl"]),
             recovery_entry_permit=RecoveryEntryPermit(
                 remaining_entries=int(permit["remaining_entries"]),
                 exception_headroom=float(permit["exception_headroom"]),
-                success_pnl=float(permit["success_pnl"]),
+                ordinary_entry_resume_pnl=float(
+                    permit["ordinary_entry_resume_pnl"]
+                ),
             ),
         ),
     )
@@ -2830,6 +2839,11 @@ class HistoricalCandidateRunner:
             ),
             entry_opportunity_sequence_fraction=float(
                 training_config.get("entry_opportunity_sequence_fraction", 0.0)
+            ),
+            recovery_sequence_fraction=(
+                0.0
+                if recovery_curriculum is None
+                else recovery_curriculum.episode_fraction
             ),
             regime_wait_sequence_fraction=float(
                 training_config.get("regime_wait_sequence_fraction", 0.0)
@@ -3516,6 +3530,15 @@ class HistoricalCandidateRunner:
                     recovery_stress.one_entry_violations
                 ),
                 "environment_steps": float(recovery_stress.environment_steps),
+                "requested_entry_decisions": float(
+                    recovery_stress.requested_entry_decisions
+                ),
+                "executed_entry_decisions": float(
+                    recovery_stress.executed_entry_decisions
+                ),
+                "blocked_requested_entry_decisions": float(
+                    recovery_stress.blocked_requested_entry_decisions
+                ),
             }
 
         stages = [
@@ -4699,6 +4722,14 @@ def train_agent(
         recovery_curriculum,
         episodes=episodes,
     )
+    expected_recovery_replay_fraction = (
+        0.0 if recovery_curriculum is None else recovery_curriculum.episode_fraction
+    )
+    if not math.isclose(
+        replay.recovery_sequence_fraction,
+        expected_recovery_replay_fraction,
+    ):
+        raise ValueError("recovery replay dosage drifted from episode curriculum")
     if checkpoint_every_episodes < 0:
         raise ValueError("checkpoint interval cannot be negative")
     if checkpoint_every_episodes and checkpoint_callback is None:
@@ -4750,6 +4781,8 @@ def train_agent(
         transitions = []
         action_counts = {action: 0 for action in Action}
         greedy_flat_action_counts = {action: 0 for action in Action}
+        executed_flat_action_counts = {action: 0 for action in Action}
+        blocked_requested_action_counts = {action: 0 for action in Action}
         greedy_flat_probe_count = 0
         greedy_flat_entry_advantages: list[float] = []
         selected_entry_teacher_targets: list[tuple[float, float]] = []
@@ -4845,8 +4878,9 @@ def train_agent(
                 Action.ENTER_LONG_1,
                 Action.ENTER_SHORT_1,
             }
+            flat_decision = Action.WAIT in valid and set(valid).issubset(flat_actions)
             diagnostic_probe = (
-                flat_actions.issubset(valid)
+                flat_decision
                 and (progress.environment_steps + step_index)
                 % greedy_diagnostic_interval_steps == 0
             )
@@ -4858,11 +4892,15 @@ def train_agent(
                 return_action_values=diagnostic_probe,
             )
             action_counts[Action(action)] += 1
-            if diagnostic_probe:
-                assert action_values is not None
+            if diagnostic_probe and action_values is not None:
                 values = np.asarray(action_values, dtype=np.float64)
-                greedy_action = max(valid, key=lambda item: values[int(item)])
-                greedy_flat_action_counts[Action(greedy_action)] += 1
+                requested_action = max(
+                    flat_actions, key=lambda item: values[int(item)]
+                )
+                greedy_flat_action_counts[Action(requested_action)] += 1
+                executed_flat_action_counts[Action(action)] += 1
+                if requested_action not in valid:
+                    blocked_requested_action_counts[Action(requested_action)] += 1
                 greedy_flat_probe_count += 1
                 greedy_flat_entry_advantages.append(
                     max(
@@ -5090,13 +5128,12 @@ def train_agent(
             raise ValueError(f"unknown terminal outcome: {outcome}")
         recovery_success = bool(
             recovery_episode
-            and terminal_info.get("recovery_trade_closed", False)
             and terminal_info.get("recovery_success", False)
             and outcome in {"pass", "recovery_success"}
         )
         if recovery_episode and outcome == "pass" and not recovery_success:
             raise ValueError(
-                "recovery pass did not close its one permitted successful trade"
+                "recovery pass did not satisfy the breakeven recovery contract"
             )
         terminal_pnl = float(terminal_info.get("equity_pnl", 0.0))
         if outcome == "pass" and retention_checkpoint_callback is not None:
@@ -5145,6 +5182,7 @@ def train_agent(
             outcome=outcome,
             primary_side=str(terminal_info["primary_side"]),
             ended_at_ns=time.time_ns(),
+            recovery=recovery_episode,
             transitions=replay_transitions,
         ))
         episode_losses = []
@@ -5585,6 +5623,7 @@ def train_agent(
                 "recovery_entry_permit_remaining": int(
                     terminal_info.get("recovery_entry_permit_remaining", 0)
                 ),
+                "recovery_replay_sample": replay.last_sample_receipt,
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
@@ -5741,6 +5780,18 @@ def train_agent(
                 },
                 "greedy_flat_action_counts": {
                     action.name: greedy_flat_action_counts[action]
+                    for action in Action
+                },
+                "requested_flat_action_counts": {
+                    action.name: greedy_flat_action_counts[action]
+                    for action in Action
+                },
+                "executed_flat_action_counts": {
+                    action.name: executed_flat_action_counts[action]
+                    for action in Action
+                },
+                "blocked_requested_action_counts": {
+                    action.name: blocked_requested_action_counts[action]
                     for action in Action
                 },
                 "greedy_flat_entry_rate": (
@@ -6326,6 +6377,9 @@ def evaluate_recovery_stress(
     episode_tickers: tuple[str, ...] | None = None,
 ) -> RecoveryStressResult:
     """Run a greedy, teacher-free one-shot recovery stress evaluation."""
+    assert_teacher_free = getattr(agent, "assert_teacher_free", None)
+    if assert_teacher_free is not None:
+        assert_teacher_free()
     if episodes < 1 or recurrent_horizon < 1:
         raise ValueError("recovery stress budget must be positive")
     ticker_schedule = _balanced_ticker_schedule(
@@ -6343,6 +6397,14 @@ def evaluate_recovery_stress(
     wait_decisions: list[int] = []
     entries_used = 0
     environment_steps = 0
+    requested_entry_decisions = 0
+    executed_entry_decisions = 0
+    blocked_requested_entry_decisions = 0
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
     for episode_index in range(episodes):
         options: dict[str, object] = {
             "challenge_start_state": settings.start_state,
@@ -6357,12 +6419,19 @@ def evaluate_recovery_stress(
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
-            action, hidden, _ = agent.select_action(
+            action, hidden, action_values = agent.select_action(
                 observation,
                 hidden=hidden,
                 valid_actions=valid,
                 epsilon=0.0,
+                return_action_values=True,
             )
+            if Action.WAIT in valid and action_values is not None:
+                values = np.asarray(action_values, dtype=np.float64)
+                requested = max(flat_actions, key=lambda item: values[int(item)])
+                requested_entry_decisions += int(requested != Action.WAIT)
+                executed_entry_decisions += int(action != Action.WAIT)
+                blocked_requested_entry_decisions += int(requested not in valid)
             observation, _, terminated, _, info = environment.step(action)
             valid = tuple(info["valid_actions"])
             episode_entries += int(info.get("recovery_entry_used", False))
@@ -6378,12 +6447,11 @@ def evaluate_recovery_stress(
         normalized_outcome = outcome
         if outcome == "pass":
             if not (
-                info.get("recovery_trade_closed", False)
-                and info.get("recovery_success", False)
+                info.get("recovery_success", False)
                 and episode_entries == 1
             ):
                 raise ValueError(
-                    "recovery stress pass did not close its successful entry"
+                    "recovery stress pass did not satisfy breakeven recovery"
                 )
             normalized_outcome = "recovery_success"
         if normalized_outcome not in outcomes:
@@ -6412,6 +6480,9 @@ def evaluate_recovery_stress(
         entries_used=entries_used,
         one_entry_violations=0,
         environment_steps=environment_steps,
+        requested_entry_decisions=requested_entry_decisions,
+        executed_entry_decisions=executed_entry_decisions,
+        blocked_requested_entry_decisions=blocked_requested_entry_decisions,
     )
     print(
         "[recovery-stress] COMPLETE "
@@ -6419,7 +6490,10 @@ def evaluate_recovery_stress(
         f"survived={result.survived_not_recovered} "
         f"wait_timeout={result.wait_timeouts} blow={result.blows} "
         f"success_rate={result.recovery_success_rate:.1%} "
-        f"mean_pnl={result.mean_terminal_pnl:+.2f}",
+        f"mean_pnl={result.mean_terminal_pnl:+.2f} "
+        f"requested_entry={result.requested_entry_decisions} "
+        f"executed_entry={result.executed_entry_decisions} "
+        f"blocked_request={result.blocked_requested_entry_decisions}",
         flush=True,
     )
     return result

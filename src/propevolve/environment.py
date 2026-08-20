@@ -106,6 +106,7 @@ class ChallengeStartState:
     position_size: int
     session_pnl: float
     trading_days_elapsed: int
+    recovery_success_pnl: float
     recovery_entry_permit: RecoveryEntryPermit
 
     def __post_init__(self) -> None:
@@ -115,6 +116,7 @@ class ChallengeStartState:
             self.peak_equity_pnl,
             self.mll_floor_pnl,
             self.session_pnl,
+            self.recovery_success_pnl,
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("challenge start account values must be finite")
@@ -374,6 +376,7 @@ class HistoricalChallengeEnv:
         self._trading_days_elapsed = 0
         self._recovery_entry_permit: RecoveryEntryPermit | None = None
         self._recovery_entry_open = False
+        self._recovery_success_pnl: float | None = None
         self._recovery_wait_decisions = 0
 
     @property
@@ -472,6 +475,7 @@ class HistoricalChallengeEnv:
         self._trading_days_elapsed = 1
         self._recovery_entry_permit = None
         self._recovery_entry_open = False
+        self._recovery_success_pnl = None
         self._recovery_wait_decisions = 0
         start_state = options.get("challenge_start_state")
         if start_state is not None:
@@ -485,6 +489,7 @@ class HistoricalChallengeEnv:
             self._peak_equity = start_state.peak_equity_pnl
             self._trading_days_elapsed = start_state.trading_days_elapsed
             self._recovery_entry_permit = start_state.recovery_entry_permit
+            self._recovery_success_pnl = start_state.recovery_success_pnl
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
         return self._observation(), {
@@ -538,12 +543,14 @@ class HistoricalChallengeEnv:
         ):
             raise ValueError("recovery headroom must equal per-trade risk")
         if not math.isclose(
-            permit.success_pnl - state.mll_floor_pnl,
+            permit.ordinary_entry_resume_pnl - state.mll_floor_pnl,
             self.spec.minimum_mll_headroom,
         ):
             raise ValueError(
-                "recovery success PnL must restore exactly ordinary entry eligibility"
+                "recovery ordinary-entry PnL must restore exactly eligibility"
             )
+        if not math.isclose(state.recovery_success_pnl, 0.0):
+            raise ValueError("recovery success PnL must be breakeven")
         if state.trading_days_elapsed > self.spec.episode_days:
             raise ValueError("recovery start exceeds the challenge duration")
 
@@ -556,6 +563,7 @@ class HistoricalChallengeEnv:
         if self._episode_coverage is not None:
             self._episode_coverage.record_decision(self._ticker, self._index)
         previous_equity = self._equity(self._market.close[self._index])
+        was_exposed = self._position is not None
         closed_trade_count = len(self._closed_trade_pnls)
         next_index = self._index + 1
         fill = float(self._market.open[next_index])
@@ -592,43 +600,35 @@ class HistoricalChallengeEnv:
             outcome = "blow"
         else:
             current_equity = self._equity(float(self._market.close[self._index]))
-            if (
-                info["recovery_trade_closed"]
-                and self._account.outcome(current_equity) != "pass"
-            ):
-                outcome = (
-                    "recovery_success"
-                    if info["recovery_success"]
-                    else "survived_not_recovered"
-                )
-            elif self._account.outcome(current_equity) == "pass":
+            if self._account.outcome(current_equity) == "pass":
                 info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
+                info["recovery_success"] = self._recovery_success_pnl is not None
                 outcome = "pass"
-            elif self._index >= self._end:
+            elif (
+                self._recovery_success_pnl is not None
+                and current_equity >= self._recovery_success_pnl
+            ):
+                info.setdefault("exit_reason", "recovery_breakeven")
+                self._liquidate(float(self._market.close[self._index]), info)
+                current_equity = self._equity(float(self._market.close[self._index]))
+                if self._account.realized_pnl >= self._recovery_success_pnl:
+                    info["recovery_success"] = True
+                    outcome = "recovery_success"
+            if outcome is None and self._index >= self._end:
                 info.setdefault("exit_reason", "episode_timeout")
                 self._liquidate(float(self._market.close[self._index]), info)
                 outcome = (
-                    (
-                        "recovery_success"
-                        if info["recovery_success"]
-                        else "survived_not_recovered"
-                    )
-                    if info["recovery_trade_closed"]
-                    else
                     "wait_timeout"
                     if (
-                        self._recovery_entry_permit is not None
+                        self._recovery_success_pnl is not None
+                        and self._recovery_entry_permit is not None
                         and self._recovery_entry_permit.remaining_entries == 1
                     )
+                    else "survived_not_recovered"
+                    if self._recovery_success_pnl is not None
                     else "timeout"
                 )
-        if outcome is None and info["recovery_trade_closed"]:
-            outcome = (
-                "recovery_success"
-                if info["recovery_success"]
-                else "survived_not_recovered"
-            )
         if outcome is None and self._position is not None:
             self._update_ratchet(next_index, info)
 
@@ -637,6 +637,7 @@ class HistoricalChallengeEnv:
         shaping_reward, shaping_info = self._reward_shaping(
             equity,
             closed_trade_count=closed_trade_count,
+            exposed_during_step=was_exposed or self._position is not None,
         )
         reward += shaping_reward
         self._peak_equity = max(self._peak_equity, equity)
@@ -688,10 +689,11 @@ class HistoricalChallengeEnv:
         equity: float,
         *,
         closed_trade_count: int,
+        exposed_during_step: bool,
     ) -> tuple[float, dict[str, float]]:
         proximity_penalty = 0.0
         lead_giveback_penalty = 0.0
-        if self._account is not None:
+        if exposed_during_step and self._account is not None:
             cushion_fraction = min(
                 1.0,
                 max(
@@ -757,7 +759,9 @@ class HistoricalChallengeEnv:
                     self._recovery_entry_permit = RecoveryEntryPermit(
                         remaining_entries=0,
                         exception_headroom=permit.exception_headroom,
-                        success_pnl=permit.success_pnl,
+                        ordinary_entry_resume_pnl=(
+                            permit.ordinary_entry_resume_pnl
+                        ),
                     )
                     self._recovery_entry_open = True
                     info["recovery_entry_used"] = True
@@ -1061,12 +1065,6 @@ class HistoricalChallengeEnv:
             )
             info["fees_paid"] += self._close_size(price, self._position.size)
             if self._recovery_entry_open:
-                assert self._account is not None
-                assert self._recovery_entry_permit is not None
-                info["recovery_success"] = (
-                    self._account.realized_pnl
-                    >= self._recovery_entry_permit.success_pnl
-                )
                 info["recovery_trade_closed"] = True
                 self._recovery_entry_open = False
             pnl = self._closed_trade_pnls[-1]

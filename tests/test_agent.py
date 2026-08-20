@@ -130,14 +130,16 @@ def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:
         # Give ENTER_LONG_1 the largest unmasked value; it must still lose to WAIT.
         agent.online.output.bias.view(len(Action), agent.atoms)[Action.ENTER_LONG_1, -1] = 100
 
-    selected, _, _ = agent.select_action(
+    selected, _, action_values = agent.select_action(
         np.zeros(4, np.float32),
         hidden=None,
         valid_actions=(Action.WAIT,),
         epsilon=0.0,
+        return_action_values=True,
     )
 
     assert selected == Action.WAIT
+    assert action_values[Action.ENTER_LONG_1] > action_values[Action.WAIT]
 
 
 def test_agent_scores_long_and_short_hypotheses_in_the_same_decision() -> None:

@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.recipe_fixtures import paired_aplus_recipe, paired_recurrent_aplus_recipe
+from tests.recipe_fixtures import (
+    paired_aplus_recipe,
+    paired_recurrent_aplus_recipe,
+    stage2_recipe,
+)
 
 from propevolve.config import (
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
@@ -38,6 +42,11 @@ CURRENT_RECIPE = paired_aplus_recipe(100)
 STAGE2_PAIRED_A_PLUS_RECIPE = CURRENT_RECIPE
 STAGE2_PAIRED_A_PLUS_450_RECIPE = paired_aplus_recipe(450)
 STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE = paired_recurrent_aplus_recipe(200)
+STAGE2_RECOVERY_RECIPE = stage2_recipe(
+    semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+    training_episodes=200,
+    recovery_episode_fraction=0.25,
+)
 
 STAGE2_V6_ASSOCIATION_SEMANTICS = "persistent_chop_association_v2"
 STAGE2_V6_ASSOCIATION_FORMULA = (
@@ -567,6 +576,19 @@ def test_paired_recurrent_recipe_loading_is_independent_of_config_filename(
     assert selected_at_runtime["campaign"] == original["campaign"]
     assert Path(selected_at_runtime["_path"]).name == renamed.name
     assert Path(selected_at_runtime["_root"]) == tmp_path.resolve()
+
+
+def test_stage2_recovery_recipe_is_selected_by_values_and_recovers_to_breakeven() -> None:
+    config = load_experiment_config(STAGE2_RECOVERY_RECIPE)
+
+    assert config["training"]["episodes"] == 200
+    assert config["recovery_curriculum"]["episode_fraction"] == 0.25
+    assert config["recovery_curriculum"]["recovery_success_pnl"] == 0
+    assert config["recovery_curriculum"]["entry_permit"] == {
+        "remaining_entries": 1,
+        "exception_headroom": 300,
+        "ordinary_entry_resume_pnl": -2_500,
+    }
 
 
 def test_recipe_requires_explicit_workspace_root_key(tmp_path: Path) -> None:

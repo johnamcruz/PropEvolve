@@ -44,6 +44,7 @@ class Transition:
     paired_a_plus_pair_id: int | None = None
     paired_a_plus_pair_side: Action | None = None
     paired_a_plus_population_weight: float | None = None
+    recovery_episode: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class Episode:
     primary_side: str
     ended_at_ns: int
     transitions: tuple[Transition, ...]
+    recovery: bool = False
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -115,6 +117,7 @@ class _StoredEpisode:
     outcome: str
     primary_side: str
     ended_at_ns: int
+    recovery: bool
     observations: np.ndarray
     actions: np.ndarray
     rewards: np.ndarray
@@ -154,6 +157,8 @@ class _StoredEpisode:
 
     @classmethod
     def from_episode(cls, episode: Episode) -> "_StoredEpisode":
+        if type(episode.recovery) is not bool:
+            raise ValueError("replay recovery cohort is invalid")
         transitions = episode.transitions
         if not transitions or not all(item.training_valid is True for item in transitions):
             raise ValueError("replay episodes must contain authentic transitions only")
@@ -319,6 +324,7 @@ class _StoredEpisode:
             outcome=episode.outcome,
             primary_side=episode.primary_side,
             ended_at_ns=episode.ended_at_ns,
+            recovery=episode.recovery,
             observations=observations,
             actions=np.asarray([int(item.action) for item in transitions], np.int8),
             rewards=np.asarray([item.reward for item in transitions], np.float32),
@@ -418,6 +424,7 @@ class _StoredEpisode:
                 recurrent_reset=bool(self.recurrent_resets[index]),
                 next_recurrent_reset=bool(self.next_recurrent_resets[index]),
                 competence_anchor=self.outcome in {"pass", "recovery_success"},
+                recovery_episode=self.recovery,
                 teacher_target=(
                     None
                     if self.teacher_targets is None
@@ -662,6 +669,7 @@ class BalancedSequenceReplay:
         terminal_sequence_fraction: float = 0.0,
         safety_sequence_fraction: float = 0.0,
         entry_opportunity_sequence_fraction: float = 0.0,
+        recovery_sequence_fraction: float = 0.0,
         regime_wait_sequence_fraction: float = 0.0,
         regime_wait_sequence_update_period: int = 0,
         entry_opportunity_side_balance: str = "none",
@@ -676,6 +684,7 @@ class BalancedSequenceReplay:
         if (
             not 0.0 <= safety_sequence_fraction <= 1.0
             or not 0.0 <= entry_opportunity_sequence_fraction <= 1.0
+            or not 0.0 <= recovery_sequence_fraction <= 1.0
             or not 0.0 <= regime_wait_sequence_fraction <= 1.0
             or terminal_sequence_fraction + safety_sequence_fraction
             + entry_opportunity_sequence_fraction
@@ -704,6 +713,7 @@ class BalancedSequenceReplay:
         self.entry_opportunity_sequence_fraction = float(
             entry_opportunity_sequence_fraction
         )
+        self.recovery_sequence_fraction = float(recovery_sequence_fraction)
         self.regime_wait_sequence_fraction = float(regime_wait_sequence_fraction)
         if (
             isinstance(regime_wait_sequence_update_period, bool)
@@ -733,6 +743,7 @@ class BalancedSequenceReplay:
         self._transition_count = 0
         self._random = random.Random(seed)
         self._sample_calls = 0
+        self._last_sample_receipt: dict[str, object] | None = None
 
     def __len__(self) -> int:
         return len(self._episodes)
@@ -740,6 +751,15 @@ class BalancedSequenceReplay:
     @property
     def transition_count(self) -> int:
         return self._transition_count
+
+    @property
+    def last_sample_receipt(self) -> dict[str, object] | None:
+        """Describe the latest authentic recovery dosage without mutable aliases."""
+        return (
+            None
+            if self._last_sample_receipt is None
+            else dict(self._last_sample_receipt)
+        )
 
     def final_regime_probe_sequences(
         self,
@@ -845,7 +865,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 10,
+            "schema_version": 11,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -857,6 +877,7 @@ class BalancedSequenceReplay:
                 "entry_opportunity_sequence_fraction": (
                     self.entry_opportunity_sequence_fraction
                 ),
+                "recovery_sequence_fraction": self.recovery_sequence_fraction,
                 "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
                 "regime_wait_sequence_update_period": (
                     self.regime_wait_sequence_update_period
@@ -890,7 +911,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10}:
+        if schema_version not in {7, 8, 9, 10, 11}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -903,6 +924,7 @@ class BalancedSequenceReplay:
             "entry_opportunity_sequence_fraction": (
                 self.entry_opportunity_sequence_fraction
             ),
+            "recovery_sequence_fraction": self.recovery_sequence_fraction,
             "regime_wait_sequence_fraction": self.regime_wait_sequence_fraction,
             "regime_wait_sequence_update_period": (
                 self.regime_wait_sequence_update_period
@@ -911,6 +933,10 @@ class BalancedSequenceReplay:
                 self.entry_opportunity_side_balance
             ),
         }
+        if schema_version in {7, 8, 9, 10}:
+            if self.recovery_sequence_fraction != 0.0:
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("recovery_sequence_fraction")
         if schema_version in {7, 8}:
             if self.regime_wait_sequence_update_period != 0:
                 raise ValueError("replay checkpoint contract drifted")
@@ -1109,6 +1135,9 @@ class BalancedSequenceReplay:
             episode_id = str(payload.get("episode_id", ""))
             if not episode_id or episode_id in restored:
                 raise ValueError("replay checkpoint episode identity is invalid")
+            raw_recovery = payload.get("recovery", False)
+            if type(raw_recovery) is not bool:
+                raise ValueError("replay checkpoint recovery cohort is invalid")
             positive_regime_wait = regime_wait_priorities > 0.0
             if np.any(
                 positive_regime_wait
@@ -1137,6 +1166,7 @@ class BalancedSequenceReplay:
                 outcome=str(payload.get("outcome", "")),
                 primary_side=str(payload.get("primary_side", "")),
                 ended_at_ns=int(payload.get("ended_at_ns", 0)),
+                recovery=raw_recovery,
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -1244,11 +1274,15 @@ class BalancedSequenceReplay:
             removed = self._episodes.pop(remove_id)
             self._transition_count -= removed.transition_count
 
-    def sample_episodes(self, count: int) -> tuple[_StoredEpisode, ...]:
-        if count < 1 or not self._episodes:
+    def _sample_episode_population(
+        self,
+        episodes: tuple[_StoredEpisode, ...],
+        count: int,
+    ) -> tuple[_StoredEpisode, ...]:
+        if count < 1 or not episodes:
             raise ValueError("cannot sample an empty or nonpositive replay batch")
         buckets: dict[tuple[str, str, str], list[_StoredEpisode]] = defaultdict(list)
-        for episode in self._episodes.values():
+        for episode in episodes:
             buckets[episode.bucket].append(episode)
         # Outcome is the competence boundary: scarce passes or blows must not
         # disappear merely because timeout episodes span more tickers. Balance
@@ -1272,6 +1306,9 @@ class BalancedSequenceReplay:
                     break
         return tuple(selected)
 
+    def sample_episodes(self, count: int) -> tuple[_StoredEpisode, ...]:
+        return self._sample_episode_population(tuple(self._episodes.values()), count)
+
     def sample(self, count: int) -> tuple[tuple[Transition, ...], ...]:
         sequences = []
         terminal_count = round(count * self.terminal_sequence_fraction)
@@ -1280,7 +1317,47 @@ class BalancedSequenceReplay:
             count * self.regime_wait_sequence_fraction
         )
         entry_count = round(count * self.entry_opportunity_sequence_fraction)
-        sampled_episodes = list(self.sample_episodes(count))
+        recovery_count = round(count * self.recovery_sequence_fraction)
+        recovery_episodes = tuple(
+            episode for episode in self._episodes.values() if episode.recovery
+        )
+        ordinary_episodes = tuple(
+            episode for episode in self._episodes.values() if not episode.recovery
+        )
+        if recovery_count and recovery_episodes and ordinary_episodes:
+            sampled_recovery = list(
+                self._sample_episode_population(recovery_episodes, recovery_count)
+            )
+            sampled_ordinary = list(
+                self._sample_episode_population(
+                    ordinary_episodes, count - recovery_count
+                )
+            )
+            # Preserve both A+ entry comparisons and terminal recovery
+            # competence in the 4/16 Stage 2B cohort: two paired entry rows
+            # and two terminal-boundary rows.
+            recovery_entry_slots = min(
+                2,
+                entry_count - entry_count % 2,
+                recovery_count - recovery_count % 2,
+            )
+            entry_start = terminal_count + safety_count + fixed_regime_wait_count
+            recovery_slots = set(
+                range(entry_start, entry_start + recovery_entry_slots)
+            )
+            for index in range(count):
+                if len(recovery_slots) == recovery_count:
+                    break
+                if index not in recovery_slots:
+                    recovery_slots.add(index)
+            sampled_episodes = []
+            for index in range(count):
+                population = (
+                    sampled_recovery if index in recovery_slots else sampled_ordinary
+                )
+                sampled_episodes.append(population.pop())
+        else:
+            sampled_episodes = list(self.sample_episodes(count))
         self._sample_calls += 1
         scheduled_regime_wait_count = int(
             self.regime_wait_sequence_update_period > 0
@@ -1311,17 +1388,30 @@ class BalancedSequenceReplay:
             regime_wait_count -= scheduled_regime_wait_count
         regime_wait_start = terminal_count + safety_count
         for offset in range(regime_wait_count):
-            if not cumulative_regime_wait_priorities:
+            slot = regime_wait_start + offset
+            desired_recovery = sampled_episodes[slot].recovery
+            eligible_regime_wait_episodes = [
+                episode
+                for episode in regime_wait_episodes
+                if episode.recovery == desired_recovery
+            ]
+            eligible_cumulative: list[float] = []
+            for episode in eligible_regime_wait_episodes:
+                eligible_cumulative.append(
+                    (eligible_cumulative[-1] if eligible_cumulative else 0.0)
+                    + episode.regime_wait_priority_sum
+                )
+            if not eligible_cumulative:
                 break
             selected_priority = (
-                self._random.random() * cumulative_regime_wait_priorities[-1]
+                self._random.random() * eligible_cumulative[-1]
             )
             episode_offset = bisect_right(
-                cumulative_regime_wait_priorities, selected_priority
+                eligible_cumulative, selected_priority
             )
-            episode = regime_wait_episodes[episode_offset]
+            episode = eligible_regime_wait_episodes[episode_offset]
             previous_priority = (
-                cumulative_regime_wait_priorities[episode_offset - 1]
+                eligible_cumulative[episode_offset - 1]
                 if episode_offset
                 else 0.0
             )
@@ -1336,7 +1426,7 @@ class BalancedSequenceReplay:
             anchor_offset = min(
                 anchor_offset, episode.regime_wait_anchor_indices.size - 1
             )
-            regime_wait_anchors[regime_wait_start + offset] = (
+            regime_wait_anchors[slot] = (
                 episode,
                 int(episode.regime_wait_anchor_indices[anchor_offset]),
             )
@@ -1377,27 +1467,46 @@ class BalancedSequenceReplay:
                     failures[side].extend(
                         (stored, int(index)) for index in failure_indices
                     )
-            available_sides = [
-                side
-                for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
-                if winners[side] and failures[side]
-            ]
-            if len(available_sides) == 2:
-                self._random.shuffle(available_sides)
             entry_start = terminal_count + safety_count + regime_wait_count
             for pair_offset in range(entry_count // 2):
+                pair_start = entry_start + pair_offset * 2
+                desired_recovery = sampled_episodes[pair_start].recovery
+                if sampled_episodes[pair_start + 1].recovery != desired_recovery:
+                    raise ValueError("paired replay cohort slots are inconsistent")
+                available_sides = [
+                    side
+                    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+                    if any(
+                        episode.recovery == desired_recovery
+                        for episode, _ in winners[side]
+                    )
+                    and any(
+                        episode.recovery == desired_recovery
+                        for episode, _ in failures[side]
+                    )
+                ]
+                if len(available_sides) == 2:
+                    self._random.shuffle(available_sides)
                 if not available_sides:
-                    break
+                    continue
                 side = available_sides[pair_offset % len(available_sides)]
                 winner_episode, winner_index = self._random.choice(
-                    winners[side]
+                    [
+                        candidate
+                        for candidate in winners[side]
+                        if candidate[0].recovery == desired_recovery
+                    ]
                 )
                 winner_context = self._paired_context_for_side(
                     winner_episode.paired_a_plus_contexts[winner_index],
                     side,
                 )
                 failure_episode, failure_index = min(
-                    failures[side],
+                    [
+                        candidate
+                        for candidate in failures[side]
+                        if candidate[0].recovery == desired_recovery
+                    ],
                     key=lambda candidate: self._paired_failure_rank(
                         candidate,
                         side=side,
@@ -1409,7 +1518,6 @@ class BalancedSequenceReplay:
                 # unique/equality kernels, so a sample-call prefix can corrupt
                 # otherwise valid winner/failure pairs.
                 pair_id = pair_offset
-                pair_start = entry_start + pair_offset * 2
                 population_count = len(winners[side]) + len(failures[side])
                 winner_population_weight = (
                     2.0 * len(winners[side]) / population_count
@@ -1564,6 +1672,37 @@ class BalancedSequenceReplay:
             else:
                 start = self._random.randint(0, last_start)
             sequences.append(episode.sequence(start, self.sequence_length))
+        if recovery_count and recovery_episodes and ordinary_episodes:
+            realized_recovery = sum(
+                any(row.recovery_episode for row in sequence)
+                for sequence in sequences
+            )
+            if realized_recovery != recovery_count:
+                raise ValueError(
+                    "recovery replay dosage drifted from its declared fraction"
+                )
+        recovery_learning_rows = [
+            row
+            for sequence in sequences
+            for row in sequence[self.recurrent_burn_in:]
+            if row.training_valid and row.recovery_episode
+        ]
+        realized_recovery = sum(
+            any(row.recovery_episode for row in sequence)
+            for sequence in sequences
+        )
+        self._last_sample_receipt = {
+            "schema": "propevolve_recovery_replay_sample_v1",
+            "batch_sequences": len(sequences),
+            "requested_recovery_sequences": recovery_count,
+            "recovery_sequences": realized_recovery,
+            "ordinary_sequences": len(sequences) - realized_recovery,
+            "authentic_recovery_learning_rows": len(recovery_learning_rows),
+            "recovery_learning_action_counts": {
+                action.name: sum(row.action == action for row in recovery_learning_rows)
+                for action in Action
+            },
+        }
         return tuple(sequences)
 
     @staticmethod

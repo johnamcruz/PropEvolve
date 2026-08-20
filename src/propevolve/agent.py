@@ -1300,12 +1300,13 @@ class RecurrentC51Agent:
                     self._online_forward, self.online.forward, value, hidden
                 )
             q_values = (logits.float().softmax(-1) * self.support).sum(-1)[0, 0]
+            native_q_values = q_values
             valid = torch.zeros(len(Action), dtype=torch.bool, device=self.device)
             valid[[int(action) for action in valid_actions]] = True
             q_values = q_values.masked_fill(~valid, -torch.inf)
             if selected is None:
                 selected = Action(int(q_values.argmax().item()))
-        values = q_values.cpu().numpy() if return_action_values else None
+        values = native_q_values.cpu().numpy() if return_action_values else None
         return selected, next_hidden.detach(), values
 
     @torch.no_grad()
