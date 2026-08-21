@@ -477,7 +477,11 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "start_pnls",
         "retain_nonnegative_entry_policy",
     }
-    optional_supervision_fields = {"success_replay", "healthy_pass_replay"}
+    optional_supervision_fields = {
+        "success_replay",
+        "healthy_pass_replay",
+        "post_recovery_contrast_replay",
+    }
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
     start = curriculum["start_state"]
@@ -490,48 +494,36 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         or set(supervision) - supervision_fields - optional_supervision_fields
     ):
         raise ValueError("recovery curriculum contract is invalid")
-    success_replay = supervision.get("success_replay")
-    if success_replay is not None and (
-        not isinstance(success_replay, dict)
-        or set(success_replay)
-        != {"path", "sha256", "update_period", "max_examples"}
-        or not isinstance(success_replay["path"], str)
-        or not success_replay["path"]
-        or not isinstance(success_replay["sha256"], str)
-        or len(success_replay["sha256"]) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in success_replay["sha256"]
-        )
-        or isinstance(success_replay["update_period"], bool)
-        or not isinstance(success_replay["update_period"], int)
-        or success_replay["update_period"] < 1
-        or isinstance(success_replay["max_examples"], bool)
-        or not isinstance(success_replay["max_examples"], int)
-        or success_replay["max_examples"] < 1
-    ):
-        raise ValueError("recovery pass replay contract is invalid")
-    healthy_pass_replay = supervision.get("healthy_pass_replay")
-    if healthy_pass_replay is not None and (
-        not isinstance(healthy_pass_replay, dict)
-        or set(healthy_pass_replay)
-        != {"path", "sha256", "update_period", "max_examples"}
-        or not isinstance(healthy_pass_replay["path"], str)
-        or not healthy_pass_replay["path"]
-        or not isinstance(healthy_pass_replay["sha256"], str)
-        or len(healthy_pass_replay["sha256"]) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in healthy_pass_replay["sha256"]
-        )
-        or isinstance(healthy_pass_replay["update_period"], bool)
-        or not isinstance(healthy_pass_replay["update_period"], int)
-        or healthy_pass_replay["update_period"] < 1
-        or isinstance(healthy_pass_replay["max_examples"], bool)
-        or not isinstance(healthy_pass_replay["max_examples"], int)
-        or healthy_pass_replay["max_examples"] < 1
-    ):
-        raise ValueError("healthy pass replay contract is invalid")
+    replay_contracts = (
+        ("success_replay", "recovery pass replay contract is invalid"),
+        ("healthy_pass_replay", "healthy pass replay contract is invalid"),
+        (
+            "post_recovery_contrast_replay",
+            "post-recovery contrast replay contract is invalid",
+        ),
+    )
+    for replay_key, error_message in replay_contracts:
+        replay = supervision.get(replay_key)
+        if replay is not None and (
+            not isinstance(replay, dict)
+            or set(replay)
+            != {"path", "sha256", "update_period", "max_examples"}
+            or not isinstance(replay["path"], str)
+            or not replay["path"]
+            or not isinstance(replay["sha256"], str)
+            or len(replay["sha256"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in replay["sha256"]
+            )
+            or isinstance(replay["update_period"], bool)
+            or not isinstance(replay["update_period"], int)
+            or replay["update_period"] < 1
+            or isinstance(replay["max_examples"], bool)
+            or not isinstance(replay["max_examples"], int)
+            or replay["max_examples"] < 1
+        ):
+            raise ValueError(error_message)
     integer_values = (
         curriculum["schedule_seed"],
         curriculum["stress_evaluation_episodes"],

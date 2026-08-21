@@ -32,6 +32,66 @@ def _episode(ticker: str, outcome: str, side: str, offset: int) -> Episode:
     )
 
 
+def _post_recovery_episode(
+    *,
+    episode_id: str,
+    side: Action,
+    retained: bool,
+    offset: int,
+) -> Episode:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    anchor_index = 4
+    recovery_active = (
+        (True, True, False, False, False, False, False, False)
+        if retained
+        else (True, True, False, False, False, True, True, True)
+    )
+    return Episode(
+        episode_id=episode_id,
+        ticker="NQ",
+        outcome="pass" if retained else "blow",
+        primary_side="long" if side == Action.ENTER_LONG_1 else "short",
+        ended_at_ns=offset,
+        transitions=tuple(
+            Transition(
+                observation=np.array([offset + index], np.float32),
+                action=Action.WAIT,
+                reward=1.0 if retained else -1.0,
+                next_observation=np.array([offset + index + 1], np.float32),
+                terminated=index == 7,
+                valid_actions=flat_actions,
+                next_valid_actions=() if index == 7 else flat_actions,
+                teacher_target=(
+                    np.ones(4, np.float32) if index == anchor_index else None
+                ),
+                entry_action_target=(
+                    side
+                    if retained and index == anchor_index
+                    else Action.WAIT if index == anchor_index else None
+                ),
+                regime_selectivity_headroom_fraction=(
+                    0.8 if index == anchor_index else None
+                ),
+                recovery_active=recovery_active[index],
+                paired_a_plus_context=(
+                    np.full(7, 0.4 + 0.1 * int(side), np.float32)
+                    if index == anchor_index
+                    else None
+                ),
+                paired_a_plus_side=side if index == anchor_index else None,
+                paired_a_plus_economic_win=(
+                    retained if index == anchor_index else None
+                ),
+            )
+            for index in range(8)
+        ),
+    )
+
+
 def test_replay_is_bounded_and_samples_whole_causal_sequences() -> None:
     replay = BalancedSequenceReplay(capacity_episodes=3, sequence_length=4, seed=7)
     for i in range(5):
@@ -1310,6 +1370,84 @@ def test_healthy_pass_replay_anchors_nonnegative_flat_policy_rows() -> None:
     assert anchor.recovery_active is False
     assert anchor.valid_actions == flat_actions
     assert anchor.training_valid is True
+
+
+def test_post_recovery_contrast_pairs_retained_with_giveback_for_both_sides(
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=73,
+    )
+    for offset, side in enumerate(
+        (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    ):
+        replay.add(_post_recovery_episode(
+            episode_id=f"retained-{side.name}",
+            side=side,
+            retained=True,
+            offset=offset * 100,
+        ))
+        replay.add(_post_recovery_episode(
+            episode_id=f"giveback-{side.name}",
+            side=side,
+            retained=False,
+            offset=offset * 100 + 20,
+        ))
+
+    sequences = replay.sample_post_recovery_contrast_pairs(
+        2,
+        max_examples=8,
+        pair_id_start=7,
+    )
+
+    assert len(sequences) == 4
+    anchors = [sequence[2] for sequence in sequences]
+    pairs = {
+        pair_id: [row for row in anchors if row.paired_a_plus_pair_id == pair_id]
+        for pair_id in {row.paired_a_plus_pair_id for row in anchors}
+    }
+    assert set(pairs) == {7, 8}
+    assert {
+        rows[0].paired_a_plus_pair_side for rows in pairs.values()
+    } == {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+    for rows in pairs.values():
+        assert len(rows) == 2
+        assert rows[0].paired_a_plus_pair_side == rows[1].paired_a_plus_pair_side
+        assert {row.paired_a_plus_economic_win for row in rows} == {True, False}
+        winner = next(row for row in rows if row.paired_a_plus_economic_win)
+        failure = next(row for row in rows if not row.paired_a_plus_economic_win)
+        assert winner.entry_action_target == winner.paired_a_plus_pair_side
+        assert failure.entry_action_target == Action.WAIT
+
+
+def test_post_recovery_contrast_rejects_nonrecovery_and_unmatched_sides() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=79,
+    )
+    replay.add(_post_recovery_episode(
+        episode_id="retained-long",
+        side=Action.ENTER_LONG_1,
+        retained=True,
+        offset=0,
+    ))
+    replay.add(_post_recovery_episode(
+        episode_id="giveback-short",
+        side=Action.ENTER_SHORT_1,
+        retained=False,
+        offset=20,
+    ))
+
+    assert replay.sample_post_recovery_contrast_pairs(
+        1,
+        max_examples=8,
+    ) == ()
 
 
 def test_replay_caps_compact_storage_by_transition_budget() -> None:

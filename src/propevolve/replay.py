@@ -1715,6 +1715,143 @@ class BalancedSequenceReplay:
             ))
         return tuple(sequences)
 
+    def sample_post_recovery_contrast_pairs(
+        self,
+        count: int,
+        *,
+        max_examples: int = 8,
+        pair_id_start: int = 0,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Pair retained recovery winners with pre-relapse failures."""
+        if (
+            count < 1
+            or max_examples < 1
+            or isinstance(pair_id_start, bool)
+            or pair_id_start < 0
+        ):
+            raise ValueError("post-recovery contrast request is invalid")
+        retained: dict[
+            Action, list[tuple[float, str, _StoredEpisode, int]]
+        ] = defaultdict(list)
+        givebacks: dict[
+            Action, list[tuple[float, str, _StoredEpisode, int]]
+        ] = defaultdict(list)
+        for episode in self._episodes.values():
+            if episode.transition_count < 2:
+                continue
+            boundaries = np.flatnonzero(
+                episode.recovery_active[:-1]
+                & ~episode.recovery_active[1:]
+            )
+            if not boundaries.size:
+                continue
+            score = float(np.sum(episode.rewards, dtype=np.float64))
+            final_boundary = int(boundaries[-1])
+            retained_start = final_boundary + 1
+            if not bool(episode.recovery_active[retained_start:].any()):
+                for side, winner_indices in (
+                    (
+                        Action.ENTER_LONG_1,
+                        episode.paired_a_plus_long_winner_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        episode.paired_a_plus_short_winner_anchor_indices,
+                    ),
+                ):
+                    for anchor_index in winner_indices:
+                        if int(anchor_index) >= retained_start:
+                            retained[side].append((
+                                score,
+                                episode.episode_id,
+                                episode,
+                                int(anchor_index),
+                            ))
+            for boundary in boundaries:
+                healthy_start = int(boundary) + 1
+                relapse_offsets = np.flatnonzero(
+                    episode.recovery_active[healthy_start:]
+                )
+                if not relapse_offsets.size:
+                    continue
+                relapse_index = healthy_start + int(relapse_offsets[0])
+                for side, failure_indices in (
+                    (
+                        Action.ENTER_LONG_1,
+                        episode.paired_a_plus_long_failure_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        episode.paired_a_plus_short_failure_anchor_indices,
+                    ),
+                ):
+                    for anchor_index in failure_indices:
+                        anchor_index = int(anchor_index)
+                        if healthy_start <= anchor_index < relapse_index:
+                            givebacks[side].append((
+                                score,
+                                episode.episode_id,
+                                episode,
+                                anchor_index,
+                            ))
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            retained[side] = sorted(
+                retained[side], key=lambda item: (-item[0], item[1], item[3])
+            )[:max_examples]
+            givebacks[side] = sorted(
+                givebacks[side], key=lambda item: (item[0], item[1], item[3])
+            )[:max_examples]
+        available_sides = [
+            side
+            for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+            if retained[side] and givebacks[side]
+        ]
+        if not available_sides:
+            return ()
+        start = self._sample_calls
+        self._sample_calls += count
+        sequences: list[tuple[Transition, ...]] = []
+        for offset in range(count):
+            side = available_sides[(start + offset) % len(available_sides)]
+            winner = retained[side][
+                ((start + offset) // len(available_sides)) % len(retained[side])
+            ]
+            _, _, winner_episode, winner_index = winner
+            winner_context = self._paired_context_for_side(
+                winner_episode.paired_a_plus_contexts[winner_index], side
+            )
+            failure = min(
+                givebacks[side],
+                key=lambda item: self._paired_failure_rank(
+                    (item[2], item[3]),
+                    side=side,
+                    winner_context=winner_context,
+                ),
+            )
+            _, _, failure_episode, failure_index = failure
+            pair_id = pair_id_start + offset
+            population_count = len(retained[side]) + len(givebacks[side])
+            winner_weight = 2.0 * len(retained[side]) / population_count
+            failure_weight = 2.0 * len(givebacks[side]) / population_count
+            for episode, anchor_index, population_weight in (
+                (winner_episode, winner_index, winner_weight),
+                (failure_episode, failure_index, failure_weight),
+            ):
+                sequence = list(episode.target_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                ))
+                sequence[self.recurrent_burn_in] = replace(
+                    sequence[self.recurrent_burn_in],
+                    paired_a_plus_pair_id=pair_id,
+                    paired_a_plus_pair_side=side,
+                    paired_a_plus_population_weight=population_weight,
+                )
+                sequences.append(tuple(sequence))
+        return tuple(sequences)
+
     @staticmethod
     def _paired_context_for_side(
         context: np.ndarray,

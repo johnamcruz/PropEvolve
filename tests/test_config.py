@@ -12,6 +12,7 @@ from tests.recipe_fixtures import (
 )
 
 from propevolve.config import (
+    RECOVERY_CURRICULUM_FROZEN_PATHS,
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
     REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
     TRAINING_POLICY_HEALTH_FROZEN_PATH,
@@ -64,6 +65,62 @@ def _generic_payload() -> dict:
         and path != "training.regime_wait_sequence_update_period"
     ]
     return payload
+
+
+def _recovery_curriculum_payload() -> dict:
+    payload = _generic_payload()
+    payload["challenge"]["minimum_mll_headroom"] = 500.0
+    payload["challenge"]["per_trade_risk_dollars"] = 300.0
+    payload["recovery_curriculum"] = {
+        "schedule_seed": 37,
+        "stress_evaluation_episodes": 200,
+        "recovery_success_pnl": 0.0,
+        "start_state": {
+            "realized_pnl": -2_000.0,
+            "equity_pnl": -2_000.0,
+            "peak_equity_pnl": 0.0,
+            "mll_floor_pnl": -3_000.0,
+            "passmark_locked": False,
+            "position_side": 0,
+            "position_size": 0,
+            "session_pnl": -2_000.0,
+            "trading_days_elapsed": 1,
+        },
+        "action_value_supervision": {
+            "loss_weight": 0.25,
+            "temperature": 1.0,
+            "store_capacity": 200,
+            "target_every_episodes": 1,
+            "start_pnls": [-2_500, -2_000, -1_500, -1_000, -500],
+            "retain_nonnegative_entry_policy": True,
+            "post_recovery_contrast_replay": {
+                "path": "runs/local/retained-versus-giveback.pt",
+                "sha256": "a" * 64,
+                "update_period": 8,
+                "max_examples": 8,
+            },
+        },
+    }
+    payload["evolution"]["frozen_paths"].extend(
+        RECOVERY_CURRICULUM_FROZEN_PATHS
+    )
+    return payload
+
+
+def test_config_accepts_post_recovery_contrast_replay_by_values(
+    tmp_path: Path,
+) -> None:
+    payload = _recovery_curriculum_payload()
+    path = tmp_path / "arbitrary-runtime-name.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    replay = config["recovery_curriculum"]["action_value_supervision"][
+        "post_recovery_contrast_replay"
+    ]
+    assert replay["update_period"] == 8
+    assert replay["max_examples"] == 8
 
 
 def _episode_budget_payload() -> dict:

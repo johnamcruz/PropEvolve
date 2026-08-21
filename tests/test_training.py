@@ -38,6 +38,7 @@ from propevolve.training import (
     _entry_action_balance,
     _entry_supervision_frozen_contract,
     _load_healthy_pass_replay_artifact,
+    _load_post_recovery_contrast_replay_artifact,
     _load_recovery_success_replay_artifact,
     _regime_selectivity_agent_settings,
     _regime_selectivity_replay_settings,
@@ -145,6 +146,48 @@ def test_json_recovery_curriculum_projects_authenticated_healthy_pass_replay() -
     assert settings.healthy_pass_replay_sha256 == "c" * 64
     assert settings.healthy_pass_replay_update_period == 8
     assert settings.healthy_pass_replay_max_examples == 8
+
+
+def test_json_recovery_curriculum_projects_post_recovery_contrast_replay() -> None:
+    settings, _ = _recovery_curriculum_from_config({
+        "schedule_seed": 37,
+        "stress_evaluation_episodes": 200,
+        "recovery_success_pnl": 0.0,
+        "action_value_supervision": {
+            "loss_weight": 0.25,
+            "temperature": 1.0,
+            "store_capacity": 200,
+            "target_every_episodes": 1,
+            "start_pnls": [-2_500, -2_000, -1_500, -1_000, -500],
+            "retain_nonnegative_entry_policy": True,
+            "post_recovery_contrast_replay": {
+                "path": "runs/v22-post-recovery-contrast.pt",
+                "sha256": "e" * 64,
+                "update_period": 8,
+                "max_examples": 8,
+            },
+        },
+        "start_state": {
+            "realized_pnl": -2_000.0,
+            "equity_pnl": -2_000.0,
+            "peak_equity_pnl": 0.0,
+            "mll_floor_pnl": -3_000.0,
+            "passmark_locked": False,
+            "position_side": 0,
+            "position_size": 0,
+            "session_pnl": -2_000.0,
+            "trading_days_elapsed": 1,
+        },
+    })
+
+    assert settings is not None
+    assert (
+        settings.post_recovery_contrast_replay_path
+        == "runs/v22-post-recovery-contrast.pt"
+    )
+    assert settings.post_recovery_contrast_replay_sha256 == "e" * 64
+    assert settings.post_recovery_contrast_replay_update_period == 8
+    assert settings.post_recovery_contrast_replay_max_examples == 8
 
 
 def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
@@ -2583,7 +2626,7 @@ def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> No
     assert replay.recovery_flags == [True, False]
 
 
-def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
+def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
 ) -> None:
     class RecoveryAgent(Agent):
         recurrent_burn_in = 1
@@ -2594,23 +2637,33 @@ def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
             self.batch_sizes: list[int] = []
             self.recovery_boundaries: list[bool] = []
             self.healthy_policy_rows: list[bool] = []
+            self.post_recovery_pairs: list[bool] = []
 
         def train_batch(self, sequences, **kwargs) -> float:
             self.batch_sizes.append(len(sequences))
             self.recovery_boundaries.append(
-                len(sequences) >= 2
-                and sequences[-2][1].recovery_active
-                and not sequences[-2][2].recovery_active
+                len(sequences) >= 4
+                and sequences[-4][1].recovery_active
+                and not sequences[-4][2].recovery_active
             )
             self.healthy_policy_rows.append(
-                len(sequences) == 3
-                and not sequences[-1][1].recovery_active
-                and sequences[-1][1].valid_actions
+                len(sequences) == 5
+                and not sequences[-3][1].recovery_active
+                and sequences[-3][1].valid_actions
                 == (
                     Action.WAIT,
                     Action.ENTER_LONG_1,
                     Action.ENTER_SHORT_1,
                 )
+            )
+            pair_rows = [sequence[1] for sequence in sequences[-2:]]
+            self.post_recovery_pairs.append(
+                len(sequences) == 5
+                and pair_rows[0].paired_a_plus_pair_id
+                == pair_rows[1].paired_a_plus_pair_id
+                and {
+                    row.paired_a_plus_economic_win for row in pair_rows
+                } == {True, False}
             )
             self.last_train_metrics = {}
             return 0.5
@@ -2682,6 +2735,9 @@ def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
         "healthy_pass_replay_update_period": 2,
         "healthy_pass_replay_path": "runs/v21-healthy-passes.pt",
         "healthy_pass_replay_sha256": "b" * 64,
+        "post_recovery_contrast_replay_update_period": 2,
+        "post_recovery_contrast_replay_path": "runs/post-recovery.pt",
+        "post_recovery_contrast_replay_sha256": "c" * 64,
     })
     pass_replay = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -2743,6 +2799,62 @@ def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
             for index in range(4)
         ),
     ))
+    post_recovery_replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=77,
+    )
+    for retained, offset in ((True, 0), (False, 10)):
+        recovery_states = (
+            (True, False, False, False)
+            if retained
+            else (True, False, True, True)
+        )
+        post_recovery_replay.add(Episode(
+            episode_id="retained" if retained else "giveback",
+            ticker="NQ",
+            outcome="pass" if retained else "blow",
+            primary_side="long",
+            ended_at_ns=3 + offset,
+            transitions=tuple(
+                Transition(
+                    observation=np.array([offset + index], np.float32),
+                    action=Action.WAIT,
+                    reward=1.0 if retained else -1.0,
+                    next_observation=np.array(
+                        [offset + index + 1], np.float32
+                    ),
+                    terminated=index == 3,
+                    valid_actions=flat_actions,
+                    next_valid_actions=() if index == 3 else flat_actions,
+                    teacher_target=(
+                        np.ones(4, np.float32) if index == 1 else None
+                    ),
+                    entry_action_target=(
+                        Action.ENTER_LONG_1
+                        if retained and index == 1
+                        else Action.WAIT if index == 1 else None
+                    ),
+                    regime_selectivity_headroom_fraction=(
+                        0.8 if index == 1 else None
+                    ),
+                    recovery_active=recovery_states[index],
+                    paired_a_plus_context=(
+                        np.full(7, 0.5, np.float32)
+                        if index == 1 else None
+                    ),
+                    paired_a_plus_side=(
+                        Action.ENTER_LONG_1 if index == 1 else None
+                    ),
+                    paired_a_plus_economic_win=(
+                        retained if index == 1 else None
+                    ),
+                )
+                for index in range(4)
+            ),
+        ))
     agent = RecoveryAgent()
     train_agent(
         agent,
@@ -2771,11 +2883,13 @@ def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
         recovery_value_source_identity_sha256="3" * 64,
         recovery_success_replay=pass_replay,
         healthy_pass_replay=healthy_replay,
+        post_recovery_contrast_replay=post_recovery_replay,
     )
 
-    assert agent.batch_sizes == [1, 3, 1, 3]
+    assert agent.batch_sizes == [1, 5, 1, 5]
     assert agent.recovery_boundaries == [False, True, False, True]
     assert agent.healthy_policy_rows == [False, True, False, True]
+    assert agent.post_recovery_pairs == [False, True, False, True]
 
 
 def test_recovery_pass_replay_artifact_is_authenticated_and_recurrent(
@@ -2907,6 +3021,99 @@ def test_healthy_pass_replay_artifact_is_authenticated_and_anchored(
     anchor = restored.sample_healthy_pass_sequences(1)[0][1]
     assert anchor.recovery_active is False
     assert anchor.valid_actions == flat_actions
+
+
+def test_post_recovery_contrast_artifact_is_authenticated_and_paired(
+    tmp_path: Path,
+) -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=101,
+    )
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    for retained, offset in ((True, 0), (False, 10)):
+        recovery_states = (
+            (True, False, False, False)
+            if retained else (True, False, True, True)
+        )
+        source.add(Episode(
+            episode_id="retained" if retained else "giveback",
+            ticker="NQ",
+            outcome="pass" if retained else "blow",
+            primary_side="long",
+            ended_at_ns=offset + 1,
+            transitions=tuple(
+                Transition(
+                    observation=np.array([offset + index], np.float32),
+                    action=Action.WAIT,
+                    reward=1.0 if retained else -1.0,
+                    next_observation=np.array(
+                        [offset + index + 1], np.float32
+                    ),
+                    terminated=index == 3,
+                    valid_actions=flat_actions,
+                    next_valid_actions=() if index == 3 else flat_actions,
+                    teacher_target=(
+                        np.ones(4, np.float32) if index == 1 else None
+                    ),
+                    entry_action_target=(
+                        Action.ENTER_LONG_1
+                        if retained and index == 1
+                        else Action.WAIT if index == 1 else None
+                    ),
+                    regime_selectivity_headroom_fraction=(
+                        0.8 if index == 1 else None
+                    ),
+                    recovery_active=recovery_states[index],
+                    paired_a_plus_context=(
+                        np.full(7, 0.5, np.float32)
+                        if index == 1 else None
+                    ),
+                    paired_a_plus_side=(
+                        Action.ENTER_LONG_1 if index == 1 else None
+                    ),
+                    paired_a_plus_economic_win=(
+                        retained if index == 1 else None
+                    ),
+                )
+                for index in range(4)
+            ),
+        ))
+    artifact = tmp_path / "post-recovery-contrast.pt"
+    torch.save({
+        "schema": "propevolve_post_recovery_contrast_replay_v1",
+        "source_checkpoints": [{
+            "causal_identity_sha256": "e" * 64,
+            "resume_identity": "frozen-v22-r14-r15",
+        }],
+        "replay_state": source.state_dict(),
+    }, artifact)
+    expected_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=103,
+    )
+
+    _load_post_recovery_contrast_replay_artifact(
+        artifact,
+        expected_sha256=expected_sha256,
+        replay=restored,
+    )
+
+    sequences = restored.sample_post_recovery_contrast_pairs(1)
+    assert len(sequences) == 2
+    anchors = [sequence[1] for sequence in sequences]
+    assert {row.paired_a_plus_economic_win for row in anchors} == {True, False}
 
 def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
     agent = Agent()

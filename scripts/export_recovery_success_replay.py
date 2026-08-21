@@ -20,6 +20,9 @@ import torch
 
 RECOVERY_SCHEMA = "propevolve_recovery_success_replay_v1"
 HEALTHY_SCHEMA = "propevolve_healthy_pass_replay_v1"
+POST_RECOVERY_CONTRAST_SCHEMA = (
+    "propevolve_post_recovery_contrast_replay_v1"
+)
 
 
 class _LazyBytes:
@@ -263,6 +266,42 @@ def _is_healthy_pass(episode: Mapping[str, object]) -> bool:
     return bool(recovery_active.size and np.any(~recovery_active))
 
 
+def _is_post_recovery_contrast_candidate(
+    episode: Mapping[str, object],
+) -> bool:
+    recovery_active = np.asarray(
+        episode.get("recovery_active", ()), dtype=np.bool_
+    )
+    sides = np.asarray(episode.get("paired_a_plus_sides", ()), dtype=np.int8)
+    wins = np.asarray(
+        episode.get("paired_a_plus_economic_wins", ()), dtype=np.int8
+    )
+    if (
+        recovery_active.size < 2
+        or sides.shape != recovery_active.shape
+        or wins.shape != recovery_active.shape
+    ):
+        return False
+    boundaries = np.flatnonzero(
+        recovery_active[:-1] & ~recovery_active[1:]
+    )
+    for boundary in boundaries:
+        healthy_start = int(boundary) + 1
+        relapse_offsets = np.flatnonzero(recovery_active[healthy_start:])
+        if relapse_offsets.size:
+            relapse_index = healthy_start + int(relapse_offsets[0])
+            if np.any(
+                (sides[healthy_start:relapse_index] >= 0)
+                & (wins[healthy_start:relapse_index] == 0)
+            ):
+                return True
+        elif np.any(
+            (sides[healthy_start:] >= 0) & (wins[healthy_start:] == 1)
+        ):
+            return True
+    return False
+
+
 def _with_recovery_state(
     episode: Mapping[str, object],
 ) -> Mapping[str, object]:
@@ -296,14 +335,18 @@ def export(
     episode_prefixes: tuple[str, ...] = (),
     kind: str = "recovery",
 ) -> dict[str, object]:
-    if kind not in {"recovery", "healthy"}:
+    if kind not in {"recovery", "healthy", "post_recovery_contrast"}:
         raise ValueError("pass replay export kind is invalid")
-    predicate = (
-        _is_successful_recovery_pass
-        if kind == "recovery"
-        else _is_healthy_pass
-    )
-    schema = RECOVERY_SCHEMA if kind == "recovery" else HEALTHY_SCHEMA
+    predicate = {
+        "recovery": _is_successful_recovery_pass,
+        "healthy": _is_healthy_pass,
+        "post_recovery_contrast": _is_post_recovery_contrast_candidate,
+    }[kind]
+    schema = {
+        "recovery": RECOVERY_SCHEMA,
+        "healthy": HEALTHY_SCHEMA,
+        "post_recovery_contrast": POST_RECOVERY_CONTRAST_SCHEMA,
+    }[kind]
     contract = None
     schema_version = None
     random_state = None
@@ -368,7 +411,7 @@ def export(
         })
         del payload
     if not episodes or contract is None or random_state is None:
-        raise ValueError("source checkpoints contain no retained pass")
+        raise ValueError("source checkpoints contain no retained replay episode")
     replay_state = {
         "schema_version": schema_version,
         "contract": contract,
@@ -384,13 +427,18 @@ def export(
         "replay_state": replay_state,
     }, temporary)
     os.replace(temporary, output)
-    return {
+    receipt = {
         "artifact": str(output),
         "sha256": _sha256(output),
         "source_checkpoints": len(sources),
         "kind": kind,
-        "retained_passes": len(episodes),
     }
+    receipt[
+        "retained_episodes"
+        if kind == "post_recovery_contrast"
+        else "retained_passes"
+    ] = len(episodes)
+    return receipt
 
 
 def main() -> int:
@@ -400,7 +448,7 @@ def main() -> int:
     parser.add_argument("--episode-prefix", action="append", default=[])
     parser.add_argument(
         "--kind",
-        choices=("recovery", "healthy"),
+        choices=("recovery", "healthy", "post_recovery_contrast"),
         default="recovery",
     )
     args = parser.parse_args()

@@ -2279,6 +2279,10 @@ class RecoveryCurriculumSettings:
     healthy_pass_replay_max_examples: int = 8
     healthy_pass_replay_path: str | None = None
     healthy_pass_replay_sha256: str | None = None
+    post_recovery_contrast_replay_update_period: int = 0
+    post_recovery_contrast_replay_max_examples: int = 8
+    post_recovery_contrast_replay_path: str | None = None
+    post_recovery_contrast_replay_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.schedule_seed, bool) or not isinstance(
@@ -2304,6 +2308,14 @@ class RecoveryCurriculumSettings:
             or self.healthy_pass_replay_update_period < 0
             or isinstance(self.healthy_pass_replay_max_examples, bool)
             or self.healthy_pass_replay_max_examples < 1
+            or isinstance(
+                self.post_recovery_contrast_replay_update_period, bool
+            )
+            or self.post_recovery_contrast_replay_update_period < 0
+            or isinstance(
+                self.post_recovery_contrast_replay_max_examples, bool
+            )
+            or self.post_recovery_contrast_replay_max_examples < 1
         ):
             raise ValueError("recovery action-value supervision is invalid")
         replay_contracts = (
@@ -2318,6 +2330,12 @@ class RecoveryCurriculumSettings:
                 self.healthy_pass_replay_update_period,
                 self.healthy_pass_replay_path,
                 self.healthy_pass_replay_sha256,
+            ),
+            (
+                "post-recovery contrast",
+                self.post_recovery_contrast_replay_update_period,
+                self.post_recovery_contrast_replay_path,
+                self.post_recovery_contrast_replay_sha256,
             ),
         )
         for name, update_period, path, sha256 in replay_contracts:
@@ -2436,7 +2454,11 @@ def _recovery_curriculum_from_config(
         "start_pnls",
         "retain_nonnegative_entry_policy",
     }
-    supervision_optional = {"success_replay", "healthy_pass_replay"}
+    supervision_optional = {
+        "success_replay",
+        "healthy_pass_replay",
+        "post_recovery_contrast_replay",
+    }
     if (
         not isinstance(supervision, Mapping)
         or not supervision_required.issubset(supervision)
@@ -2445,6 +2467,9 @@ def _recovery_curriculum_from_config(
         raise ValueError("recovery action-value supervision is invalid")
     success_replay = supervision.get("success_replay")
     healthy_pass_replay = supervision.get("healthy_pass_replay")
+    post_recovery_contrast_replay = supervision.get(
+        "post_recovery_contrast_replay"
+    )
     if success_replay is not None and (
         not isinstance(success_replay, Mapping)
         or set(success_replay)
@@ -2457,6 +2482,12 @@ def _recovery_curriculum_from_config(
         != {"path", "sha256", "update_period", "max_examples"}
     ):
         raise ValueError("healthy pass replay identity is invalid")
+    if post_recovery_contrast_replay is not None and (
+        not isinstance(post_recovery_contrast_replay, Mapping)
+        or set(post_recovery_contrast_replay)
+        != {"path", "sha256", "update_period", "max_examples"}
+    ):
+        raise ValueError("post-recovery contrast replay identity is invalid")
     integer_fields = (
         value["schedule_seed"],
         start["position_side"],
@@ -2484,6 +2515,16 @@ def _recovery_curriculum_from_config(
             ()
             if healthy_pass_replay is None
             else (healthy_pass_replay["max_examples"],)
+        ),
+        *(
+            ()
+            if post_recovery_contrast_replay is None
+            else (post_recovery_contrast_replay["update_period"],)
+        ),
+        *(
+            ()
+            if post_recovery_contrast_replay is None
+            else (post_recovery_contrast_replay["max_examples"],)
         ),
     )
     numeric_fields = (
@@ -2555,6 +2596,26 @@ def _recovery_curriculum_from_config(
             None
             if healthy_pass_replay is None
             else str(healthy_pass_replay["sha256"])
+        ),
+        post_recovery_contrast_replay_update_period=(
+            0
+            if post_recovery_contrast_replay is None
+            else int(post_recovery_contrast_replay["update_period"])
+        ),
+        post_recovery_contrast_replay_max_examples=(
+            8
+            if post_recovery_contrast_replay is None
+            else int(post_recovery_contrast_replay["max_examples"])
+        ),
+        post_recovery_contrast_replay_path=(
+            None
+            if post_recovery_contrast_replay is None
+            else str(post_recovery_contrast_replay["path"])
+        ),
+        post_recovery_contrast_replay_sha256=(
+            None
+            if post_recovery_contrast_replay is None
+            else str(post_recovery_contrast_replay["sha256"])
         ),
         start_state=ChallengeStartState(
             realized_pnl=float(start["realized_pnl"]),
@@ -2878,6 +2939,7 @@ class HistoricalCandidateRunner:
         recovery_value_store_state = None
         recovery_success_replay_state = None
         healthy_pass_replay_state = None
+        post_recovery_contrast_replay_state = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
                 recovery_path, device=agent_settings["device"]
@@ -2930,6 +2992,9 @@ class HistoricalCandidateRunner:
             )
             healthy_pass_replay_state = manifest.get(
                 "healthy_pass_replay_state"
+            )
+            post_recovery_contrast_replay_state = manifest.get(
+                "post_recovery_contrast_replay_state"
             )
             _assert_recovery_entry_balance(loaded, agent_settings)
             _assert_recovery_regime_selectivity(loaded, agent_settings)
@@ -3160,6 +3225,64 @@ class HistoricalCandidateRunner:
             raise ValueError(
                 "checkpoint contains disabled healthy pass replay"
             )
+        post_recovery_contrast_replay = None
+        if (
+            recovery_curriculum is not None
+            and recovery_curriculum.post_recovery_contrast_replay_path
+            is not None
+        ):
+            post_recovery_contrast_replay = BalancedSequenceReplay(
+                capacity_episodes=int(
+                    training_config["replay_capacity_episodes"]
+                ),
+                capacity_transitions=int(
+                    training_config["replay_capacity_transitions"]
+                ),
+                sequence_length=int(training_config["sequence_length"]),
+                terminal_sequence_fraction=float(
+                    training_config["terminal_sequence_fraction"]
+                ),
+                safety_sequence_fraction=float(
+                    training_config.get("safety_sequence_fraction", 0.0)
+                ),
+                entry_opportunity_sequence_fraction=float(
+                    training_config.get(
+                        "entry_opportunity_sequence_fraction", 0.0
+                    )
+                ),
+                regime_wait_sequence_fraction=float(
+                    training_config.get("regime_wait_sequence_fraction", 0.0)
+                ),
+                regime_wait_sequence_update_period=int(
+                    training_config.get(
+                        "regime_wait_sequence_update_period", 0
+                    )
+                ),
+                **_regime_selectivity_replay_settings(
+                    regime_selectivity_spec
+                ),
+                recurrent_burn_in=int(agent.recurrent_burn_in),
+                n_step_return=int(agent.n_step_return),
+                seed=recovery_curriculum.schedule_seed + 2,
+            )
+            _load_post_recovery_contrast_replay_artifact(
+                _resolve(
+                    root,
+                    recovery_curriculum.post_recovery_contrast_replay_path,
+                ),
+                expected_sha256=str(
+                    recovery_curriculum.post_recovery_contrast_replay_sha256
+                ),
+                replay=post_recovery_contrast_replay,
+            )
+            if post_recovery_contrast_replay_state is not None:
+                post_recovery_contrast_replay.load_state_dict(
+                    post_recovery_contrast_replay_state
+                )
+        elif post_recovery_contrast_replay_state is not None:
+            raise ValueError(
+                "checkpoint contains disabled post-recovery contrast replay"
+            )
         policy_health_monitor = None
         if policy_health_config is not None:
             if teacher_targets is None or regime_selectivity_spec is None:
@@ -3301,6 +3424,11 @@ class HistoricalCandidateRunner:
                     if healthy_pass_replay is None
                     else healthy_pass_replay.state_dict()
                 ),
+                post_recovery_contrast_replay_state=(
+                    None
+                    if post_recovery_contrast_replay is None
+                    else post_recovery_contrast_replay.state_dict()
+                ),
                 policy_health_probe_path=(
                     policy_health_probe_path
                     if policy_health_config is not None
@@ -3420,6 +3548,7 @@ class HistoricalCandidateRunner:
             ),
             recovery_success_replay=recovery_success_replay,
             healthy_pass_replay=healthy_pass_replay,
+            post_recovery_contrast_replay=post_recovery_contrast_replay,
         )
         episode_coverage_receipt = None
         episode_coverage_path = output / "episode-coverage-receipt.json"
@@ -3998,6 +4127,7 @@ def _save_training_recovery(
     recovery_value_store_state: dict[str, object] | None = None,
     recovery_success_replay_state: dict[str, object] | None = None,
     healthy_pass_replay_state: dict[str, object] | None = None,
+    post_recovery_contrast_replay_state: dict[str, object] | None = None,
     policy_health_probe_path: Path | None = None,
 ) -> None:
     policy_health_probe_corpus = None
@@ -4027,6 +4157,9 @@ def _save_training_recovery(
             "recovery_value_store_state": recovery_value_store_state,
             "recovery_success_replay_state": recovery_success_replay_state,
             "healthy_pass_replay_state": healthy_pass_replay_state,
+            "post_recovery_contrast_replay_state": (
+                post_recovery_contrast_replay_state
+            ),
             "policy_health_probe_corpus": policy_health_probe_corpus,
         },
     )
@@ -4768,7 +4901,7 @@ def _load_recovery_success_replay_artifact(
         expected_sha256=expected_sha256,
         expected_schema="propevolve_recovery_success_replay_v1",
         replay=replay,
-        require_healthy=False,
+        sample_kind="recovery",
     )
 
 
@@ -4784,7 +4917,23 @@ def _load_healthy_pass_replay_artifact(
         expected_sha256=expected_sha256,
         expected_schema="propevolve_healthy_pass_replay_v1",
         replay=replay,
-        require_healthy=True,
+        sample_kind="healthy",
+    )
+
+
+def _load_post_recovery_contrast_replay_artifact(
+    path: Path,
+    *,
+    expected_sha256: str,
+    replay: BalancedSequenceReplay,
+) -> None:
+    """Authenticate retained-versus-giveback recurrent training pairs."""
+    _load_authenticated_pass_replay_artifact(
+        path,
+        expected_sha256=expected_sha256,
+        expected_schema="propevolve_post_recovery_contrast_replay_v1",
+        replay=replay,
+        sample_kind="post_recovery_contrast",
     )
 
 
@@ -4794,8 +4943,14 @@ def _load_authenticated_pass_replay_artifact(
     expected_sha256: str,
     expected_schema: str,
     replay: BalancedSequenceReplay,
-    require_healthy: bool,
+    sample_kind: str,
 ) -> None:
+    if sample_kind not in {
+        "recovery",
+        "healthy",
+        "post_recovery_contrast",
+    }:
+        raise ValueError("training replay sample kind is invalid")
     if _path_sha256(path) != expected_sha256:
         raise ValueError("pass replay identity drifted")
     payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -4821,13 +4976,16 @@ def _load_authenticated_pass_replay_artifact(
     if not isinstance(state, Mapping):
         raise ValueError("pass replay state is invalid")
     replay.load_state_dict(state)
-    sample = (
-        replay.sample_healthy_pass_sequences(1)
-        if require_healthy
-        else replay.sample_successful_recovery_sequences(1)
-    )
+    if sample_kind == "healthy":
+        sample = replay.sample_healthy_pass_sequences(1)
+        requirement = "healthy policy row"
+    elif sample_kind == "recovery":
+        sample = replay.sample_successful_recovery_sequences(1)
+        requirement = "successful boundary"
+    else:
+        sample = replay.sample_post_recovery_contrast_pairs(1)
+        requirement = "retained-versus-giveback pair"
     if not sample:
-        requirement = "healthy policy row" if require_healthy else "successful boundary"
         raise ValueError(f"pass replay lacks a {requirement}")
     replay.load_state_dict(state)
 
@@ -4976,6 +5134,7 @@ def train_agent(
     recovery_value_source_identity_sha256: str | None = None,
     recovery_success_replay: BalancedSequenceReplay | None = None,
     healthy_pass_replay: BalancedSequenceReplay | None = None,
+    post_recovery_contrast_replay: BalancedSequenceReplay | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -5076,6 +5235,7 @@ def train_agent(
             any(component is not None for component in recovery_components)
             or recovery_success_replay is not None
             or healthy_pass_replay is not None
+            or post_recovery_contrast_replay is not None
         ):
             raise ValueError("recovery-value components require a curriculum")
     elif (
@@ -5112,6 +5272,24 @@ def train_agent(
             or healthy_pass_replay.n_step_return != replay.n_step_return
         ):
             raise ValueError("healthy pass replay recurrent contract drifted")
+        contrast_replay_enabled = (
+            recovery_curriculum.post_recovery_contrast_replay_update_period > 0
+        )
+        if contrast_replay_enabled != (post_recovery_contrast_replay is not None):
+            raise ValueError(
+                "post-recovery contrast replay contract is incomplete"
+            )
+        if post_recovery_contrast_replay is not None and (
+            post_recovery_contrast_replay.sequence_length
+            != replay.sequence_length
+            or post_recovery_contrast_replay.recurrent_burn_in
+            != replay.recurrent_burn_in
+            or post_recovery_contrast_replay.n_step_return
+            != replay.n_step_return
+        ):
+            raise ValueError(
+                "post-recovery contrast replay recurrent contract drifted"
+            )
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -5628,6 +5806,8 @@ def train_agent(
         replay.add(completed_episode)
         if recovery_success_replay is not None and outcome == "pass":
             recovery_success_replay.add(completed_episode)
+        if post_recovery_contrast_replay is not None:
+            post_recovery_contrast_replay.add(completed_episode)
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
@@ -5749,6 +5929,7 @@ def train_agent(
             ))
         recovery_success_replay_sequences = 0
         healthy_pass_replay_sequences = 0
+        post_recovery_contrast_pairs = 0
         if len(replay) >= warmup_episodes:
             def train_replay_batch(
                 batch: Sequence[Sequence[Transition]],
@@ -5756,6 +5937,7 @@ def train_agent(
             ) -> None:
                 nonlocal recovery_success_replay_sequences
                 nonlocal healthy_pass_replay_sequences
+                nonlocal post_recovery_contrast_pairs
                 if (
                     recovery_curriculum is not None
                     and recovery_success_replay is not None
@@ -5798,6 +5980,40 @@ def train_agent(
                         batch = tuple(batch) + healthy_sequences
                         healthy_pass_replay_sequences += len(
                             healthy_sequences
+                        )
+                if (
+                    recovery_curriculum is not None
+                    and post_recovery_contrast_replay is not None
+                    and (update_index + 1)
+                    % (
+                        recovery_curriculum
+                        .post_recovery_contrast_replay_update_period
+                    )
+                    == 0
+                ):
+                    existing_pair_ids = [
+                        int(transition.paired_a_plus_pair_id)
+                        for sequence in batch
+                        for transition in sequence
+                        if transition.paired_a_plus_pair_id is not None
+                    ]
+                    contrast_sequences = (
+                        post_recovery_contrast_replay
+                        .sample_post_recovery_contrast_pairs(
+                            1,
+                            max_examples=(
+                                recovery_curriculum
+                                .post_recovery_contrast_replay_max_examples
+                            ),
+                            pair_id_start=(
+                                max(existing_pair_ids, default=-1) + 1
+                            ),
+                        )
+                    )
+                    if contrast_sequences:
+                        batch = tuple(batch) + contrast_sequences
+                        post_recovery_contrast_pairs += (
+                            len(contrast_sequences) // 2
                         )
                 recovery_target = (
                     recovery_value_store.sample()
@@ -6132,6 +6348,9 @@ def train_agent(
                 ),
                 "healthy_pass_replay_sequences": (
                     healthy_pass_replay_sequences
+                ),
+                "post_recovery_contrast_pairs": (
+                    post_recovery_contrast_pairs
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,

@@ -313,6 +313,12 @@
         "sha256": "7b283c278051e9e2fe5b23c4119288e8155896139913ee463b59852a596312ed",
         "update_period": 8,
         "max_examples": 8
+      },
+      "post_recovery_contrast_replay": {
+        "path": "runs/recovery-pass-replay/v22-post-recovery-contrast-v1.pt",
+        "sha256": "98f133c7172b59008df2bc8c93e19b80edd420361d2c0426d3d2129754587a2b",
+        "update_period": 8,
+        "max_examples": 8
       }
     }
   },
