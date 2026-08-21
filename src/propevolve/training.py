@@ -2270,6 +2270,7 @@ class RecoveryCurriculumSettings:
     target_every_episodes: int
     supervision_start_pnls: tuple[float, ...]
     retain_nonnegative_entry_policy: bool
+    latch_recovery_until_terminal: bool
     start_state: ChallengeStartState
     recovery_success_replay_update_period: int = 0
     recovery_success_replay_max_examples: int = 8
@@ -2296,6 +2297,7 @@ class RecoveryCurriculumSettings:
             or isinstance(self.target_every_episodes, bool)
             or self.target_every_episodes < 1
             or type(self.retain_nonnegative_entry_policy) is not bool
+            or type(self.latch_recovery_until_terminal) is not bool
             or isinstance(self.recovery_success_replay_update_period, bool)
             or self.recovery_success_replay_update_period < 0
             or isinstance(self.recovery_success_replay_max_examples, bool)
@@ -2436,7 +2438,11 @@ def _recovery_curriculum_from_config(
         "start_pnls",
         "retain_nonnegative_entry_policy",
     }
-    supervision_optional = {"success_replay", "healthy_pass_replay"}
+    supervision_optional = {
+        "success_replay",
+        "healthy_pass_replay",
+        "latch_recovery_until_terminal",
+    }
     if (
         not isinstance(supervision, Mapping)
         or not supervision_required.issubset(supervision)
@@ -2508,6 +2514,9 @@ def _recovery_curriculum_from_config(
         or not isinstance(start["passmark_locked"], bool)
         or not isinstance(supervision["start_pnls"], (list, tuple))
         or not isinstance(supervision["retain_nonnegative_entry_policy"], bool)
+        or not isinstance(
+            supervision.get("latch_recovery_until_terminal", False), bool
+        )
     ):
         raise ValueError("recovery curriculum scalar types are invalid")
     settings = RecoveryCurriculumSettings(
@@ -2521,6 +2530,9 @@ def _recovery_curriculum_from_config(
         ),
         retain_nonnegative_entry_policy=bool(
             supervision["retain_nonnegative_entry_policy"]
+        ),
+        latch_recovery_until_terminal=bool(
+            supervision.get("latch_recovery_until_terminal", False)
         ),
         recovery_success_replay_update_period=(
             0
@@ -3521,6 +3533,10 @@ class HistoricalCandidateRunner:
                 ),
                 greedy_diagnostic_interval_steps=int(
                     training_config.get("greedy_diagnostic_interval_steps", 256)
+                ),
+                recovery_latch_until_terminal=bool(
+                    recovery_curriculum is not None
+                    and recovery_curriculum.latch_recovery_until_terminal
                 ),
                 episode_diagnostic_callback=lambda payload: _append_jsonl(
                     validation_diagnostics_path, payload
@@ -5191,6 +5207,9 @@ def train_agent(
             reset_options["challenge_start_state"] = (
                 recovery_curriculum.start_state
             )
+            reset_options["latch_recovery_until_terminal"] = (
+                recovery_curriculum.latch_recovery_until_terminal
+            )
         if not reset_options:
             observation, reset_info = environment.reset()
         else:
@@ -5284,6 +5303,11 @@ def train_agent(
         ) * teacher_schedule_progress
         entry_action_weight_scale = 1.0
         teacher_guidance_dropout_probability = teacher_guidance_dropout_start
+        recovery_latched = bool(
+            recovery_curriculum is not None
+            and recovery_curriculum.latch_recovery_until_terminal
+            and float(reset_info["realized_pnl"]) < 0.0
+        )
         terminal_info = reset_info
         step_index = 0
         while True:
@@ -5511,6 +5535,10 @@ def train_agent(
                     entry_action_target=entry_action_target,
                     metadata=metadata,
                 )
+            recovery_active = bool(
+                recovery_curriculum is not None
+                and float(terminal_info["realized_pnl"]) < 0.0
+            )
             transitions.append(Transition(
                 observation=observation,
                 action=Action(action),
@@ -5532,9 +5560,14 @@ def train_agent(
                 regime_selectivity_headroom_fraction=(
                     regime_selectivity_headroom_fraction
                 ),
-                recovery_active=(
-                    recovery_curriculum is not None
-                    and float(terminal_info["realized_pnl"]) < 0.0
+                recovery_active=recovery_active,
+                recovery_latched=(
+                    recovery_latched
+                    if (
+                        recovery_curriculum is not None
+                        and recovery_curriculum.latch_recovery_until_terminal
+                    )
+                    else recovery_active
                 ),
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
@@ -5546,6 +5579,14 @@ def train_agent(
                 paired_a_plus_economic_win=paired_a_plus_economic_win,
             ))
             total_reward += reward
+            if (
+                recovery_curriculum is not None
+                and recovery_curriculum.latch_recovery_until_terminal
+                and float(
+                    info.get("realized_pnl", info.get("equity_pnl", 0.0))
+                ) < 0.0
+            ):
+                recovery_latched = True
             observation, valid = next_observation, next_valid
             terminal_info = info
             decision_index = int(info.get("fill_index", decision_index + 1))
@@ -6446,6 +6487,7 @@ def evaluate_agent(
     stop_on_first_blow: bool = False,
     no_trade_patience_episodes: int = 0,
     greedy_diagnostic_interval_steps: int = 256,
+    recovery_latch_until_terminal: bool = False,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> TrainingResult:
     assert_teacher_free = getattr(agent, "assert_teacher_free", None)
@@ -6464,6 +6506,8 @@ def evaluate_agent(
         or greedy_diagnostic_interval_steps < 1
     ):
         raise ValueError("greedy diagnostic interval must be positive")
+    if type(recovery_latch_until_terminal) is not bool:
+        raise ValueError("validation recovery latch must be boolean")
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     rewards = []
     terminal_pnls = []
@@ -6505,7 +6549,12 @@ def evaluate_agent(
     }
     evaluated_episodes = 0
     for episode_index in range(episodes):
-        observation, info = environment.reset()
+        if recovery_latch_until_terminal:
+            observation, info = environment.reset(options={
+                "latch_recovery_until_terminal": True,
+            })
+        else:
+            observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
         hidden = None
         total = 0.0
@@ -6864,6 +6913,9 @@ def evaluate_recovery_stress(
     for episode_index in range(episodes):
         options: dict[str, object] = {
             "challenge_start_state": settings.start_state,
+            "latch_recovery_until_terminal": (
+                settings.latch_recovery_until_terminal
+            ),
         }
         if ticker_schedule is not None:
             options["ticker"] = ticker_schedule[episode_index]
@@ -6892,8 +6944,6 @@ def evaluate_recovery_stress(
             raise ValueError(f"unknown recovery stress outcome: {outcome}")
         if status not in statuses:
             raise ValueError(f"unknown recovery status: {status}")
-        if outcome == "blow" and status == "recovered":
-            raise ValueError("a blown recovery episode cannot be recovered")
         outcomes[outcome] += 1
         statuses[status] += 1
         entries_used += int(info.get("trade_count", 0))

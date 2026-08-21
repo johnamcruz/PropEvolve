@@ -373,6 +373,8 @@ class HistoricalChallengeEnv:
         self._trading_days_elapsed = 0
         self._recovery_entry_open = False
         self._recovery_success_pnl: float | None = None
+        self._recovery_latch_enabled = False
+        self._recovery_latched = False
         self._recovery_status: str | None = None
         self._recovery_wait_decisions = 0
 
@@ -472,9 +474,15 @@ class HistoricalChallengeEnv:
         self._trading_days_elapsed = 1
         self._recovery_entry_open = False
         self._recovery_success_pnl = None
+        self._recovery_latch_enabled = False
+        self._recovery_latched = False
         self._recovery_status = None
         self._recovery_wait_decisions = 0
         start_state = options.get("challenge_start_state")
+        latch_recovery = options.get("latch_recovery_until_terminal", False)
+        if type(latch_recovery) is not bool:
+            raise TypeError("recovery latch must be boolean")
+        self._recovery_latch_enabled = latch_recovery
         if start_state is not None:
             if not isinstance(start_state, ChallengeStartState):
                 raise TypeError("challenge_start_state must be a ChallengeStartState")
@@ -486,6 +494,9 @@ class HistoricalChallengeEnv:
             self._peak_equity = start_state.peak_equity_pnl
             self._trading_days_elapsed = start_state.trading_days_elapsed
             self._recovery_success_pnl = start_state.recovery_success_pnl
+            self._recovery_latched = (
+                latch_recovery and start_state.realized_pnl < 0.0
+            )
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
         return self._observation(), {
@@ -507,7 +518,10 @@ class HistoricalChallengeEnv:
     def valid_actions(self) -> tuple[Action, ...]:
         return self._masker.valid_actions(
             self._account_state(),
-            recovery_active=self._recovery_success_pnl is not None,
+            recovery_active=(
+                self._recovery_success_pnl is not None
+                or self._recovery_latched
+            ),
         )
 
     def _validate_challenge_start_state(self, state: ChallengeStartState) -> None:
@@ -544,7 +558,10 @@ class HistoricalChallengeEnv:
         }
         if (
             action == Action.WAIT
-            and self._recovery_success_pnl is not None
+            and (
+                self._recovery_success_pnl is not None
+                or self._recovery_latched
+            )
         ):
             self._recovery_wait_decisions += 1
         if self._session_keys[self._ticker][next_index] != self._session_keys[self._ticker][self._index]:
@@ -554,6 +571,7 @@ class HistoricalChallengeEnv:
         self._apply_action(action, fill, info)
 
         self._apply_protective_stop(next_index, info)
+        self._activate_recovery_latch_if_needed()
 
         worst_price = self._adverse_price(next_index)
         worst_equity = self._equity(worst_price)
@@ -563,13 +581,17 @@ class HistoricalChallengeEnv:
         if self._account.outcome(worst_equity) == "blow":
             info.setdefault("exit_reason", "challenge_blow")
             self._liquidate(worst_price, info)
+            self._activate_recovery_latch_if_needed()
             outcome = "blow"
         else:
             current_equity = self._equity(float(self._market.close[self._index]))
             if self._account.outcome(current_equity) == "pass":
                 info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
-                if self._recovery_success_pnl is not None:
+                if (
+                    self._recovery_success_pnl is not None
+                    or self._recovery_latched
+                ):
                     self._recovery_status = "recovered"
                     self._recovery_success_pnl = None
                 outcome = "pass"
@@ -649,6 +671,16 @@ class HistoricalChallengeEnv:
             info["recovery_status"] = self._recovery_status
         return self._observation(), float(reward), self._terminated, False, info
 
+    def _activate_recovery_latch_if_needed(self) -> None:
+        if (
+            self._recovery_latch_enabled
+            and not self._recovery_latched
+            and self._account is not None
+            and self._account.realized_pnl < 0.0
+        ):
+            self._recovery_latched = True
+            self._recovery_success_pnl = 0.0
+
     def _reward_shaping(
         self,
         equity: float,
@@ -713,7 +745,10 @@ class HistoricalChallengeEnv:
             if action in entries:
                 side, size = entries[action]
                 assert self._account is not None
-                if self._recovery_success_pnl is not None:
+                if (
+                    self._recovery_success_pnl is not None
+                    or self._recovery_latched
+                ):
                     self._recovery_entry_open = True
                     info["recovery_entry_used"] = True
                 initial_risk_points = None

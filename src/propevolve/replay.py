@@ -34,6 +34,7 @@ class Transition:
     entry_action_target: Action | None = None
     regime_selectivity_headroom_fraction: float | None = None
     recovery_active: bool = False
+    recovery_latched: bool = False
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
     regime_wait_priority: float = 0.0
@@ -131,6 +132,7 @@ class _StoredEpisode:
     entry_short_anchor_indices: np.ndarray
     regime_selectivity_headroom_fractions: np.ndarray
     recovery_active: np.ndarray
+    recovery_latched: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
     regime_wait_priorities: np.ndarray
@@ -357,6 +359,9 @@ class _StoredEpisode:
             recovery_active=np.asarray(
                 [item.recovery_active for item in transitions], np.bool_
             ),
+            recovery_latched=np.asarray(
+                [item.recovery_latched for item in transitions], np.bool_
+            ),
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
             ),
@@ -447,6 +452,7 @@ class _StoredEpisode:
                     )
                 ),
                 recovery_active=bool(self.recovery_active[index]),
+                recovery_latched=bool(self.recovery_latched[index]),
                 safety_priority=float(self.safety_priorities[index]),
                 entry_opportunity_priority=float(
                     self.entry_opportunity_priorities[index]
@@ -891,7 +897,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 11,
+            "schema_version": 12,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -936,7 +942,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11}:
+        if schema_version not in {7, 8, 9, 10, 11, 12}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1019,6 +1025,13 @@ class BalancedSequenceReplay:
                     ),
                     dtype=np.bool_,
                 )
+                recovery_latched = np.asarray(
+                    payload.get(
+                        "recovery_latched",
+                        np.maximum.accumulate(recovery_active),
+                    ),
+                    dtype=np.bool_,
+                )
                 source_decision_indices = np.asarray(
                     payload.get(
                         "source_decision_indices",
@@ -1078,6 +1091,7 @@ class BalancedSequenceReplay:
                 or teacher_imitation_visible.shape != (count,)
                 or regime_selectivity_headroom.shape != (count,)
                 or recovery_active.shape != (count,)
+                or recovery_latched.shape != (count,)
                 or source_decision_indices.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
@@ -1212,6 +1226,7 @@ class BalancedSequenceReplay:
                     regime_selectivity_headroom
                 ),
                 recovery_active=recovery_active,
+                recovery_latched=recovery_latched,
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
                 regime_wait_priorities=regime_wait_priorities,
@@ -1681,7 +1696,7 @@ class BalancedSequenceReplay:
             if episode.outcome != "pass":
                 continue
             healthy_flat_rows = np.flatnonzero(
-                ~episode.recovery_active
+                ~episode.recovery_latched
                 & (episode.entry_action_targets >= int(Action.WAIT))
                 & episode.valid_masks[:, :flat_action_count].all(axis=1)
                 & (episode.valid_masks.sum(axis=1) == flat_action_count)

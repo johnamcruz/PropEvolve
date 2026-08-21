@@ -1475,8 +1475,14 @@ class RecurrentC51Agent:
             dtype=torch.bool,
             device=self.device,
         )
-        recovery_active = torch.as_tensor(
-            [[item.recovery_active for item in sequence] for sequence in sequences],
+        recovery_latched = torch.as_tensor(
+            [
+                [
+                    item.recovery_active or item.recovery_latched
+                    for item in sequence
+                ]
+                for sequence in sequences
+            ],
             dtype=torch.bool,
             device=self.device,
         )
@@ -2915,7 +2921,7 @@ class RecurrentC51Agent:
         healthy_entry_retention_rows = (
             retain_nonnegative_entry_policy
             & auxiliary_valid
-            & ~recovery_active[:, self.recurrent_burn_in:]
+            & ~recovery_latched[:, self.recurrent_burn_in:]
             & valid_masks[
                 :, self.recurrent_burn_in:, int(Action.WAIT)
             ]
