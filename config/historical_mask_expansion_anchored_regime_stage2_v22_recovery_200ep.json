@@ -302,7 +302,6 @@
       "target_every_episodes": 1,
       "start_pnls": [-2500, -2000, -1500, -1000, -500],
       "retain_nonnegative_entry_policy": true,
-      "latch_recovery_until_terminal": true,
       "success_replay": {
         "path": "runs/recovery-pass-replay/v22-r14-recovery-passes-v1.pt",
         "sha256": "b09a604f3ce64c6b9add79aec2eb29b8e055ec9d3ea5a7df65ec90cf37a057c8",
@@ -318,7 +317,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000. Once realized PnL is negative, recovery learning remains latched through breakeven and positive PnL until pass, blow, or timeout, so the V21 healthy-entry retention anchor cannot interrupt the learned recovery-to-pass path. The below-breakeven boundary remains separately available for successful-recovery replay. WAIT, Long, and Short remain native actions; recovery-disabled V21 behavior, public outcomes, and teacher-free inference remain unchanged.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs, authenticated R14 recovery passes rehearse successful recovery behavior, and authenticated V21 healthy passes sparsely retain the nonnegative A+ entry policy. Recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],

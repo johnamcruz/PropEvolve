@@ -19,17 +19,6 @@ describes V22 main episodes as ordinary-start episodes; it does not change the
 V21 model, optimizer, replay sampler, A+ losses, public outcomes, or
 teacher-free inference contract.
 
-For the post-R14 matched revision, recovery learning is sticky within the
-challenge. The first negative realized-PnL state latches recovery through
-breakeven and positive PnL until the episode ends in `pass`, `blow`, or
-`timeout`. Crossing `$0` still records `recovered`, but it no longer restores
-the V21 healthy-entry retention pressure during that same challenge. A separate
-below-breakeven flag preserves the existing red-to-breakeven replay boundary.
-The latch is causal episode state, not a policy observation or teacher input.
-It adds no action and no new gate; it only keeps the existing recovery entry
-eligibility active until the challenge ends. Teacher-free validation enables
-the same state transition directly from realized account PnL.
-
 This start replaces the falsified `-$2,700` start and changes no other V21 or
 V22 learning mechanic. Run r7 at code identity
 `5b7614620790f3dbb30a79487c294c7f0b62a32d` was stopped after 16 episodes with

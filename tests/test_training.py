@@ -63,7 +63,6 @@ def _recovery_curriculum_settings() -> RecoveryCurriculumSettings:
         target_every_episodes=1,
         supervision_start_pnls=(-2_500.0, -2_000.0, -1_500.0, -1_000.0, -500.0),
         retain_nonnegative_entry_policy=True,
-        latch_recovery_until_terminal=True,
         start_state=ChallengeStartState(
             realized_pnl=-2_000.0,
             equity_pnl=-2_000.0,
@@ -91,7 +90,6 @@ def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> N
             "target_every_episodes": 1,
             "start_pnls": [-2_500, -2_000, -1_500, -1_000, -500],
             "retain_nonnegative_entry_policy": True,
-            "latch_recovery_until_terminal": True,
         },
         "start_state": {
             "realized_pnl": -2_000.0,
@@ -2479,7 +2477,7 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
     }
 
 
-def test_recovery_training_latches_recovery_after_breakeven_until_terminal() -> None:
+def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> None:
     class RecoveryAgent(Agent):
         recurrent_burn_in = 64
         n_step_return = 8
@@ -2546,15 +2544,10 @@ def test_recovery_training_latches_recovery_after_breakeven_until_terminal() -> 
 
     class CapturingReplay(BalancedSequenceReplay):
         recovery_flags: list[bool]
-        recovery_latches: list[bool]
 
         def add(self, episode):
             self.recovery_flags = [
                 transition.recovery_active
-                for transition in episode.transitions
-            ]
-            self.recovery_latches = [
-                transition.recovery_latched
                 for transition in episode.transitions
             ]
             super().add(episode)
@@ -2588,7 +2581,6 @@ def test_recovery_training_latches_recovery_after_breakeven_until_terminal() -> 
     )
 
     assert replay.recovery_flags == [True, False]
-    assert replay.recovery_latches == [True, True]
 
 
 def test_recovery_and_healthy_pass_replays_are_additive_to_the_ordinary_batch(
@@ -5011,33 +5003,6 @@ def test_teacher_free_evaluation_performs_zero_teacher_lookups() -> None:
     assert result.passes == 2
 
 
-def test_teacher_free_evaluation_enables_configured_recovery_latch() -> None:
-    class LatchEnvironment(Environment):
-        def __init__(self) -> None:
-            super().__init__()
-            self.reset_options: list[dict[str, object]] = []
-
-        def reset(self, *, options=None):
-            self.reset_options.append(dict(options or {}))
-            return super().reset()
-
-    environment = LatchEnvironment()
-
-    result = evaluate_agent(
-        Agent(),
-        environment,
-        episodes=2,
-        recurrent_horizon=2,
-        recovery_latch_until_terminal=True,
-    )
-
-    assert result.passes == 2
-    assert environment.reset_options == [
-        {"latch_recovery_until_terminal": True},
-        {"latch_recovery_until_terminal": True},
-    ]
-
-
 def test_greedy_evaluation_preserves_serialized_agent_state(
     tmp_path: Path,
 ) -> None:
@@ -5365,7 +5330,7 @@ def test_teacher_free_recovery_stress_keeps_public_outcomes_and_status_separate(
                 "timeout",
                 "blow",
             )[self.episode]
-            recovered = self.episode in {0, 3}
+            recovered = self.episode == 0
             return np.ones(1, np.float32), 0.0, True, False, {
                 "valid_actions": (),
                 "outcome": outcome,
@@ -5389,12 +5354,12 @@ def test_teacher_free_recovery_stress_keeps_public_outcomes_and_status_separate(
     )
 
     assert isinstance(result, RecoveryStressResult)
-    assert result.recovered == 2
-    assert result.not_recovered == 2
+    assert result.recovered == 1
+    assert result.not_recovered == 3
     assert result.passes == 1
     assert result.timeouts == 2
     assert result.blows == 1
-    assert result.recovery_success_rate == 0.5
+    assert result.recovery_success_rate == 0.25
     assert result.blow_rate == 0.25
     assert result.entries_used == 4
     assert agent.updates == 0

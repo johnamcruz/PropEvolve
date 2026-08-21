@@ -414,35 +414,3 @@ def test_recovery_training_does_not_anchor_negative_pnl_entry_rows() -> None:
     assert agent.last_train_metrics[
         "healthy_entry_policy_retention_loss"
     ] == 0.0
-
-
-def test_recovery_training_does_not_restore_v21_entry_policy_after_breakeven(
-) -> None:
-    agent = _agent(313, policy_retention_loss_weight=1.0)
-    agent.retain_policy(apply_to_all_management_rows=True)
-    with torch.no_grad():
-        agent.online.output.bias.view(len(Action), agent.atoms)[
-            int(Action.ENTER_SHORT_1)
-        ].add_(3.0)
-    recovered = tuple(
-        Transition(
-            **{
-                **item.__dict__,
-                "recovery_active": False,
-                "recovery_latched": True,
-            }
-        )
-        for item in _ordinary_v21_batch()[0]
-    )
-
-    agent.train_batch(
-        (recovered, recovered),
-        retain_nonnegative_entry_policy=True,
-    )
-
-    assert agent.last_train_metrics[
-        "healthy_entry_policy_retention_rows"
-    ] == 0.0
-    assert agent.last_train_metrics[
-        "healthy_entry_policy_retention_loss"
-    ] == 0.0

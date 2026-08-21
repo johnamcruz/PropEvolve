@@ -264,7 +264,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 11
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -1070,7 +1070,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 11
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1184,11 +1184,7 @@ def test_replay_round_trip_preserves_negative_pnl_recovery_state() -> None:
         primary_side=episode.primary_side,
         ended_at_ns=episode.ended_at_ns,
         transitions=tuple(
-            Transition(**{
-                **item.__dict__,
-                "recovery_active": index < 3,
-                "recovery_latched": True,
-            })
+            Transition(**{**item.__dict__, "recovery_active": index < 3})
             for index, item in enumerate(episode.transitions)
         ),
     )
@@ -1207,46 +1203,7 @@ def test_replay_round_trip_preserves_negative_pnl_recovery_state() -> None:
     restored.load_state_dict(replay.state_dict())
 
     row_states = [item.recovery_active for item in restored.sample(1)[0]]
-    row_latches = [item.recovery_latched for item in restored.sample(1)[0]]
     assert row_states == [True, True, True, False, False, False]
-    assert row_latches == [True] * 6
-
-
-def test_legacy_replay_derives_sticky_recovery_without_losing_the_boundary(
-) -> None:
-    episode = _episode("NQ", "pass", "long", 0)
-    replay = BalancedSequenceReplay(
-        capacity_episodes=1,
-        sequence_length=6,
-        seed=63,
-    )
-    replay.add(Episode(
-        episode_id=episode.episode_id,
-        ticker=episode.ticker,
-        outcome=episode.outcome,
-        primary_side=episode.primary_side,
-        ended_at_ns=episode.ended_at_ns,
-        transitions=tuple(
-            Transition(**{**item.__dict__, "recovery_active": index < 3})
-            for index, item in enumerate(episode.transitions)
-        ),
-    ))
-    legacy = replay.state_dict()
-    legacy["schema_version"] = 11
-    legacy["episodes"][0].pop("recovery_latched")
-    restored = BalancedSequenceReplay(
-        capacity_episodes=1,
-        sequence_length=6,
-        seed=63,
-    )
-
-    restored.load_state_dict(legacy)
-
-    sequence = restored.sample(1)[0]
-    assert [item.recovery_active for item in sequence] == [
-        True, True, True, False, False, False,
-    ]
-    assert [item.recovery_latched for item in sequence] == [True] * 6
 
 
 def test_replay_anchors_successful_pass_at_recovery_boundary() -> None:
@@ -1341,8 +1298,7 @@ def test_healthy_pass_replay_anchors_nonnegative_flat_policy_rows() -> None:
                 "valid_actions": flat_actions,
                 "next_valid_actions": () if item.terminated else flat_actions,
                 "entry_action_target": Action.WAIT,
-                "recovery_active": False,
-                "recovery_latched": False,
+                "recovery_active": index < 3,
             })
             for index, item in enumerate(episode.transitions)
         ),
@@ -1693,7 +1649,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 11
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

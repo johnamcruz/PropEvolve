@@ -477,11 +477,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "start_pnls",
         "retain_nonnegative_entry_policy",
     }
-    optional_supervision_fields = {
-        "success_replay",
-        "healthy_pass_replay",
-        "latch_recovery_until_terminal",
-    }
+    optional_supervision_fields = {"success_replay", "healthy_pass_replay"}
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
     start = curriculum["start_state"]
@@ -569,9 +565,6 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         or not isinstance(start["passmark_locked"], bool)
         or not isinstance(supervision["start_pnls"], list)
         or not isinstance(supervision["retain_nonnegative_entry_policy"], bool)
-        or not isinstance(
-            supervision.get("latch_recovery_until_terminal", False), bool
-        )
     ):
         raise ValueError("recovery curriculum scalar types are invalid")
     stress_episodes = int(curriculum["stress_evaluation_episodes"])
