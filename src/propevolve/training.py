@@ -2267,6 +2267,8 @@ class RecoveryCurriculumSettings:
     recovery_value_temperature: float
     recovery_value_store_capacity: int
     target_every_episodes: int
+    supervision_start_pnls: tuple[float, ...]
+    retain_nonnegative_entry_policy: bool
     start_state: ChallengeStartState
 
     def __post_init__(self) -> None:
@@ -2284,8 +2286,21 @@ class RecoveryCurriculumSettings:
             or self.recovery_value_store_capacity < 1
             or isinstance(self.target_every_episodes, bool)
             or self.target_every_episodes < 1
+            or type(self.retain_nonnegative_entry_policy) is not bool
         ):
             raise ValueError("recovery action-value supervision is invalid")
+        if (
+            not self.supervision_start_pnls
+            or any(
+                not np.isfinite(value)
+                or not self.start_state.mll_floor_pnl < value < 0.0
+                for value in self.supervision_start_pnls
+            )
+            or len(set(self.supervision_start_pnls))
+            != len(self.supervision_start_pnls)
+            or self.start_state.realized_pnl not in self.supervision_start_pnls
+        ):
+            raise ValueError("recovery supervision start PnLs are invalid")
         if not (
             math.isclose(self.start_state.realized_pnl, -2_000.0)
             and math.isclose(self.start_state.equity_pnl, -2_000.0)
@@ -2295,6 +2310,21 @@ class RecoveryCurriculumSettings:
             and math.isclose(self.start_state.recovery_success_pnl, 0.0)
         ):
             raise ValueError("Stage-2 recovery start contract drifted")
+
+    def supervision_start_state(self, episode_index: int) -> ChallengeStartState:
+        """Return one resume-stable negative-PnL training-only branch state."""
+        if isinstance(episode_index, bool) or episode_index < 0:
+            raise ValueError("recovery supervision episode index is invalid")
+        offset = self.schedule_seed % len(self.supervision_start_pnls)
+        pnl = self.supervision_start_pnls[
+            (offset + episode_index) % len(self.supervision_start_pnls)
+        ]
+        return replace(
+            self.start_state,
+            realized_pnl=pnl,
+            equity_pnl=pnl,
+            session_pnl=pnl,
+        )
 
 
 @dataclass(frozen=True)
@@ -2355,6 +2385,8 @@ def _recovery_curriculum_from_config(
         "temperature",
         "store_capacity",
         "target_every_episodes",
+        "start_pnls",
+        "retain_nonnegative_entry_policy",
     }:
         raise ValueError("recovery action-value supervision is invalid")
     integer_fields = (
@@ -2386,6 +2418,8 @@ def _recovery_curriculum_from_config(
             for item in numeric_fields
         )
         or not isinstance(start["passmark_locked"], bool)
+        or not isinstance(supervision["start_pnls"], (list, tuple))
+        or not isinstance(supervision["retain_nonnegative_entry_policy"], bool)
     ):
         raise ValueError("recovery curriculum scalar types are invalid")
     settings = RecoveryCurriculumSettings(
@@ -2394,6 +2428,12 @@ def _recovery_curriculum_from_config(
         recovery_value_temperature=float(supervision["temperature"]),
         recovery_value_store_capacity=int(supervision["store_capacity"]),
         target_every_episodes=int(supervision["target_every_episodes"]),
+        supervision_start_pnls=tuple(
+            float(item) for item in supervision["start_pnls"]
+        ),
+        retain_nonnegative_entry_policy=bool(
+            supervision["retain_nonnegative_entry_policy"]
+        ),
         start_state=ChallengeStartState(
             realized_pnl=float(start["realized_pnl"]),
             equity_pnl=float(start["equity_pnl"]),
@@ -4286,6 +4326,12 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "policy_retention_loss": weighted(
             "mean_policy_retention_loss", update_weights
         ),
+        "healthy_entry_policy_retention_loss": weighted(
+            "mean_healthy_entry_policy_retention_loss", update_weights
+        ),
+        "healthy_entry_policy_retention_rows": weighted(
+            "mean_healthy_entry_policy_retention_rows", update_weights
+        ),
         "teacher_scored_entries": int(sum(teacher_weights)),
         "selected_side_attempt_probability_mean": weighted(
             "selected_side_attempt_probability_mean", teacher_weights
@@ -4807,16 +4853,19 @@ def train_agent(
             assert recovery_value_environment is not None
             assert recovery_value_store is not None
             assert recovery_value_source_identity_sha256 is not None
+            supervision_start_state = (
+                recovery_curriculum.supervision_start_state(episode_index)
+            )
             recovery_value_store.add(build_recovery_value_target(
                 recovery_value_policy,
                 recovery_value_environment,
                 reset_options={
                     "ticker": episode_ticker,
                     "start": episode_start_index,
-                    "challenge_start_state": recovery_curriculum.start_state,
+                    "challenge_start_state": supervision_start_state,
                 },
                 recurrent_horizon=recurrent_horizon,
-                start_pnl=recovery_curriculum.start_state.realized_pnl,
+                start_pnl=supervision_start_state.realized_pnl,
                 recovery_success_pnl=(
                     recovery_curriculum.start_state.recovery_success_pnl
                 ),
@@ -5116,6 +5165,10 @@ def train_agent(
                 regime_selectivity_headroom_fraction=(
                     regime_selectivity_headroom_fraction
                 ),
+                recovery_active=(
+                    recovery_curriculum is not None
+                    and float(terminal_info["realized_pnl"]) < 0.0
+                ),
                 safety_priority=float(
                     info.get("mll_proximity_penalty", 0.0)
                 ),
@@ -5228,6 +5281,8 @@ def train_agent(
                 "sampled_burn_in_reset_coverage",
                 "sampled_recurrent_reset_pattern_count",
                 "policy_retention_loss",
+                "healthy_entry_policy_retention_loss",
+                "healthy_entry_policy_retention_rows",
                 "entry_action_target_wait_rows",
                 "entry_action_target_long_rows",
                 "entry_action_target_short_rows",
@@ -5342,6 +5397,9 @@ def train_agent(
                         ),
                         "recovery_value_temperature": (
                             recovery_curriculum.recovery_value_temperature
+                        ),
+                        "retain_nonnegative_entry_policy": (
+                            recovery_curriculum.retain_nonnegative_entry_policy
                         ),
                     })
                 episode_losses.append(agent.train_batch(batch, **train_kwargs))

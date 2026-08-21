@@ -1374,6 +1374,7 @@ class RecurrentC51Agent:
         recovery_target: RecoveryValueTarget | None = None,
         recovery_value_loss_weight: float = 0.0,
         recovery_value_temperature: float = 1.0,
+        retain_nonnegative_entry_policy: bool = False,
     ) -> float:
         if not sequences:
             raise ValueError("training batch cannot be empty")
@@ -1400,6 +1401,7 @@ class RecurrentC51Agent:
             or float(recovery_value_temperature) <= 0.0
             or recovery_target is not None
             and not isinstance(recovery_target, RecoveryValueTarget)
+            or type(retain_nonnegative_entry_policy) is not bool
         ):
             raise ValueError("recovery value training contract is invalid")
         lengths = {len(sequence) for sequence in sequences}
@@ -1470,6 +1472,11 @@ class RecurrentC51Agent:
         )
         competence_anchors = torch.as_tensor(
             [[item.competence_anchor for item in sequence] for sequence in sequences],
+            dtype=torch.bool,
+            device=self.device,
+        )
+        recovery_active = torch.as_tensor(
+            [[item.recovery_active for item in sequence] for sequence in sequences],
             dtype=torch.bool,
             device=self.device,
         )
@@ -1797,6 +1804,12 @@ class RecurrentC51Agent:
                 diagnostic_targets[diagnostic_target_rows], minlength=3
             ).to(torch.float32)
         policy_retention_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
+        healthy_entry_policy_retention_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
+        healthy_entry_policy_retention_rows = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
         # Teacher dropout and its curriculum scale govern optional imitation
@@ -2899,10 +2912,27 @@ class RecurrentC51Agent:
                 competence_anchors[:, self.recurrent_burn_in:]
                 & retention_rows
             )
+        healthy_entry_retention_rows = (
+            retain_nonnegative_entry_policy
+            & auxiliary_valid
+            & ~recovery_active[:, self.recurrent_burn_in:]
+            & valid_masks[
+                :, self.recurrent_burn_in:, int(Action.WAIT)
+            ]
+            & valid_masks[
+                :, self.recurrent_burn_in:, int(Action.ENTER_LONG_1)
+            ]
+            & valid_masks[
+                :, self.recurrent_burn_in:, int(Action.ENTER_SHORT_1)
+            ]
+            & (valid_masks[:, self.recurrent_burn_in:].sum(-1) == 3)
+        )
         if (
             self.retention_anchor is not None
             and self.policy_retention_loss_weight
-            and bool(retention_rows.any().item())
+            and bool(
+                (retention_rows.any() | healthy_entry_retention_rows.any()).item()
+            )
         ):
             with torch.no_grad():
                 anchor_hidden = None
@@ -2922,19 +2952,34 @@ class RecurrentC51Agent:
                     anchor_recurrent[:, :-1]
                 ).float()
                 anchor_q = (anchor_logits.softmax(-1) * self.support).sum(-1)
+            current_q = (all_logits.float().softmax(-1) * self.support).sum(-1)
+            if bool(retention_rows.any().item()):
                 anchor_management_q = torch.stack((
                     anchor_q[..., int(Action.HOLD)],
                     anchor_q[..., int(Action.CLOSE)],
                 ), dim=-1)
-            current_q = (all_logits.float().softmax(-1) * self.support).sum(-1)
-            current_management_q = torch.stack((
-                current_q[..., int(Action.HOLD)],
-                current_q[..., int(Action.CLOSE)],
-            ), dim=-1)
-            policy_retention_loss = nn.functional.smooth_l1_loss(
-                current_management_q[retention_rows],
-                anchor_management_q[retention_rows],
-            )
+                current_management_q = torch.stack((
+                    current_q[..., int(Action.HOLD)],
+                    current_q[..., int(Action.CLOSE)],
+                ), dim=-1)
+                policy_retention_loss = nn.functional.smooth_l1_loss(
+                    current_management_q[retention_rows],
+                    anchor_management_q[retention_rows],
+                )
+            if bool(healthy_entry_retention_rows.any().item()):
+                healthy_entry_policy_retention_loss = (
+                    nn.functional.smooth_l1_loss(
+                        current_q[..., :3][healthy_entry_retention_rows],
+                        anchor_q[..., :3][healthy_entry_retention_rows],
+                    )
+                )
+                healthy_entry_policy_retention_rows = (
+                    healthy_entry_retention_rows.sum().to(torch.float32)
+                )
+                policy_retention_loss = (
+                    policy_retention_loss
+                    + healthy_entry_policy_retention_loss
+                )
             loss = loss + (
                 self.policy_retention_loss_weight * policy_retention_loss
             )
@@ -3075,6 +3120,8 @@ class RecurrentC51Agent:
             *entry_action_prediction_counts.unbind(),
             *entry_action_correct_counts.unbind(),
             policy_retention_loss,
+            healthy_entry_policy_retention_loss,
+            healthy_entry_policy_retention_rows,
             recovery_value_loss,
             recovery_value_rows,
             recovery_value_top1_concurrence,
@@ -3146,6 +3193,8 @@ class RecurrentC51Agent:
             entry_correct_long_rows,
             entry_correct_short_rows,
             policy_retention_loss_value,
+            healthy_entry_policy_retention_loss_value,
+            healthy_entry_policy_retention_rows_value,
             recovery_value_loss_value,
             recovery_value_rows_value,
             recovery_value_top1_concurrence_value,
@@ -3584,6 +3633,12 @@ class RecurrentC51Agent:
             "entry_action_correct_long_rows": entry_correct_long_rows,
             "entry_action_correct_short_rows": entry_correct_short_rows,
             "policy_retention_loss": policy_retention_loss_value,
+            "healthy_entry_policy_retention_loss": (
+                healthy_entry_policy_retention_loss_value
+            ),
+            "healthy_entry_policy_retention_rows": (
+                healthy_entry_policy_retention_rows_value
+            ),
             "recovery_value_loss": recovery_value_loss_value,
             "recovery_value_rows": recovery_value_rows_value,
             "recovery_value_top1_concurrence": (

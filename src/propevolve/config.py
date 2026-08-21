@@ -474,6 +474,8 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "temperature",
         "store_capacity",
         "target_every_episodes",
+        "start_pnls",
+        "retain_nonnegative_entry_policy",
     }
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
@@ -517,6 +519,8 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
             for value in numeric_values
         )
         or not isinstance(start["passmark_locked"], bool)
+        or not isinstance(supervision["start_pnls"], list)
+        or not isinstance(supervision["retain_nonnegative_entry_policy"], bool)
     ):
         raise ValueError("recovery curriculum scalar types are invalid")
     stress_episodes = int(curriculum["stress_evaluation_episodes"])
@@ -529,6 +533,21 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         or int(supervision["target_every_episodes"]) < 1
     ):
         raise ValueError("recovery action-value supervision is invalid")
+    start_pnls = supervision["start_pnls"]
+    if (
+        not start_pnls
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not float(start["mll_floor_pnl"]) < float(value) < 0.0
+            for value in start_pnls
+        )
+        or len({float(value) for value in start_pnls}) != len(start_pnls)
+        or float(start["realized_pnl"])
+        not in {float(value) for value in start_pnls}
+    ):
+        raise ValueError("recovery supervision start PnLs are invalid")
     exact_start = {
         "realized_pnl": -2_000.0,
         "equity_pnl": -2_000.0,

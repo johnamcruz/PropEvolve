@@ -33,6 +33,7 @@ class Transition:
     teacher_imitation_visible: bool = True
     entry_action_target: Action | None = None
     regime_selectivity_headroom_fraction: float | None = None
+    recovery_active: bool = False
     safety_priority: float = 0.0
     entry_opportunity_priority: float = 0.0
     regime_wait_priority: float = 0.0
@@ -129,6 +130,7 @@ class _StoredEpisode:
     entry_long_anchor_indices: np.ndarray
     entry_short_anchor_indices: np.ndarray
     regime_selectivity_headroom_fractions: np.ndarray
+    recovery_active: np.ndarray
     safety_priorities: np.ndarray
     entry_opportunity_priorities: np.ndarray
     regime_wait_priorities: np.ndarray
@@ -352,6 +354,9 @@ class _StoredEpisode:
             regime_selectivity_headroom_fractions=(
                 regime_selectivity_headroom_fractions
             ),
+            recovery_active=np.asarray(
+                [item.recovery_active for item in transitions], np.bool_
+            ),
             safety_priorities=np.asarray(
                 [item.safety_priority for item in transitions], np.float32
             ),
@@ -441,6 +446,7 @@ class _StoredEpisode:
                         self.regime_selectivity_headroom_fractions[index]
                     )
                 ),
+                recovery_active=bool(self.recovery_active[index]),
                 safety_priority=float(self.safety_priorities[index]),
                 entry_opportunity_priority=float(
                     self.entry_opportunity_priorities[index]
@@ -845,7 +851,7 @@ class BalancedSequenceReplay:
     def state_dict(self) -> dict[str, object]:
         """Return the complete resumable replay state, including sampler RNG."""
         return {
-            "schema_version": 10,
+            "schema_version": 11,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -890,7 +896,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10}:
+        if schema_version not in {7, 8, 9, 10, 11}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -966,6 +972,13 @@ class BalancedSequenceReplay:
                 raw_regime_selectivity_headroom = payload[
                     "regime_selectivity_headroom_fractions"
                 ]
+                recovery_active = np.asarray(
+                    payload.get(
+                        "recovery_active",
+                        np.zeros(actions.size, dtype=np.bool_),
+                    ),
+                    dtype=np.bool_,
+                )
                 source_decision_indices = np.asarray(
                     payload.get(
                         "source_decision_indices",
@@ -1024,6 +1037,7 @@ class BalancedSequenceReplay:
                 or entry_action_targets.shape != (count,)
                 or teacher_imitation_visible.shape != (count,)
                 or regime_selectivity_headroom.shape != (count,)
+                or recovery_active.shape != (count,)
                 or source_decision_indices.shape != (count,)
                 or safety_priorities.shape != (count,)
                 or entry_priorities.shape != (count,)
@@ -1157,6 +1171,7 @@ class BalancedSequenceReplay:
                 regime_selectivity_headroom_fractions=(
                     regime_selectivity_headroom
                 ),
+                recovery_active=recovery_active,
                 safety_priorities=safety_priorities,
                 entry_opportunity_priorities=entry_priorities,
                 regime_wait_priorities=regime_wait_priorities,

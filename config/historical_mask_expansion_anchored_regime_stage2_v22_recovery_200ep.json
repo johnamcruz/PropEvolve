@@ -299,11 +299,13 @@
       "loss_weight": 0.25,
       "temperature": 1,
       "store_capacity": 200,
-      "target_every_episodes": 1
+      "target_every_episodes": 1,
+      "start_pnls": [-2500, -2000, -1500, -1000, -500],
+      "retain_nonnegative_entry_policy": true
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven, using training-only same-state recovery values to learn selective recovery and reduce near-blow timeouts, while recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
+    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs so the policy learns to wait for economically favorable A+ Expansion opportunities while red, and V21 flat-entry values are retained once realized PnL is nonnegative. Recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],

@@ -264,7 +264,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 11
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -1070,7 +1070,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 11
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1173,6 +1173,37 @@ def test_replay_round_trip_preserves_teacher_imitation_visibility() -> None:
     assert row.teacher_target is not None
     assert row.entry_action_target == Action.WAIT
     assert row.teacher_imitation_visible is False
+
+
+def test_replay_round_trip_preserves_negative_pnl_recovery_state() -> None:
+    episode = _episode("NQ", "timeout", "long", 0)
+    marked = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{**item.__dict__, "recovery_active": index < 3})
+            for index, item in enumerate(episode.transitions)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=1,
+        sequence_length=6,
+        seed=59,
+    )
+    replay.add(marked)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=1,
+        sequence_length=6,
+        seed=61,
+    )
+
+    restored.load_state_dict(replay.state_dict())
+
+    row_states = [item.recovery_active for item in restored.sample(1)[0]]
+    assert row_states == [True, True, True, False, False, False]
 
 
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
@@ -1512,7 +1543,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 10
+    assert state["schema_version"] == 11
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

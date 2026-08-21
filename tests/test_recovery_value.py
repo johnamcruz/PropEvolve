@@ -239,7 +239,7 @@ def test_recovery_value_store_does_not_accept_replay_transitions() -> None:
         ))
 
 
-def _agent(seed: int) -> RecurrentC51Agent:
+def _agent(seed: int, **overrides) -> RecurrentC51Agent:
     return RecurrentC51Agent(
         2,
         hidden_dim=8,
@@ -253,6 +253,7 @@ def _agent(seed: int) -> RecurrentC51Agent:
         target_sync_updates=250,
         device="cpu",
         seed=seed,
+        **overrides,
     )
 
 
@@ -348,3 +349,68 @@ def test_recovery_target_adds_one_loss_to_the_existing_optimizer_step() -> None:
     assert candidate.last_train_metrics["total_loss"] > (
         candidate.last_train_metrics["rl_loss"]
     )
+
+
+def test_recovery_training_retains_v21_entry_policy_only_at_nonnegative_pnl() -> None:
+    agent = _agent(307, policy_retention_loss_weight=1.0)
+    agent.retain_policy(apply_to_all_management_rows=True)
+    with torch.no_grad():
+        agent.online.output.bias.view(len(Action), agent.atoms)[
+            int(Action.ENTER_SHORT_1)
+        ].add_(3.0)
+    healthy = tuple(
+        Transition(
+            **{
+                **item.__dict__,
+                "recovery_active": False,
+            }
+        )
+        for item in _ordinary_v21_batch()[0]
+    )
+    recovery = tuple(
+        Transition(
+            **{
+                **item.__dict__,
+                "recovery_active": True,
+            }
+        )
+        for item in _ordinary_v21_batch()[0]
+    )
+
+    agent.train_batch(
+        (healthy, recovery),
+        retain_nonnegative_entry_policy=True,
+    )
+
+    assert agent.last_train_metrics[
+        "healthy_entry_policy_retention_rows"
+    ] == 4.0
+    assert agent.last_train_metrics[
+        "healthy_entry_policy_retention_loss"
+    ] > 0.0
+
+
+def test_recovery_training_does_not_anchor_negative_pnl_entry_rows() -> None:
+    agent = _agent(311, policy_retention_loss_weight=1.0)
+    agent.retain_policy(apply_to_all_management_rows=True)
+    recovery = tuple(
+        Transition(
+            **{
+                **item.__dict__,
+                "recovery_active": True,
+            }
+        )
+        for item in _ordinary_v21_batch()[0]
+    )
+
+    agent.train_batch(
+        (recovery, recovery),
+        retain_nonnegative_entry_policy=True,
+    )
+
+    assert agent.last_train_metrics[
+        "healthy_entry_policy_retention_rows"
+    ] == 0.0
+    assert agent.last_train_metrics[
+        "healthy_entry_policy_retention_loss"
+    ] == 0.0
