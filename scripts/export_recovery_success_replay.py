@@ -18,7 +18,8 @@ import numpy as np
 import torch
 
 
-SCHEMA = "propevolve_recovery_success_replay_v1"
+RECOVERY_SCHEMA = "propevolve_recovery_success_replay_v1"
+HEALTHY_SCHEMA = "propevolve_healthy_pass_replay_v1"
 
 
 class _LazyBytes:
@@ -252,6 +253,16 @@ def _is_successful_recovery_pass(episode: Mapping[str, object]) -> bool:
     )
 
 
+def _is_healthy_pass(episode: Mapping[str, object]) -> bool:
+    if episode.get("outcome") != "pass":
+        return False
+    recovery_active = np.asarray(
+        episode.get("recovery_active", ()),
+        dtype=np.bool_,
+    )
+    return bool(recovery_active.size and np.any(~recovery_active))
+
+
 def _with_recovery_state(
     episode: Mapping[str, object],
 ) -> Mapping[str, object]:
@@ -283,7 +294,16 @@ def export(
     output: Path,
     *,
     episode_prefixes: tuple[str, ...] = (),
+    kind: str = "recovery",
 ) -> dict[str, object]:
+    if kind not in {"recovery", "healthy"}:
+        raise ValueError("pass replay export kind is invalid")
+    predicate = (
+        _is_successful_recovery_pass
+        if kind == "recovery"
+        else _is_healthy_pass
+    )
+    schema = RECOVERY_SCHEMA if kind == "recovery" else HEALTHY_SCHEMA
     contract = None
     schema_version = None
     random_state = None
@@ -329,11 +349,11 @@ def export(
                     materialized = _with_recovery_state(
                         _materialize(episode, source)
                     )
-                    if not _is_successful_recovery_pass(materialized):
+                    if not predicate(materialized):
                         continue
                     if not episode_id or episode_id in episode_ids:
                         raise ValueError(
-                            "recovery pass replay episode identity collided"
+                            "pass replay episode identity collided"
                         )
                     episodes.append(materialized)
                     episode_ids.add(episode_id)
@@ -348,7 +368,7 @@ def export(
         })
         del payload
     if not episodes or contract is None or random_state is None:
-        raise ValueError("source checkpoints contain no retained recovery pass")
+        raise ValueError("source checkpoints contain no retained pass")
     replay_state = {
         "schema_version": schema_version,
         "contract": contract,
@@ -359,7 +379,7 @@ def export(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     torch.save({
-        "schema": SCHEMA,
+        "schema": schema,
         "source_checkpoints": sources,
         "replay_state": replay_state,
     }, temporary)
@@ -368,7 +388,8 @@ def export(
         "artifact": str(output),
         "sha256": _sha256(output),
         "source_checkpoints": len(sources),
-        "successful_recovery_passes": len(episodes),
+        "kind": kind,
+        "retained_passes": len(episodes),
     }
 
 
@@ -377,11 +398,17 @@ def main() -> int:
     parser.add_argument("--checkpoint", action="append", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--episode-prefix", action="append", default=[])
+    parser.add_argument(
+        "--kind",
+        choices=("recovery", "healthy"),
+        default="recovery",
+    )
     args = parser.parse_args()
     receipt = export(
         tuple(Path(value) for value in args.checkpoint),
         Path(args.output),
         episode_prefixes=tuple(args.episode_prefix),
+        kind=args.kind,
     )
     print(receipt)
     return 0

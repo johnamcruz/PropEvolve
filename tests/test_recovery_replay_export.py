@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from scripts.export_recovery_success_replay import (
+    _is_healthy_pass,
     _is_successful_recovery_pass,
     _with_recovery_state,
 )
@@ -29,6 +30,21 @@ def test_failure_or_pass_without_breakeven_is_not_recovery_competence() -> None:
         "recovery_active": np.array([True, False]),
     }) is False
     assert _is_successful_recovery_pass({
+        "outcome": "pass",
+        "recovery_active": np.array([True, True]),
+    }) is False
+
+
+def test_healthy_pass_export_excludes_failures_and_all_red_passes() -> None:
+    assert _is_healthy_pass({
+        "outcome": "pass",
+        "recovery_active": np.array([False, False]),
+    }) is True
+    assert _is_healthy_pass({
+        "outcome": "blow",
+        "recovery_active": np.array([False, False]),
+    }) is False
+    assert _is_healthy_pass({
         "outcome": "pass",
         "recovery_active": np.array([True, True]),
     }) is False

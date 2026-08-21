@@ -1272,6 +1272,46 @@ def test_recovery_pass_replay_rotates_through_best_economic_examples() -> None:
     assert anchor_values == [82, 72, 62, 52, 42, 32, 22, 12]
 
 
+def test_healthy_pass_replay_anchors_nonnegative_flat_policy_rows() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=71,
+    )
+    episode = _episode("NQ", "pass", "short", 0)
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    replay.add(Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{
+                **item.__dict__,
+                "valid_actions": flat_actions,
+                "next_valid_actions": () if item.terminated else flat_actions,
+                "entry_action_target": Action.WAIT,
+                "recovery_active": index < 3,
+            })
+            for index, item in enumerate(episode.transitions)
+        ),
+    ))
+
+    sequence = replay.sample_healthy_pass_sequences(1)[0]
+
+    anchor = sequence[2]
+    assert anchor.recovery_active is False
+    assert anchor.valid_actions == flat_actions
+    assert anchor.training_valid is True
+
+
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,

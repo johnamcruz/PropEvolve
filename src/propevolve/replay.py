@@ -1666,6 +1666,55 @@ class BalancedSequenceReplay:
             )
         )
 
+    def sample_healthy_pass_sequences(
+        self,
+        count: int,
+        *,
+        max_examples: int = 8,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Sample pass traces with a healthy flat row in the learning window."""
+        if count < 1 or max_examples < 1:
+            raise ValueError("healthy pass replay count must be positive")
+        candidates: list[tuple[float, str, _StoredEpisode, np.ndarray]] = []
+        flat_action_count = int(Action.ENTER_SHORT_1) + 1
+        for episode in self._episodes.values():
+            if episode.outcome != "pass":
+                continue
+            healthy_flat_rows = np.flatnonzero(
+                ~episode.recovery_active
+                & (episode.entry_action_targets >= int(Action.WAIT))
+                & episode.valid_masks[:, :flat_action_count].all(axis=1)
+                & (episode.valid_masks.sum(axis=1) == flat_action_count)
+            )
+            if healthy_flat_rows.size:
+                candidates.append((
+                    float(np.sum(episode.rewards, dtype=np.float64)),
+                    episode.episode_id,
+                    episode,
+                    healthy_flat_rows,
+                ))
+        if not candidates:
+            return ()
+        candidates = sorted(
+            candidates,
+            key=lambda item: (-item[0], item[1]),
+        )[:max_examples]
+        starts = self._sample_calls
+        self._sample_calls += count
+        sequences = []
+        for offset in range(count):
+            candidate_index = (starts + offset) % len(candidates)
+            _, _, episode, healthy_flat_rows = candidates[candidate_index]
+            cycle = (starts + offset) // len(candidates)
+            anchor_index = int(healthy_flat_rows[cycle % len(healthy_flat_rows)])
+            sequences.append(episode.target_anchored_sequence(
+                anchor_index=anchor_index,
+                length=self.sequence_length,
+                recurrent_burn_in=self.recurrent_burn_in,
+                n_step_return=self.n_step_return,
+            ))
+        return tuple(sequences)
+
     @staticmethod
     def _paired_context_for_side(
         context: np.ndarray,

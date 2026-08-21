@@ -477,7 +477,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "start_pnls",
         "retain_nonnegative_entry_policy",
     }
-    optional_supervision_fields = {"success_replay"}
+    optional_supervision_fields = {"success_replay", "healthy_pass_replay"}
     if not isinstance(curriculum, dict) or set(curriculum) != required:
         raise ValueError("recovery curriculum contract is invalid")
     start = curriculum["start_state"]
@@ -511,6 +511,27 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         or success_replay["max_examples"] < 1
     ):
         raise ValueError("recovery pass replay contract is invalid")
+    healthy_pass_replay = supervision.get("healthy_pass_replay")
+    if healthy_pass_replay is not None and (
+        not isinstance(healthy_pass_replay, dict)
+        or set(healthy_pass_replay)
+        != {"path", "sha256", "update_period", "max_examples"}
+        or not isinstance(healthy_pass_replay["path"], str)
+        or not healthy_pass_replay["path"]
+        or not isinstance(healthy_pass_replay["sha256"], str)
+        or len(healthy_pass_replay["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in healthy_pass_replay["sha256"]
+        )
+        or isinstance(healthy_pass_replay["update_period"], bool)
+        or not isinstance(healthy_pass_replay["update_period"], int)
+        or healthy_pass_replay["update_period"] < 1
+        or isinstance(healthy_pass_replay["max_examples"], bool)
+        or not isinstance(healthy_pass_replay["max_examples"], int)
+        or healthy_pass_replay["max_examples"] < 1
+    ):
+        raise ValueError("healthy pass replay contract is invalid")
     integer_values = (
         curriculum["schedule_seed"],
         curriculum["stress_evaluation_episodes"],
