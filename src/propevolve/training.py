@@ -18,6 +18,7 @@ import time
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 import numpy as np
+import torch
 
 from .assets import AssetContract
 from .balance_aware_regime_selectivity import (
@@ -2270,6 +2271,10 @@ class RecoveryCurriculumSettings:
     supervision_start_pnls: tuple[float, ...]
     retain_nonnegative_entry_policy: bool
     start_state: ChallengeStartState
+    recovery_success_replay_update_period: int = 0
+    recovery_success_replay_max_examples: int = 8
+    recovery_success_replay_path: str | None = None
+    recovery_success_replay_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.schedule_seed, bool) or not isinstance(
@@ -2287,8 +2292,28 @@ class RecoveryCurriculumSettings:
             or isinstance(self.target_every_episodes, bool)
             or self.target_every_episodes < 1
             or type(self.retain_nonnegative_entry_policy) is not bool
+            or isinstance(self.recovery_success_replay_update_period, bool)
+            or self.recovery_success_replay_update_period < 0
+            or isinstance(self.recovery_success_replay_max_examples, bool)
+            or self.recovery_success_replay_max_examples < 1
         ):
             raise ValueError("recovery action-value supervision is invalid")
+        replay_identity = (
+            self.recovery_success_replay_path,
+            self.recovery_success_replay_sha256,
+        )
+        if self.recovery_success_replay_update_period == 0:
+            if any(value is not None for value in replay_identity):
+                raise ValueError("recovery pass replay schedule is disabled")
+        elif (
+            not all(isinstance(value, str) and value for value in replay_identity)
+            or len(str(self.recovery_success_replay_sha256)) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in str(self.recovery_success_replay_sha256)
+            )
+        ):
+            raise ValueError("recovery pass replay identity is invalid")
         if (
             not self.supervision_start_pnls
             or any(
@@ -2380,15 +2405,28 @@ def _recovery_curriculum_from_config(
     if set(start) != start_required:
         raise ValueError("recovery curriculum start-state fields are invalid")
     supervision = value["action_value_supervision"]
-    if not isinstance(supervision, Mapping) or set(supervision) != {
+    supervision_required = {
         "loss_weight",
         "temperature",
         "store_capacity",
         "target_every_episodes",
         "start_pnls",
         "retain_nonnegative_entry_policy",
-    }:
+    }
+    supervision_optional = {"success_replay"}
+    if (
+        not isinstance(supervision, Mapping)
+        or not supervision_required.issubset(supervision)
+        or set(supervision) - supervision_required - supervision_optional
+    ):
         raise ValueError("recovery action-value supervision is invalid")
+    success_replay = supervision.get("success_replay")
+    if success_replay is not None and (
+        not isinstance(success_replay, Mapping)
+        or set(success_replay)
+        != {"path", "sha256", "update_period", "max_examples"}
+    ):
+        raise ValueError("recovery pass replay identity is invalid")
     integer_fields = (
         value["schedule_seed"],
         start["position_side"],
@@ -2397,6 +2435,16 @@ def _recovery_curriculum_from_config(
         value["stress_evaluation_episodes"],
         supervision["store_capacity"],
         supervision["target_every_episodes"],
+        *(
+            ()
+            if success_replay is None
+            else (success_replay["update_period"],)
+        ),
+        *(
+            ()
+            if success_replay is None
+            else (success_replay["max_examples"],)
+        ),
     )
     numeric_fields = (
         value["recovery_success_pnl"],
@@ -2433,6 +2481,20 @@ def _recovery_curriculum_from_config(
         ),
         retain_nonnegative_entry_policy=bool(
             supervision["retain_nonnegative_entry_policy"]
+        ),
+        recovery_success_replay_update_period=(
+            0
+            if success_replay is None
+            else int(success_replay["update_period"])
+        ),
+        recovery_success_replay_max_examples=(
+            8 if success_replay is None else int(success_replay["max_examples"])
+        ),
+        recovery_success_replay_path=(
+            None if success_replay is None else str(success_replay["path"])
+        ),
+        recovery_success_replay_sha256=(
+            None if success_replay is None else str(success_replay["sha256"])
         ),
         start_state=ChallengeStartState(
             realized_pnl=float(start["realized_pnl"]),
@@ -2754,6 +2816,7 @@ class HistoricalCandidateRunner:
         resume = None
         replay_state = None
         recovery_value_store_state = None
+        recovery_success_replay_state = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
                 recovery_path, device=agent_settings["device"]
@@ -2800,6 +2863,9 @@ class HistoricalCandidateRunner:
                 raise ValueError("training recovery is missing replay state")
             recovery_value_store_state = manifest.get(
                 "recovery_value_store_state"
+            )
+            recovery_success_replay_state = manifest.get(
+                "recovery_success_replay_state"
             )
             _assert_recovery_entry_balance(loaded, agent_settings)
             _assert_recovery_regime_selectivity(loaded, agent_settings)
@@ -2916,6 +2982,63 @@ class HistoricalCandidateRunner:
         )
         if replay_state is not None:
             replay.load_state_dict(replay_state)
+        recovery_success_replay = None
+        if (
+            recovery_curriculum is not None
+            and recovery_curriculum.recovery_success_replay_path is not None
+        ):
+            recovery_success_replay = BalancedSequenceReplay(
+                capacity_episodes=int(
+                    training_config["replay_capacity_episodes"]
+                ),
+                capacity_transitions=int(
+                    training_config["replay_capacity_transitions"]
+                ),
+                sequence_length=int(training_config["sequence_length"]),
+                terminal_sequence_fraction=float(
+                    training_config["terminal_sequence_fraction"]
+                ),
+                safety_sequence_fraction=float(
+                    training_config.get("safety_sequence_fraction", 0.0)
+                ),
+                entry_opportunity_sequence_fraction=float(
+                    training_config.get(
+                        "entry_opportunity_sequence_fraction", 0.0
+                    )
+                ),
+                regime_wait_sequence_fraction=float(
+                    training_config.get("regime_wait_sequence_fraction", 0.0)
+                ),
+                regime_wait_sequence_update_period=int(
+                    training_config.get(
+                        "regime_wait_sequence_update_period", 0
+                    )
+                ),
+                **_regime_selectivity_replay_settings(
+                    regime_selectivity_spec
+                ),
+                recurrent_burn_in=int(agent.recurrent_burn_in),
+                n_step_return=int(agent.n_step_return),
+                seed=recovery_curriculum.schedule_seed,
+            )
+            _load_recovery_success_replay_artifact(
+                _resolve(
+                    root,
+                    recovery_curriculum.recovery_success_replay_path,
+                ),
+                expected_sha256=str(
+                    recovery_curriculum.recovery_success_replay_sha256
+                ),
+                replay=recovery_success_replay,
+            )
+            if recovery_success_replay_state is not None:
+                recovery_success_replay.load_state_dict(
+                    recovery_success_replay_state
+                )
+        elif recovery_success_replay_state is not None:
+            raise ValueError(
+                "checkpoint contains disabled recovery pass replay"
+            )
         policy_health_monitor = None
         if policy_health_config is not None:
             if teacher_targets is None or regime_selectivity_spec is None:
@@ -3047,6 +3170,11 @@ class HistoricalCandidateRunner:
                     if recovery_value_store is None
                     else recovery_value_store.state_dict()
                 ),
+                recovery_success_replay_state=(
+                    None
+                    if recovery_success_replay is None
+                    else recovery_success_replay.state_dict()
+                ),
                 policy_health_probe_path=(
                     policy_health_probe_path
                     if policy_health_config is not None
@@ -3164,6 +3292,7 @@ class HistoricalCandidateRunner:
             recovery_value_source_identity_sha256=(
                 resume_identity if recovery_curriculum is not None else None
             ),
+            recovery_success_replay=recovery_success_replay,
         )
         episode_coverage_receipt = None
         episode_coverage_path = output / "episode-coverage-receipt.json"
@@ -3740,6 +3869,7 @@ def _save_training_recovery(
     environment_rng_state: dict,
     replay_state: dict[str, object],
     recovery_value_store_state: dict[str, object] | None = None,
+    recovery_success_replay_state: dict[str, object] | None = None,
     policy_health_probe_path: Path | None = None,
 ) -> None:
     policy_health_probe_corpus = None
@@ -3767,6 +3897,7 @@ def _save_training_recovery(
             "replay_state": replay_state,
             "replay_restored": True,
             "recovery_value_store_state": recovery_value_store_state,
+            "recovery_success_replay_state": recovery_success_replay_state,
             "policy_health_probe_corpus": policy_health_probe_corpus,
         },
     )
@@ -4496,6 +4627,43 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else root / path
 
 
+def _load_recovery_success_replay_artifact(
+    path: Path,
+    *,
+    expected_sha256: str,
+    replay: BalancedSequenceReplay,
+) -> None:
+    """Authenticate and restore a training-only V22 recovery-pass library."""
+    if _path_sha256(path) != expected_sha256:
+        raise ValueError("recovery pass replay identity drifted")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if payload.get("schema") != "propevolve_recovery_success_replay_v1":
+        raise ValueError("recovery pass replay schema is invalid")
+    sources = payload.get("source_checkpoints")
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or any(
+            not isinstance(source, Mapping)
+            or set(source)
+            != {"causal_identity_sha256", "resume_identity"}
+            or not isinstance(source["causal_identity_sha256"], str)
+            or len(source["causal_identity_sha256"]) != 64
+            or not isinstance(source["resume_identity"], str)
+            or not source["resume_identity"]
+            for source in sources
+        )
+    ):
+        raise ValueError("recovery pass replay source identity is invalid")
+    state = payload.get("replay_state")
+    if not isinstance(state, Mapping):
+        raise ValueError("recovery pass replay state is invalid")
+    replay.load_state_dict(state)
+    if not replay.sample_successful_recovery_sequences(1):
+        raise ValueError("recovery pass replay lacks a successful boundary")
+    replay.load_state_dict(state)
+
+
 def _plain_contract_value(value):
     """Convert immutable runtime receipts into JSON/pickle-safe containers."""
     if isinstance(value, Mapping):
@@ -4638,6 +4806,7 @@ def train_agent(
     recovery_value_environment: HistoricalChallengeEnv | None = None,
     recovery_value_store: RecoveryValueStore | None = None,
     recovery_value_source_identity_sha256: str | None = None,
+    recovery_success_replay: BalancedSequenceReplay | None = None,
 ) -> TrainingResult:
     if episodes < 1 or minimum_environment_steps < 1:
         raise ValueError("episode ceiling and minimum environment steps must be positive")
@@ -4734,7 +4903,10 @@ def train_agent(
         recovery_value_source_identity_sha256,
     )
     if recovery_curriculum is None:
-        if any(component is not None for component in recovery_components):
+        if (
+            any(component is not None for component in recovery_components)
+            or recovery_success_replay is not None
+        ):
             raise ValueError("recovery-value components require a curriculum")
     elif (
         any(component is None for component in recovery_components)
@@ -4745,6 +4917,19 @@ def train_agent(
         )
     ):
         raise ValueError("recovery-value supervision contract is incomplete")
+    if recovery_curriculum is not None:
+        pass_replay_enabled = (
+            recovery_curriculum.recovery_success_replay_update_period > 0
+        )
+        if pass_replay_enabled != (recovery_success_replay is not None):
+            raise ValueError("recovery pass replay contract is incomplete")
+        if recovery_success_replay is not None and (
+            recovery_success_replay.sequence_length != replay.sequence_length
+            or recovery_success_replay.recurrent_burn_in
+            != replay.recurrent_burn_in
+            or recovery_success_replay.n_step_return != replay.n_step_return
+        ):
+            raise ValueError("recovery pass replay recurrent contract drifted")
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -5250,14 +5435,17 @@ def train_agent(
                 replay_transitions,
                 compiler,
             )
-        replay.add(Episode(
+        completed_episode = Episode(
             episode_id=f"historical-{episode_index}-{time.time_ns()}",
             ticker=str(terminal_info["ticker"]),
             outcome=outcome,
             primary_side=str(terminal_info["primary_side"]),
             ended_at_ns=time.time_ns(),
             transitions=replay_transitions,
-        ))
+        )
+        replay.add(completed_episode)
+        if recovery_success_replay is not None and outcome == "pass":
+            recovery_success_replay.add(completed_episode)
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
@@ -5377,8 +5565,35 @@ def train_agent(
                     class_index
                 ]
             ))
+        recovery_success_replay_sequences = 0
         if len(replay) >= warmup_episodes:
-            def train_replay_batch(batch: Sequence[Sequence[Transition]]) -> None:
+            def train_replay_batch(
+                batch: Sequence[Sequence[Transition]],
+                update_index: int,
+            ) -> None:
+                nonlocal recovery_success_replay_sequences
+                if (
+                    recovery_curriculum is not None
+                    and recovery_success_replay is not None
+                    and (update_index + 1)
+                    % recovery_curriculum.recovery_success_replay_update_period
+                    == 0
+                ):
+                    recovery_sequences = (
+                        recovery_success_replay
+                        .sample_successful_recovery_sequences(
+                            1,
+                            max_examples=(
+                                recovery_curriculum
+                                .recovery_success_replay_max_examples
+                            ),
+                        )
+                    )
+                    if recovery_sequences:
+                        batch = tuple(batch) + recovery_sequences
+                        recovery_success_replay_sequences += len(
+                            recovery_sequences
+                        )
                 recovery_target = (
                     recovery_value_store.sample()
                     if recovery_value_store is not None
@@ -5438,10 +5653,13 @@ def train_agent(
                             pending.append(
                                 executor.submit(replay.sample, batch_sequences)
                             )
-                        train_replay_batch(batch)
+                        train_replay_batch(batch, update_index)
             else:
-                for _ in range(updates_per_episode):
-                    train_replay_batch(replay.sample(batch_sequences))
+                for update_index in range(updates_per_episode):
+                    train_replay_batch(
+                        replay.sample(batch_sequences),
+                        update_index,
+                    )
         trade_count = int(terminal_info.get("trade_count", 0))
         recent_outcomes = progress.recent_outcomes if collapse_window_episodes else ()
         recent_hold_bars = (
@@ -5703,6 +5921,9 @@ def train_agent(
                 ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
+                ),
+                "recovery_success_replay_sequences": (
+                    recovery_success_replay_sequences
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,

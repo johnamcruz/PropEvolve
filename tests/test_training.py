@@ -25,7 +25,7 @@ from propevolve.decision import Action, PositionSide
 from propevolve.environment import ChallengeSpec, ChallengeStartState, MarketSeries
 from propevolve.entry_supervision import EntryTargetMetadata
 from propevolve.observation import TradeManagementObservationSpec
-from propevolve.replay import BalancedSequenceReplay
+from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.recovery import RecoveryValueStore
 from propevolve.training import (
     HistoricalCandidateRunner,
@@ -37,6 +37,7 @@ from propevolve.training import (
     _assert_recovery_regime_selectivity,
     _entry_action_balance,
     _entry_supervision_frozen_contract,
+    _load_recovery_success_replay_artifact,
     _regime_selectivity_agent_settings,
     _regime_selectivity_replay_settings,
     _recovery_curriculum_from_config,
@@ -2540,6 +2541,217 @@ def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> No
     )
 
     assert replay.recovery_flags == [True, False]
+
+
+def test_recovery_pass_replay_is_additive_to_the_ordinary_batch() -> None:
+    class RecoveryAgent(Agent):
+        recurrent_burn_in = 1
+        n_step_return = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+            self.recovery_boundaries: list[bool] = []
+
+        def train_batch(self, sequences, **kwargs) -> float:
+            self.batch_sizes.append(len(sequences))
+            self.recovery_boundaries.append(
+                len(sequences) == 2
+                and sequences[-1][1].recovery_active
+                and not sequences[-1][2].recovery_active
+            )
+            self.last_train_metrics = {}
+            return 0.5
+
+    class PassingRecoveryEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            return np.zeros(1, np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 0,
+                "realized_pnl": -2_000.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            terminated = self.steps == 2
+            realized_pnl = 0.0 if self.steps == 1 else 6_000.0
+            return np.full(1, self.steps, np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else (Action.WAIT,),
+                "ticker": "NQ",
+                "fill_index": self.steps,
+                "outcome": "pass" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": realized_pnl,
+                "equity_pnl": realized_pnl,
+            }
+
+    class SidecarEnvironment:
+        def reset(self, *, options=None):
+            return np.zeros(1, np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "start": 0,
+                "realized_pnl": float(
+                    options["challenge_start_state"].realized_pnl
+                ),
+            }
+
+        def step(self, action):
+            return np.ones(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": "timeout",
+                "realized_pnl": -1_900.0,
+                "equity_pnl": -1_900.0,
+                "recovery_status": "not_recovered",
+            }
+
+    class FrozenPolicy:
+        def select_action(self, observation, *, hidden, valid_actions, epsilon,
+                          return_action_values=False):
+            return Action.WAIT, None, None
+
+    settings = RecoveryCurriculumSettings(**{
+        **_recovery_curriculum_settings().__dict__,
+        "recovery_success_replay_update_period": 2,
+        "recovery_success_replay_path": "runs/recovery-passes.pt",
+        "recovery_success_replay_sha256": "a" * 64,
+    })
+    pass_replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=73,
+    )
+    pass_replay.add(Episode(
+        episode_id="prior-v22-pass",
+        ticker="NQ",
+        outcome="pass",
+        primary_side="long",
+        ended_at_ns=1,
+        transitions=tuple(
+            Transition(
+                observation=np.array([index], np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array([index + 1], np.float32),
+                terminated=index == 3,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=() if index == 3 else (Action.WAIT,),
+                recovery_active=index < 2,
+            )
+            for index in range(4)
+        ),
+    ))
+    agent = RecoveryAgent()
+    train_agent(
+        agent,
+        PassingRecoveryEnvironment(),
+        episodes=2,
+        minimum_environment_steps=4,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=4,
+            recurrent_burn_in=1,
+            n_step_return=1,
+            seed=71,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=2,
+        batch_sequences=1,
+        recurrent_horizon=4,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        recovery_curriculum=settings,
+        recovery_value_policy=FrozenPolicy(),
+        recovery_value_environment=SidecarEnvironment(),
+        recovery_value_store=RecoveryValueStore(capacity=10, seed=37),
+        recovery_value_source_identity_sha256="3" * 64,
+        recovery_success_replay=pass_replay,
+    )
+
+    assert agent.batch_sizes == [1, 2, 1, 2]
+    assert agent.recovery_boundaries == [False, True, False, True]
+
+
+def test_recovery_pass_replay_artifact_is_authenticated_and_recurrent(
+    tmp_path: Path,
+) -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=79,
+    )
+    source.add(Episode(
+        episode_id="saved-v22-pass",
+        ticker="NQ",
+        outcome="pass",
+        primary_side="short",
+        ended_at_ns=2,
+        transitions=tuple(
+            Transition(
+                observation=np.array([index], np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array([index + 1], np.float32),
+                terminated=index == 3,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=() if index == 3 else (Action.WAIT,),
+                recovery_active=index < 2,
+            )
+            for index in range(4)
+        ),
+    ))
+    artifact = tmp_path / "v22-recovery-passes.pt"
+    torch.save({
+        "schema": "propevolve_recovery_success_replay_v1",
+        "source_checkpoints": [{
+            "causal_identity_sha256": "b" * 64,
+            "resume_identity": "frozen-v22-run",
+        }],
+        "replay_state": source.state_dict(),
+    }, artifact)
+    expected_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    restored = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=83,
+    )
+
+    _load_recovery_success_replay_artifact(
+        artifact,
+        expected_sha256=expected_sha256,
+        replay=restored,
+    )
+
+    sequence = restored.sample_successful_recovery_sequences(1)[0]
+    assert sequence[1].recovery_active is True
+    assert sequence[2].recovery_active is False
+
+    with pytest.raises(ValueError, match="identity drifted"):
+        _load_recovery_success_replay_artifact(
+            artifact,
+            expected_sha256="0" * 64,
+            replay=restored,
+        )
 
 def test_teacher_curriculum_is_gradual_and_deterministic() -> None:
     agent = Agent()

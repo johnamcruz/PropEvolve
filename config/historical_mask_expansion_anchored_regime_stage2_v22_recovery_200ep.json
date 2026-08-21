@@ -301,7 +301,13 @@
       "store_capacity": 200,
       "target_every_episodes": 1,
       "start_pnls": [-2500, -2000, -1500, -1000, -500],
-      "retain_nonnegative_entry_policy": true
+      "retain_nonnegative_entry_policy": true,
+      "success_replay": {
+        "path": "runs/recovery-pass-replay/v22-best-available-recovery-passes-v1.pt",
+        "sha256": "c9571bafc557d7afc9c9e6b5a9d012c8cbac67c510c7a812e8da769a64eae960",
+        "update_period": 8,
+        "max_examples": 8
+      }
     }
   },
   "evolution": {

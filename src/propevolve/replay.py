@@ -655,6 +655,46 @@ class _StoredEpisode:
         ]
         return tuple((*pre, *real, *post))
 
+    def recovery_anchored_sequence(
+        self,
+        *,
+        anchor_index: int,
+        length: int,
+        recurrent_burn_in: int,
+        n_step_return: int,
+    ) -> tuple[Transition, ...]:
+        """Place the last red row before breakeven at the first learnable row."""
+        last_learning_index = length - n_step_return
+        if (
+            not 0 <= anchor_index < self.transition_count - 1
+            or not recurrent_burn_in <= last_learning_index < length
+            or not bool(self.recovery_active[anchor_index])
+            or bool(self.recovery_active[anchor_index + 1])
+        ):
+            raise ValueError("successful recovery replay anchor is invalid")
+        source_start = max(0, anchor_index - recurrent_burn_in)
+        context_before_anchor = anchor_index - source_start
+        real_start = recurrent_burn_in - context_before_anchor
+        source_stop = min(
+            self.transition_count,
+            source_start + length - real_start,
+        )
+        real = list(self.sequence(source_start, source_stop - source_start))
+        pre = [
+            self._padding_transition(
+                real[0].observation,
+                next_recurrent_reset=index == real_start - 1,
+            )
+            for index in range(real_start)
+        ]
+        if pre:
+            real[0] = replace(real[0], recurrent_reset=True)
+        post = [
+            self._padding_transition(real[-1].next_observation)
+            for _ in range(length - real_start - len(real))
+        ]
+        return tuple((*pre, *real, *post))
+
 
 class BalancedSequenceReplay:
     """Retain recent episodes while sampling scarce outcome buckets fairly."""
@@ -1580,6 +1620,51 @@ class BalancedSequenceReplay:
                 start = self._random.randint(0, last_start)
             sequences.append(episode.sequence(start, self.sequence_length))
         return tuple(sequences)
+
+    def sample_successful_recovery_sequences(
+        self,
+        count: int,
+        *,
+        max_examples: int = 8,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Sample pass traces at the causal red-to-breakeven boundary."""
+        if count < 1 or max_examples < 1:
+            raise ValueError("successful recovery replay count must be positive")
+        candidates: list[tuple[float, str, _StoredEpisode, int]] = []
+        for episode in self._episodes.values():
+            if episode.outcome != "pass" or episode.transition_count < 2:
+                continue
+            boundary_indices = np.flatnonzero(
+                episode.recovery_active[:-1]
+                & ~episode.recovery_active[1:]
+            )
+            if boundary_indices.size:
+                candidates.append((
+                    float(np.sum(episode.rewards, dtype=np.float64)),
+                    episode.episode_id,
+                    episode,
+                    int(boundary_indices[-1]),
+                ))
+        if not candidates:
+            return ()
+        candidates = sorted(
+            candidates,
+            key=lambda item: (-item[0], item[1]),
+        )[:max_examples]
+        start = self._sample_calls % len(candidates)
+        self._sample_calls += count
+        return tuple(
+            episode.recovery_anchored_sequence(
+                anchor_index=anchor_index,
+                length=self.sequence_length,
+                recurrent_burn_in=self.recurrent_burn_in,
+                n_step_return=self.n_step_return,
+            )
+            for _, _, episode, anchor_index in (
+                candidates[(start + offset) % len(candidates)]
+                for offset in range(count)
+            )
+        )
 
     @staticmethod
     def _paired_context_for_side(

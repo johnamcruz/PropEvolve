@@ -1206,6 +1206,72 @@ def test_replay_round_trip_preserves_negative_pnl_recovery_state() -> None:
     assert row_states == [True, True, True, False, False, False]
 
 
+def test_replay_anchors_successful_pass_at_recovery_boundary() -> None:
+    episode = _episode("NQ", "pass", "long", 0)
+    marked = Episode(
+        episode_id=episode.episode_id,
+        ticker=episode.ticker,
+        outcome=episode.outcome,
+        primary_side=episode.primary_side,
+        ended_at_ns=episode.ended_at_ns,
+        transitions=tuple(
+            Transition(**{**item.__dict__, "recovery_active": index < 3})
+            for index, item in enumerate(episode.transitions)
+        ),
+    )
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=67,
+    )
+    replay.add(marked)
+
+    sequence = replay.sample_successful_recovery_sequences(1)[0]
+
+    assert len(sequence) == 5
+    assert sequence[2].recovery_active is True
+    assert sequence[3].recovery_active is False
+    assert sequence[2].training_valid is True
+    assert sequence[3].training_valid is True
+
+
+def test_recovery_pass_replay_rotates_through_best_economic_examples() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=10,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=69,
+    )
+    for score in range(9):
+        episode = _episode("NQ", "pass", "long", score * 10)
+        replay.add(Episode(
+            episode_id=episode.episode_id,
+            ticker=episode.ticker,
+            outcome=episode.outcome,
+            primary_side=episode.primary_side,
+            ended_at_ns=episode.ended_at_ns,
+            transitions=tuple(
+                Transition(**{
+                    **item.__dict__,
+                    "reward": float(score) if index == 0 else 0.0,
+                    "recovery_active": index < 3,
+                })
+                for index, item in enumerate(episode.transitions)
+            ),
+        ))
+
+    sequences = replay.sample_successful_recovery_sequences(
+        8,
+        max_examples=8,
+    )
+
+    anchor_values = [int(sequence[2].observation[0]) for sequence in sequences]
+    assert anchor_values == [82, 72, 62, 52, 42, 32, 22, 12]
+
+
 def test_replay_caps_compact_storage_by_transition_budget() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=20,
