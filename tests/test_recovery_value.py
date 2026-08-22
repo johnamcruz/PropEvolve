@@ -428,6 +428,107 @@ def test_recovery_target_replays_causal_prefix_and_preserves_recurrent_boundary(
     ] * 3
 
 
+def test_recovery_target_keeps_fallback_wait_anchor_metadata_atomic() -> None:
+    """A WAIT fallback may carry an Entry label without being an Entry anchor."""
+    outcomes = {
+        Action.WAIT: ("timeout", -1_900.0, False),
+        Action.ENTER_LONG_1: ("timeout", 0.0, True),
+        Action.ENTER_SHORT_1: ("blow", -3_000.0, False),
+    }
+
+    class PrefixEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def reset(self, *, options):
+            self.steps = 0
+            return np.array([1.0, 0.0], np.float32), {
+                "ticker": options["ticker"],
+                "start": options["start"],
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": -2_000.0,
+                "equity_pnl": -2_000.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            if self.steps == 1:
+                return np.array([2.0, 0.0], np.float32), 0.0, False, False, {
+                    "outcome": None,
+                    "valid_actions": (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    ),
+                    "realized_pnl": -2_000.0,
+                    "equity_pnl": -2_000.0,
+                }
+            outcome, pnl, recovered = outcomes[Action(action)]
+            return np.array([3.0, 0.0], np.float32), 0.0, True, False, {
+                "outcome": outcome,
+                "valid_actions": (),
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "recovery_status": (
+                    "recovered" if recovered else "not_recovered"
+                ),
+            }
+
+    valid_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    prefix = (
+        Transition(
+            observation=np.array([1.0, 0.0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([2.0, 0.0], np.float32),
+            terminated=False,
+            valid_actions=valid_actions,
+            next_valid_actions=valid_actions,
+            recurrent_reset=True,
+            recovery_active=True,
+        ),
+        Transition(
+            observation=np.array([2.0, 0.0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([3.0, 0.0], np.float32),
+            terminated=False,
+            valid_actions=valid_actions,
+            next_valid_actions=valid_actions,
+            recovery_active=True,
+            paired_a_plus_side=Action.ENTER_LONG_1,
+            paired_a_plus_economic_win=True,
+        ),
+    )
+
+    target = build_recovery_value_target(
+        _RecordingPolicy(Action.WAIT, "frozen"),
+        PrefixEnvironment(),
+        reset_options={
+            "ticker": "NQ",
+            "start": 17,
+            "challenge_start_state": object(),
+        },
+        recurrent_horizon=64,
+        start_pnl=-2_000.0,
+        recovery_success_pnl=0.0,
+        source_role="training",
+        source_identity_sha256="9" * 64,
+        causal_prefix=prefix,
+    )
+
+    assert target.anchor_action is None
+    assert target.anchor_economic_success is None
+
+
 def test_recovery_value_store_round_trip_resumes_the_same_sample() -> None:
     store = RecoveryValueStore(capacity=3, seed=19)
     for index in range(3):

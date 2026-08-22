@@ -691,6 +691,18 @@ def build_recovery_value_target(
                 raise ValueError("recovery target rollout cannot be truncated")
             step_index += 1
     assert shared_observation is not None
+    anchor_action: Action | None = None
+    anchor_economic_success: bool | None = None
+    if (
+        prefix
+        and prefix[-1].action in {
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
+        and type(prefix[-1].paired_a_plus_economic_win) is bool
+    ):
+        anchor_action = prefix[-1].action
+        anchor_economic_success = prefix[-1].paired_a_plus_economic_win
     return recovery_action_values(
         observation=shared_observation,
         branches=branches,
@@ -700,19 +712,8 @@ def build_recovery_value_target(
         source_identity_sha256=source_identity_sha256,
         recurrent_observations=recurrent_observations,
         recurrent_resets=recurrent_resets,
-        anchor_action=(
-            None
-            if not prefix
-            or prefix[-1].action not in {
-                Action.ENTER_LONG_1,
-                Action.ENTER_SHORT_1,
-            }
-            or type(prefix[-1].paired_a_plus_economic_win) is not bool
-            else prefix[-1].action
-        ),
-        anchor_economic_success=(
-            None if not prefix else prefix[-1].paired_a_plus_economic_win
-        ),
+        anchor_action=anchor_action,
+        anchor_economic_success=anchor_economic_success,
     )
 
 
