@@ -323,15 +323,15 @@
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated V21 A+ selector, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs, authenticated R14 recovery passes rehearse successful recovery behavior, and authenticated V21 healthy passes sparsely retain the nonnegative A+ entry policy. Recovery-disabled V21 behavior, action supervision, challenge outcomes, and teacher-free inference remain unchanged.",
+    "hypothesis": "Starting from the immutable authenticated zero-blow Stage 2B recovery policy, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs, authenticated recovery passes rehearse successful recovery behavior, authenticated V21 healthy passes sparsely retain the inherited nonnegative A+ entry policy, and current retained-versus-relapsed recovery evidence refines post-recovery behavior. V21 action supervision, challenge outcomes, and teacher-free inference remain unchanged through the inherited Stage 2B policy.",
     "parent_candidate_ids": [
-      "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
+      "a744e9228dd6100b4337ac0102f7bcfead6bb72155707975edc4ef436e2d4440"
     ],
     "base_parent": {
-      "archive_root": "runs/historical_mask_expansion_anchored_regime_stage2_v21_paired_recurrent_aplus_200ep/archive",
-      "candidate_id": "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23",
-      "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
-      "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
+      "archive_root": "runs/frozen-parents/stage2b-recovery-r2/archive",
+      "candidate_id": "a744e9228dd6100b4337ac0102f7bcfead6bb72155707975edc4ef436e2d4440",
+      "evaluation_id": "ed0fc919de1dc291ffe41b544428b706400fdefa9b07d79a2ee13e6d34fd20c7",
+      "model_sha256": "189b09166cdc375fa635e986e829e3dcbfb0b70cdf4f9706db5eec8a92c814f4"
     },
     "allowed_revision_paths": [],
     "frozen_paths": [
