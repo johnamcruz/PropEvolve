@@ -649,6 +649,7 @@ def test_v21_recipe_changes_only_paired_replay_and_uses_200_episode_stage() -> N
     baseline = load_experiment_config(STAGE2_PAIRED_A_PLUS_RECIPE)
     candidate = load_experiment_config(STAGE2_PAIRED_RECURRENT_A_PLUS_RECIPE)
 
+    assert candidate.get("recovery_curriculum") is None
     selectivity = candidate["regime_selectivity"]
     assert selectivity["semantics"] == (
         PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
