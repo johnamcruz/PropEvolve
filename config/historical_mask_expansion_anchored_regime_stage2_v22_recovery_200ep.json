@@ -325,13 +325,13 @@
   "evolution": {
     "hypothesis": "Starting from the immutable authenticated zero-blow Stage 2B recovery policy, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs, authenticated recovery passes rehearse successful recovery behavior, authenticated V21 healthy passes sparsely retain the inherited nonnegative A+ entry policy, and current retained-versus-relapsed recovery evidence refines post-recovery behavior. V21 action supervision, challenge outcomes, and teacher-free inference remain unchanged through the inherited Stage 2B policy.",
     "parent_candidate_ids": [
-      "a744e9228dd6100b4337ac0102f7bcfead6bb72155707975edc4ef436e2d4440"
+      "cc33f28d7b4a16f74f3e51f17f2b88dd53354b2b7980b3826694dfcf2111d59e"
     ],
     "base_parent": {
       "archive_root": "runs/frozen-parents/stage2b-recovery-r2/archive",
-      "candidate_id": "a744e9228dd6100b4337ac0102f7bcfead6bb72155707975edc4ef436e2d4440",
-      "evaluation_id": "ed0fc919de1dc291ffe41b544428b706400fdefa9b07d79a2ee13e6d34fd20c7",
-      "model_sha256": "189b09166cdc375fa635e986e829e3dcbfb0b70cdf4f9706db5eec8a92c814f4"
+      "candidate_id": "cc33f28d7b4a16f74f3e51f17f2b88dd53354b2b7980b3826694dfcf2111d59e",
+      "evaluation_id": "5c906d43e466bffb15c6014773c3484e1d049d4e9eb3217e1c92d7ad45617915",
+      "model_sha256": "ffd793b1d3c34f4380cf7e5624bc8ba6955ea9e53361fff51939cc96c60f34b2"
     },
     "allowed_revision_paths": [],
     "frozen_paths": [
