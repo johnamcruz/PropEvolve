@@ -2971,7 +2971,7 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         def reset(self, *, options=None):
             self.steps = 0
             return np.zeros(1, np.float32), {
-                "valid_actions": (Action.WAIT,),
+                "valid_actions": flat_actions,
                 "ticker": "NQ",
                 "start": 0,
                 "realized_pnl": -2_000.0,
@@ -2982,7 +2982,7 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
             terminated = self.steps == 2
             realized_pnl = 0.0 if self.steps == 1 else 6_000.0
             return np.full(1, self.steps, np.float32), 0.0, terminated, False, {
-                "valid_actions": () if terminated else (Action.WAIT,),
+                "valid_actions": () if terminated else flat_actions,
                 "ticker": "NQ",
                 "fill_index": self.steps,
                 "outcome": "pass" if terminated else None,
@@ -3180,20 +3180,27 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         recovery_success_replay=pass_replay,
         healthy_pass_replay=healthy_replay,
         post_recovery_contrast_replay=post_recovery_replay,
+        entry_action_lookup=lambda ticker, decision_index: Action.WAIT,
     )
 
     assert agent.batch_sizes == [1, 5, 1, 5]
     assert agent.recovery_boundaries == [False, True, False, True]
     assert agent.healthy_policy_rows == [False, True, False, True]
     assert agent.post_recovery_pairs == [False, True, False, True]
-    assert [
-        episode["episode_id"]
-        for episode in pass_replay.state_dict()["episodes"]
-    ] == ["prior-v22-pass"]
+    promoted_passes = pass_replay.state_dict()["episodes"]
+    assert len(promoted_passes) == 2
+    assert all(episode["outcome"] == "pass" for episode in promoted_passes)
+    promoted_ids = {episode["episode_id"] for episode in promoted_passes}
+    assert "prior-v22-pass" in promoted_ids
+    assert any(value.startswith("historical-1-") for value in promoted_ids)
     assert [
         episode["episode_id"]
         for episode in healthy_replay.state_dict()["episodes"]
-    ] == ["v21-healthy-pass"]
+    ][0] == "v21-healthy-pass"
+    assert any(
+        episode["episode_id"].startswith("historical-1-")
+        for episode in healthy_replay.state_dict()["episodes"]
+    )
     assert [
         episode["episode_id"]
         for episode in post_recovery_replay.state_dict()["episodes"]

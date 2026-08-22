@@ -1297,11 +1297,13 @@ class BalancedSequenceReplay:
         self._sample_calls = sample_calls
 
     def add(self, episode: Episode) -> None:
-        stored = _StoredEpisode.from_episode(episode)
-        replaced = self._episodes.pop(episode.episode_id, None)
+        self._retain_stored_episode(_StoredEpisode.from_episode(episode))
+
+    def _retain_stored_episode(self, stored: _StoredEpisode) -> None:
+        replaced = self._episodes.pop(stored.episode_id, None)
         if replaced is not None:
             self._transition_count -= replaced.transition_count
-        self._episodes[episode.episode_id] = stored
+        self._episodes[stored.episode_id] = stored
         self._transition_count += stored.transition_count
         while len(self._episodes) > 1 and (
             len(self._episodes) > self.capacity
@@ -1324,6 +1326,86 @@ class BalancedSequenceReplay:
             )
             removed = self._episodes.pop(remove_id)
             self._transition_count -= removed.transition_count
+
+    def absorb_recent_successful_recoveries(
+        self,
+        source: "BalancedSequenceReplay",
+        *,
+        max_examples: int = 8,
+    ) -> int:
+        """Share the newest authentic recovery passes from ordinary replay.
+
+        Stored episodes are immutable, so sharing them avoids copying their
+        observation arrays or serializing a second growing replay corpus.
+        Re-running this after checkpoint restore reconstructs the same online
+        priority pool from the already-resumable ordinary replay.
+        """
+        if not isinstance(source, BalancedSequenceReplay) or max_examples < 1:
+            raise ValueError("recent recovery replay request is invalid")
+        if (
+            self.sequence_length != source.sequence_length
+            or self.recurrent_burn_in != source.recurrent_burn_in
+            or self.n_step_return != source.n_step_return
+        ):
+            raise ValueError("recent recovery replay recurrent contract drifted")
+        candidates = sorted(
+            (
+                episode
+                for episode in source._episodes.values()
+                if episode.outcome == "pass"
+                and episode.transition_count >= 2
+                and np.any(
+                    episode.recovery_active[:-1]
+                    & ~episode.recovery_active[1:]
+                )
+            ),
+            key=lambda episode: (-episode.ended_at_ns, episode.episode_id),
+        )[:max_examples]
+        added = 0
+        # Retain oldest-to-newest so a tight target capacity preserves the
+        # newest pass if admission requires eviction.
+        for episode in reversed(candidates):
+            if episode.episode_id not in self._episodes:
+                added += 1
+            self._retain_stored_episode(episode)
+        return added
+
+    def absorb_recent_healthy_passes(
+        self,
+        source: "BalancedSequenceReplay",
+        *,
+        max_examples: int = 8,
+    ) -> int:
+        """Share newest passes that contain usable post-recovery flat rows."""
+        if not isinstance(source, BalancedSequenceReplay) or max_examples < 1:
+            raise ValueError("recent healthy pass replay request is invalid")
+        if (
+            self.sequence_length != source.sequence_length
+            or self.recurrent_burn_in != source.recurrent_burn_in
+            or self.n_step_return != source.n_step_return
+        ):
+            raise ValueError("recent healthy pass replay recurrent contract drifted")
+        flat_action_count = int(Action.ENTER_SHORT_1) + 1
+        candidates = sorted(
+            (
+                episode
+                for episode in source._episodes.values()
+                if episode.outcome == "pass"
+                and np.any(
+                    ~episode.recovery_active
+                    & (episode.entry_action_targets >= int(Action.WAIT))
+                    & episode.valid_masks[:, :flat_action_count].all(axis=1)
+                    & (episode.valid_masks.sum(axis=1) == flat_action_count)
+                )
+            ),
+            key=lambda episode: (-episode.ended_at_ns, episode.episode_id),
+        )[:max_examples]
+        added = 0
+        for episode in reversed(candidates):
+            if episode.episode_id not in self._episodes:
+                added += 1
+            self._retain_stored_episode(episode)
+        return added
 
     def sample_episodes(self, count: int) -> tuple[_StoredEpisode, ...]:
         if count < 1 or not self._episodes:
@@ -1656,7 +1738,7 @@ class BalancedSequenceReplay:
         """Sample pass traces at the causal red-to-breakeven boundary."""
         if count < 1 or max_examples < 1:
             raise ValueError("successful recovery replay count must be positive")
-        candidates: list[tuple[float, str, _StoredEpisode, int]] = []
+        candidates: list[tuple[int, float, str, _StoredEpisode, int]] = []
         for episode in self._episodes.values():
             if episode.outcome != "pass" or episode.transition_count < 2:
                 continue
@@ -1666,6 +1748,7 @@ class BalancedSequenceReplay:
             )
             if boundary_indices.size:
                 candidates.append((
+                    episode.ended_at_ns,
                     float(np.sum(episode.rewards, dtype=np.float64)),
                     episode.episode_id,
                     episode,
@@ -1675,7 +1758,7 @@ class BalancedSequenceReplay:
             return ()
         candidates = sorted(
             candidates,
-            key=lambda item: (-item[0], item[1]),
+            key=lambda item: (-item[0], -item[1], item[2]),
         )[:max_examples]
         start = self._sample_calls % len(candidates)
         self._sample_calls += count
@@ -1686,7 +1769,7 @@ class BalancedSequenceReplay:
                 recurrent_burn_in=self.recurrent_burn_in,
                 n_step_return=self.n_step_return,
             )
-            for _, _, episode, anchor_index in (
+            for _, _, _, episode, anchor_index in (
                 candidates[(start + offset) % len(candidates)]
                 for offset in range(count)
             )
@@ -1701,7 +1784,9 @@ class BalancedSequenceReplay:
         """Sample pass traces with a healthy flat row in the learning window."""
         if count < 1 or max_examples < 1:
             raise ValueError("healthy pass replay count must be positive")
-        candidates: list[tuple[float, str, _StoredEpisode, np.ndarray]] = []
+        candidates: list[
+            tuple[int, float, str, _StoredEpisode, np.ndarray]
+        ] = []
         flat_action_count = int(Action.ENTER_SHORT_1) + 1
         for episode in self._episodes.values():
             if episode.outcome != "pass":
@@ -1714,6 +1799,7 @@ class BalancedSequenceReplay:
             )
             if healthy_flat_rows.size:
                 candidates.append((
+                    episode.ended_at_ns,
                     float(np.sum(episode.rewards, dtype=np.float64)),
                     episode.episode_id,
                     episode,
@@ -1723,14 +1809,14 @@ class BalancedSequenceReplay:
             return ()
         candidates = sorted(
             candidates,
-            key=lambda item: (-item[0], item[1]),
+            key=lambda item: (-item[0], -item[1], item[2]),
         )[:max_examples]
         starts = self._sample_calls
         self._sample_calls += count
         sequences = []
         for offset in range(count):
             candidate_index = (starts + offset) % len(candidates)
-            _, _, episode, healthy_flat_rows = candidates[candidate_index]
+            _, _, _, episode, healthy_flat_rows = candidates[candidate_index]
             cycle = (starts + offset) // len(candidates)
             anchor_index = int(healthy_flat_rows[cycle % len(healthy_flat_rows)])
             sequences.append(episode.target_anchored_sequence(

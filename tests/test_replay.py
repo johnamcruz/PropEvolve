@@ -1359,6 +1359,93 @@ def test_recovery_pass_replay_rotates_through_best_economic_examples() -> None:
     assert anchor_values == [82, 72, 62, 52, 42, 32, 22, 12]
 
 
+def test_recovery_pass_replay_absorbs_only_recent_successes_without_copying() -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=10,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=70,
+    )
+    priority = BalancedSequenceReplay(
+        capacity_episodes=10,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=71,
+    )
+    for index, outcome in enumerate(("pass", "timeout", "blow", "pass")):
+        episode = _episode("NQ", outcome, "long", index * 10)
+        source.add(Episode(
+            episode_id=episode.episode_id,
+            ticker=episode.ticker,
+            outcome=episode.outcome,
+            primary_side=episode.primary_side,
+            ended_at_ns=episode.ended_at_ns,
+            transitions=tuple(
+                Transition(**{
+                    **item.__dict__,
+                    "recovery_active": transition_index < 3,
+                })
+                for transition_index, item in enumerate(episode.transitions)
+            ),
+        ))
+
+    added = priority.absorb_recent_successful_recoveries(
+        source,
+        max_examples=1,
+    )
+
+    assert added == 1
+    assert [
+        episode["episode_id"]
+        for episode in priority.state_dict()["episodes"]
+    ] == ["NQ-pass-30"]
+    assert priority.absorb_recent_successful_recoveries(
+        source,
+        max_examples=1,
+    ) == 0
+    sequence = priority.sample_successful_recovery_sequences(1)[0]
+    assert int(sequence[2].observation[0]) == 32
+
+
+def test_recovery_pass_replay_prioritizes_recency_over_historical_reward() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=72,
+    )
+    for offset, ended_at_ns, reward in (
+        (0, 100, 100.0),
+        (10, 200, 1.0),
+    ):
+        episode = _episode("NQ", "pass", "long", offset)
+        replay.add(Episode(
+            episode_id=episode.episode_id,
+            ticker=episode.ticker,
+            outcome=episode.outcome,
+            primary_side=episode.primary_side,
+            ended_at_ns=ended_at_ns,
+            transitions=tuple(
+                Transition(**{
+                    **item.__dict__,
+                    "reward": reward if index == 0 else 0.0,
+                    "recovery_active": index < 3,
+                })
+                for index, item in enumerate(episode.transitions)
+            ),
+        ))
+
+    sequence = replay.sample_successful_recovery_sequences(
+        1,
+        max_examples=1,
+    )[0]
+
+    assert int(sequence[2].observation[0]) == 12
+
+
 def test_healthy_pass_replay_anchors_nonnegative_flat_policy_rows() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -1397,6 +1484,118 @@ def test_healthy_pass_replay_anchors_nonnegative_flat_policy_rows() -> None:
     assert anchor.recovery_active is False
     assert anchor.valid_actions == flat_actions
     assert anchor.training_valid is True
+
+
+def test_healthy_pass_replay_absorbs_only_recent_usable_passes() -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=72,
+    )
+    priority = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=73,
+    )
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    for offset, outcome in ((0, "pass"), (10, "blow"), (20, "pass")):
+        episode = _episode("NQ", outcome, "long", offset)
+        source.add(Episode(
+            episode_id=episode.episode_id,
+            ticker=episode.ticker,
+            outcome=episode.outcome,
+            primary_side=episode.primary_side,
+            ended_at_ns=episode.ended_at_ns,
+            transitions=tuple(
+                Transition(**{
+                    **item.__dict__,
+                    "valid_actions": flat_actions,
+                    "next_valid_actions": (
+                        () if item.terminated else flat_actions
+                    ),
+                    "entry_action_target": Action.WAIT,
+                    "recovery_active": index < 3,
+                })
+                for index, item in enumerate(episode.transitions)
+            ),
+        ))
+
+    added = priority.absorb_recent_healthy_passes(
+        source,
+        max_examples=1,
+    )
+
+    assert added == 1
+    assert [
+        episode["episode_id"]
+        for episode in priority.state_dict()["episodes"]
+    ] == ["NQ-pass-20"]
+    anchor = priority.sample_healthy_pass_sequences(1)[0][2]
+    assert int(anchor.observation[0]) >= 23
+    assert anchor.recovery_active is False
+
+
+def test_healthy_pass_replay_keeps_v21_seed_with_new_v22_pass() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    def healthy_pass(episode_id: str, offset: int, ended_at_ns: int) -> Episode:
+        episode = _episode("NQ", "pass", "long", offset)
+        return Episode(
+            episode_id=episode_id,
+            ticker=episode.ticker,
+            outcome=episode.outcome,
+            primary_side=episode.primary_side,
+            ended_at_ns=ended_at_ns,
+            transitions=tuple(
+                Transition(**{
+                    **item.__dict__,
+                    "valid_actions": flat_actions,
+                    "next_valid_actions": (
+                        () if item.terminated else flat_actions
+                    ),
+                    "entry_action_target": Action.WAIT,
+                    "recovery_active": index < 3,
+                })
+                for index, item in enumerate(episode.transitions)
+            ),
+        )
+
+    priority = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=74,
+    )
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=75,
+    )
+    priority.add(healthy_pass("v21-pass", 0, 100))
+    source.add(healthy_pass("v22-pass", 10, 200))
+
+    assert priority.absorb_recent_healthy_passes(source) == 1
+    sequences = priority.sample_healthy_pass_sequences(2)
+
+    assert {
+        int(sequence[2].observation[0]) // 10
+        for sequence in sequences
+    } == {0, 1}
 
 
 def test_post_recovery_contrast_pairs_retained_with_giveback_for_both_sides(

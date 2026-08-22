@@ -5322,6 +5322,27 @@ def train_agent(
             raise ValueError(
                 "post-recovery contrast replay recurrent contract drifted"
             )
+        if recovery_success_replay is not None:
+            recovery_success_replay.absorb_recent_successful_recoveries(
+                replay,
+                max_examples=(
+                    recovery_curriculum.recovery_success_replay_max_examples
+                ),
+            )
+        if healthy_pass_replay is not None:
+            if recovery_success_replay is not None:
+                healthy_pass_replay.absorb_recent_healthy_passes(
+                    recovery_success_replay,
+                    max_examples=(
+                        recovery_curriculum.healthy_pass_replay_max_examples
+                    ),
+                )
+            healthy_pass_replay.absorb_recent_healthy_passes(
+                replay,
+                max_examples=(
+                    recovery_curriculum.healthy_pass_replay_max_examples
+                ),
+            )
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -5870,6 +5891,27 @@ def train_agent(
             transitions=replay_transitions,
         )
         replay.add(completed_episode)
+        recovery_success_replay_promoted_passes = 0
+        healthy_pass_replay_promoted_passes = 0
+        if outcome == "pass" and recovery_success_replay is not None:
+            recovery_success_replay_promoted_passes = (
+                recovery_success_replay.absorb_recent_successful_recoveries(
+                    replay,
+                    max_examples=(
+                        recovery_curriculum
+                        .recovery_success_replay_max_examples
+                    ),
+                )
+            )
+        if outcome == "pass" and healthy_pass_replay is not None:
+            healthy_pass_replay_promoted_passes = (
+                healthy_pass_replay.absorb_recent_healthy_passes(
+                    replay,
+                    max_examples=(
+                        recovery_curriculum.healthy_pass_replay_max_examples
+                    ),
+                )
+            )
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
@@ -6410,8 +6452,14 @@ def train_agent(
                 "recovery_success_replay_sequences": (
                     recovery_success_replay_sequences
                 ),
+                "recovery_success_replay_promoted_passes": (
+                    recovery_success_replay_promoted_passes
+                ),
                 "healthy_pass_replay_sequences": (
                     healthy_pass_replay_sequences
+                ),
+                "healthy_pass_replay_promoted_passes": (
+                    healthy_pass_replay_promoted_passes
                 ),
                 "post_recovery_contrast_pairs": (
                     post_recovery_contrast_pairs
