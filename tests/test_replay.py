@@ -38,6 +38,8 @@ def _post_recovery_episode(
     side: Action,
     retained: bool,
     offset: int,
+    outcome: str | None = None,
+    recovery_pattern: tuple[bool, ...] | None = None,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
@@ -45,7 +47,7 @@ def _post_recovery_episode(
         Action.ENTER_SHORT_1,
     )
     anchor_index = 4
-    recovery_active = (
+    recovery_active = recovery_pattern or (
         (True, True, False, False, False, False, False, False)
         if retained
         else (True, True, False, False, False, True, True, True)
@@ -53,7 +55,7 @@ def _post_recovery_episode(
     return Episode(
         episode_id=episode_id,
         ticker="NQ",
-        outcome="pass" if retained else "blow",
+        outcome=("pass" if retained else "blow") if outcome is None else outcome,
         primary_side="long" if side == Action.ENTER_LONG_1 else "short",
         ended_at_ns=offset,
         transitions=tuple(
@@ -1409,6 +1411,49 @@ def test_recovery_pass_replay_absorbs_only_recent_successes_without_copying() ->
     assert int(sequence[2].observation[0]) == 32
 
 
+def test_recovery_success_replay_admits_retained_nonnegative_timeout() -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=81,
+    )
+    retained_timeout = _post_recovery_episode(
+        episode_id="retained-timeout",
+        side=Action.ENTER_LONG_1,
+        retained=True,
+        offset=100,
+        outcome="timeout",
+    )
+    relapsed_timeout = _post_recovery_episode(
+        episode_id="relapsed-timeout",
+        side=Action.ENTER_LONG_1,
+        retained=False,
+        offset=200,
+        outcome="timeout",
+    )
+    source.add(retained_timeout)
+    source.add(relapsed_timeout)
+    priority = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=82,
+    )
+
+    added = priority.absorb_recent_successful_recoveries(source)
+
+    assert added == 1
+    assert [
+        episode["episode_id"]
+        for episode in priority.state_dict()["episodes"]
+    ] == ["retained-timeout"]
+    sequence = priority.sample_successful_recovery_sequences(1)[0]
+    assert int(sequence[2].observation[0]) == 101
+
+
 def test_recovery_pass_replay_prioritizes_recency_over_historical_reward() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=4,
@@ -1647,6 +1692,92 @@ def test_post_recovery_contrast_pairs_retained_with_giveback_for_both_sides(
         failure = next(row for row in rows if not row.paired_a_plus_economic_win)
         assert winner.entry_action_target == winner.paired_a_plus_pair_side
         assert failure.entry_action_target == Action.WAIT
+
+
+def test_post_recovery_contrast_replay_admits_and_prefers_current_examples(
+) -> None:
+    priority = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=83,
+    )
+    source = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=84,
+    )
+    for replay, prefix, base_offset in (
+        (priority, "a-static", 0),
+        (source, "z-current", 100),
+    ):
+        replay.add(_post_recovery_episode(
+            episode_id=f"{prefix}-retained",
+            side=Action.ENTER_LONG_1,
+            retained=True,
+            offset=base_offset,
+            outcome="timeout",
+        ))
+        replay.add(_post_recovery_episode(
+            episode_id=f"{prefix}-relapsed",
+            side=Action.ENTER_LONG_1,
+            retained=False,
+            offset=base_offset + 20,
+            outcome="timeout",
+        ))
+
+    added = priority.absorb_recent_post_recovery_contrasts(
+        source,
+        max_examples=1,
+    )
+    sequences = priority.sample_post_recovery_contrast_pairs(
+        1,
+        max_examples=1,
+    )
+
+    assert added == 2
+    assert {
+        int(sequence[2].observation[0]) for sequence in sequences
+    } == {104, 124}
+
+
+def test_dynamic_recovery_replay_rejects_recovered_then_relapsed_episode(
+) -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=85,
+    )
+    source.add(_post_recovery_episode(
+        episode_id="recovered-relapsed-recovered",
+        side=Action.ENTER_LONG_1,
+        retained=True,
+        offset=300,
+        outcome="timeout",
+        recovery_pattern=(True, True, False, False, True, True, False, False),
+    ))
+    recovery_success = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=86,
+    )
+    post_recovery = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=87,
+    )
+
+    assert recovery_success.absorb_recent_successful_recoveries(source) == 0
+    assert post_recovery.absorb_recent_post_recovery_contrasts(source) == 0
 
 
 def test_post_recovery_contrast_rejects_nonrecovery_and_unmatched_sides() -> None:

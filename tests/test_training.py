@@ -2923,6 +2923,7 @@ def test_recovery_stress_hands_breakeven_to_frozen_v21_until_pass() -> None:
 
 
 def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
+    monkeypatch,
 ) -> None:
     class RecoveryAgent(Agent):
         recurrent_burn_in = 1
@@ -2967,9 +2968,11 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
     class PassingRecoveryEnvironment:
         def __init__(self) -> None:
             self.steps = 0
+            self.episode = 0
 
         def reset(self, *, options=None):
             self.steps = 0
+            self.episode += 1
             return np.zeros(1, np.float32), {
                 "valid_actions": flat_actions,
                 "ticker": "NQ",
@@ -2980,12 +2983,20 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         def step(self, action):
             self.steps += 1
             terminated = self.steps == 2
-            realized_pnl = 0.0 if self.steps == 1 else 6_000.0
+            realized_pnl = (
+                0.0
+                if self.steps == 1
+                else 6_000.0 if self.episode == 1 else 100.0
+            )
             return np.full(1, self.steps, np.float32), 0.0, terminated, False, {
                 "valid_actions": () if terminated else flat_actions,
                 "ticker": "NQ",
                 "fill_index": self.steps,
-                "outcome": "pass" if terminated else None,
+                "outcome": (
+                    "pass"
+                    if terminated and self.episode == 1
+                    else "timeout" if terminated else None
+                ),
                 "primary_side": "flat",
                 "trade_count": 0,
                 "win_count": 0,
@@ -3036,7 +3047,7 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         "post_recovery_contrast_replay_sha256": "c" * 64,
     })
     pass_replay = BalancedSequenceReplay(
-        capacity_episodes=2,
+        capacity_episodes=3,
         sequence_length=4,
         recurrent_burn_in=1,
         n_step_return=1,
@@ -3152,6 +3163,24 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
             ),
         ))
     agent = RecoveryAgent()
+    post_recovery_absorb_calls: list[int] = []
+    original_post_recovery_absorb = (
+        post_recovery_replay.absorb_recent_post_recovery_contrasts
+    )
+
+    def track_post_recovery_absorb(source, *, max_examples):
+        post_recovery_absorb_calls.append(max_examples)
+        return original_post_recovery_absorb(
+            source,
+            max_examples=max_examples,
+        )
+
+    monkeypatch.setattr(
+        post_recovery_replay,
+        "absorb_recent_post_recovery_contrasts",
+        track_post_recovery_absorb,
+    )
+    diagnostics: list[dict[str, object]] = []
     train_agent(
         agent,
         PassingRecoveryEnvironment(),
@@ -3181,6 +3210,7 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         healthy_pass_replay=healthy_replay,
         post_recovery_contrast_replay=post_recovery_replay,
         entry_action_lookup=lambda ticker, decision_index: Action.WAIT,
+        episode_diagnostic_callback=diagnostics.append,
     )
 
     assert agent.batch_sizes == [1, 5, 1, 5]
@@ -3188,8 +3218,11 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
     assert agent.healthy_policy_rows == [False, True, False, True]
     assert agent.post_recovery_pairs == [False, True, False, True]
     promoted_passes = pass_replay.state_dict()["episodes"]
-    assert len(promoted_passes) == 2
-    assert all(episode["outcome"] == "pass" for episode in promoted_passes)
+    assert len(promoted_passes) == 3
+    assert {episode["outcome"] for episode in promoted_passes} == {
+        "pass",
+        "timeout",
+    }
     promoted_ids = {episode["episode_id"] for episode in promoted_passes}
     assert "prior-v22-pass" in promoted_ids
     assert any(value.startswith("historical-1-") for value in promoted_ids)
@@ -3198,13 +3231,22 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
         for episode in healthy_replay.state_dict()["episodes"]
     ][0] == "v21-healthy-pass"
     assert any(
-        episode["episode_id"].startswith("historical-1-")
+        episode["episode_id"].startswith("historical-0-")
         for episode in healthy_replay.state_dict()["episodes"]
     )
     assert [
         episode["episode_id"]
         for episode in post_recovery_replay.state_dict()["episodes"]
     ] == ["retained", "giveback"]
+    assert post_recovery_absorb_calls == [8, 8, 8]
+    assert [
+        diagnostic["recovery_success_replay_promoted_episodes"]
+        for diagnostic in diagnostics
+    ] == [1, 1]
+    assert all(
+        "post_recovery_contrast_replay_promoted_episodes" in diagnostic
+        for diagnostic in diagnostics
+    )
 
 
 def test_recovery_pass_replay_artifact_is_authenticated_and_recurrent(

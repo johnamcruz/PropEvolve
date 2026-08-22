@@ -5343,6 +5343,14 @@ def train_agent(
                     recovery_curriculum.healthy_pass_replay_max_examples
                 ),
             )
+        if post_recovery_contrast_replay is not None:
+            post_recovery_contrast_replay.absorb_recent_post_recovery_contrasts(
+                replay,
+                max_examples=(
+                    recovery_curriculum
+                    .post_recovery_contrast_replay_max_examples
+                ),
+            )
     if not 0 <= teacher_loss_end_scale <= 1:
         raise ValueError("teacher loss end scale must be between zero and one")
     if not (
@@ -5891,10 +5899,15 @@ def train_agent(
             transitions=replay_transitions,
         )
         replay.add(completed_episode)
+        recovery_success_replay_promoted_episodes = 0
         recovery_success_replay_promoted_passes = 0
         healthy_pass_replay_promoted_passes = 0
-        if outcome == "pass" and recovery_success_replay is not None:
-            recovery_success_replay_promoted_passes = (
+        post_recovery_contrast_replay_promoted_episodes = 0
+        if (
+            outcome in {"pass", "timeout"}
+            and recovery_success_replay is not None
+        ):
+            recovery_success_replay_promoted_episodes = (
                 recovery_success_replay.absorb_recent_successful_recoveries(
                     replay,
                     max_examples=(
@@ -5903,12 +5916,27 @@ def train_agent(
                     ),
                 )
             )
+            if outcome == "pass":
+                recovery_success_replay_promoted_passes = (
+                    recovery_success_replay_promoted_episodes
+                )
         if outcome == "pass" and healthy_pass_replay is not None:
             healthy_pass_replay_promoted_passes = (
                 healthy_pass_replay.absorb_recent_healthy_passes(
                     replay,
                     max_examples=(
                         recovery_curriculum.healthy_pass_replay_max_examples
+                    ),
+                )
+            )
+        if post_recovery_contrast_replay is not None:
+            post_recovery_contrast_replay_promoted_episodes = (
+                post_recovery_contrast_replay
+                .absorb_recent_post_recovery_contrasts(
+                    replay,
+                    max_examples=(
+                        recovery_curriculum
+                        .post_recovery_contrast_replay_max_examples
                     ),
                 )
             )
@@ -6455,6 +6483,9 @@ def train_agent(
                 "recovery_success_replay_promoted_passes": (
                     recovery_success_replay_promoted_passes
                 ),
+                "recovery_success_replay_promoted_episodes": (
+                    recovery_success_replay_promoted_episodes
+                ),
                 "healthy_pass_replay_sequences": (
                     healthy_pass_replay_sequences
                 ),
@@ -6463,6 +6494,9 @@ def train_agent(
                 ),
                 "post_recovery_contrast_pairs": (
                     post_recovery_contrast_pairs
+                ),
+                "post_recovery_contrast_replay_promoted_episodes": (
+                    post_recovery_contrast_replay_promoted_episodes
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,

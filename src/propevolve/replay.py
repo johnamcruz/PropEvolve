@@ -1333,7 +1333,7 @@ class BalancedSequenceReplay:
         *,
         max_examples: int = 8,
     ) -> int:
-        """Share the newest authentic recovery passes from ordinary replay.
+        """Share newest retained recoveries from ordinary replay.
 
         Stored episodes are immutable, so sharing them avoids copying their
         observation arrays or serializing a second growing replay corpus.
@@ -1352,12 +1352,9 @@ class BalancedSequenceReplay:
             (
                 episode
                 for episode in source._episodes.values()
-                if episode.outcome == "pass"
+                if episode.outcome in {"pass", "timeout"}
                 and episode.transition_count >= 2
-                and np.any(
-                    episode.recovery_active[:-1]
-                    & ~episode.recovery_active[1:]
-                )
+                and self._retained_recovery_boundary(episode) is not None
             ),
             key=lambda episode: (-episode.ended_at_ns, episode.episode_id),
         )[:max_examples]
@@ -1365,6 +1362,88 @@ class BalancedSequenceReplay:
         # Retain oldest-to-newest so a tight target capacity preserves the
         # newest pass if admission requires eviction.
         for episode in reversed(candidates):
+            if episode.episode_id not in self._episodes:
+                added += 1
+            self._retain_stored_episode(episode)
+        return added
+
+    def absorb_recent_post_recovery_contrasts(
+        self,
+        source: "BalancedSequenceReplay",
+        *,
+        max_examples: int = 8,
+    ) -> int:
+        """Share newest retained and relapsed recovery examples by side."""
+        if not isinstance(source, BalancedSequenceReplay) or max_examples < 1:
+            raise ValueError("recent post-recovery contrast request is invalid")
+        if (
+            self.sequence_length != source.sequence_length
+            or self.recurrent_burn_in != source.recurrent_burn_in
+            or self.n_step_return != source.n_step_return
+        ):
+            raise ValueError("recent post-recovery recurrent contract drifted")
+        buckets: dict[tuple[str, Action], list[_StoredEpisode]] = defaultdict(list)
+        for episode in source._episodes.values():
+            if episode.transition_count < 2:
+                continue
+            boundaries = np.flatnonzero(
+                episode.recovery_active[:-1]
+                & ~episode.recovery_active[1:]
+            )
+            if not boundaries.size:
+                continue
+            retained_boundary = self._retained_recovery_boundary(episode)
+            if retained_boundary is not None:
+                retained_start = retained_boundary + 1
+                for side, winner_indices in (
+                    (
+                        Action.ENTER_LONG_1,
+                        episode.paired_a_plus_long_winner_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        episode.paired_a_plus_short_winner_anchor_indices,
+                    ),
+                ):
+                    if np.any(winner_indices >= retained_start):
+                        buckets[("retained", side)].append(episode)
+            if not bool(episode.recovery_active[-1]):
+                continue
+            healthy_start = int(boundaries[0]) + 1
+            relapse_offsets = np.flatnonzero(
+                episode.recovery_active[healthy_start:]
+            )
+            if not relapse_offsets.size:
+                continue
+            relapse_index = healthy_start + int(relapse_offsets[0])
+            for side, failure_indices in (
+                (
+                    Action.ENTER_LONG_1,
+                    episode.paired_a_plus_long_failure_anchor_indices,
+                ),
+                (
+                    Action.ENTER_SHORT_1,
+                    episode.paired_a_plus_short_failure_anchor_indices,
+                ),
+            ):
+                if np.any(
+                    (failure_indices >= healthy_start)
+                    & (failure_indices < relapse_index)
+                ):
+                    buckets[("relapsed", side)].append(episode)
+        selected = {
+            episode.episode_id: episode
+            for candidates in buckets.values()
+            for episode in sorted(
+                candidates,
+                key=lambda item: (-item.ended_at_ns, item.episode_id),
+            )[:max_examples]
+        }
+        added = 0
+        for episode in sorted(
+            selected.values(),
+            key=lambda item: (item.ended_at_ns, item.episode_id),
+        ):
             if episode.episode_id not in self._episodes:
                 added += 1
             self._retain_stored_episode(episode)
@@ -1735,24 +1814,24 @@ class BalancedSequenceReplay:
         *,
         max_examples: int = 8,
     ) -> tuple[tuple[Transition, ...], ...]:
-        """Sample pass traces at the causal red-to-breakeven boundary."""
+        """Sample retained traces at the causal red-to-breakeven boundary."""
         if count < 1 or max_examples < 1:
             raise ValueError("successful recovery replay count must be positive")
         candidates: list[tuple[int, float, str, _StoredEpisode, int]] = []
         for episode in self._episodes.values():
-            if episode.outcome != "pass" or episode.transition_count < 2:
+            if (
+                episode.outcome not in {"pass", "timeout"}
+                or episode.transition_count < 2
+            ):
                 continue
-            boundary_indices = np.flatnonzero(
-                episode.recovery_active[:-1]
-                & ~episode.recovery_active[1:]
-            )
-            if boundary_indices.size:
+            boundary_index = self._retained_recovery_boundary(episode)
+            if boundary_index is not None:
                 candidates.append((
                     episode.ended_at_ns,
                     float(np.sum(episode.rewards, dtype=np.float64)),
                     episode.episode_id,
                     episode,
-                    int(boundary_indices[-1]),
+                    boundary_index,
                 ))
         if not candidates:
             return ()
@@ -1843,10 +1922,10 @@ class BalancedSequenceReplay:
         ):
             raise ValueError("post-recovery contrast request is invalid")
         retained: dict[
-            Action, list[tuple[float, str, _StoredEpisode, int]]
+            Action, list[tuple[int, float, str, _StoredEpisode, int]]
         ] = defaultdict(list)
         givebacks: dict[
-            Action, list[tuple[float, str, _StoredEpisode, int]]
+            Action, list[tuple[int, float, str, _StoredEpisode, int]]
         ] = defaultdict(list)
         for episode in self._episodes.values():
             if episode.transition_count < 2:
@@ -1858,9 +1937,9 @@ class BalancedSequenceReplay:
             if not boundaries.size:
                 continue
             score = float(np.sum(episode.rewards, dtype=np.float64))
-            final_boundary = int(boundaries[-1])
-            retained_start = final_boundary + 1
-            if not bool(episode.recovery_active[retained_start:].any()):
+            retained_boundary = self._retained_recovery_boundary(episode)
+            if retained_boundary is not None:
+                retained_start = retained_boundary + 1
                 for side, winner_indices in (
                     (
                         Action.ENTER_LONG_1,
@@ -1874,44 +1953,49 @@ class BalancedSequenceReplay:
                     for anchor_index in winner_indices:
                         if int(anchor_index) >= retained_start:
                             retained[side].append((
+                                episode.ended_at_ns,
                                 score,
                                 episode.episode_id,
                                 episode,
                                 int(anchor_index),
                             ))
-            for boundary in boundaries:
-                healthy_start = int(boundary) + 1
-                relapse_offsets = np.flatnonzero(
-                    episode.recovery_active[healthy_start:]
-                )
-                if not relapse_offsets.size:
-                    continue
-                relapse_index = healthy_start + int(relapse_offsets[0])
-                for side, failure_indices in (
-                    (
-                        Action.ENTER_LONG_1,
-                        episode.paired_a_plus_long_failure_anchor_indices,
-                    ),
-                    (
-                        Action.ENTER_SHORT_1,
-                        episode.paired_a_plus_short_failure_anchor_indices,
-                    ),
-                ):
-                    for anchor_index in failure_indices:
-                        anchor_index = int(anchor_index)
-                        if healthy_start <= anchor_index < relapse_index:
-                            givebacks[side].append((
-                                score,
-                                episode.episode_id,
-                                episode,
-                                anchor_index,
-                            ))
+            if not bool(episode.recovery_active[-1]):
+                continue
+            healthy_start = int(boundaries[0]) + 1
+            relapse_offsets = np.flatnonzero(
+                episode.recovery_active[healthy_start:]
+            )
+            if not relapse_offsets.size:
+                continue
+            relapse_index = healthy_start + int(relapse_offsets[0])
+            for side, failure_indices in (
+                (
+                    Action.ENTER_LONG_1,
+                    episode.paired_a_plus_long_failure_anchor_indices,
+                ),
+                (
+                    Action.ENTER_SHORT_1,
+                    episode.paired_a_plus_short_failure_anchor_indices,
+                ),
+            ):
+                for anchor_index in failure_indices:
+                    anchor_index = int(anchor_index)
+                    if healthy_start <= anchor_index < relapse_index:
+                        givebacks[side].append((
+                            episode.ended_at_ns,
+                            score,
+                            episode.episode_id,
+                            episode,
+                            anchor_index,
+                        ))
         for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
             retained[side] = sorted(
-                retained[side], key=lambda item: (-item[0], item[1], item[3])
+                retained[side],
+                key=lambda item: (-item[0], -item[1], item[2], item[4]),
             )[:max_examples]
             givebacks[side] = sorted(
-                givebacks[side], key=lambda item: (item[0], item[1], item[3])
+                givebacks[side],
+                key=lambda item: (-item[0], item[1], item[2], item[4]),
             )[:max_examples]
         available_sides = [
             side
@@ -1928,19 +2012,19 @@ class BalancedSequenceReplay:
             winner = retained[side][
                 ((start + offset) // len(available_sides)) % len(retained[side])
             ]
-            _, _, winner_episode, winner_index = winner
+            _, _, _, winner_episode, winner_index = winner
             winner_context = self._paired_context_for_side(
                 winner_episode.paired_a_plus_contexts[winner_index], side
             )
             failure = min(
                 givebacks[side],
                 key=lambda item: self._paired_failure_rank(
-                    (item[2], item[3]),
+                    (item[3], item[4]),
                     side=side,
                     winner_context=winner_context,
                 ),
             )
-            _, _, failure_episode, failure_index = failure
+            _, _, _, failure_episode, failure_index = failure
             pair_id = pair_id_start + offset
             population_count = len(retained[side]) + len(givebacks[side])
             winner_weight = 2.0 * len(retained[side]) / population_count
@@ -1963,6 +2047,22 @@ class BalancedSequenceReplay:
                 )
                 sequences.append(tuple(sequence))
         return tuple(sequences)
+
+    @staticmethod
+    def _retained_recovery_boundary(episode: _StoredEpisode) -> int | None:
+        """Return the first red-to-breakeven boundary when never relapsed."""
+        if episode.transition_count < 2:
+            return None
+        boundaries = np.flatnonzero(
+            episode.recovery_active[:-1]
+            & ~episode.recovery_active[1:]
+        )
+        if not boundaries.size:
+            return None
+        boundary = int(boundaries[0])
+        if bool(episode.recovery_active[boundary + 1:].any()):
+            return None
+        return boundary
 
     @staticmethod
     def _paired_context_for_side(
