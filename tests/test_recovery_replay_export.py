@@ -36,6 +36,23 @@ def test_failure_or_pass_without_breakeven_is_not_recovery_competence() -> None:
     }) is False
 
 
+def test_recovery_export_keeps_retained_timeout_but_rejects_relapse() -> None:
+    assert _is_successful_recovery_pass({
+        "outcome": "timeout",
+        "recovery_active": np.array([True, False, False, False]),
+    }) is True
+    assert _is_successful_recovery_pass({
+        "outcome": "pass",
+        "recovery_active": np.array(
+            [True, False, True, False], dtype=np.bool_
+        ),
+    }) is False
+    assert _is_successful_recovery_pass({
+        "outcome": "timeout",
+        "recovery_active": np.array([True, False, True, True]),
+    }) is False
+
+
 def test_healthy_pass_export_excludes_failures_and_all_red_passes() -> None:
     assert _is_healthy_pass({
         "outcome": "pass",
@@ -67,7 +84,18 @@ def test_post_recovery_contrast_export_keeps_retained_and_giveback_rows() -> Non
         "paired_a_plus_sides": np.array([-1, 1, -1, -1]),
         "paired_a_plus_economic_wins": np.array([-1, 1, -1, -1]),
     }
+    recovered_after_giveback = {
+        "recovery_active": np.array(
+            [True, False, True, False], dtype=np.bool_
+        ),
+        "paired_a_plus_sides": np.array([-1, -1, 2, -1]),
+        "paired_a_plus_economic_wins": np.array([-1, -1, 0, -1]),
+    }
 
     assert _is_post_recovery_contrast_candidate(retained) is True
     assert _is_post_recovery_contrast_candidate(giveback) is True
     assert _is_post_recovery_contrast_candidate(never_recovered) is False
+    assert (
+        _is_post_recovery_contrast_candidate(recovered_after_giveback)
+        is False
+    )

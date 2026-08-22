@@ -244,16 +244,21 @@ def _sha256(path: Path) -> str:
 
 
 def _is_successful_recovery_pass(episode: Mapping[str, object]) -> bool:
-    if episode.get("outcome") != "pass":
+    if episode.get("outcome") not in {"pass", "timeout"}:
         return False
     recovery_active = np.asarray(
         episode.get("recovery_active", ()),
         dtype=np.bool_,
     )
-    return bool(
-        recovery_active.size >= 2
-        and np.any(recovery_active[:-1] & ~recovery_active[1:])
+    if recovery_active.size < 2:
+        return False
+    boundaries = np.flatnonzero(
+        recovery_active[:-1] & ~recovery_active[1:]
     )
+    if not boundaries.size:
+        return False
+    healthy_start = int(boundaries[0]) + 1
+    return not bool(recovery_active[healthy_start:].any())
 
 
 def _is_healthy_pass(episode: Mapping[str, object]) -> bool:
@@ -285,21 +290,21 @@ def _is_post_recovery_contrast_candidate(
     boundaries = np.flatnonzero(
         recovery_active[:-1] & ~recovery_active[1:]
     )
-    for boundary in boundaries:
-        healthy_start = int(boundary) + 1
-        relapse_offsets = np.flatnonzero(recovery_active[healthy_start:])
-        if relapse_offsets.size:
-            relapse_index = healthy_start + int(relapse_offsets[0])
-            if np.any(
-                (sides[healthy_start:relapse_index] >= 0)
-                & (wins[healthy_start:relapse_index] == 0)
-            ):
-                return True
-        elif np.any(
+    if not boundaries.size:
+        return False
+    healthy_start = int(boundaries[0]) + 1
+    relapse_offsets = np.flatnonzero(recovery_active[healthy_start:])
+    if not relapse_offsets.size:
+        return bool(np.any(
             (sides[healthy_start:] >= 0) & (wins[healthy_start:] == 1)
-        ):
-            return True
-    return False
+        ))
+    if not bool(recovery_active[-1]):
+        return False
+    relapse_index = healthy_start + int(relapse_offsets[0])
+    return bool(np.any(
+        (sides[healthy_start:relapse_index] >= 0)
+        & (wins[healthy_start:relapse_index] == 0)
+    ))
 
 
 def _with_recovery_state(

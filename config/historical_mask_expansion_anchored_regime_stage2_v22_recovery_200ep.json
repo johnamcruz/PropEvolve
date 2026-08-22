@@ -315,8 +315,8 @@
         "max_examples": 8
       },
       "post_recovery_contrast_replay": {
-        "path": "runs/recovery-pass-replay/v22-post-recovery-contrast-v1.pt",
-        "sha256": "98f133c7172b59008df2bc8c93e19b80edd420361d2c0426d3d2129754587a2b",
+        "path": "runs/recovery-pass-replay/v22-r2-exact-post-recovery-contrast-v2.pt",
+        "sha256": "e8d1a583a48f3d351a83f0e9e722b15adf12ea6e52132cd9311830b73da018fb",
         "update_period": 8,
         "max_examples": 8
       }
