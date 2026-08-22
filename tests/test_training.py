@@ -2890,6 +2890,18 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
     assert agent.recovery_boundaries == [False, True, False, True]
     assert agent.healthy_policy_rows == [False, True, False, True]
     assert agent.post_recovery_pairs == [False, True, False, True]
+    assert [
+        episode["episode_id"]
+        for episode in pass_replay.state_dict()["episodes"]
+    ] == ["prior-v22-pass"]
+    assert [
+        episode["episode_id"]
+        for episode in healthy_replay.state_dict()["episodes"]
+    ] == ["v21-healthy-pass"]
+    assert [
+        episode["episode_id"]
+        for episode in post_recovery_replay.state_dict()["episodes"]
+    ] == ["retained", "giveback"]
 
 
 def test_recovery_pass_replay_artifact_is_authenticated_and_recurrent(
@@ -4872,6 +4884,49 @@ def test_recovery_checkpoint_authenticates_fixed_health_probe(
         "completed_episodes": 45,
         "file_sha256": hashlib.sha256(probe.read_bytes()).hexdigest(),
     }
+
+
+def test_recovery_checkpoint_stores_replay_sampler_metadata_only(
+    tmp_path: Path,
+) -> None:
+    class SavingAgent:
+        manifest = None
+
+        def save(self, path, *, manifest):
+            self.manifest = manifest
+            Path(path).write_bytes(b"checkpoint")
+
+    agent = SavingAgent()
+    sampler_state = {
+        "schema_version": 1,
+        "random_state": (3, (), None),
+        "sample_calls": 12,
+    }
+
+    training_module._save_training_recovery(
+        agent,
+        tmp_path / "training-recovery.pt",
+        resume_identity="recipe-1",
+        progress=TrainingProgress(completed_episodes=40),
+        environment_rng_state={},
+        replay_state={"episodes": ["ordinary-replay-is-resumable"]},
+        recovery_success_replay_sampler_state=sampler_state,
+        healthy_pass_replay_sampler_state=sampler_state,
+        post_recovery_contrast_replay_sampler_state=sampler_state,
+    )
+
+    assert not {
+        "recovery_success_replay_state",
+        "healthy_pass_replay_state",
+        "post_recovery_contrast_replay_state",
+    } & set(agent.manifest)
+    assert agent.manifest["recovery_success_replay_sampler_state"] == (
+        sampler_state
+    )
+    assert agent.manifest["healthy_pass_replay_sampler_state"] == sampler_state
+    assert agent.manifest["post_recovery_contrast_replay_sampler_state"] == (
+        sampler_state
+    )
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:

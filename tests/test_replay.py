@@ -351,6 +351,33 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
     ]
 
 
+def test_replay_sampler_state_resumes_without_serializing_episodes() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=3,
+        seed=83,
+    )
+    replay.add(_episode("NQ", "timeout", "long", 0))
+    replay.sample(1)
+
+    sampler_state = replay.sampler_state_dict()
+
+    assert set(sampler_state) == {
+        "schema_version",
+        "random_state",
+        "sample_calls",
+    }
+    assert "episodes" not in sampler_state
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=3,
+        seed=999,
+    )
+    restored.add(_episode("NQ", "timeout", "long", 0))
+    restored.load_sampler_state_dict(sampler_state)
+    assert restored.sample(1) == replay.sample(1)
+
+
 def test_replay_rejects_hard_wait_priority_on_positive_entry_target() -> None:
     episode = _entry_opportunity_episode(
         episode_id="long-positive",

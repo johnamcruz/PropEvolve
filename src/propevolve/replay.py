@@ -933,6 +933,32 @@ class BalancedSequenceReplay:
             ],
         }
 
+    def sampler_state_dict(self) -> dict[str, object]:
+        """Return resumable sampler metadata without duplicating episodes."""
+        return {
+            "schema_version": 1,
+            "random_state": self._random.getstate(),
+            "sample_calls": self._sample_calls,
+        }
+
+    def load_sampler_state_dict(self, state: Mapping[str, object]) -> None:
+        """Restore sampler metadata after immutable episodes are loaded."""
+        if set(state) != {"schema_version", "random_state", "sample_calls"}:
+            raise ValueError("replay sampler state is invalid")
+        sample_calls = state["sample_calls"]
+        if (
+            state["schema_version"] != 1
+            or isinstance(sample_calls, bool)
+            or not isinstance(sample_calls, int)
+            or sample_calls < 0
+        ):
+            raise ValueError("replay sampler state is invalid")
+        try:
+            self._random.setstate(state["random_state"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("replay sampler state is invalid") from error
+        self._sample_calls = sample_calls
+
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")

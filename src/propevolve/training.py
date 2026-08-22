@@ -2937,9 +2937,9 @@ class HistoricalCandidateRunner:
         resume = None
         replay_state = None
         recovery_value_store_state = None
-        recovery_success_replay_state = None
-        healthy_pass_replay_state = None
-        post_recovery_contrast_replay_state = None
+        recovery_success_replay_sampler_state = None
+        healthy_pass_replay_sampler_state = None
+        post_recovery_contrast_replay_sampler_state = None
         if recovery_path.is_file():
             loaded, manifest = RecurrentC51Agent.load(
                 recovery_path, device=agent_settings["device"]
@@ -2987,15 +2987,26 @@ class HistoricalCandidateRunner:
             recovery_value_store_state = manifest.get(
                 "recovery_value_store_state"
             )
-            recovery_success_replay_state = manifest.get(
-                "recovery_success_replay_state"
+            recovery_success_replay_sampler_state = manifest.get(
+                "recovery_success_replay_sampler_state"
             )
-            healthy_pass_replay_state = manifest.get(
-                "healthy_pass_replay_state"
+            healthy_pass_replay_sampler_state = manifest.get(
+                "healthy_pass_replay_sampler_state"
             )
-            post_recovery_contrast_replay_state = manifest.get(
-                "post_recovery_contrast_replay_state"
+            post_recovery_contrast_replay_sampler_state = manifest.get(
+                "post_recovery_contrast_replay_sampler_state"
             )
+            if any(
+                manifest.get(key) is not None
+                for key in (
+                    "recovery_success_replay_state",
+                    "healthy_pass_replay_state",
+                    "post_recovery_contrast_replay_state",
+                )
+            ):
+                raise ValueError(
+                    "training recovery embeds an obsolete replay library"
+                )
             _assert_recovery_entry_balance(loaded, agent_settings)
             _assert_recovery_regime_selectivity(loaded, agent_settings)
             agent = loaded
@@ -3160,13 +3171,17 @@ class HistoricalCandidateRunner:
                 ),
                 replay=recovery_success_replay,
             )
-            if recovery_success_replay_state is not None:
-                recovery_success_replay.load_state_dict(
-                    recovery_success_replay_state
+            if recovery_success_replay_sampler_state is not None:
+                recovery_success_replay.load_sampler_state_dict(
+                    recovery_success_replay_sampler_state
                 )
-        elif recovery_success_replay_state is not None:
+            elif resume is not None:
+                raise ValueError(
+                    "training recovery is missing recovery pass sampler state"
+                )
+        elif recovery_success_replay_sampler_state is not None:
             raise ValueError(
-                "checkpoint contains disabled recovery pass replay"
+                "checkpoint contains disabled recovery pass sampler state"
             )
         healthy_pass_replay = None
         if (
@@ -3217,13 +3232,17 @@ class HistoricalCandidateRunner:
                 ),
                 replay=healthy_pass_replay,
             )
-            if healthy_pass_replay_state is not None:
-                healthy_pass_replay.load_state_dict(
-                    healthy_pass_replay_state
+            if healthy_pass_replay_sampler_state is not None:
+                healthy_pass_replay.load_sampler_state_dict(
+                    healthy_pass_replay_sampler_state
                 )
-        elif healthy_pass_replay_state is not None:
+            elif resume is not None:
+                raise ValueError(
+                    "training recovery is missing healthy pass sampler state"
+                )
+        elif healthy_pass_replay_sampler_state is not None:
             raise ValueError(
-                "checkpoint contains disabled healthy pass replay"
+                "checkpoint contains disabled healthy pass sampler state"
             )
         post_recovery_contrast_replay = None
         if (
@@ -3275,13 +3294,19 @@ class HistoricalCandidateRunner:
                 ),
                 replay=post_recovery_contrast_replay,
             )
-            if post_recovery_contrast_replay_state is not None:
-                post_recovery_contrast_replay.load_state_dict(
-                    post_recovery_contrast_replay_state
+            if post_recovery_contrast_replay_sampler_state is not None:
+                post_recovery_contrast_replay.load_sampler_state_dict(
+                    post_recovery_contrast_replay_sampler_state
                 )
-        elif post_recovery_contrast_replay_state is not None:
+            elif resume is not None:
+                raise ValueError(
+                    "training recovery is missing post-recovery contrast "
+                    "sampler state"
+                )
+        elif post_recovery_contrast_replay_sampler_state is not None:
             raise ValueError(
-                "checkpoint contains disabled post-recovery contrast replay"
+                "checkpoint contains disabled post-recovery contrast sampler "
+                "state"
             )
         policy_health_monitor = None
         if policy_health_config is not None:
@@ -3414,20 +3439,20 @@ class HistoricalCandidateRunner:
                     if recovery_value_store is None
                     else recovery_value_store.state_dict()
                 ),
-                recovery_success_replay_state=(
+                recovery_success_replay_sampler_state=(
                     None
                     if recovery_success_replay is None
-                    else recovery_success_replay.state_dict()
+                    else recovery_success_replay.sampler_state_dict()
                 ),
-                healthy_pass_replay_state=(
+                healthy_pass_replay_sampler_state=(
                     None
                     if healthy_pass_replay is None
-                    else healthy_pass_replay.state_dict()
+                    else healthy_pass_replay.sampler_state_dict()
                 ),
-                post_recovery_contrast_replay_state=(
+                post_recovery_contrast_replay_sampler_state=(
                     None
                     if post_recovery_contrast_replay is None
-                    else post_recovery_contrast_replay.state_dict()
+                    else post_recovery_contrast_replay.sampler_state_dict()
                 ),
                 policy_health_probe_path=(
                     policy_health_probe_path
@@ -4125,9 +4150,9 @@ def _save_training_recovery(
     environment_rng_state: dict,
     replay_state: dict[str, object],
     recovery_value_store_state: dict[str, object] | None = None,
-    recovery_success_replay_state: dict[str, object] | None = None,
-    healthy_pass_replay_state: dict[str, object] | None = None,
-    post_recovery_contrast_replay_state: dict[str, object] | None = None,
+    recovery_success_replay_sampler_state: dict[str, object] | None = None,
+    healthy_pass_replay_sampler_state: dict[str, object] | None = None,
+    post_recovery_contrast_replay_sampler_state: dict[str, object] | None = None,
     policy_health_probe_path: Path | None = None,
 ) -> None:
     policy_health_probe_corpus = None
@@ -4155,10 +4180,14 @@ def _save_training_recovery(
             "replay_state": replay_state,
             "replay_restored": True,
             "recovery_value_store_state": recovery_value_store_state,
-            "recovery_success_replay_state": recovery_success_replay_state,
-            "healthy_pass_replay_state": healthy_pass_replay_state,
-            "post_recovery_contrast_replay_state": (
-                post_recovery_contrast_replay_state
+            "recovery_success_replay_sampler_state": (
+                recovery_success_replay_sampler_state
+            ),
+            "healthy_pass_replay_sampler_state": (
+                healthy_pass_replay_sampler_state
+            ),
+            "post_recovery_contrast_replay_sampler_state": (
+                post_recovery_contrast_replay_sampler_state
             ),
             "policy_health_probe_corpus": policy_health_probe_corpus,
         },
@@ -5804,10 +5833,6 @@ def train_agent(
             transitions=replay_transitions,
         )
         replay.add(completed_episode)
-        if recovery_success_replay is not None and outcome == "pass":
-            recovery_success_replay.add(completed_episode)
-        if post_recovery_contrast_replay is not None:
-            post_recovery_contrast_replay.add(completed_episode)
         episode_losses = []
         episode_rl_losses = []
         episode_teacher_losses = []
