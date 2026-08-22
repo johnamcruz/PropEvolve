@@ -2397,7 +2397,11 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
             )
             self.ticker = str(options.get("ticker", "NQ"))
             return np.zeros(1, np.float32), {
-                "valid_actions": (Action.WAIT,),
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
                 "ticker": self.ticker,
                 "start": 0,
                 "mll_headroom_fraction": 1.0,
@@ -2497,20 +2501,7 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
     assert environment.recovery_flags == [True] * 4
     assert environment.starting_realized_pnls == [-2_000.0] * 4
     assert sidecar.resets == 12
-    assert sidecar.starting_realized_pnls == [
-        -1_500.0,
-        -1_500.0,
-        -1_500.0,
-        -1_000.0,
-        -1_000.0,
-        -1_000.0,
-        -500.0,
-        -500.0,
-        -500.0,
-        -2_500.0,
-        -2_500.0,
-        -2_500.0,
-    ]
+    assert sidecar.starting_realized_pnls == [-2_000.0] * 12
     assert len(store) == 4
     assert result.passes == 4
     assert replay.transition_count == 4
@@ -2518,6 +2509,8 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
     assert Counter(item["episode_kind"] for item in diagnostics) == {
         "recovery": 4,
     }
+    assert all(item["recovery_value_target_added"] for item in diagnostics)
+    assert all(item["recovery_value_store_size"] >= 1 for item in diagnostics)
 
 
 def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> None:
@@ -2689,8 +2682,12 @@ def test_recovery_training_hands_breakeven_to_frozen_v21_and_reenters_recovery(
             }
 
     class SidecarEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
         def reset(self, *, options=None):
-            return np.array([99.0], np.float32), {
+            self.steps = 0
+            return np.array([-2_000.0], np.float32), {
                 "valid_actions": (
                     Action.WAIT,
                     Action.ENTER_LONG_1,
@@ -2704,12 +2701,25 @@ def test_recovery_training_hands_breakeven_to_frozen_v21_and_reenters_recovery(
             }
 
         def step(self, action):
-            return np.array([100.0], np.float32), 0.0, True, False, {
-                "valid_actions": (),
-                "outcome": "timeout",
-                "realized_pnl": -1_900.0,
-                "equity_pnl": -1_900.0,
-                "recovery_status": "not_recovered",
+            self.steps += 1
+            realized_pnl = (0.0, -100.0, 6_000.0)[self.steps - 1]
+            terminated = self.steps == 3
+            return np.array([realized_pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": (
+                    ()
+                    if terminated
+                    else (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                ),
+                "outcome": "pass" if terminated else None,
+                "realized_pnl": realized_pnl,
+                "equity_pnl": realized_pnl,
+                "recovery_status": (
+                    "recovered" if terminated else "not_recovered"
+                ),
             }
 
     class FrozenV21:
@@ -2717,8 +2727,7 @@ def test_recovery_training_hands_breakeven_to_frozen_v21_and_reenters_recovery(
             self.main_epsilons: list[float] = []
 
         def select_action(self, observation, *, epsilon, **kwargs):
-            if float(observation[0]) != 99.0:
-                self.main_epsilons.append(float(epsilon))
+            self.main_epsilons.append(float(epsilon))
             values = (
                 np.zeros(len(Action), np.float32)
                 if kwargs.get("return_action_values", False)
@@ -2762,7 +2771,8 @@ def test_recovery_training_hands_breakeven_to_frozen_v21_and_reenters_recovery(
         Action.ENTER_LONG_1,
         Action.ENTER_SHORT_1,
     ]
-    assert v21.main_epsilons == [0.0, 0.0]
+    assert v21.main_epsilons
+    assert set(v21.main_epsilons) == {0.0}
     assert diagnostics[0]["policy_state_decisions"] == {
         "recovery": 2,
         "normal": 1,

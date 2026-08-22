@@ -7,12 +7,13 @@ from dataclasses import dataclass
 import hashlib
 import math
 import re
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 
 import numpy as np
 import torch
 
 from .decision import Action
+from .replay import Transition
 
 
 RECOVERY_ACTIONS = (
@@ -50,10 +51,29 @@ class RecoveryValueTarget:
     observation: np.ndarray
     action_values: tuple[float, float, float]
     source_identity_sha256: str
+    recurrent_observations: np.ndarray | None = None
+    recurrent_resets: tuple[bool, ...] | None = None
+    anchor_action: Action | None = None
+    anchor_economic_success: bool | None = None
 
     def __post_init__(self) -> None:
         observation = np.asarray(self.observation, dtype=np.float32)
         values = tuple(float(value) for value in self.action_values)
+        recurrent_observations = self.recurrent_observations
+        recurrent_resets = self.recurrent_resets
+        anchor_action = self.anchor_action
+        anchor_economic_success = self.anchor_economic_success
+        if anchor_action is not None:
+            anchor_action = Action(anchor_action)
+        if recurrent_observations is None:
+            recurrent_resets = None
+        else:
+            recurrent_observations = np.asarray(
+                recurrent_observations, dtype=np.float32
+            )
+            if recurrent_resets is None:
+                raise ValueError("recovery recurrent resets are missing")
+            recurrent_resets = tuple(recurrent_resets)
         if (
             observation.ndim != 1
             or observation.size == 0
@@ -61,12 +81,38 @@ class RecoveryValueTarget:
             or len(values) != len(RECOVERY_ACTIONS)
             or not all(math.isfinite(value) and -1.0 <= value <= 1.0 for value in values)
             or _SHA256.fullmatch(self.source_identity_sha256) is None
+            or recurrent_observations is not None
+            and (
+                recurrent_observations.ndim != 2
+                or recurrent_observations.shape[0] < 1
+                or recurrent_observations.shape[1:] != observation.shape
+                or not np.isfinite(recurrent_observations).all()
+                or len(recurrent_resets) != recurrent_observations.shape[0]
+                or not all(type(value) is bool for value in recurrent_resets)
+                or not recurrent_resets[0]
+                or not np.array_equal(recurrent_observations[-1], observation)
+            )
+            or (anchor_action is None) != (anchor_economic_success is None)
+            or anchor_action is not None
+            and (
+                anchor_action not in {
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                }
+                or type(anchor_economic_success) is not bool
+            )
         ):
             raise ValueError("recovery value target is invalid")
         observation = observation.copy()
         observation.setflags(write=False)
         object.__setattr__(self, "observation", observation)
         object.__setattr__(self, "action_values", values)
+        if recurrent_observations is not None:
+            recurrent_observations = recurrent_observations.copy()
+            recurrent_observations.setflags(write=False)
+        object.__setattr__(self, "recurrent_observations", recurrent_observations)
+        object.__setattr__(self, "recurrent_resets", recurrent_resets)
+        object.__setattr__(self, "anchor_action", anchor_action)
 
     @property
     def best_action(self) -> Action:
@@ -74,11 +120,21 @@ class RecoveryValueTarget:
 
     @property
     def identity_sha256(self) -> str:
-        digest = hashlib.sha256(b"propevolve-recovery-value-target-v1\0")
+        version = 1 if self.recurrent_observations is None else 2
+        digest = hashlib.sha256(
+            f"propevolve-recovery-value-target-v{version}\0".encode("ascii")
+        )
         digest.update(self.source_identity_sha256.encode("ascii"))
         digest.update(str(self.observation.shape).encode("ascii"))
         digest.update(self.observation.tobytes(order="C"))
         digest.update(np.asarray(self.action_values, np.float64).tobytes(order="C"))
+        if self.recurrent_observations is not None:
+            digest.update(str(self.recurrent_observations.shape).encode("ascii"))
+            digest.update(self.recurrent_observations.tobytes(order="C"))
+            digest.update(bytes(self.recurrent_resets))
+        if self.anchor_action is not None:
+            digest.update(bytes((int(self.anchor_action),)))
+            digest.update(bytes((int(self.anchor_economic_success),)))
         return digest.hexdigest()
 
 
@@ -201,6 +257,7 @@ class RecoveryValueStore:
         self.seed = seed
         self._targets: list[RecoveryValueTarget] = []
         self._rng = np.random.default_rng(seed)
+        self._balanced_sample_count = 0
 
     def __len__(self) -> int:
         return len(self._targets)
@@ -217,17 +274,50 @@ class RecoveryValueStore:
             raise ValueError("recovery value store is empty")
         return self._targets[int(self._rng.integers(len(self._targets)))]
 
+    def sample_balanced(self) -> RecoveryValueTarget:
+        """Sample one target while balancing side and success when available."""
+        if not self._targets:
+            raise ValueError("recovery value store is empty")
+        groups: dict[tuple[Action, bool], list[RecoveryValueTarget]] = {}
+        for target in self._targets:
+            if target.anchor_action is None:
+                continue
+            key = (target.anchor_action, bool(target.anchor_economic_success))
+            groups.setdefault(key, []).append(target)
+        if not groups:
+            return self.sample()
+        keys = sorted(groups, key=lambda item: (int(item[0]), item[1]))
+        key = keys[self._balanced_sample_count % len(keys)]
+        self._balanced_sample_count += 1
+        group = groups[key]
+        return group[int(self._rng.integers(len(group)))]
+
     def state_dict(self) -> dict[str, object]:
         return {
             "schema": "propevolve_recovery_value_store_v1",
             "capacity": self.capacity,
             "seed": self.seed,
             "rng_state": copy.deepcopy(self._rng.bit_generator.state),
+            "balanced_sample_count": self._balanced_sample_count,
             "targets": [
                 {
                     "observation": target.observation.copy(),
                     "action_values": target.action_values,
                     "source_identity_sha256": target.source_identity_sha256,
+                    "recurrent_observations": (
+                        None
+                        if target.recurrent_observations is None
+                        else target.recurrent_observations.copy()
+                    ),
+                    "recurrent_resets": target.recurrent_resets,
+                    "anchor_action": (
+                        None
+                        if target.anchor_action is None
+                        else int(target.anchor_action)
+                    ),
+                    "anchor_economic_success": (
+                        target.anchor_economic_success
+                    ),
                     "identity_sha256": target.identity_sha256,
                 }
                 for target in self._targets
@@ -251,6 +341,24 @@ class RecoveryValueStore:
                 observation=np.asarray(payload.get("observation"), np.float32),
                 action_values=tuple(payload.get("action_values", ())),
                 source_identity_sha256=str(payload.get("source_identity_sha256", "")),
+                recurrent_observations=(
+                    None
+                    if payload.get("recurrent_observations") is None
+                    else np.asarray(payload["recurrent_observations"], np.float32)
+                ),
+                recurrent_resets=(
+                    None
+                    if payload.get("recurrent_resets") is None
+                    else tuple(payload["recurrent_resets"])
+                ),
+                anchor_action=(
+                    None
+                    if payload.get("anchor_action") is None
+                    else Action(int(payload["anchor_action"]))
+                ),
+                anchor_economic_success=payload.get(
+                    "anchor_economic_success"
+                ),
             )
             if payload.get("identity_sha256") != target.identity_sha256:
                 raise ValueError("recovery value store target identity drifted")
@@ -259,6 +367,14 @@ class RecoveryValueStore:
             raise ValueError("recovery value store exceeds capacity")
         self._targets = targets
         self._rng.bit_generator.state = copy.deepcopy(dict(state["rng_state"]))
+        balanced_sample_count = state.get("balanced_sample_count", 0)
+        if (
+            isinstance(balanced_sample_count, bool)
+            or not isinstance(balanced_sample_count, int)
+            or balanced_sample_count < 0
+        ):
+            raise ValueError("recovery value store sample state drifted")
+        self._balanced_sample_count = balanced_sample_count
 
 
 def recovery_value_kl(
@@ -293,6 +409,37 @@ def recovery_value_kl(
     ).sum(dim=-1).mean()
 
 
+def recovery_action_margin(
+    policy_q_values: torch.Tensor,
+    recovery_values: torch.Tensor,
+    *,
+    margin: float,
+) -> torch.Tensor:
+    """Require the unique best recovery action to outrank alternatives."""
+    if (
+        policy_q_values.shape != recovery_values.shape
+        or policy_q_values.shape != (len(RECOVERY_ACTIONS),)
+        or not torch.is_floating_point(policy_q_values)
+        or not torch.is_floating_point(recovery_values)
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+        or float(margin) < 0.0
+    ):
+        raise ValueError("recovery action margin contract is invalid")
+    maximum = recovery_values.max()
+    winners = recovery_values == maximum
+    if int(winners.sum().item()) != 1:
+        return policy_q_values.sum() * 0.0
+    winner_index = int(winners.nonzero(as_tuple=False)[0].item())
+    alternatives = torch.cat((
+        policy_q_values[:winner_index],
+        policy_q_values[winner_index + 1:],
+    ))
+    return torch.relu(
+        float(margin) + alternatives.max() - policy_q_values[winner_index]
+    )
+
+
 def recovery_action_values(
     *,
     observation: np.ndarray,
@@ -301,6 +448,10 @@ def recovery_action_values(
     recovery_success_pnl: float,
     source_role: str,
     source_identity_sha256: str,
+    recurrent_observations: np.ndarray | None = None,
+    recurrent_resets: tuple[bool, ...] | None = None,
+    anchor_action: Action | None = None,
+    anchor_economic_success: bool | None = None,
 ) -> RecoveryValueTarget:
     """Convert three authenticated counterfactual branches to bounded utility."""
     if source_role != "training":
@@ -342,7 +493,59 @@ def recovery_action_values(
         observation=observation,
         action_values=tuple(values),
         source_identity_sha256=source_identity_sha256,
+        recurrent_observations=recurrent_observations,
+        recurrent_resets=recurrent_resets,
+        anchor_action=anchor_action,
+        anchor_economic_success=anchor_economic_success,
     )
+
+
+def select_recovery_target_prefix(
+    transitions: Sequence[Transition],
+    *,
+    prefer_success: bool,
+) -> tuple[Transition, ...] | None:
+    """Select one actual low-headroom recovery entry and its causal prefix."""
+    if type(prefer_success) is not bool:
+        raise ValueError("recovery target preference is invalid")
+    rows = tuple(transitions)
+    candidates = tuple(
+        (index, transition)
+        for index, transition in enumerate(rows)
+        if transition.recovery_active
+        and set(transition.valid_actions) == set(RECOVERY_ACTIONS)
+        and transition.action in {
+            Action.ENTER_LONG_1,
+            Action.ENTER_SHORT_1,
+        }
+        and transition.paired_a_plus_side is transition.action
+        and type(transition.paired_a_plus_economic_win) is bool
+    )
+    preferred = tuple(
+        item
+        for item in candidates
+        if item[1].paired_a_plus_economic_win is prefer_success
+    )
+    fallback = tuple(
+        (index, transition)
+        for index, transition in enumerate(rows)
+        if transition.recovery_active
+        and set(transition.valid_actions) == set(RECOVERY_ACTIONS)
+    )
+    pool = preferred or candidates or fallback
+    if not pool:
+        return None
+
+    def ranking(item: tuple[int, Transition]) -> tuple[float, int]:
+        index, transition = item
+        headroom = transition.regime_selectivity_headroom_fraction
+        return (
+            math.inf if headroom is None else float(headroom),
+            -index,
+        )
+
+    anchor_index, _ = min(pool, key=ranking)
+    return rows[: anchor_index + 1]
 
 
 def build_recovery_value_target(
@@ -355,6 +558,7 @@ def build_recovery_value_target(
     recovery_success_pnl: float,
     source_role: str,
     source_identity_sha256: str,
+    causal_prefix: Sequence[Transition] | None = None,
 ) -> RecoveryValueTarget:
     """Roll out all native flat actions from one authenticated recovery state."""
     if (
@@ -364,6 +568,38 @@ def build_recovery_value_target(
         or not {"ticker", "start", "challenge_start_state"} <= set(reset_options)
     ):
         raise ValueError("recovery rollout contract is invalid")
+    prefix = tuple(causal_prefix or ())
+    if prefix and (
+        not all(isinstance(transition, Transition) for transition in prefix)
+        or not prefix[-1].recovery_active
+        or set(prefix[-1].valid_actions) != set(RECOVERY_ACTIONS)
+    ):
+        raise ValueError("recovery causal prefix is invalid")
+    recurrent_prefix = prefix
+    if prefix:
+        reset_indices = tuple(
+            index
+            for index, transition in enumerate(prefix)
+            if transition.recurrent_reset
+        )
+        if not reset_indices:
+            raise ValueError("recovery causal prefix has no recurrent boundary")
+        recurrent_prefix = prefix[reset_indices[-1]:]
+    recurrent_observations = (
+        None
+        if not recurrent_prefix
+        else np.stack(
+            [transition.observation for transition in recurrent_prefix]
+        ).astype(np.float32, copy=False)
+    )
+    recurrent_resets = (
+        None
+        if not recurrent_prefix
+        else tuple(
+            bool(transition.recurrent_reset)
+            for transition in recurrent_prefix
+        )
+    )
     branches: dict[Action, RecoveryBranchResult] = {}
     shared_observation: np.ndarray | None = None
     shared_origin: tuple[object, object] | None = None
@@ -371,30 +607,58 @@ def build_recovery_value_target(
         observation, reset_info = environment.reset(options=dict(reset_options))
         observation = np.asarray(observation, np.float32)
         origin = (reset_info.get("ticker"), reset_info.get("start"))
+        valid = tuple(Action(value) for value in reset_info.get("valid_actions", ()))
+        hidden = None
+        anchor_pnl = float(start_pnl)
+        for index, transition in enumerate(prefix):
+            if not np.array_equal(observation, transition.observation):
+                raise ValueError("recovery causal prefix observation drifted")
+            valid = tuple(Action(value) for value in transition.valid_actions)
+            if transition.recurrent_reset:
+                hidden = None
+            _, hidden, _ = policy.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=valid,
+                epsilon=0.0,
+            )
+            if index == len(prefix) - 1:
+                break
+            next_observation, _, terminated, truncated, info = environment.step(
+                transition.action
+            )
+            if terminated or truncated:
+                raise ValueError("recovery causal prefix ended before its anchor")
+            if not np.array_equal(next_observation, transition.next_observation):
+                raise ValueError("recovery causal prefix transition drifted")
+            observation = np.asarray(next_observation, np.float32)
+            anchor_pnl = float(
+                info.get("realized_pnl", info.get("equity_pnl", anchor_pnl))
+            )
         if shared_observation is None:
             shared_observation = observation.copy()
             shared_origin = origin
         elif not np.array_equal(observation, shared_observation) or origin != shared_origin:
             raise ValueError("recovery branches do not share one causal state")
-        valid = tuple(Action(value) for value in reset_info.get("valid_actions", ()))
         if forced_action not in valid:
             raise ValueError("forced recovery action is not executable")
 
         # Advance the frozen recurrent state on the shared observation, but
         # discard its choice because only the first action is counterfactual.
-        _, hidden, _ = policy.select_action(
-            observation,
-            hidden=None,
-            valid_actions=valid,
-            epsilon=0.0,
-        )
+        if not prefix:
+            _, hidden, _ = policy.select_action(
+                observation,
+                hidden=None,
+                valid_actions=valid,
+                epsilon=0.0,
+            )
         next_observation, _, terminated, truncated, info = environment.step(
             forced_action
         )
         if truncated:
             raise ValueError("recovery target rollout cannot be truncated")
         step_index = 1
-        maximum_pnl = float(info.get("equity_pnl", start_pnl))
+        maximum_pnl = float(info.get("equity_pnl", anchor_pnl))
         while True:
             outcome = info.get("outcome")
             realized_pnl = float(info.get("realized_pnl", info.get("equity_pnl")))
@@ -430,10 +694,25 @@ def build_recovery_value_target(
     return recovery_action_values(
         observation=shared_observation,
         branches=branches,
-        start_pnl=start_pnl,
+        start_pnl=anchor_pnl if prefix else start_pnl,
         recovery_success_pnl=recovery_success_pnl,
         source_role=source_role,
         source_identity_sha256=source_identity_sha256,
+        recurrent_observations=recurrent_observations,
+        recurrent_resets=recurrent_resets,
+        anchor_action=(
+            None
+            if not prefix
+            or prefix[-1].action not in {
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }
+            or type(prefix[-1].paired_a_plus_economic_win) is not bool
+            else prefix[-1].action
+        ),
+        anchor_economic_success=(
+            None if not prefix else prefix[-1].paired_a_plus_economic_win
+        ),
     )
 
 
@@ -444,5 +723,7 @@ __all__ = [
     "RecoveryValueTarget",
     "build_recovery_value_target",
     "recovery_action_values",
+    "recovery_action_margin",
     "recovery_value_kl",
+    "select_recovery_target_prefix",
 ]

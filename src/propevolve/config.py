@@ -478,6 +478,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         "retain_nonnegative_entry_policy",
     }
     optional_supervision_fields = {
+        "action_margin",
         "success_replay",
         "healthy_pass_replay",
         "post_recovery_contrast_replay",
@@ -542,6 +543,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         start["session_pnl"],
         supervision["loss_weight"],
         supervision["temperature"],
+        supervision.get("action_margin", 0.0),
     )
     if (
         any(
@@ -565,6 +567,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     if (
         not 0.0 < float(supervision["loss_weight"]) <= 1.0
         or float(supervision["temperature"]) <= 0.0
+        or float(supervision.get("action_margin", 0.0)) < 0.0
         or int(supervision["store_capacity"]) < 1
         or int(supervision["target_every_episodes"]) < 1
     ):

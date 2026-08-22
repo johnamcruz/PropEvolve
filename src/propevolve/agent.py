@@ -28,7 +28,11 @@ from .balance_aware_regime_selectivity import (
 from .decision import Action
 from .config import configure_runtime_environment
 from .replay import Transition
-from .recovery import RecoveryValueTarget, recovery_value_kl
+from .recovery import (
+    RecoveryValueTarget,
+    recovery_action_margin as recovery_action_margin_loss_fn,
+    recovery_value_kl,
+)
 
 
 _REGIME_SELECTIVITY_STRATA = (
@@ -1374,6 +1378,7 @@ class RecurrentC51Agent:
         recovery_target: RecoveryValueTarget | None = None,
         recovery_value_loss_weight: float = 0.0,
         recovery_value_temperature: float = 1.0,
+        recovery_action_margin: float = 0.0,
         retain_nonnegative_entry_policy: bool = False,
     ) -> float:
         if not sequences:
@@ -1399,6 +1404,9 @@ class RecurrentC51Agent:
             or isinstance(recovery_value_temperature, bool)
             or not np.isfinite(recovery_value_temperature)
             or float(recovery_value_temperature) <= 0.0
+            or isinstance(recovery_action_margin, bool)
+            or not np.isfinite(recovery_action_margin)
+            or float(recovery_action_margin) < 0.0
             or recovery_target is not None
             and not isinstance(recovery_target, RecoveryValueTarget)
             or type(retain_nonnegative_entry_policy) is not bool
@@ -2998,26 +3006,48 @@ class RecurrentC51Agent:
         recovery_wait_minus_short_q = torch.zeros(
             (), dtype=torch.float32, device=self.device
         )
+        recovery_action_margin_loss = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
+        recovery_recurrent_rows = torch.zeros(
+            (), dtype=torch.float32, device=self.device
+        )
         if recovery_target is not None:
             if float(recovery_value_loss_weight) <= 0.0:
                 raise ValueError("recovery target requires positive loss weight")
+            target_observations = (
+                recovery_target.recurrent_observations
+                if recovery_target.recurrent_observations is not None
+                else recovery_target.observation.reshape(1, -1)
+            )
             recovery_observation = torch.as_tensor(
-                np.array(recovery_target.observation, copy=True),
+                np.array(target_observations, copy=True),
                 dtype=torch.float32,
                 device=self.device,
-            ).view(1, 1, -1)
+            ).view(1, len(target_observations), -1)
             if recovery_observation.shape[-1] != self.observation_dim:
                 raise ValueError("recovery target observation width drifted")
+            target_resets = (
+                recovery_target.recurrent_resets
+                if recovery_target.recurrent_resets is not None
+                else (True,)
+            )
             with self._autocast():
-                recovery_logits, _ = self._call_with_compile_fallback(
-                    self._online_forward,
-                    self.online.forward,
+                recovery_recurrent, _ = self._recurrent_features_with_resets(
+                    self.online,
                     recovery_observation,
-                    None,
+                    torch.as_tensor(
+                        target_resets,
+                        dtype=torch.bool,
+                        device=self.device,
+                    ).view(1, -1),
+                )
+                recovery_logits = self.online.distribution_logits(
+                    recovery_recurrent
                 )
             recovery_q = (
                 recovery_logits.float().softmax(-1) * self.support
-            ).sum(-1)[0, 0].index_select(-1, self._flat_action_indices)
+            ).sum(-1)[0, -1].index_select(-1, self._flat_action_indices)
             recovery_economic_values = torch.as_tensor(
                 recovery_target.action_values,
                 dtype=torch.float32,
@@ -3028,7 +3058,14 @@ class RecurrentC51Agent:
                 recovery_economic_values,
                 temperature=float(recovery_value_temperature),
             )
-            loss = loss + float(recovery_value_loss_weight) * recovery_value_loss
+            recovery_action_margin_loss = recovery_action_margin_loss_fn(
+                recovery_q,
+                recovery_economic_values,
+                margin=float(recovery_action_margin),
+            )
+            loss = loss + float(recovery_value_loss_weight) * (
+                recovery_value_loss + recovery_action_margin_loss
+            )
             recovery_value_rows = torch.ones(
                 (), dtype=torch.float32, device=self.device
             )
@@ -3037,6 +3074,11 @@ class RecurrentC51Agent:
             ).to(torch.float32)
             recovery_wait_minus_long_q = recovery_q[0] - recovery_q[1]
             recovery_wait_minus_short_q = recovery_q[0] - recovery_q[2]
+            recovery_recurrent_rows = torch.as_tensor(
+                float(recovery_observation.shape[1]),
+                dtype=torch.float32,
+                device=self.device,
+            )
         self.optimizer.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
@@ -3127,6 +3169,8 @@ class RecurrentC51Agent:
             recovery_value_top1_concurrence,
             recovery_wait_minus_long_q,
             recovery_wait_minus_short_q,
+            recovery_action_margin_loss,
+            recovery_recurrent_rows,
             loss,
             gradient_norm.float(),
             management_rows.sum().to(torch.float32)
@@ -3200,6 +3244,8 @@ class RecurrentC51Agent:
             recovery_value_top1_concurrence_value,
             recovery_wait_minus_long_q_value,
             recovery_wait_minus_short_q_value,
+            recovery_action_margin_loss_value,
+            recovery_recurrent_rows_value,
             total_loss,
             gradient_norm_value,
             management_row_fraction,
@@ -3646,6 +3692,8 @@ class RecurrentC51Agent:
             ),
             "recovery_wait_minus_long_q": recovery_wait_minus_long_q_value,
             "recovery_wait_minus_short_q": recovery_wait_minus_short_q_value,
+            "recovery_action_margin_loss": recovery_action_margin_loss_value,
+            "recovery_recurrent_rows": recovery_recurrent_rows_value,
             "teacher_weight_scale": teacher_weight_scale,
             "entry_action_weight_scale": entry_action_weight_scale,
             "total_loss": total_loss,

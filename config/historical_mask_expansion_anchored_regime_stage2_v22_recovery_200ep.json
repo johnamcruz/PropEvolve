@@ -298,6 +298,7 @@
     "action_value_supervision": {
       "loss_weight": 0.25,
       "temperature": 1,
+      "action_margin": 0.25,
       "store_capacity": 200,
       "target_every_episodes": 1,
       "start_pnls": [-2500, -2000, -1500, -1000, -500],

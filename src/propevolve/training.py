@@ -60,6 +60,7 @@ from .recovery import (
     RecoveryHandoffPolicy,
     RecoveryValueStore,
     build_recovery_value_target,
+    select_recovery_target_prefix,
 )
 from .teachers import agent_teacher_settings
 from .training_health import (
@@ -2272,6 +2273,7 @@ class RecoveryCurriculumSettings:
     supervision_start_pnls: tuple[float, ...]
     retain_nonnegative_entry_policy: bool
     start_state: ChallengeStartState
+    recovery_action_margin: float = 0.0
     recovery_success_replay_update_period: int = 0
     recovery_success_replay_max_examples: int = 8
     recovery_success_replay_path: str | None = None
@@ -2296,6 +2298,9 @@ class RecoveryCurriculumSettings:
             or isinstance(self.recovery_value_temperature, bool)
             or not np.isfinite(self.recovery_value_temperature)
             or self.recovery_value_temperature <= 0.0
+            or isinstance(self.recovery_action_margin, bool)
+            or not np.isfinite(self.recovery_action_margin)
+            or self.recovery_action_margin < 0.0
             or isinstance(self.recovery_value_store_capacity, bool)
             or self.recovery_value_store_capacity < 1
             or isinstance(self.target_every_episodes, bool)
@@ -2456,6 +2461,7 @@ def _recovery_curriculum_from_config(
         "retain_nonnegative_entry_policy",
     }
     supervision_optional = {
+        "action_margin",
         "success_replay",
         "healthy_pass_replay",
         "post_recovery_contrast_replay",
@@ -2537,6 +2543,7 @@ def _recovery_curriculum_from_config(
         start["session_pnl"],
         supervision["loss_weight"],
         supervision["temperature"],
+        supervision.get("action_margin", 0.0),
     )
     if (
         any(
@@ -2564,6 +2571,7 @@ def _recovery_curriculum_from_config(
         retain_nonnegative_entry_policy=bool(
             supervision["retain_nonnegative_entry_policy"]
         ),
+        recovery_action_margin=float(supervision.get("action_margin", 0.0)),
         recovery_success_replay_update_period=(
             0
             if success_replay is None
@@ -5451,35 +5459,6 @@ def train_agent(
                 )
             episode_end_index = int(episode_end_index)
         episode_ticker = str(reset_info.get("ticker", ""))
-        if (
-            recovery_curriculum is not None
-            and episode_index % recovery_curriculum.target_every_episodes == 0
-        ):
-            assert recovery_value_policy is not None
-            assert recovery_value_environment is not None
-            assert recovery_value_store is not None
-            assert recovery_value_source_identity_sha256 is not None
-            supervision_start_state = (
-                recovery_curriculum.supervision_start_state(episode_index)
-            )
-            recovery_value_store.add(build_recovery_value_target(
-                recovery_value_policy,
-                recovery_value_environment,
-                reset_options={
-                    "ticker": episode_ticker,
-                    "start": episode_start_index,
-                    "challenge_start_state": supervision_start_state,
-                },
-                recurrent_horizon=recurrent_horizon,
-                start_pnl=supervision_start_state.realized_pnl,
-                recovery_success_pnl=(
-                    recovery_curriculum.start_state.recovery_success_pnl
-                ),
-                source_role="training",
-                source_identity_sha256=(
-                    recovery_value_source_identity_sha256
-                ),
-            ))
         hidden = None
         handoff_policy = (
             None
@@ -5877,6 +5856,55 @@ def train_agent(
             episode_outcome=outcome,
         )
         replay_transitions = tuple(transitions)
+        recovery_value_target_added = False
+        recovery_value_target_side: str | None = None
+        recovery_value_target_economic_success: bool | None = None
+        if (
+            recovery_curriculum is not None
+            and episode_index % recovery_curriculum.target_every_episodes == 0
+        ):
+            assert recovery_value_policy is not None
+            assert recovery_value_environment is not None
+            assert recovery_value_store is not None
+            assert recovery_value_source_identity_sha256 is not None
+            causal_prefix = select_recovery_target_prefix(
+                replay_transitions,
+                prefer_success=outcome == "pass",
+            )
+            if causal_prefix is not None:
+                recovery_target = build_recovery_value_target(
+                    recovery_value_policy,
+                    recovery_value_environment,
+                    reset_options={
+                        "ticker": episode_ticker,
+                        "start": episode_start_index,
+                        "challenge_start_state": (
+                            recovery_curriculum.start_state
+                        ),
+                    },
+                    recurrent_horizon=recurrent_horizon,
+                    start_pnl=(
+                        recovery_curriculum.start_state.realized_pnl
+                    ),
+                    recovery_success_pnl=(
+                        recovery_curriculum.start_state.recovery_success_pnl
+                    ),
+                    source_role="training",
+                    source_identity_sha256=(
+                        recovery_value_source_identity_sha256
+                    ),
+                    causal_prefix=causal_prefix,
+                )
+                recovery_value_store.add(recovery_target)
+                recovery_value_target_added = True
+                recovery_value_target_side = (
+                    None
+                    if recovery_target.anchor_action is None
+                    else recovery_target.anchor_action.name
+                )
+                recovery_value_target_economic_success = (
+                    recovery_target.anchor_economic_success
+                )
         if (
             replay.regime_wait_sequence_fraction > 0.0
             or replay.regime_wait_sequence_update_period > 0
@@ -5999,6 +6027,8 @@ def train_agent(
                 "recovery_value_top1_concurrence",
                 "recovery_wait_minus_long_q",
                 "recovery_wait_minus_short_q",
+                "recovery_action_margin_loss",
+                "recovery_recurrent_rows",
                 *(
                     f"regime_selectivity_association_{cohort}_{field}"
                     for cohort in _REGIME_ASSOCIATION_COHORTS
@@ -6148,7 +6178,7 @@ def train_agent(
                             len(contrast_sequences) // 2
                         )
                 recovery_target = (
-                    recovery_value_store.sample()
+                    recovery_value_store.sample_balanced()
                     if recovery_value_store is not None
                     and len(recovery_value_store) > 0
                     else None
@@ -6165,6 +6195,9 @@ def train_agent(
                         ),
                         "recovery_value_temperature": (
                             recovery_curriculum.recovery_value_temperature
+                        ),
+                        "recovery_action_margin": (
+                            recovery_curriculum.recovery_action_margin
                         ),
                         "retain_nonnegative_entry_policy": (
                             recovery_curriculum.retain_nonnegative_entry_policy
@@ -6497,6 +6530,16 @@ def train_agent(
                 ),
                 "post_recovery_contrast_replay_promoted_episodes": (
                     post_recovery_contrast_replay_promoted_episodes
+                ),
+                "recovery_value_target_added": recovery_value_target_added,
+                "recovery_value_target_side": recovery_value_target_side,
+                "recovery_value_target_economic_success": (
+                    recovery_value_target_economic_success
+                ),
+                "recovery_value_store_size": (
+                    0
+                    if recovery_value_store is None
+                    else len(recovery_value_store)
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,

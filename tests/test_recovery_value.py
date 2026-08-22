@@ -13,8 +13,10 @@ from propevolve.recovery import (
     RecoveryValueStore,
     RecoveryValueTarget,
     build_recovery_value_target,
+    recovery_action_margin,
     recovery_action_values,
     recovery_value_kl,
+    select_recovery_target_prefix,
 )
 
 
@@ -306,6 +308,126 @@ def test_recovery_target_forces_each_first_action_from_the_same_causal_state() -
     assert environment.resets == [options, options, options]
 
 
+def test_recovery_target_replays_causal_prefix_and_preserves_recurrent_boundary(
+) -> None:
+    outcomes = {
+        Action.WAIT: ("timeout", -2_400.0, False),
+        Action.ENTER_LONG_1: ("timeout", 0.0, True),
+        Action.ENTER_SHORT_1: ("blow", -3_000.0, False),
+    }
+
+    class PrefixEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def reset(self, *, options):
+            self.steps = 0
+            return np.array([1.0, 0.0], np.float32), {
+                "ticker": options["ticker"],
+                "start": options["start"],
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": -2_000.0,
+                "equity_pnl": -2_000.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            if self.steps == 1:
+                assert Action(action) is Action.WAIT
+                return np.array([2.0, 0.0], np.float32), 0.0, False, False, {
+                    "outcome": None,
+                    "valid_actions": (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    ),
+                    "realized_pnl": -2_000.0,
+                    "equity_pnl": -2_000.0,
+                }
+            outcome, pnl, recovered = outcomes[Action(action)]
+            return np.array([3.0, 0.0], np.float32), 0.0, True, False, {
+                "outcome": outcome,
+                "valid_actions": (),
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "recovery_status": (
+                    "recovered" if recovered else "not_recovered"
+                ),
+            }
+
+    prefix = (
+        Transition(
+            observation=np.array([1.0, 0.0], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([2.0, 0.0], np.float32),
+            terminated=False,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            recurrent_reset=True,
+            recovery_active=True,
+        ),
+        Transition(
+            observation=np.array([2.0, 0.0], np.float32),
+            action=Action.ENTER_SHORT_1,
+            reward=0.0,
+            next_observation=np.array([3.0, 0.0], np.float32),
+            terminated=True,
+            valid_actions=(
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            ),
+            next_valid_actions=(),
+            recovery_active=True,
+            paired_a_plus_side=Action.ENTER_SHORT_1,
+            paired_a_plus_economic_win=False,
+        ),
+    )
+    policy = _RecordingPolicy(Action.WAIT, "frozen")
+
+    target = build_recovery_value_target(
+        policy,
+        PrefixEnvironment(),
+        reset_options={
+            "ticker": "NQ",
+            "start": 17,
+            "challenge_start_state": object(),
+        },
+        recurrent_horizon=64,
+        start_pnl=-2_000.0,
+        recovery_success_pnl=0.0,
+        source_role="training",
+        source_identity_sha256="e" * 64,
+        causal_prefix=prefix,
+    )
+
+    np.testing.assert_array_equal(
+        target.recurrent_observations,
+        np.array([[1.0, 0.0], [2.0, 0.0]], np.float32),
+    )
+    assert target.recurrent_resets == (True, False)
+    assert target.action_values == pytest.approx((-0.2, 1.0, -1.0))
+    assert target.anchor_action is Action.ENTER_SHORT_1
+    assert target.anchor_economic_success is False
+    assert policy.calls == [
+        (1.0, None, 0.0),
+        (2.0, 1, 0.0),
+    ] * 3
+
+
 def test_recovery_value_store_round_trip_resumes_the_same_sample() -> None:
     store = RecoveryValueStore(capacity=3, seed=19)
     for index in range(3):
@@ -321,6 +443,89 @@ def test_recovery_value_store_round_trip_resumes_the_same_sample() -> None:
     restored.load_state_dict(state)
 
     assert restored.sample().identity_sha256 == expected.identity_sha256
+
+
+def test_recovery_value_store_loads_legacy_v22_checkpoint_state() -> None:
+    store = RecoveryValueStore(capacity=2, seed=23)
+    store.add(RecoveryValueTarget(
+        observation=np.array([1.0], np.float32),
+        action_values=(0.0, 1.0, -1.0),
+        source_identity_sha256="9" * 64,
+    ))
+    legacy_state = store.state_dict()
+    legacy_state.pop("balanced_sample_count")
+    for payload in legacy_state["targets"]:
+        payload.pop("recurrent_observations")
+        payload.pop("recurrent_resets")
+        payload.pop("anchor_action")
+        payload.pop("anchor_economic_success")
+
+    restored = RecoveryValueStore(capacity=2, seed=23)
+    restored.load_state_dict(legacy_state)
+
+    assert restored.sample().identity_sha256 == store.sample().identity_sha256
+
+
+def test_recovery_target_prefix_selects_the_requested_economic_boundary() -> None:
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    transitions = tuple(
+        Transition(
+            observation=np.array([float(index), 0.0], np.float32),
+            action=action,
+            reward=0.0,
+            next_observation=np.array([float(index + 1), 0.0], np.float32),
+            terminated=False,
+            valid_actions=valid,
+            next_valid_actions=valid,
+            recurrent_reset=index == 0,
+            recovery_active=True,
+            regime_selectivity_headroom_fraction=headroom,
+            paired_a_plus_side=action if action is not Action.WAIT else None,
+            paired_a_plus_economic_win=economic_win,
+        )
+        for index, (action, economic_win, headroom) in enumerate((
+            (Action.WAIT, None, 0.8),
+            (Action.ENTER_LONG_1, True, 0.7),
+            (Action.ENTER_SHORT_1, False, 0.2),
+        ))
+    )
+
+    winning = select_recovery_target_prefix(transitions, prefer_success=True)
+    failed = select_recovery_target_prefix(transitions, prefer_success=False)
+
+    assert winning is not None and winning[-1].action is Action.ENTER_LONG_1
+    assert failed is not None and failed[-1].action is Action.ENTER_SHORT_1
+    assert len(winning) == 2
+    assert len(failed) == 3
+
+
+def test_recovery_value_store_balances_side_and_economic_boundary() -> None:
+    store = RecoveryValueStore(capacity=8, seed=7)
+    for index, (side, success) in enumerate((
+        (Action.ENTER_LONG_1, False),
+        (Action.ENTER_LONG_1, True),
+        (Action.ENTER_SHORT_1, False),
+        (Action.ENTER_SHORT_1, True),
+    )):
+        store.add(RecoveryValueTarget(
+            observation=np.array([float(index)], np.float32),
+            action_values=(0.0, 1.0, -1.0),
+            source_identity_sha256=f"{index + 10:064x}",
+            anchor_action=side,
+            anchor_economic_success=success,
+        ))
+
+    sampled = {
+        (target.anchor_action, target.anchor_economic_success)
+        for target in (store.sample_balanced() for _ in range(4))
+    }
+
+    assert sampled == {
+        (Action.ENTER_LONG_1, False),
+        (Action.ENTER_LONG_1, True),
+        (Action.ENTER_SHORT_1, False),
+        (Action.ENTER_SHORT_1, True),
+    }
 
 
 def test_recovery_value_store_does_not_accept_replay_transitions() -> None:
@@ -437,6 +642,34 @@ def test_recovery_kl_moves_the_best_action_up_and_alternatives_down() -> None:
     assert q_values.grad[2] > 0.0
 
 
+def test_recovery_action_margin_requires_the_economic_winner_to_rank_first(
+) -> None:
+    q_values = torch.tensor([0.0, 0.1, 0.0], requires_grad=True)
+
+    loss = recovery_action_margin(
+        q_values,
+        torch.tensor([-1.0, 1.0, 0.0]),
+        margin=0.25,
+    )
+
+    assert loss.item() == pytest.approx(0.15)
+    loss.backward()
+    assert q_values.grad is not None
+    assert q_values.grad[1] < 0.0
+    assert q_values.grad[0] > 0.0
+
+
+def test_recovery_action_margin_does_not_invent_a_winner_for_economic_ties(
+) -> None:
+    loss = recovery_action_margin(
+        torch.zeros(3),
+        torch.tensor([1.0, 1.0, -1.0]),
+        margin=0.25,
+    )
+
+    assert loss.item() == 0.0
+
+
 def test_recovery_disabled_keeps_the_complete_v21_update_exact() -> None:
     control = _agent(101)
     candidate = _agent(101)
@@ -468,6 +701,10 @@ def test_recovery_target_adds_one_loss_to_the_existing_optimizer_step() -> None:
         observation=np.array([0.0, 1.0], np.float32),
         action_values=(-1.0, 1.0, 0.0),
         source_identity_sha256="1" * 64,
+        recurrent_observations=np.array(
+            [[1.0, 0.0], [0.0, 1.0]], np.float32
+        ),
+        recurrent_resets=(True, False),
     )
 
     control.train_batch(batch)
@@ -476,11 +713,14 @@ def test_recovery_target_adds_one_loss_to_the_existing_optimizer_step() -> None:
         recovery_target=target,
         recovery_value_loss_weight=0.25,
         recovery_value_temperature=1.0,
+        recovery_action_margin=0.25,
     )
 
     assert candidate.optimizer_updates == control.optimizer_updates == 1
     assert candidate.last_train_metrics["recovery_value_rows"] == 1.0
     assert candidate.last_train_metrics["recovery_value_loss"] > 0.0
+    assert candidate.last_train_metrics["recovery_action_margin_loss"] > 0.0
+    assert candidate.last_train_metrics["recovery_recurrent_rows"] == 2.0
     assert candidate.last_train_metrics["total_loss"] > (
         candidate.last_train_metrics["rl_loss"]
     )

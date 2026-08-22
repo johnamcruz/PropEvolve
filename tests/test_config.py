@@ -89,6 +89,7 @@ def _recovery_curriculum_payload() -> dict:
         "action_value_supervision": {
             "loss_weight": 0.25,
             "temperature": 1.0,
+            "action_margin": 0.25,
             "store_capacity": 200,
             "target_every_episodes": 1,
             "start_pnls": [-2_500, -2_000, -1_500, -1_000, -500],
@@ -121,6 +122,24 @@ def test_config_accepts_post_recovery_contrast_replay_by_values(
     ]
     assert replay["update_period"] == 8
     assert replay["max_examples"] == 8
+    assert config["recovery_curriculum"]["action_value_supervision"][
+        "action_margin"
+    ] == 0.25
+
+
+def test_config_rejects_negative_recovery_action_margin(tmp_path: Path) -> None:
+    payload = _recovery_curriculum_payload()
+    payload["recovery_curriculum"]["action_value_supervision"][
+        "action_margin"
+    ] = -0.1
+    path = tmp_path / "negative-recovery-margin.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="recovery action-value supervision",
+    ):
+        load_experiment_config(path)
 
 
 def _episode_budget_payload() -> dict:
