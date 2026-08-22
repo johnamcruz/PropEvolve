@@ -94,6 +94,89 @@ class RecoveryPolicy(Protocol):
     ) -> tuple[Action, object | None, np.ndarray | None]: ...
 
 
+class RecoveryHandoffPolicy:
+    """Route negative PnL to recovery and nonnegative PnL to frozen V21.
+
+    Only the active policy runs on ordinary decisions.  When the economic
+    state changes, the newly active recurrent policy reconstructs its hidden
+    state from the causal prefix collected since the last recurrent reset.
+    """
+
+    def __init__(
+        self,
+        recovery_policy: RecoveryPolicy,
+        *,
+        normal_policy: RecoveryPolicy,
+    ) -> None:
+        if recovery_policy is normal_policy:
+            raise ValueError("recovery and normal policies must be distinct")
+        self.recovery_policy = recovery_policy
+        self.normal_policy = normal_policy
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset the causal prefix at an episode or recurrent boundary."""
+        self._active_state: str | None = None
+        self._active_hidden: object | None = None
+        self._prefix: list[tuple[np.ndarray, tuple[Action, ...]]] = []
+
+    def assert_teacher_free(self) -> None:
+        """Fail closed unless both inference policies are teacher-free."""
+        for policy in (self.recovery_policy, self.normal_policy):
+            check = getattr(policy, "assert_teacher_free", None)
+            if check is not None:
+                check()
+
+    def _reconstruct_hidden(self, policy: RecoveryPolicy) -> object | None:
+        hidden = None
+        for observation, valid_actions in self._prefix:
+            _, hidden, _ = policy.select_action(
+                observation,
+                hidden=hidden,
+                valid_actions=valid_actions,
+                epsilon=0.0,
+                return_action_values=False,
+            )
+        return hidden
+
+    def select_action(
+        self,
+        observation: np.ndarray,
+        *,
+        valid_actions: tuple[Action, ...],
+        realized_pnl: float,
+        recovery_epsilon: float,
+        return_action_values: bool = False,
+    ) -> tuple[Action, np.ndarray | None, str]:
+        """Select from recovery below zero and frozen V21 otherwise."""
+        if (
+            isinstance(realized_pnl, bool)
+            or not math.isfinite(float(realized_pnl))
+            or not 0.0 <= float(recovery_epsilon) <= 1.0
+        ):
+            raise ValueError("recovery handoff state is invalid")
+        state = "recovery" if float(realized_pnl) < 0.0 else "normal"
+        policy = (
+            self.recovery_policy
+            if state == "recovery"
+            else self.normal_policy
+        )
+        if state != self._active_state:
+            self._active_hidden = self._reconstruct_hidden(policy)
+            self._active_state = state
+        epsilon = float(recovery_epsilon) if state == "recovery" else 0.0
+        action, self._active_hidden, action_values = policy.select_action(
+            observation,
+            hidden=self._active_hidden,
+            valid_actions=valid_actions,
+            epsilon=epsilon,
+            return_action_values=return_action_values,
+        )
+        prefix_observation = np.asarray(observation, dtype=np.float32).copy()
+        self._prefix.append((prefix_observation, tuple(valid_actions)))
+        return Action(action), action_values, state
+
+
 class RecoveryEnvironment(Protocol):
     def reset(self, *, options: Mapping[str, object]) -> tuple[np.ndarray, dict]: ...
 

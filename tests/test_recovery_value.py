@@ -8,6 +8,7 @@ from propevolve.agent import RecurrentC51Agent
 from propevolve.decision import Action
 from propevolve.replay import Transition
 from propevolve.recovery import (
+    RecoveryHandoffPolicy,
     RecoveryBranchResult,
     RecoveryValueStore,
     RecoveryValueTarget,
@@ -15,6 +16,103 @@ from propevolve.recovery import (
     recovery_action_values,
     recovery_value_kl,
 )
+
+
+class _RecordingPolicy:
+    def __init__(self, action: Action, name: str) -> None:
+        self.action = action
+        self.name = name
+        self.calls: list[tuple[float, object | None, float]] = []
+
+    def select_action(
+        self,
+        observation,
+        *,
+        hidden,
+        valid_actions,
+        epsilon,
+        return_action_values=False,
+    ):
+        marker = 0 if hidden is None else int(hidden)
+        self.calls.append((float(observation[0]), hidden, float(epsilon)))
+        values = np.arange(len(Action), dtype=np.float32)
+        return self.action, marker + 1, values if return_action_values else None
+
+
+def test_recovery_handoff_uses_recovery_below_zero_and_v21_at_breakeven() -> None:
+    recovery = _RecordingPolicy(Action.WAIT, "recovery")
+    v21 = _RecordingPolicy(Action.ENTER_LONG_1, "v21")
+    policy = RecoveryHandoffPolicy(recovery, normal_policy=v21)
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+
+    first, _, first_state = policy.select_action(
+        np.array([-2_000.0], np.float32),
+        valid_actions=valid,
+        realized_pnl=-2_000.0,
+        recovery_epsilon=0.4,
+    )
+    second, _, second_state = policy.select_action(
+        np.array([0.0], np.float32),
+        valid_actions=valid,
+        realized_pnl=0.0,
+        recovery_epsilon=0.4,
+    )
+
+    assert (first, first_state) == (Action.WAIT, "recovery")
+    assert (second, second_state) == (Action.ENTER_LONG_1, "normal")
+    assert recovery.calls == [(-2_000.0, None, 0.4)]
+    # V21 is reconstructed from the causal prefix, then acts greedily at $0.
+    assert v21.calls == [(-2_000.0, None, 0.0), (0.0, 1, 0.0)]
+
+
+def test_recovery_handoff_reconstructs_each_policy_when_pnl_crosses_zero_again() -> None:
+    recovery = _RecordingPolicy(Action.ENTER_SHORT_1, "recovery")
+    v21 = _RecordingPolicy(Action.ENTER_LONG_1, "v21")
+    policy = RecoveryHandoffPolicy(recovery, normal_policy=v21)
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+
+    states = []
+    for observation, pnl in ((-100.0, -100.0), (10.0, 10.0), (-50.0, -50.0)):
+        _, _, state = policy.select_action(
+            np.array([observation], np.float32),
+            valid_actions=valid,
+            realized_pnl=pnl,
+            recovery_epsilon=0.2,
+        )
+        states.append(state)
+
+    assert states == ["recovery", "normal", "recovery"]
+    # Re-entering recovery rebuilds its state from both preceding observations.
+    assert recovery.calls == [
+        (-100.0, None, 0.2),
+        (-100.0, None, 0.0),
+        (10.0, 1, 0.0),
+        (-50.0, 2, 0.2),
+    ]
+    assert v21.calls == [(-100.0, None, 0.0), (10.0, 1, 0.0)]
+
+
+def test_recovery_handoff_reset_discards_the_prior_episode_prefix() -> None:
+    recovery = _RecordingPolicy(Action.WAIT, "recovery")
+    v21 = _RecordingPolicy(Action.ENTER_LONG_1, "v21")
+    policy = RecoveryHandoffPolicy(recovery, normal_policy=v21)
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+
+    policy.select_action(
+        np.array([-1.0], np.float32),
+        valid_actions=valid,
+        realized_pnl=-1.0,
+        recovery_epsilon=0.1,
+    )
+    policy.reset()
+    policy.select_action(
+        np.array([0.0], np.float32),
+        valid_actions=valid,
+        realized_pnl=0.0,
+        recovery_epsilon=0.1,
+    )
+
+    assert v21.calls == [(0.0, None, 0.0)]
 
 
 def _branches(
@@ -255,6 +353,43 @@ def _agent(seed: int, **overrides) -> RecurrentC51Agent:
         seed=seed,
         **overrides,
     )
+
+
+def test_recovery_handoff_reconstructs_exact_v21_q_values_at_breakeven() -> None:
+    direct_v21 = _agent(97)
+    routed_v21 = _agent(97)
+    recovery = _agent(101)
+    handoff = RecoveryHandoffPolicy(recovery, normal_policy=routed_v21)
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    observations = (
+        np.array([-0.3, 0.1], np.float32),
+        np.array([-0.1, 0.4], np.float32),
+        np.array([0.0, 0.8], np.float32),
+    )
+    direct_hidden = None
+    direct_action = None
+    direct_values = None
+    for observation in observations:
+        direct_action, direct_hidden, direct_values = direct_v21.select_action(
+            observation,
+            hidden=direct_hidden,
+            valid_actions=valid,
+            epsilon=0.0,
+            return_action_values=True,
+        )
+
+    for observation, pnl in zip(observations, (-2_000.0, -500.0, 0.0), strict=True):
+        routed_action, routed_values, state = handoff.select_action(
+            observation,
+            valid_actions=valid,
+            realized_pnl=pnl,
+            recovery_epsilon=0.0,
+            return_action_values=True,
+        )
+
+    assert state == "normal"
+    assert routed_action is direct_action
+    np.testing.assert_allclose(routed_values, direct_values, rtol=0, atol=0)
 
 
 def _ordinary_v21_batch() -> tuple[tuple[Transition, ...], ...]:

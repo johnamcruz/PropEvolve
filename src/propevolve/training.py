@@ -57,6 +57,7 @@ from .final_regime_probe import (
 from .observation import TradeManagementObservationSpec
 from .replay import BalancedSequenceReplay, Episode, Transition
 from .recovery import (
+    RecoveryHandoffPolicy,
     RecoveryValueStore,
     build_recovery_value_target,
 )
@@ -3679,6 +3680,7 @@ class HistoricalCandidateRunner:
                 episode_diagnostic_callback=lambda payload: _append_jsonl(
                     validation_diagnostics_path, payload
                 ),
+                normal_policy=recovery_value_policy,
             )
             if recovery_stress_episodes:
                 assert recovery_curriculum is not None
@@ -3689,6 +3691,7 @@ class HistoricalCandidateRunner:
                     recurrent_horizon=int(training_config["recurrent_horizon"]),
                     settings=recovery_curriculum,
                     episode_tickers=tuple(config["deployment_tickers"]),
+                    normal_policy=recovery_value_policy,
                 )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
@@ -5449,6 +5452,20 @@ def train_agent(
                 ),
             ))
         hidden = None
+        handoff_policy = (
+            None
+            if recovery_curriculum is None
+            else RecoveryHandoffPolicy(
+                agent,
+                normal_policy=recovery_value_policy,
+            )
+        )
+        policy_state_decisions = {"recovery": 0, "normal": 0}
+        policy_state_handoffs = {
+            "recovery_to_normal": 0,
+            "normal_to_recovery": 0,
+        }
+        previous_policy_state: str | None = None
         transitions = []
         action_counts = {action: 0 for action in Action}
         greedy_flat_action_counts = {action: 0 for action in Action}
@@ -5537,6 +5554,8 @@ def train_agent(
                 )
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
+                if handoff_policy is not None:
+                    handoff_policy.reset()
             action_epsilon = (
                 management_epsilon
                 if set(valid) == {Action.HOLD, Action.CLOSE}
@@ -5552,13 +5571,31 @@ def train_agent(
                 and (progress.environment_steps + step_index)
                 % greedy_diagnostic_interval_steps == 0
             )
-            action, hidden, action_values = agent.select_action(
-                observation,
-                hidden=hidden,
-                valid_actions=valid,
-                epsilon=action_epsilon,
-                return_action_values=diagnostic_probe,
-            )
+            if handoff_policy is None:
+                action, hidden, action_values = agent.select_action(
+                    observation,
+                    hidden=hidden,
+                    valid_actions=valid,
+                    epsilon=action_epsilon,
+                    return_action_values=diagnostic_probe,
+                )
+            else:
+                action, action_values, policy_state = handoff_policy.select_action(
+                    observation,
+                    valid_actions=valid,
+                    realized_pnl=float(terminal_info["realized_pnl"]),
+                    recovery_epsilon=action_epsilon,
+                    return_action_values=diagnostic_probe,
+                )
+                policy_state_decisions[policy_state] += 1
+                if (
+                    previous_policy_state is not None
+                    and policy_state != previous_policy_state
+                ):
+                    policy_state_handoffs[
+                        f"{previous_policy_state}_to_{policy_state}"
+                    ] += 1
+                previous_policy_state = policy_state
             action_counts[Action(action)] += 1
             if diagnostic_probe:
                 assert action_values is not None
@@ -6301,6 +6338,8 @@ def train_agent(
                     if recovery_curriculum is not None
                     else "ordinary"
                 ),
+                "policy_state_decisions": policy_state_decisions,
+                "policy_state_handoffs": policy_state_handoffs,
                 "reward": total_reward,
                 "environment_steps": progress.environment_steps,
                 "budget_mode": budget_mode,
@@ -6691,10 +6730,18 @@ def evaluate_agent(
     no_trade_patience_episodes: int = 0,
     greedy_diagnostic_interval_steps: int = 256,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
+    normal_policy: RecurrentC51Agent | None = None,
 ) -> TrainingResult:
     assert_teacher_free = getattr(agent, "assert_teacher_free", None)
     if assert_teacher_free is not None:
         assert_teacher_free()
+    handoff_policy = (
+        None
+        if normal_policy is None
+        else RecoveryHandoffPolicy(agent, normal_policy=normal_policy)
+    )
+    if handoff_policy is not None:
+        handoff_policy.assert_teacher_free()
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
     if (
@@ -6752,6 +6799,8 @@ def evaluate_agent(
         observation, info = environment.reset()
         valid = tuple(info["valid_actions"])
         hidden = None
+        if handoff_policy is not None:
+            handoff_policy.reset()
         total = 0.0
         step_index = 0
         episode_flat_action_counts = {
@@ -6771,9 +6820,12 @@ def evaluate_agent(
         episode_best_entry_margins: list[float] = []
         episode_long_margins: list[float] = []
         episode_short_margins: list[float] = []
+        episode_policy_state_decisions = {"recovery": 0, "normal": 0}
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
+                if handoff_policy is not None:
+                    handoff_policy.reset()
             flat_actions = {
                 Action.WAIT,
                 Action.ENTER_LONG_1,
@@ -6784,13 +6836,23 @@ def evaluate_agent(
                 is_flat_decision
                 and environment_steps % greedy_diagnostic_interval_steps == 0
             )
-            action, hidden, action_values = agent.select_action(
-                observation,
-                hidden=hidden,
-                valid_actions=valid,
-                epsilon=0.0,
-                return_action_values=diagnostic_probe,
-            )
+            if handoff_policy is None:
+                action, hidden, action_values = agent.select_action(
+                    observation,
+                    hidden=hidden,
+                    valid_actions=valid,
+                    epsilon=0.0,
+                    return_action_values=diagnostic_probe,
+                )
+            else:
+                action, action_values, policy_state = handoff_policy.select_action(
+                    observation,
+                    valid_actions=valid,
+                    realized_pnl=float(info["realized_pnl"]),
+                    recovery_epsilon=0.0,
+                    return_action_values=diagnostic_probe,
+                )
+                episode_policy_state_decisions[policy_state] += 1
             if is_flat_decision:
                 flat_decision_count += 1
                 episode_flat_action_counts[Action(action)] += 1
@@ -6960,6 +7022,7 @@ def evaluate_agent(
                         Action.ENTER_SHORT_1
                     ],
                 },
+                "policy_state_decisions": episode_policy_state_decisions,
                 "headroom": episode_headroom,
                 "closed_trade_economics": closed_trade_economics,
                 "sampled_q_margins": {
@@ -7090,6 +7153,7 @@ def evaluate_recovery_stress(
     recurrent_horizon: int,
     settings: RecoveryCurriculumSettings,
     episode_tickers: tuple[str, ...] | None = None,
+    normal_policy: RecurrentC51Agent | None = None,
 ) -> RecoveryStressResult:
     """Run fixed-window recovery starts with normal challenge outcomes."""
     if episodes < 1 or recurrent_horizon < 1:
@@ -7105,6 +7169,13 @@ def evaluate_recovery_stress(
     wait_decisions: list[int] = []
     entries_used = 0
     environment_steps = 0
+    handoff_policy = (
+        None
+        if normal_policy is None
+        else RecoveryHandoffPolicy(agent, normal_policy=normal_policy)
+    )
+    if handoff_policy is not None:
+        handoff_policy.assert_teacher_free()
     for episode_index in range(episodes):
         options: dict[str, object] = {
             "challenge_start_state": settings.start_state,
@@ -7114,16 +7185,28 @@ def evaluate_recovery_stress(
         observation, info = environment.reset(options=options)
         valid = tuple(info["valid_actions"])
         hidden = None
+        if handoff_policy is not None:
+            handoff_policy.reset()
         step_index = 0
         while True:
             if step_index and step_index % recurrent_horizon == 0:
                 hidden = None
-            action, hidden, _ = agent.select_action(
-                observation,
-                hidden=hidden,
-                valid_actions=valid,
-                epsilon=0.0,
-            )
+                if handoff_policy is not None:
+                    handoff_policy.reset()
+            if handoff_policy is None:
+                action, hidden, _ = agent.select_action(
+                    observation,
+                    hidden=hidden,
+                    valid_actions=valid,
+                    epsilon=0.0,
+                )
+            else:
+                action, _, _ = handoff_policy.select_action(
+                    observation,
+                    valid_actions=valid,
+                    realized_pnl=float(info["realized_pnl"]),
+                    recovery_epsilon=0.0,
+                )
             observation, _, terminated, _, info = environment.step(action)
             valid = tuple(info["valid_actions"])
             step_index += 1

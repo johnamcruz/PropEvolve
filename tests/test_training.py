@@ -2626,6 +2626,302 @@ def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> No
     assert replay.recovery_flags == [True, False]
 
 
+def test_recovery_training_hands_breakeven_to_frozen_v21_and_reenters_recovery(
+) -> None:
+    class RecoveryAgent(Agent):
+        recurrent_burn_in = 64
+        n_step_return = 8
+
+        def select_action(self, observation, **kwargs):
+            values = (
+                np.zeros(len(Action), np.float32)
+                if kwargs.get("return_action_values", False)
+                else None
+            )
+            return Action.ENTER_SHORT_1, None, values
+
+    class HandoffEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+            self.actions: list[Action] = []
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            return np.array([-2_000.0], np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "start": 0,
+                "realized_pnl": -2_000.0,
+                "mll_headroom_fraction": 1.0 / 3.0,
+            }
+
+        def step(self, action):
+            self.actions.append(Action(action))
+            self.steps += 1
+            pnls = (0.0, -100.0, 6_000.0)
+            realized_pnl = pnls[self.steps - 1]
+            terminated = self.steps == len(pnls)
+            return np.array([realized_pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": (
+                    ()
+                    if terminated
+                    else (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                ),
+                "ticker": "NQ",
+                "fill_index": self.steps,
+                "outcome": "pass" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": realized_pnl,
+                "equity_pnl": realized_pnl,
+                "mll_headroom_fraction": 1.0,
+                "recovery_wait_decisions": 0,
+            }
+
+    class SidecarEnvironment:
+        def reset(self, *, options=None):
+            return np.array([99.0], np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "ticker": "NQ",
+                "start": 0,
+                "realized_pnl": float(
+                    options["challenge_start_state"].realized_pnl
+                ),
+            }
+
+        def step(self, action):
+            return np.array([100.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "outcome": "timeout",
+                "realized_pnl": -1_900.0,
+                "equity_pnl": -1_900.0,
+                "recovery_status": "not_recovered",
+            }
+
+    class FrozenV21:
+        def __init__(self) -> None:
+            self.main_epsilons: list[float] = []
+
+        def select_action(self, observation, *, epsilon, **kwargs):
+            if float(observation[0]) != 99.0:
+                self.main_epsilons.append(float(epsilon))
+            values = (
+                np.zeros(len(Action), np.float32)
+                if kwargs.get("return_action_values", False)
+                else None
+            )
+            return Action.ENTER_LONG_1, None, values
+
+    environment = HandoffEnvironment()
+    v21 = FrozenV21()
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        RecoveryAgent(),
+        environment,
+        episodes=1,
+        minimum_environment_steps=3,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=2,
+            sequence_length=96,
+            recurrent_burn_in=64,
+            n_step_return=8,
+            seed=69,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=96,
+        epsilon_start=0.5,
+        epsilon_end=0.5,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        recovery_curriculum=_recovery_curriculum_settings(),
+        recovery_value_policy=v21,
+        recovery_value_environment=SidecarEnvironment(),
+        recovery_value_store=RecoveryValueStore(capacity=10, seed=37),
+        recovery_value_source_identity_sha256="3" * 64,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert environment.actions == [
+        Action.ENTER_SHORT_1,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    ]
+    assert v21.main_epsilons == [0.0, 0.0]
+    assert diagnostics[0]["policy_state_decisions"] == {
+        "recovery": 2,
+        "normal": 1,
+    }
+    assert diagnostics[0]["policy_state_handoffs"] == {
+        "recovery_to_normal": 1,
+        "normal_to_recovery": 1,
+    }
+
+
+def test_teacher_free_evaluation_routes_normal_to_v21_and_drawdown_to_recovery(
+) -> None:
+    class Policy(Agent):
+        def __init__(self, action: Action) -> None:
+            super().__init__()
+            self.action = action
+            self.epsilons: list[float] = []
+
+        def select_action(self, observation, *, epsilon, return_action_values=False,
+                          **kwargs):
+            self.epsilons.append(float(epsilon))
+            values = (
+                np.zeros(len(Action), np.float32)
+                if return_action_values else None
+            )
+            return self.action, None, values
+
+    class EvaluationEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+            self.actions: list[Action] = []
+
+        def reset(self):
+            self.steps = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": 0.0,
+            }
+
+        def step(self, action):
+            self.actions.append(Action(action))
+            self.steps += 1
+            pnl = -100.0 if self.steps == 1 else 6_000.0
+            terminated = self.steps == 2
+            return np.array([pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": (
+                    ()
+                    if terminated
+                    else (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                ),
+                "outcome": "pass" if terminated else None,
+                "ticker": "NQ",
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+            }
+
+    recovery = Policy(Action.ENTER_SHORT_1)
+    v21 = Policy(Action.ENTER_LONG_1)
+    environment = EvaluationEnvironment()
+    diagnostics: list[dict[str, object]] = []
+
+    result = evaluate_agent(
+        recovery,
+        environment,
+        episodes=1,
+        recurrent_horizon=96,
+        normal_policy=v21,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert result.passes == 1
+    assert environment.actions == [Action.ENTER_LONG_1, Action.ENTER_SHORT_1]
+    assert recovery.epsilons == [0.0, 0.0]
+    assert v21.epsilons == [0.0]
+    assert diagnostics[0]["policy_state_decisions"] == {
+        "recovery": 1,
+        "normal": 1,
+    }
+
+
+def test_recovery_stress_hands_breakeven_to_frozen_v21_until_pass() -> None:
+    class Policy(Agent):
+        def __init__(self, action: Action) -> None:
+            super().__init__()
+            self.action = action
+
+        def select_action(self, observation, *, return_action_values=False, **kwargs):
+            values = (
+                np.zeros(len(Action), np.float32)
+                if return_action_values else None
+            )
+            return self.action, None, values
+
+    class StressEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+            self.actions: list[Action] = []
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            pnl = float(options["challenge_start_state"].realized_pnl)
+            return np.array([pnl], np.float32), {
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": pnl,
+            }
+
+        def step(self, action):
+            self.actions.append(Action(action))
+            self.steps += 1
+            pnl = 0.0 if self.steps == 1 else 6_000.0
+            terminated = self.steps == 2
+            return np.array([pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": (
+                    ()
+                    if terminated
+                    else (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    )
+                ),
+                "outcome": "pass" if terminated else None,
+                "recovery_status": "recovered" if terminated else None,
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "trade_count": 0,
+                "recovery_wait_decisions": 0,
+            }
+
+    environment = StressEnvironment()
+    result = evaluate_recovery_stress(
+        Policy(Action.ENTER_SHORT_1),
+        environment,
+        episodes=1,
+        recurrent_horizon=96,
+        settings=_recovery_curriculum_settings(),
+        episode_tickers=("NQ",),
+        normal_policy=Policy(Action.ENTER_LONG_1),
+    )
+
+    assert result.passes == 1
+    assert environment.actions == [Action.ENTER_SHORT_1, Action.ENTER_LONG_1]
+
+
 def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
 ) -> None:
     class RecoveryAgent(Agent):
