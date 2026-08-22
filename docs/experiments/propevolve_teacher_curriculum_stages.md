@@ -1,5 +1,9 @@
 # PropEvolve teacher curriculum stages
 
+> Historical curriculum record. The current operational design for a
+> config-driven, from-scratch campaign is documented in
+> `docs/experiments/propevolve_e2e_curriculum_campaign.md`.
+
 ## Status and purpose
 
 This document freezes the intended curriculum after the balanced post-launch
