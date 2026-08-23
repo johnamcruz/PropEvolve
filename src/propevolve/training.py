@@ -2404,6 +2404,9 @@ class RecoveryStressResult:
     episodes: int
     recovered: int
     not_recovered: int
+    retained: int
+    relapsed: int
+    recovered_then_blown: int
     passes: int
     timeouts: int
     blows: int
@@ -2419,6 +2422,14 @@ class RecoveryStressResult:
     @property
     def blow_rate(self) -> float:
         return self.blows / self.episodes
+
+    @property
+    def retained_recovery_rate(self) -> float:
+        return 0.0 if self.recovered == 0 else self.retained / self.recovered
+
+    @property
+    def relapse_rate(self) -> float:
+        return 0.0 if self.recovered == 0 else self.relapsed / self.recovered
 
 
 def _recovery_curriculum_from_config(
@@ -3995,6 +4006,15 @@ class HistoricalCandidateRunner:
                 "not_recovered": float(recovery_stress.not_recovered),
                 "not_recovered_rate": (
                     recovery_stress.not_recovered / recovery_stress.episodes
+                ),
+                "retained": float(recovery_stress.retained),
+                "retained_recovery_rate": (
+                    recovery_stress.retained_recovery_rate
+                ),
+                "relapsed": float(recovery_stress.relapsed),
+                "relapse_rate": recovery_stress.relapse_rate,
+                "recovered_then_blown": float(
+                    recovery_stress.recovered_then_blown
                 ),
                 "passes": float(recovery_stress.passes),
                 "timeouts": float(recovery_stress.timeouts),
@@ -5856,7 +5876,9 @@ def train_agent(
             episode_outcome=outcome,
         )
         replay_transitions = tuple(transitions)
+        recovery_value_target_generated = False
         recovery_value_target_added = False
+        recovery_value_target_discriminative = False
         recovery_value_target_side: str | None = None
         recovery_value_target_economic_success: bool | None = None
         if (
@@ -5869,12 +5891,25 @@ def train_agent(
             assert recovery_value_source_identity_sha256 is not None
             causal_prefix = select_recovery_target_prefix(
                 replay_transitions,
-                prefer_success=outcome == "pass",
+                recovery_succeeded=(
+                    bool(terminal_info.get("recovery_success", False))
+                    and bool(terminal_info.get(
+                        "recovery_retained",
+                        terminal_info.get("recovery_success", False),
+                    ))
+                ),
             )
             if causal_prefix is not None:
+                target_policy_identity = hashlib.sha256(
+                    (
+                        f"{recovery_value_source_identity_sha256}\0"
+                        f"recovery-updates={getattr(agent, 'optimizer_updates', 0)}"
+                    ).encode("ascii")
+                ).hexdigest()
                 recovery_target = build_recovery_value_target(
-                    recovery_value_policy,
+                    agent,
                     recovery_value_environment,
+                    normal_policy=recovery_value_policy,
                     reset_options={
                         "ticker": episode_ticker,
                         "start": episode_start_index,
@@ -5891,12 +5926,17 @@ def train_agent(
                     ),
                     source_role="training",
                     source_identity_sha256=(
-                        recovery_value_source_identity_sha256
+                        target_policy_identity
                     ),
                     causal_prefix=causal_prefix,
                 )
-                recovery_value_store.add(recovery_target)
-                recovery_value_target_added = True
+                recovery_value_target_generated = True
+                recovery_value_target_discriminative = (
+                    recovery_target.is_discriminative
+                )
+                recovery_value_target_added = recovery_value_store.add(
+                    recovery_target
+                )
                 recovery_value_target_side = (
                     None
                     if recovery_target.anchor_action is None
@@ -6507,6 +6547,27 @@ def train_agent(
                 "recovery_success": bool(
                     terminal_info.get("recovery_success", False)
                 ),
+                "recovery_retained": bool(
+                    terminal_info.get("recovery_retained", False)
+                ),
+                "recovery_relapsed": bool(
+                    terminal_info.get("recovery_relapsed", False)
+                ),
+                "recovery_relapse_count": int(
+                    terminal_info.get("recovery_relapse_count", 0)
+                ),
+                "first_recovery_index": terminal_info.get(
+                    "first_recovery_index"
+                ),
+                "first_recovery_relapse_index": terminal_info.get(
+                    "first_recovery_relapse_index"
+                ),
+                "post_recovery_min_realized_pnl": terminal_info.get(
+                    "post_recovery_min_realized_pnl"
+                ),
+                "recovered_then_blown": bool(
+                    terminal_info.get("recovered_then_blown", False)
+                ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
                 ),
@@ -6532,6 +6593,12 @@ def train_agent(
                     post_recovery_contrast_replay_promoted_episodes
                 ),
                 "recovery_value_target_added": recovery_value_target_added,
+                "recovery_value_target_generated": (
+                    recovery_value_target_generated
+                ),
+                "recovery_value_target_discriminative": (
+                    recovery_value_target_discriminative
+                ),
                 "recovery_value_target_side": recovery_value_target_side,
                 "recovery_value_target_economic_success": (
                     recovery_value_target_economic_success
@@ -7290,6 +7357,9 @@ def evaluate_recovery_stress(
     )
     outcomes = {"pass": 0, "blow": 0, "timeout": 0}
     statuses = {"recovered": 0, "not_recovered": 0}
+    retained = 0
+    relapsed = 0
+    recovered_then_blown = 0
     terminal_pnls: list[float] = []
     wait_decisions: list[int] = []
     entries_used = 0
@@ -7344,10 +7414,16 @@ def evaluate_recovery_stress(
             raise ValueError(f"unknown recovery stress outcome: {outcome}")
         if status not in statuses:
             raise ValueError(f"unknown recovery status: {status}")
-        if outcome == "blow" and status == "recovered":
-            raise ValueError("a blown recovery episode cannot be recovered")
         outcomes[outcome] += 1
         statuses[status] += 1
+        if status == "recovered":
+            episode_relapsed = bool(info.get("recovery_relapsed", False))
+            if episode_relapsed:
+                relapsed += 1
+            else:
+                retained += 1
+            if outcome == "blow":
+                recovered_then_blown += 1
         entries_used += int(info.get("trade_count", 0))
         terminal_pnls.append(float(info["equity_pnl"]))
         wait_decisions.append(int(info.get("recovery_wait_decisions", 0)))
@@ -7355,6 +7431,9 @@ def evaluate_recovery_stress(
         episodes=episodes,
         recovered=statuses["recovered"],
         not_recovered=statuses["not_recovered"],
+        retained=retained,
+        relapsed=relapsed,
+        recovered_then_blown=recovered_then_blown,
         passes=outcomes["pass"],
         timeouts=outcomes["timeout"],
         blows=outcomes["blow"],
@@ -7367,6 +7446,7 @@ def evaluate_recovery_stress(
         "[recovery-stress] COMPLETE "
         f"episodes={episodes} recovered={result.recovered} "
         f"not_recovered={result.not_recovered} "
+        f"retained={result.retained} relapsed={result.relapsed} "
         f"pass={result.passes} timeout={result.timeouts} blow={result.blows} "
         f"success_rate={result.recovery_success_rate:.1%} "
         f"mean_pnl={result.mean_terminal_pnl:+.2f}",

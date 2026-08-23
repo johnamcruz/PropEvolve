@@ -375,6 +375,11 @@ class HistoricalChallengeEnv:
         self._recovery_success_pnl: float | None = None
         self._recovery_status: str | None = None
         self._recovery_wait_decisions = 0
+        self._first_recovery_index: int | None = None
+        self._first_recovery_relapse_index: int | None = None
+        self._recovery_relapse_count = 0
+        self._post_recovery_min_realized_pnl: float | None = None
+        self._post_recovery_was_negative = False
 
     @property
     def observation_dim(self) -> int:
@@ -474,6 +479,11 @@ class HistoricalChallengeEnv:
         self._recovery_success_pnl = None
         self._recovery_status = None
         self._recovery_wait_decisions = 0
+        self._first_recovery_index = None
+        self._first_recovery_relapse_index = None
+        self._recovery_relapse_count = 0
+        self._post_recovery_min_realized_pnl = None
+        self._post_recovery_was_negative = False
         start_state = options.get("challenge_start_state")
         if start_state is not None:
             if not isinstance(start_state, ChallengeStartState):
@@ -570,7 +580,7 @@ class HistoricalChallengeEnv:
                 info.setdefault("exit_reason", "challenge_pass")
                 self._liquidate(float(self._market.close[self._index]), info)
                 if self._recovery_success_pnl is not None:
-                    self._recovery_status = "recovered"
+                    self._mark_recovered()
                     self._recovery_success_pnl = None
                 outcome = "pass"
             elif (
@@ -581,7 +591,7 @@ class HistoricalChallengeEnv:
                 self._liquidate(float(self._market.close[self._index]), info)
                 current_equity = self._equity(float(self._market.close[self._index]))
                 if self._account.realized_pnl >= self._recovery_success_pnl:
-                    self._recovery_status = "recovered"
+                    self._mark_recovered()
                     self._recovery_success_pnl = None
             if outcome is None and self._index >= self._end:
                 info.setdefault("exit_reason", "episode_timeout")
@@ -595,6 +605,8 @@ class HistoricalChallengeEnv:
             self._recovery_status = "not_recovered"
         if outcome is None and self._position is not None:
             self._update_ratchet(next_index, info)
+
+        self._update_recovery_retention()
 
         equity = self._equity(float(self._market.close[self._index]))
         reward = (equity - previous_equity) / self.spec.max_loss
@@ -647,7 +659,48 @@ class HistoricalChallengeEnv:
         })
         if self._recovery_status in {"recovered", "not_recovered"}:
             info["recovery_status"] = self._recovery_status
+        if self._recovery_status == "recovered":
+            info.update({
+                "first_recovery_index": self._first_recovery_index,
+                "first_recovery_relapse_index": (
+                    self._first_recovery_relapse_index
+                ),
+                "recovery_relapse_count": self._recovery_relapse_count,
+                "post_recovery_min_realized_pnl": (
+                    self._post_recovery_min_realized_pnl
+                ),
+                "recovery_relapsed": self._recovery_relapse_count > 0,
+                "recovery_retained": self._recovery_relapse_count == 0,
+                "recovered_then_blown": outcome == "blow",
+            })
         return self._observation(), float(reward), self._terminated, False, info
+
+    def _mark_recovered(self) -> None:
+        if self._account is None:
+            raise RuntimeError("recovery requires an active account")
+        if self._recovery_status != "recovered":
+            self._recovery_status = "recovered"
+            self._first_recovery_index = self._index
+            self._post_recovery_min_realized_pnl = self._account.realized_pnl
+            self._post_recovery_was_negative = False
+
+    def _update_recovery_retention(self) -> None:
+        if self._recovery_status != "recovered" or self._account is None:
+            return
+        realized_pnl = float(self._account.realized_pnl)
+        if self._post_recovery_min_realized_pnl is None:
+            self._post_recovery_min_realized_pnl = realized_pnl
+        else:
+            self._post_recovery_min_realized_pnl = min(
+                self._post_recovery_min_realized_pnl,
+                realized_pnl,
+            )
+        negative = realized_pnl < 0.0
+        if negative and not self._post_recovery_was_negative:
+            self._recovery_relapse_count += 1
+            if self._first_recovery_relapse_index is None:
+                self._first_recovery_relapse_index = self._index
+        self._post_recovery_was_negative = negative
 
     def _reward_shaping(
         self,

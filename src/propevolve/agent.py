@@ -3053,6 +3053,10 @@ class RecurrentC51Agent:
                 dtype=torch.float32,
                 device=self.device,
             )
+            recovery_target_has_unique_winner = bool((
+                recovery_economic_values
+                == recovery_economic_values.max()
+            ).sum().item() == 1)
             recovery_value_loss = recovery_value_kl(
                 recovery_q,
                 recovery_economic_values,
@@ -3066,12 +3070,15 @@ class RecurrentC51Agent:
             loss = loss + float(recovery_value_loss_weight) * (
                 recovery_value_loss + recovery_action_margin_loss
             )
-            recovery_value_rows = torch.ones(
-                (), dtype=torch.float32, device=self.device
+            recovery_value_rows = torch.as_tensor(
+                float(recovery_target_has_unique_winner),
+                dtype=torch.float32,
+                device=self.device,
             )
-            recovery_value_top1_concurrence = (
-                recovery_q.argmax() == recovery_economic_values.argmax()
-            ).to(torch.float32)
+            if recovery_target_has_unique_winner:
+                recovery_value_top1_concurrence = (
+                    recovery_q.argmax() == recovery_economic_values.argmax()
+                ).to(torch.float32)
             recovery_wait_minus_long_q = recovery_q[0] - recovery_q[1]
             recovery_wait_minus_short_q = recovery_q[0] - recovery_q[2]
             recovery_recurrent_rows = torch.as_tensor(

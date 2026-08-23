@@ -12,6 +12,7 @@ from propevolve.recovery import (
     RecoveryBranchResult,
     RecoveryValueStore,
     RecoveryValueTarget,
+    audit_recovery_action_values,
     build_recovery_value_target,
     recovery_action_margin,
     recovery_action_values,
@@ -207,6 +208,49 @@ def test_recovery_values_treat_an_eventual_blow_as_failure_after_early_profit() 
     assert target.best_action is Action.ENTER_SHORT_1
 
 
+def test_retention_value_does_not_relabel_a_genuine_entry_winner() -> None:
+    target = recovery_action_values(
+        observation=np.array([1.0], np.float32),
+        branches=_branches(
+            wait=RecoveryBranchResult("blow", -3_000.0, False),
+            long=RecoveryBranchResult(
+                "timeout",
+                -50.0,
+                True,
+                retained=False,
+                minimum_post_recovery_pnl=-50.0,
+            ),
+            short=RecoveryBranchResult("timeout", -1_000.0, False),
+        ),
+        start_pnl=-2_000.0,
+        recovery_success_pnl=0.0,
+        source_role="training",
+        source_identity_sha256="5" * 64,
+        anchor_action=Action.ENTER_LONG_1,
+        anchor_economic_success=True,
+    )
+
+    assert target.action_values[1] == pytest.approx(-0.025)
+    assert target.anchor_action is Action.ENTER_LONG_1
+    assert target.anchor_economic_success is True
+
+
+def test_recovered_then_blown_requires_explicit_failed_retention() -> None:
+    branch = RecoveryBranchResult(
+        "blow",
+        -3_000.0,
+        True,
+        retained=False,
+        minimum_post_recovery_pnl=-3_000.0,
+    )
+
+    assert branch.recovered is True
+    assert branch.retained is False
+
+    with pytest.raises(ValueError, match="blown branch cannot retain"):
+        RecoveryBranchResult("blow", -3_000.0, True)
+
+
 def test_recovery_values_reject_nontraining_or_mismatched_lineage() -> None:
     branches = _branches(
         wait=RecoveryBranchResult("timeout", -2_700.0, False),
@@ -295,6 +339,7 @@ def test_recovery_target_forces_each_first_action_from_the_same_causal_state() -
     target = build_recovery_value_target(
         policy,
         environment,
+        normal_policy=FrozenPolicy(),
         reset_options=options,
         recurrent_horizon=64,
         start_pnl=-2_700.0,
@@ -306,6 +351,106 @@ def test_recovery_target_forces_each_first_action_from_the_same_causal_state() -
     assert target.action_values == pytest.approx((50.0 / 2_700.0, 1.0, -1.0))
     assert policy.calls == 3
     assert environment.resets == [options, options, options]
+
+
+def test_recovery_target_uses_composite_continuation_and_penalizes_giveback(
+) -> None:
+    class CompositeEnvironment:
+        def __init__(self) -> None:
+            self.first_action: Action | None = None
+            self.steps = 0
+
+        def reset(self, *, options):
+            del options
+            self.first_action = None
+            self.steps = 0
+            return np.array([-2_000.0], np.float32), {
+                "ticker": "NQ",
+                "start": 11,
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": -2_000.0,
+                "equity_pnl": -2_000.0,
+            }
+
+        def step(self, action):
+            action = Action(action)
+            self.steps += 1
+            if self.steps == 1:
+                self.first_action = action
+                if action is Action.WAIT:
+                    return np.array([-3_000.0], np.float32), 0.0, True, False, {
+                        "outcome": "blow",
+                        "valid_actions": (),
+                        "realized_pnl": -3_000.0,
+                        "equity_pnl": -3_000.0,
+                    }
+                return np.array([-100.0], np.float32), 0.0, False, False, {
+                    "outcome": None,
+                    "valid_actions": (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    ),
+                    "realized_pnl": -100.0,
+                    "equity_pnl": -100.0,
+                }
+            if self.steps == 2:
+                assert action is Action.ENTER_LONG_1
+                return np.array([0.0], np.float32), 0.0, False, False, {
+                    "outcome": None,
+                    "valid_actions": (
+                        Action.WAIT,
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    ),
+                    "realized_pnl": 0.0,
+                    "equity_pnl": 0.0,
+                }
+            assert action is Action.WAIT
+            if self.first_action is Action.ENTER_LONG_1:
+                return np.array([100.0], np.float32), 0.0, True, False, {
+                    "outcome": "timeout",
+                    "valid_actions": (),
+                    "realized_pnl": 100.0,
+                    "equity_pnl": 100.0,
+                }
+            return np.array([-50.0], np.float32), 0.0, False, False, {
+                "outcome": None,
+                "valid_actions": (
+                    Action.WAIT,
+                    Action.ENTER_LONG_1,
+                    Action.ENTER_SHORT_1,
+                ),
+                "realized_pnl": -50.0,
+                "equity_pnl": -50.0,
+            }
+
+    recovery = _RecordingPolicy(Action.ENTER_LONG_1, "recovery")
+    v21 = _RecordingPolicy(Action.WAIT, "v21")
+
+    target = build_recovery_value_target(
+        recovery,
+        CompositeEnvironment(),
+        normal_policy=v21,
+        reset_options={
+            "ticker": "NQ",
+            "start": 11,
+            "challenge_start_state": object(),
+        },
+        recurrent_horizon=64,
+        start_pnl=-2_000.0,
+        recovery_success_pnl=0.0,
+        source_role="training",
+        source_identity_sha256="8" * 64,
+    )
+
+    assert target.action_values == pytest.approx((-1.0, 1.0, -0.025))
+    assert any(call[0] == -100.0 for call in recovery.calls)
+    assert any(call[0] == 0.0 for call in v21.calls)
 
 
 def test_recovery_target_replays_causal_prefix_and_preserves_recurrent_boundary(
@@ -401,6 +546,7 @@ def test_recovery_target_replays_causal_prefix_and_preserves_recurrent_boundary(
     target = build_recovery_value_target(
         policy,
         PrefixEnvironment(),
+        normal_policy=_RecordingPolicy(Action.WAIT, "v21"),
         reset_options={
             "ticker": "NQ",
             "start": 17,
@@ -512,6 +658,7 @@ def test_recovery_target_keeps_fallback_wait_anchor_metadata_atomic() -> None:
     target = build_recovery_value_target(
         _RecordingPolicy(Action.WAIT, "frozen"),
         PrefixEnvironment(),
+        normal_policy=_RecordingPolicy(Action.WAIT, "v21"),
         reset_options={
             "ticker": "NQ",
             "start": 17,
@@ -567,7 +714,8 @@ def test_recovery_value_store_loads_legacy_v22_checkpoint_state() -> None:
     assert restored.sample().identity_sha256 == store.sample().identity_sha256
 
 
-def test_recovery_target_prefix_selects_the_requested_economic_boundary() -> None:
+def test_recovery_target_prefix_selects_the_earliest_matching_recovery_boundary(
+) -> None:
     valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     transitions = tuple(
         Transition(
@@ -591,13 +739,55 @@ def test_recovery_target_prefix_selects_the_requested_economic_boundary() -> Non
         ))
     )
 
-    winning = select_recovery_target_prefix(transitions, prefer_success=True)
-    failed = select_recovery_target_prefix(transitions, prefer_success=False)
+    winning = select_recovery_target_prefix(
+        transitions,
+        recovery_succeeded=True,
+    )
+    failed = select_recovery_target_prefix(
+        transitions,
+        recovery_succeeded=False,
+    )
 
     assert winning is not None and winning[-1].action is Action.ENTER_LONG_1
     assert failed is not None and failed[-1].action is Action.ENTER_SHORT_1
     assert len(winning) == 2
     assert len(failed) == 3
+
+
+def test_recovery_target_prefix_moves_to_reactivated_negative_segment() -> None:
+    valid = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    rows = (
+        (Action.ENTER_LONG_1, True, True),
+        (Action.WAIT, None, False),
+        (Action.WAIT, None, True),
+        (Action.ENTER_SHORT_1, False, True),
+    )
+    transitions = tuple(
+        Transition(
+            observation=np.array([float(index)], np.float32),
+            action=action,
+            reward=0.0,
+            next_observation=np.array([float(index + 1)], np.float32),
+            terminated=False,
+            valid_actions=valid,
+            next_valid_actions=valid,
+            recurrent_reset=index == 0,
+            recovery_active=recovery_active,
+            paired_a_plus_side=action if action is not Action.WAIT else None,
+            paired_a_plus_economic_win=economic_win,
+        )
+        for index, (action, economic_win, recovery_active) in enumerate(rows)
+    )
+
+    prefix = select_recovery_target_prefix(
+        transitions,
+        recovery_succeeded=True,
+    )
+
+    assert prefix is not None
+    assert len(prefix) == 4
+    assert prefix[-1].action is Action.ENTER_SHORT_1
+    assert prefix[-1].paired_a_plus_economic_win is False
 
 
 def test_recovery_value_store_balances_side_and_economic_boundary() -> None:
@@ -771,6 +961,49 @@ def test_recovery_action_margin_does_not_invent_a_winner_for_economic_ties(
     assert loss.item() == 0.0
 
 
+def test_recovery_ties_are_diagnostic_only_and_have_no_auxiliary_gradient(
+) -> None:
+    target = RecoveryValueTarget(
+        observation=np.array([1.0], np.float32),
+        action_values=(-1.0, -1.0, -1.0),
+        source_identity_sha256="7" * 64,
+    )
+    store = RecoveryValueStore(capacity=4, seed=3)
+    store.add(target)
+    q_values = torch.tensor([0.4, -0.2, 0.1], requires_grad=True)
+
+    loss = recovery_value_kl(
+        q_values,
+        torch.tensor(target.action_values),
+        temperature=1.0,
+    )
+    loss.backward()
+
+    assert len(store) == 0
+    assert loss.item() == 0.0
+    assert q_values.grad is not None
+    torch.testing.assert_close(q_values.grad, torch.zeros_like(q_values))
+    with pytest.raises(ValueError, match="no unique best"):
+        _ = target.best_action
+
+
+def test_recovery_target_audit_fails_closed_on_ambiguous_population() -> None:
+    audit = audit_recovery_action_values((
+        (-1.0, -1.0, -1.0),
+        (1.0, 0.0, -1.0),
+        (1.0, 1.0, 1.0),
+    ))
+
+    assert audit.total == 3
+    assert audit.discriminative == 1
+    assert audit.ambiguous == 2
+    assert audit.all_blow == 1
+    assert audit.valid_for_training is False
+
+    filtered = audit_recovery_action_values(((1.0, 0.0, -1.0),))
+    assert filtered.valid_for_training is True
+
+
 def test_recovery_disabled_keeps_the_complete_v21_update_exact() -> None:
     control = _agent(101)
     candidate = _agent(101)
@@ -792,6 +1025,27 @@ def test_recovery_disabled_keeps_the_complete_v21_update_exact() -> None:
         strict=True,
     ):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_agent_does_not_count_tied_recovery_target_as_supervised_or_concurrent(
+) -> None:
+    agent = _agent(109)
+    target = RecoveryValueTarget(
+        observation=np.array([0.0, 1.0], np.float32),
+        action_values=(-1.0, -1.0, -1.0),
+        source_identity_sha256="6" * 64,
+    )
+
+    agent.train_batch(
+        _ordinary_v21_batch(),
+        recovery_target=target,
+        recovery_value_loss_weight=0.25,
+        recovery_value_temperature=1.0,
+        recovery_action_margin=0.25,
+    )
+
+    assert agent.last_train_metrics["recovery_value_rows"] == 0.0
+    assert agent.last_train_metrics["recovery_value_top1_concurrence"] == 0.0
 
 
 def test_recovery_target_adds_one_loss_to_the_existing_optimizer_step() -> None:

@@ -283,6 +283,48 @@ def test_reaching_breakeven_records_recovery_and_continues_the_challenge() -> No
     )
 
 
+def test_recovery_diagnostics_distinguish_retained_from_given_back() -> None:
+    market = _recovery_market(
+        opens=(100.0, 100.0, 200.0, 200.0, 190.0, 190.0, 190.0, 190.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+    env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": replace(
+            _recovery_start_state(),
+            realized_pnl=-2_000.0,
+            equity_pnl=-2_000.0,
+            session_pnl=-2_000.0,
+        ),
+    })
+
+    env.step(Action.ENTER_LONG_1)
+    _, _, _, _, recovered = env.step(Action.CLOSE)
+    env.step(Action.ENTER_LONG_1)
+    _, _, _, _, relapsed = env.step(Action.CLOSE)
+
+    assert recovered["recovery_status"] == "recovered"
+    assert recovered["recovery_retained"] is True
+    assert recovered["recovery_relapsed"] is False
+    assert relapsed["recovery_status"] == "recovered"
+    assert relapsed["recovery_retained"] is False
+    assert relapsed["recovery_relapsed"] is True
+    assert relapsed["recovery_relapse_count"] == 1
+    assert relapsed["post_recovery_min_realized_pnl"] == -200.0
+
+
 def test_closed_trade_receipts_expose_entry_risk_and_economic_outcome() -> None:
     """Episode diagnostics can join decision-time Regime evidence to trades."""
     env = HistoricalChallengeEnv(

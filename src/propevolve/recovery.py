@@ -25,6 +25,57 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
+class RecoveryTargetAudit:
+    """Validity counts for one recovery action-value population."""
+
+    total: int
+    discriminative: int
+    ambiguous: int
+    all_blow: int
+    all_recover: int
+    wait_best: int
+    long_best: int
+    short_best: int
+
+    @property
+    def valid_for_training(self) -> bool:
+        return self.total > 0 and self.ambiguous == 0
+
+
+def audit_recovery_action_values(
+    rows: Sequence[Sequence[float]],
+) -> RecoveryTargetAudit:
+    """Fail-closed summary used before recovery targets can train the policy."""
+    total = 0
+    ambiguous = 0
+    all_blow = 0
+    all_recover = 0
+    best_counts = [0, 0, 0]
+    for row in rows:
+        values = np.asarray(tuple(row), dtype=np.float64)
+        if values.shape != (len(RECOVERY_ACTIONS),) or not np.isfinite(values).all():
+            raise ValueError("recovery target audit row is invalid")
+        total += 1
+        all_blow += int(bool(np.all(values == -1.0)))
+        all_recover += int(bool(np.all(values == 1.0)))
+        winners = np.flatnonzero(values == values.max())
+        if len(winners) != 1:
+            ambiguous += 1
+        else:
+            best_counts[int(winners[0])] += 1
+    return RecoveryTargetAudit(
+        total=total,
+        discriminative=total - ambiguous,
+        ambiguous=ambiguous,
+        all_blow=all_blow,
+        all_recover=all_recover,
+        wait_best=best_counts[0],
+        long_best=best_counts[1],
+        short_best=best_counts[2],
+    )
+
+
+@dataclass(frozen=True)
 class RecoveryBranchResult:
     """Terminal economics after forcing one first action."""
 
@@ -32,16 +83,29 @@ class RecoveryBranchResult:
     terminal_pnl: float
     recovered: bool
     maximum_pnl: float | None = None
+    retained: bool | None = None
+    minimum_post_recovery_pnl: float | None = None
 
     def __post_init__(self) -> None:
         if self.outcome not in {"pass", "blow", "timeout"}:
             raise ValueError("recovery branch outcome is invalid")
         if type(self.recovered) is not bool or not math.isfinite(self.terminal_pnl):
             raise ValueError("recovery branch economics are invalid")
+        retained = self.recovered if self.retained is None else self.retained
+        if type(retained) is not bool:
+            raise ValueError("recovery branch retention is invalid")
         if self.maximum_pnl is not None and not math.isfinite(self.maximum_pnl):
             raise ValueError("recovery branch maximum PnL is invalid")
-        if self.outcome == "blow" and self.recovered:
-            raise ValueError("a blown recovery branch cannot be recovered")
+        if (
+            self.minimum_post_recovery_pnl is not None
+            and not math.isfinite(self.minimum_post_recovery_pnl)
+        ):
+            raise ValueError("recovery branch minimum retained PnL is invalid")
+        if retained and not self.recovered:
+            raise ValueError("an unrecovered branch cannot retain recovery")
+        if self.outcome == "blow" and retained:
+            raise ValueError("a blown branch cannot retain recovery")
+        object.__setattr__(self, "retained", retained)
 
 
 @dataclass(frozen=True)
@@ -116,7 +180,16 @@ class RecoveryValueTarget:
 
     @property
     def best_action(self) -> Action:
-        return RECOVERY_ACTIONS[int(np.argmax(np.asarray(self.action_values)))]
+        values = np.asarray(self.action_values)
+        winners = np.flatnonzero(values == values.max())
+        if len(winners) != 1:
+            raise ValueError("recovery value target has no unique best action")
+        return RECOVERY_ACTIONS[int(winners[0])]
+
+    @property
+    def is_discriminative(self) -> bool:
+        values = np.sort(np.asarray(self.action_values, dtype=np.float64))
+        return bool(values[-1] > values[-2])
 
     @property
     def identity_sha256(self) -> str:
@@ -262,12 +335,15 @@ class RecoveryValueStore:
     def __len__(self) -> int:
         return len(self._targets)
 
-    def add(self, target: RecoveryValueTarget) -> None:
+    def add(self, target: RecoveryValueTarget) -> bool:
         if not isinstance(target, RecoveryValueTarget):
             raise TypeError("recovery store accepts only RecoveryValueTarget")
+        if not target.is_discriminative:
+            return False
         self._targets.append(target)
         if len(self._targets) > self.capacity:
             del self._targets[0]
+        return True
 
     def sample(self) -> RecoveryValueTarget:
         if not self._targets:
@@ -362,7 +438,8 @@ class RecoveryValueStore:
             )
             if payload.get("identity_sha256") != target.identity_sha256:
                 raise ValueError("recovery value store target identity drifted")
-            targets.append(target)
+            if target.is_discriminative:
+                targets.append(target)
         if len(targets) > self.capacity:
             raise ValueError("recovery value store exceeds capacity")
         self._targets = targets
@@ -394,6 +471,12 @@ def recovery_value_kl(
         or float(temperature) <= 0.0
     ):
         raise ValueError("recovery value KL contract is invalid")
+    unique_winner = (
+        recovery_values
+        == recovery_values.max(dim=-1, keepdim=True).values
+    ).sum(dim=-1) == 1
+    if not bool(unique_winner.any().item()):
+        return policy_q_values.sum() * 0.0
     target_probabilities = torch.softmax(
         recovery_values / float(temperature), dim=-1
     )
@@ -403,10 +486,11 @@ def recovery_value_kl(
     target_log_probabilities = target_probabilities.clamp_min(
         torch.finfo(target_probabilities.dtype).tiny
     ).log()
-    return (
+    row_losses = (
         target_probabilities
         * (target_log_probabilities - policy_log_probabilities)
-    ).sum(dim=-1).mean()
+    ).sum(dim=-1)
+    return row_losses[unique_winner].mean()
 
 
 def recovery_action_margin(
@@ -476,12 +560,21 @@ def recovery_action_values(
     values: list[float] = []
     for action in RECOVERY_ACTIONS:
         branch = branches[action]
-        if branch.recovered:
+        if branch.outcome == "blow":
+            value = -1.0
+        elif branch.recovered and branch.retained:
             if branch.terminal_pnl < float(recovery_success_pnl):
                 raise ValueError("recovered branch did not reach recovery PnL")
             value = 1.0
-        elif branch.outcome == "blow":
-            value = -1.0
+        elif branch.recovered:
+            minimum = branch.minimum_post_recovery_pnl
+            if minimum is None or minimum >= float(recovery_success_pnl):
+                raise ValueError("relapsed recovery branch is invalid")
+            value = float(np.clip(
+                (minimum - float(recovery_success_pnl)) / distance,
+                -1.0,
+                0.0,
+            ))
         else:
             value = float(np.clip(
                 (branch.terminal_pnl - float(start_pnl)) / distance,
@@ -503,16 +596,21 @@ def recovery_action_values(
 def select_recovery_target_prefix(
     transitions: Sequence[Transition],
     *,
-    prefer_success: bool,
+    recovery_succeeded: bool,
 ) -> tuple[Transition, ...] | None:
-    """Select one actual low-headroom recovery entry and its causal prefix."""
-    if type(prefer_success) is not bool:
+    """Select the earliest matching recovery decision and its causal prefix."""
+    if type(recovery_succeeded) is not bool:
         raise ValueError("recovery target preference is invalid")
     rows = tuple(transitions)
+    segment_start = 0
+    for index in range(1, len(rows)):
+        if rows[index].recovery_active and not rows[index - 1].recovery_active:
+            segment_start = index
     candidates = tuple(
         (index, transition)
         for index, transition in enumerate(rows)
-        if transition.recovery_active
+        if index >= segment_start
+        and transition.recovery_active
         and set(transition.valid_actions) == set(RECOVERY_ACTIONS)
         and transition.action in {
             Action.ENTER_LONG_1,
@@ -524,34 +622,28 @@ def select_recovery_target_prefix(
     preferred = tuple(
         item
         for item in candidates
-        if item[1].paired_a_plus_economic_win is prefer_success
+        if item[1].paired_a_plus_economic_win is recovery_succeeded
     )
     fallback = tuple(
         (index, transition)
         for index, transition in enumerate(rows)
-        if transition.recovery_active
+        if index >= segment_start
+        and transition.recovery_active
         and set(transition.valid_actions) == set(RECOVERY_ACTIONS)
     )
     pool = preferred or candidates or fallback
     if not pool:
         return None
 
-    def ranking(item: tuple[int, Transition]) -> tuple[float, int]:
-        index, transition = item
-        headroom = transition.regime_selectivity_headroom_fraction
-        return (
-            math.inf if headroom is None else float(headroom),
-            -index,
-        )
-
-    anchor_index, _ = min(pool, key=ranking)
+    anchor_index, _ = pool[0]
     return rows[: anchor_index + 1]
 
 
 def build_recovery_value_target(
-    policy: RecoveryPolicy,
+    recovery_policy: RecoveryPolicy,
     environment: RecoveryEnvironment,
     *,
+    normal_policy: RecoveryPolicy,
     reset_options: Mapping[str, object],
     recurrent_horizon: int,
     start_pnl: float,
@@ -604,23 +696,28 @@ def build_recovery_value_target(
     shared_observation: np.ndarray | None = None
     shared_origin: tuple[object, object] | None = None
     for forced_action in RECOVERY_ACTIONS:
+        handoff = RecoveryHandoffPolicy(
+            recovery_policy,
+            normal_policy=normal_policy,
+        )
         observation, reset_info = environment.reset(options=dict(reset_options))
         observation = np.asarray(observation, np.float32)
         origin = (reset_info.get("ticker"), reset_info.get("start"))
         valid = tuple(Action(value) for value in reset_info.get("valid_actions", ()))
-        hidden = None
-        anchor_pnl = float(start_pnl)
+        anchor_pnl = float(
+            reset_info.get("realized_pnl", reset_info.get("equity_pnl", start_pnl))
+        )
         for index, transition in enumerate(prefix):
             if not np.array_equal(observation, transition.observation):
                 raise ValueError("recovery causal prefix observation drifted")
             valid = tuple(Action(value) for value in transition.valid_actions)
             if transition.recurrent_reset:
-                hidden = None
-            _, hidden, _ = policy.select_action(
+                handoff.reset()
+            handoff.select_action(
                 observation,
-                hidden=hidden,
                 valid_actions=valid,
-                epsilon=0.0,
+                realized_pnl=anchor_pnl,
+                recovery_epsilon=0.0,
             )
             if index == len(prefix) - 1:
                 break
@@ -646,11 +743,11 @@ def build_recovery_value_target(
         # Advance the frozen recurrent state on the shared observation, but
         # discard its choice because only the first action is counterfactual.
         if not prefix:
-            _, hidden, _ = policy.select_action(
+            handoff.select_action(
                 observation,
-                hidden=None,
                 valid_actions=valid,
-                epsilon=0.0,
+                realized_pnl=anchor_pnl,
+                recovery_epsilon=0.0,
             )
         next_observation, _, terminated, truncated, info = environment.step(
             forced_action
@@ -659,32 +756,50 @@ def build_recovery_value_target(
             raise ValueError("recovery target rollout cannot be truncated")
         step_index = 1
         maximum_pnl = float(info.get("equity_pnl", anchor_pnl))
+        recovered_once = False
+        minimum_post_recovery_pnl: float | None = None
         while True:
             outcome = info.get("outcome")
             realized_pnl = float(info.get("realized_pnl", info.get("equity_pnl")))
             maximum_pnl = max(maximum_pnl, float(info.get("equity_pnl", realized_pnl)))
             blown = terminated and outcome == "blow"
-            recovered = not blown and realized_pnl >= float(recovery_success_pnl)
-            if recovered or terminated:
+            if not recovered_once and not blown and realized_pnl >= float(
+                recovery_success_pnl
+            ):
+                recovered_once = True
+                minimum_post_recovery_pnl = realized_pnl
+            elif recovered_once:
+                assert minimum_post_recovery_pnl is not None
+                minimum_post_recovery_pnl = min(
+                    minimum_post_recovery_pnl,
+                    realized_pnl,
+                )
+            relapsed = bool(
+                recovered_once
+                and realized_pnl < float(recovery_success_pnl)
+            )
+            if relapsed or terminated:
                 if outcome is not None and outcome not in {"pass", "blow", "timeout"}:
                     raise ValueError("recovery rollout produced an invalid outcome")
                 branches[forced_action] = RecoveryBranchResult(
                     outcome="timeout" if outcome is None else str(outcome),
                     terminal_pnl=realized_pnl,
-                    recovered=recovered,
+                    recovered=recovered_once,
                     maximum_pnl=maximum_pnl,
+                    retained=recovered_once and not relapsed and not blown,
+                    minimum_post_recovery_pnl=minimum_post_recovery_pnl,
                 )
                 break
             if step_index % recurrent_horizon == 0:
-                hidden = None
+                handoff.reset()
             valid = tuple(Action(value) for value in info.get("valid_actions", ()))
             if not valid:
                 raise ValueError("recovery rollout has no valid continuation action")
-            action, hidden, _ = policy.select_action(
+            action, _, _ = handoff.select_action(
                 np.asarray(next_observation, np.float32),
-                hidden=hidden,
                 valid_actions=valid,
-                epsilon=0.0,
+                realized_pnl=realized_pnl,
+                recovery_epsilon=0.0,
             )
             next_observation, _, terminated, truncated, info = environment.step(action)
             if truncated:
@@ -719,10 +834,12 @@ def build_recovery_value_target(
 
 __all__ = [
     "RECOVERY_ACTIONS",
+    "RecoveryTargetAudit",
     "RecoveryBranchResult",
     "RecoveryValueStore",
     "RecoveryValueTarget",
     "build_recovery_value_target",
+    "audit_recovery_action_values",
     "recovery_action_values",
     "recovery_action_margin",
     "recovery_value_kl",

@@ -2450,12 +2450,20 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
             }
 
         def step(self, action):
+            action = Action(action)
+            outcome, pnl = {
+                Action.WAIT: ("timeout", -2_600.0),
+                Action.ENTER_LONG_1: ("timeout", 0.0),
+                Action.ENTER_SHORT_1: ("blow", -3_000.0),
+            }[action]
             return np.ones(1, np.float32), 0.0, True, False, {
                 "valid_actions": (),
-                "outcome": "timeout",
-                "realized_pnl": -2_600.0,
-                "equity_pnl": -2_600.0,
-                "recovery_status": "not_recovered",
+                "outcome": outcome,
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "recovery_status": (
+                    "recovered" if pnl >= 0.0 else "not_recovered"
+                ),
             }
 
     class FrozenPolicy:
@@ -2511,6 +2519,88 @@ def test_recovery_training_starts_every_episode_at_frozen_deficit_and_builds_tar
     }
     assert all(item["recovery_value_target_added"] for item in diagnostics)
     assert all(item["recovery_value_store_size"] >= 1 for item in diagnostics)
+
+
+def test_recovered_timeout_selects_a_successful_recovery_target(
+    monkeypatch,
+) -> None:
+    selections: list[bool] = []
+
+    def capture_selection(transitions, *, recovery_succeeded):
+        assert transitions
+        selections.append(bool(recovery_succeeded))
+        return None
+
+    monkeypatch.setattr(
+        training_module,
+        "select_recovery_target_prefix",
+        capture_selection,
+    )
+
+    class TimeoutEnvironment:
+        def reset(self, *, options=None):
+            return np.zeros(1, np.float32), {
+                "valid_actions": (Action.WAIT,),
+                "ticker": "NQ",
+                "start": 0,
+                "realized_pnl": -2_000.0,
+                "mll_headroom_fraction": 1.0 / 3.0,
+            }
+
+        def step(self, action):
+            return np.ones(1, np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "fill_index": 1,
+                "outcome": "timeout",
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": 100.0,
+                "equity_pnl": 100.0,
+                "recovery_success": True,
+                "recovery_retained": True,
+                "recovery_wait_decisions": 1,
+            }
+
+    class FrozenPolicy:
+        def select_action(self, observation, *, hidden, valid_actions, epsilon,
+                          return_action_values=False):
+            return Action.WAIT, None, None
+
+    class RecoveryAgent(Agent):
+        recurrent_burn_in = 64
+        n_step_return = 8
+
+    train_agent(
+        RecoveryAgent(),
+        TimeoutEnvironment(),
+        episodes=1,
+        minimum_environment_steps=1,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=2,
+            sequence_length=96,
+            recurrent_burn_in=64,
+            n_step_return=8,
+            seed=73,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=96,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        recovery_curriculum=_recovery_curriculum_settings(),
+        recovery_value_policy=FrozenPolicy(),
+        recovery_value_environment=TimeoutEnvironment(),
+        recovery_value_store=RecoveryValueStore(capacity=10, seed=37),
+        recovery_value_source_identity_sha256="4" * 64,
+    )
+
+    assert selections == [True]
 
 
 def test_recovery_training_marks_only_negative_pnl_decisions_as_recovery() -> None:
@@ -5973,6 +6063,9 @@ def test_teacher_free_recovery_stress_keeps_public_outcomes_and_status_separate(
     assert isinstance(result, RecoveryStressResult)
     assert result.recovered == 1
     assert result.not_recovered == 3
+    assert result.retained == 1
+    assert result.relapsed == 0
+    assert result.recovered_then_blown == 0
     assert result.passes == 1
     assert result.timeouts == 2
     assert result.blows == 1
