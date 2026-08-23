@@ -12,6 +12,7 @@ from tests.recipe_fixtures import (
 )
 
 from propevolve.config import (
+    BALANCE_CURRICULUM_FROZEN_PATHS,
     RECOVERY_CURRICULUM_FROZEN_PATHS,
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
     REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
@@ -106,6 +107,55 @@ def _recovery_curriculum_payload() -> dict:
         RECOVERY_CURRICULUM_FROZEN_PATHS
     )
     return payload
+
+
+def _balance_curriculum_payload() -> dict:
+    payload = _generic_payload()
+    payload["balance_curriculum"] = {
+        "schedule_seed": 37,
+        "start_pnls": [-2_000],
+        "validation_episodes": 200,
+    }
+    payload["evolution"]["frozen_paths"].extend(
+        BALANCE_CURRICULUM_FROZEN_PATHS
+    )
+    return payload
+
+
+def test_config_accepts_single_policy_balance_curriculum_by_values(
+    tmp_path: Path,
+) -> None:
+    payload = _balance_curriculum_payload()
+    path = tmp_path / "arbitrary-balance-curriculum.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["balance_curriculum"] == {
+        "schedule_seed": 37,
+        "start_pnls": (-2_000.0,),
+        "validation_episodes": 200,
+    }
+    assert config.get("recovery_curriculum") is None
+
+
+def test_config_rejects_balance_curriculum_with_recovery_mode(
+    tmp_path: Path,
+) -> None:
+    payload = _recovery_curriculum_payload()
+    payload["balance_curriculum"] = {
+        "schedule_seed": 37,
+        "start_pnls": [-2_000],
+        "validation_episodes": 200,
+    }
+    payload["evolution"]["frozen_paths"].extend(
+        BALANCE_CURRICULUM_FROZEN_PATHS
+    )
+    path = tmp_path / "two-policy-modes.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        load_experiment_config(path)
 
 
 def test_config_accepts_post_recovery_contrast_replay_by_values(

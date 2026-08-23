@@ -2400,6 +2400,79 @@ class RecoveryCurriculumSettings:
 
 
 @dataclass(frozen=True)
+class BalanceCurriculumSettings:
+    """Resume-stable ordinary challenge starts for one continuous policy."""
+
+    schedule_seed: int
+    start_pnls: tuple[float, ...]
+    mll_floor_pnl: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schedule_seed, bool)
+            or not isinstance(self.schedule_seed, int)
+            or not math.isfinite(self.mll_floor_pnl)
+            or self.mll_floor_pnl >= 0.0
+            or len(self.start_pnls) < 1
+            or any(
+                not math.isfinite(value)
+                or not self.mll_floor_pnl < value <= 0.0
+                for value in self.start_pnls
+            )
+            or len(set(self.start_pnls)) != len(self.start_pnls)
+        ):
+            raise ValueError("balance curriculum settings are invalid")
+
+    def start_state(self, episode_index: int) -> ChallengeStartState:
+        if isinstance(episode_index, bool) or episode_index < 0:
+            raise ValueError("balance curriculum episode index is invalid")
+        cycle_index, cycle_offset = divmod(
+            episode_index, len(self.start_pnls)
+        )
+        cycle = list(self.start_pnls)
+        np.random.default_rng(
+            self.schedule_seed + cycle_index
+        ).shuffle(cycle)
+        pnl = float(cycle[cycle_offset])
+        return ChallengeStartState(
+            realized_pnl=pnl,
+            equity_pnl=pnl,
+            peak_equity_pnl=0.0,
+            mll_floor_pnl=self.mll_floor_pnl,
+            passmark_locked=False,
+            position_side=PositionSide.FLAT,
+            position_size=0,
+            session_pnl=pnl,
+            trading_days_elapsed=1,
+            recovery_success_pnl=None,
+        )
+
+
+def _balance_curriculum_from_config(
+    value: Mapping[str, object] | None,
+    *,
+    max_loss: float,
+) -> tuple[BalanceCurriculumSettings | None, int]:
+    if value is None:
+        return None, 0
+    required = {"schedule_seed", "start_pnls", "validation_episodes"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("balance curriculum fields are invalid")
+    start_pnls = value["start_pnls"]
+    if not isinstance(start_pnls, (list, tuple)):
+        raise ValueError("balance curriculum starting PnLs are invalid")
+    settings = BalanceCurriculumSettings(
+        schedule_seed=int(value["schedule_seed"]),
+        start_pnls=tuple(float(item) for item in start_pnls),
+        mll_floor_pnl=-float(max_loss),
+    )
+    validation_episodes = int(value["validation_episodes"])
+    if validation_episodes < 1:
+        raise ValueError("balance curriculum validation budget is invalid")
+    return settings, validation_episodes
+
+
+@dataclass(frozen=True)
 class RecoveryStressResult:
     episodes: int
     recovered: int
@@ -2947,6 +3020,9 @@ class HistoricalCandidateRunner:
         policy_health_path = output / "training-policy-health.jsonl"
         policy_health_probe_path = output / "training-policy-health-probe.pkl"
         validation_diagnostics_path = output / "validation-diagnostics.jsonl"
+        balance_validation_diagnostics_path = (
+            output / "balance-validation-diagnostics.jsonl"
+        )
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
         active_short_circuit = training_config.get("short_circuit")
         policy_health_config = (
@@ -3073,6 +3149,16 @@ class HistoricalCandidateRunner:
         recovery_curriculum, recovery_stress_episodes = (
             _recovery_curriculum_from_config(config.get("recovery_curriculum"))
         )
+        balance_curriculum, balance_validation_episodes = (
+            _balance_curriculum_from_config(
+                config.get("balance_curriculum"),
+                max_loss=challenge.max_loss,
+            )
+        )
+        if recovery_curriculum is not None and balance_curriculum is not None:
+            raise ValueError(
+                "balance and recovery curricula are mutually exclusive"
+            )
         recovery_value_policy = None
         recovery_value_environment = None
         recovery_value_store = None
@@ -3584,6 +3670,7 @@ class HistoricalCandidateRunner:
             ),
             training_health_callback=policy_health_monitor,
             near_blow_loss_threshold=near_blow_loss_threshold,
+            balance_curriculum=balance_curriculum,
             recovery_curriculum=recovery_curriculum,
             recovery_value_policy=recovery_value_policy,
             recovery_value_environment=recovery_value_environment,
@@ -3674,6 +3761,7 @@ class HistoricalCandidateRunner:
                 )
                 os.replace(probe_temporary, probe_path)
         validation = None
+        balance_validation = None
         recovery_stress = None
         if not training.short_circuited:
             _preserve_partial_validation_diagnostics(
@@ -3711,6 +3799,27 @@ class HistoricalCandidateRunner:
                     settings=recovery_curriculum,
                     episode_tickers=tuple(config["deployment_tickers"]),
                     normal_policy=recovery_value_policy,
+                )
+            if balance_validation_episodes:
+                assert balance_curriculum is not None
+                _preserve_partial_validation_diagnostics(
+                    balance_validation_diagnostics_path
+                )
+                balance_validation = evaluate_agent(
+                    agent,
+                    validation_environment,
+                    episodes=balance_validation_episodes,
+                    recurrent_horizon=int(training_config["recurrent_horizon"]),
+                    near_blow_loss_threshold=near_blow_loss_threshold,
+                    greedy_diagnostic_interval_steps=int(
+                        training_config.get(
+                            "greedy_diagnostic_interval_steps", 256
+                        )
+                    ),
+                    episode_diagnostic_callback=lambda payload: _append_jsonl(
+                        balance_validation_diagnostics_path, payload
+                    ),
+                    balance_curriculum=balance_curriculum,
                 )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
@@ -3826,6 +3935,20 @@ class HistoricalCandidateRunner:
             ),
             "recovery_curriculum": _plain_contract_value(
                 config.get("recovery_curriculum")
+            ),
+            "balance_curriculum": _plain_contract_value(
+                config.get("balance_curriculum")
+            ),
+            "balance_validation_diagnostics": (
+                None
+                if balance_validation is None
+                else {
+                    "schema": "propevolve_validation_episode_diagnostic_v1",
+                    "path": str(balance_validation_diagnostics_path),
+                    "file_sha256": _path_sha256(
+                        balance_validation_diagnostics_path
+                    ),
+                }
             ),
             "retained_pass_policy_restored": retained_policy_restored,
         }
@@ -4032,6 +4155,40 @@ class HistoricalCandidateRunner:
                 "environment_steps": float(recovery_stress.environment_steps),
             }
 
+        def balance_stress_metrics(_candidate):
+            assert balance_validation is not None
+            pass_rate = balance_validation.passes / balance_validation.episodes
+            blow_rate = balance_validation.blows / balance_validation.episodes
+            return {
+                "episodes": float(balance_validation.episodes),
+                "passes": float(balance_validation.passes),
+                "timeouts": float(balance_validation.timeouts),
+                "blows": float(balance_validation.blows),
+                "pass_rate": pass_rate,
+                "blow_rate": blow_rate,
+                "pass_minus_blow": pass_rate - blow_rate,
+                "mean_terminal_pnl": balance_validation.mean_terminal_pnl,
+                "worst_pnl": balance_validation.worst_pnl,
+                "near_blow_timeout_rate": (
+                    balance_validation.near_blow_timeout_rate
+                ),
+                "trade_win_rate": balance_validation.trade_win_rate,
+                "average_win_r": balance_validation.average_win_r,
+                "long_entry_count": float(balance_validation.long_entry_count),
+                "short_entry_count": float(
+                    balance_validation.short_entry_count
+                ),
+                "outcome_accounted": float(
+                    balance_validation.passes
+                    + balance_validation.timeouts
+                    + balance_validation.blows
+                    == balance_validation.episodes
+                ),
+                "environment_steps": float(
+                    balance_validation.environment_steps
+                ),
+            }
+
         stages = [
             EvaluationStage(
                 "training",
@@ -4080,6 +4237,12 @@ class HistoricalCandidateRunner:
             stages.append(EvaluationStage(
                 "recovery_stress",
                 recovery_stress_metrics,
+                gates=_recovery_stress_integrity_gates(),
+            ))
+        if balance_validation is not None:
+            stages.append(EvaluationStage(
+                "balance_stress",
+                balance_stress_metrics,
                 gates=_recovery_stress_integrity_gates(),
             ))
         cascade = EvaluatorCascade(
@@ -5187,6 +5350,7 @@ def train_agent(
     collapse_maximum_recent_passes: int = 0,
     collapse_maximum_average_hold_bars: float = math.inf,
     collapse_minimum_voluntary_close_rate: float = 1.0,
+    balance_curriculum: BalanceCurriculumSettings | None = None,
     recovery_curriculum: RecoveryCurriculumSettings | None = None,
     recovery_value_policy: RecurrentC51Agent | None = None,
     recovery_value_environment: HistoricalChallengeEnv | None = None,
@@ -5284,6 +5448,8 @@ def train_agent(
         or not all(isinstance(channel, str) and channel for channel in teacher_channels)
     ):
         raise ValueError("teacher diagnostic channels are invalid")
+    if balance_curriculum is not None and recovery_curriculum is not None:
+        raise ValueError("balance and recovery curricula are mutually exclusive")
     recovery_components = (
         recovery_value_policy,
         recovery_value_environment,
@@ -5457,6 +5623,10 @@ def train_agent(
         if recovery_curriculum is not None:
             reset_options["challenge_start_state"] = (
                 recovery_curriculum.start_state
+            )
+        elif balance_curriculum is not None:
+            reset_options["challenge_start_state"] = (
+                balance_curriculum.start_state(episode_index)
             )
         if not reset_options:
             observation, reset_info = environment.reset()
@@ -6478,7 +6648,12 @@ def train_agent(
                 "episode_kind": (
                     "recovery"
                     if recovery_curriculum is not None
+                    else "balance_curriculum"
+                    if balance_curriculum is not None
                     else "ordinary"
+                ),
+                "starting_realized_pnl": float(
+                    reset_info.get("realized_pnl", 0.0)
                 ),
                 "policy_state_decisions": policy_state_decisions,
                 "policy_state_handoffs": policy_state_handoffs,
@@ -6922,6 +7097,7 @@ def evaluate_agent(
     greedy_diagnostic_interval_steps: int = 256,
     episode_diagnostic_callback: Callable[[dict[str, object]], None] | None = None,
     normal_policy: RecurrentC51Agent | None = None,
+    balance_curriculum: BalanceCurriculumSettings | None = None,
 ) -> TrainingResult:
     assert_teacher_free = getattr(agent, "assert_teacher_free", None)
     if assert_teacher_free is not None:
@@ -6933,6 +7109,8 @@ def evaluate_agent(
     )
     if handoff_policy is not None:
         handoff_policy.assert_teacher_free()
+    if handoff_policy is not None and balance_curriculum is not None:
+        raise ValueError("balance evaluation cannot use a policy handoff")
     if near_blow_loss_threshold is not None and near_blow_loss_threshold <= 0:
         raise ValueError("near-blow loss threshold must be positive")
     if (
@@ -6987,7 +7165,15 @@ def evaluate_agent(
     }
     evaluated_episodes = 0
     for episode_index in range(episodes):
-        observation, info = environment.reset()
+        if balance_curriculum is None:
+            observation, info = environment.reset()
+        else:
+            observation, info = environment.reset(options={
+                "challenge_start_state": balance_curriculum.start_state(
+                    episode_index
+                ),
+            })
+        starting_realized_pnl = float(info.get("realized_pnl", 0.0))
         valid = tuple(info["valid_actions"])
         hidden = None
         if handoff_policy is not None:
@@ -7183,6 +7369,7 @@ def evaluate_agent(
                 "episode": episode_index + 1,
                 "ticker": str(info.get("ticker", "?")),
                 "outcome": outcome,
+                "starting_realized_pnl": starting_realized_pnl,
                 "reward": total,
                 "terminal_pnl": terminal_pnl,
                 "near_blow_timeout": near_blow_timeout,

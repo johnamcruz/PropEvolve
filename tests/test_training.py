@@ -28,6 +28,7 @@ from propevolve.observation import TradeManagementObservationSpec
 from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.recovery import RecoveryValueStore
 from propevolve.training import (
+    BalanceCurriculumSettings,
     HistoricalCandidateRunner,
     RecoveryCurriculumSettings,
     RecoveryStressResult,
@@ -77,6 +78,141 @@ def _recovery_curriculum_settings() -> RecoveryCurriculumSettings:
             recovery_success_pnl=0.0,
         ),
     )
+
+
+def test_single_policy_balance_curriculum_is_balanced_and_resume_stable() -> None:
+    settings = BalanceCurriculumSettings(
+        schedule_seed=37,
+        start_pnls=(0.0, -500.0, -1_000.0, -1_500.0, -2_000.0),
+        mll_floor_pnl=-3_000.0,
+    )
+
+    first = tuple(settings.start_state(index) for index in range(10))
+    repeated = tuple(settings.start_state(index) for index in range(10))
+
+    assert first == repeated
+    assert Counter(state.realized_pnl for state in first) == {
+        0.0: 2,
+        -500.0: 2,
+        -1_000.0: 2,
+        -1_500.0: 2,
+        -2_000.0: 2,
+    }
+    assert all(state.recovery_success_pnl is None for state in first)
+
+
+def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class OnePolicyAgent(Agent):
+        recurrent_burn_in = 64
+        n_step_return = 8
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.observed_pnls: list[float] = []
+
+        def select_action(self, observation, **kwargs):
+            self.observed_pnls.append(float(observation[0]))
+            values = (
+                np.zeros(len(Action), np.float32)
+                if kwargs.get("return_action_values", False)
+                else None
+            )
+            return Action.WAIT, None, values
+
+    class BalanceEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+            self.starting_pnls: list[float] = []
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            state = options["challenge_start_state"]
+            self.starting_pnls.append(float(state.realized_pnl))
+            return np.array([state.realized_pnl], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+                "end": 2,
+                "realized_pnl": float(state.realized_pnl),
+                "mll_headroom_fraction": 1.0 / 3.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            pnl = 0.0 if self.steps == 1 else 6_000.0
+            terminated = self.steps == 2
+            return np.array([pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else flat_actions,
+                "ticker": "NQ",
+                "fill_index": self.steps,
+                "outcome": "pass" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "mll_headroom_fraction": 1.0,
+            }
+
+    agent = OnePolicyAgent()
+    environment = BalanceEnvironment()
+    class CapturingReplay(BalancedSequenceReplay):
+        recovery_flags: list[bool]
+
+        def add(self, episode):
+            self.recovery_flags = [
+                transition.recovery_active
+                for transition in episode.transitions
+            ]
+            super().add(episode)
+
+    replay = CapturingReplay(
+        capacity_episodes=2,
+        sequence_length=96,
+        recurrent_burn_in=64,
+        n_step_return=8,
+        seed=71,
+    )
+    diagnostics: list[dict[str, object]] = []
+
+    result = train_agent(
+        agent,
+        environment,
+        episodes=1,
+        minimum_environment_steps=2,
+        budget_mode="episodes",
+        replay=replay,
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=96,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        balance_curriculum=BalanceCurriculumSettings(
+            schedule_seed=37,
+            start_pnls=(-2_000.0,),
+            mll_floor_pnl=-3_000.0,
+        ),
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert result.passes == 1
+    assert environment.starting_pnls == [-2_000.0]
+    assert agent.observed_pnls == [-2_000.0, 0.0]
+    assert diagnostics[0]["policy_state_handoffs"] == {
+        "recovery_to_normal": 0,
+        "normal_to_recovery": 0,
+    }
+    assert replay.recovery_flags == [False, False]
 
 
 def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> None:

@@ -35,6 +35,7 @@ def stage2_recipe(*, semantics: str, training_episodes: int) -> Path:
             and len(stages) == 1
             and stages[0].get("training_episodes") == training_episodes
             and payload.get("recovery_curriculum") is None
+            and payload.get("balance_curriculum") is None
         ):
             candidates.append(path)
     if len(candidates) != 1:

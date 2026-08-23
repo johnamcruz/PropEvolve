@@ -280,45 +280,13 @@
     "regime_wait_sequence_update_period": 8,
     "budget_mode": "episodes"
   },
-  "recovery_curriculum": {
+  "balance_curriculum": {
     "schedule_seed": 37,
-    "stress_evaluation_episodes": 200,
-    "recovery_success_pnl": 0,
-    "start_state": {
-      "realized_pnl": -2000,
-      "equity_pnl": -2000,
-      "peak_equity_pnl": 0,
-      "mll_floor_pnl": -3000,
-      "passmark_locked": false,
-      "position_side": 0,
-      "position_size": 0,
-      "session_pnl": -2000,
-      "trading_days_elapsed": 1
-    },
-    "action_value_supervision": {
-      "loss_weight": 0.25,
-      "temperature": 1,
-      "action_margin": 0.25,
-      "store_capacity": 200,
-      "target_every_episodes": 1,
-      "start_pnls": [-2000],
-      "retain_nonnegative_entry_policy": true,
-      "success_replay": {
-        "path": "runs/recovery-pass-replay/v22-r1-recent-recovery-passes-v1.pt",
-        "sha256": "2e58f591945be293940e6df75909e41f57282797eccb8e2d4d1572cc6d9c8ef3",
-        "update_period": 8,
-        "max_examples": 8
-      },
-      "healthy_pass_replay": {
-        "path": "runs/recovery-pass-replay/v21-healthy-passes-v1.pt",
-        "sha256": "7b283c278051e9e2fe5b23c4119288e8155896139913ee463b59852a596312ed",
-        "update_period": 8,
-        "max_examples": 8
-      }
-    }
+    "start_pnls": [-2000],
+    "validation_episodes": 200
   },
   "evolution": {
-    "hypothesis": "Starting directly from the immutable authenticated zero-blow V21 A+ entry policy, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values stop at the breakeven handoff, authenticated recovery passes preserve every successful pre-breakeven recovery, authenticated V21 healthy passes sparsely retain the inherited nonnegative A+ entry policy, and any later V21 relapse starts a new recovery target at the first negative reactivation. Retained-versus-relapsed evidence remains diagnostic only. V21 action supervision, challenge outcomes, and teacher-free inference remain unchanged; recovery is the only added competency.",
+    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target will teach balance-aware selectivity without a recovery mode, breakeven label, or policy handoff. Every episode retains the original +$6,000 pass, -$3,000 blow, and 30-day timeout outcomes; crossing $0 has no special meaning, while V21 Expansion-Regime supervision, paired economic contrast, recurrent replay, action space, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -356,11 +324,9 @@
       "entry_supervision",
       "observation",
       "point_values",
-      "recovery_curriculum.schedule_seed",
-      "recovery_curriculum.stress_evaluation_episodes",
-      "recovery_curriculum.recovery_success_pnl",
-      "recovery_curriculum.start_state",
-      "recovery_curriculum.action_value_supervision",
+      "balance_curriculum.schedule_seed",
+      "balance_curriculum.start_pnls",
+      "balance_curriculum.validation_episodes",
       "regime_selectivity.action_order",
       "regime_selectivity.chop_wait_margin",
       "regime_selectivity.dominant_chop_pressure",
@@ -427,7 +393,7 @@
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "recovery_value_200ep",
+        "name": "balance_curriculum_200ep",
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
@@ -477,23 +443,23 @@
             "value": 0.6263636363636363
           },
           {
-            "metric": "recovery_stress.blow_rate",
+            "metric": "balance_stress.blow_rate",
             "operator": "==",
             "value": 0
           },
           {
-            "metric": "recovery_stress.recovery_success_rate",
+            "metric": "balance_stress.pass_rate",
             "operator": ">",
             "value": 0
           },
           {
-            "metric": "recovery_stress.retained_recovery_rate",
+            "metric": "balance_stress.long_entry_count",
             "operator": ">",
             "value": 0
           },
           {
-            "metric": "recovery_stress.relapse_rate",
-            "operator": "==",
+            "metric": "balance_stress.short_entry_count",
+            "operator": ">",
             "value": 0
           }
         ],
@@ -587,23 +553,23 @@
         "value": 0.6263636363636363
       },
       {
-        "metric": "recovery_stress.blow_rate",
+        "metric": "balance_stress.blow_rate",
         "operator": "==",
         "value": 0
       },
       {
-        "metric": "recovery_stress.recovery_success_rate",
+        "metric": "balance_stress.pass_rate",
         "operator": ">",
         "value": 0
       },
       {
-        "metric": "recovery_stress.retained_recovery_rate",
+        "metric": "balance_stress.long_entry_count",
         "operator": ">",
         "value": 0
       },
       {
-        "metric": "recovery_stress.relapse_rate",
-        "operator": "==",
+        "metric": "balance_stress.short_entry_count",
+        "operator": ">",
         "value": 0
       }
     ],

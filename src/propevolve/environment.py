@@ -95,7 +95,7 @@ class ChallengeSpec:
 
 @dataclass(frozen=True)
 class ChallengeStartState:
-    """Validated flat account state for a bounded recovery episode."""
+    """Validated flat account state for a challenge episode."""
 
     realized_pnl: float
     equity_pnl: float
@@ -106,7 +106,7 @@ class ChallengeStartState:
     position_size: int
     session_pnl: float
     trading_days_elapsed: int
-    recovery_success_pnl: float
+    recovery_success_pnl: float | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -115,20 +115,29 @@ class ChallengeStartState:
             self.peak_equity_pnl,
             self.mll_floor_pnl,
             self.session_pnl,
-            self.recovery_success_pnl,
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("challenge start account values must be finite")
+        if (
+            self.recovery_success_pnl is not None
+            and not math.isfinite(self.recovery_success_pnl)
+        ):
+            raise ValueError("challenge recovery success PnL must be finite")
         if PositionSide(self.position_side) != PositionSide.FLAT or self.position_size != 0:
-            raise ValueError("recovery challenge must start flat")
+            raise ValueError("challenge must start flat")
         if self.equity_pnl != self.realized_pnl:
-            raise ValueError("flat recovery equity must equal realized PnL")
+            qualifier = (
+                "recovery" if self.recovery_success_pnl is not None else "challenge"
+            )
+            raise ValueError(
+                f"flat {qualifier} equity must equal realized PnL"
+            )
         if self.peak_equity_pnl < self.equity_pnl:
             raise ValueError("challenge peak equity cannot trail current equity")
         if self.mll_floor_pnl >= self.equity_pnl:
-            raise ValueError("recovery challenge must start above the MLL floor")
+            raise ValueError("challenge must start above the MLL floor")
         if self.passmark_locked:
-            raise ValueError("recovery challenge cannot start after passmark lock")
+            raise ValueError("challenge cannot start after passmark lock")
         if (
             isinstance(self.trading_days_elapsed, bool)
             or not isinstance(self.trading_days_elapsed, int)
@@ -527,7 +536,10 @@ class HistoricalChallengeEnv:
             raise ValueError("recovery start peak equity must be zero")
         if self.spec.per_trade_risk_dollars is None:
             raise ValueError("recovery start requires declared per-trade risk")
-        if not math.isclose(state.recovery_success_pnl, 0.0):
+        if (
+            state.recovery_success_pnl is not None
+            and not math.isclose(state.recovery_success_pnl, 0.0)
+        ):
             raise ValueError("recovery success PnL must be breakeven")
         if state.trading_days_elapsed > self.spec.episode_days:
             raise ValueError("recovery start exceeds the challenge duration")

@@ -67,6 +67,56 @@ def _recovery_start_state() -> ChallengeStartState:
     )
 
 
+def _balance_start_state(realized_pnl: float) -> ChallengeStartState:
+    return ChallengeStartState(
+        realized_pnl=realized_pnl,
+        equity_pnl=realized_pnl,
+        peak_equity_pnl=0.0,
+        mll_floor_pnl=-3_000.0,
+        passmark_locked=False,
+        position_side=PositionSide.FLAT,
+        position_size=0,
+        session_pnl=realized_pnl,
+        trading_days_elapsed=1,
+        recovery_success_pnl=None,
+    )
+
+
+def test_balance_curriculum_crosses_breakeven_without_recovery_transition() -> None:
+    market = _recovery_market(
+        opens=(100.0, 100.0, 200.0, 200.0, 200.0, 200.0),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0},
+        spec=_spec(
+            minimum_mll_headroom=500.0,
+            per_trade_risk_dollars=300.0,
+            ratchet_activation_r=2.0,
+            ratchet_giveback_r=0.5,
+        ),
+        seed=1,
+    )
+
+    _, reset_info = env.reset(options={
+        "ticker": "NQ",
+        "start": 0,
+        "challenge_start_state": _balance_start_state(-2_000.0),
+    })
+    _, _, entered_terminated, _, entered = env.step(Action.ENTER_LONG_1)
+    _, _, crossed_terminated, _, crossed = env.step(Action.CLOSE)
+
+    assert reset_info["realized_pnl"] == -2_000.0
+    assert entered_terminated is False
+    assert entered["recovery_entry_used"] is False
+    assert crossed_terminated is False
+    assert crossed["realized_pnl"] == 0.0
+    assert crossed["outcome"] is None
+    assert crossed["recovery_success"] is False
+    assert "recovery_status" not in crossed
+
+
 def _recovery_market(
     *,
     opens: tuple[float, ...],

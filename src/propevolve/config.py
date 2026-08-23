@@ -72,6 +72,11 @@ RECOVERY_CURRICULUM_FROZEN_PATHS = (
     "recovery_curriculum.action_value_supervision",
 )
 RECOVERY_CURRICULUM_REVISION_PATHS: tuple[str, ...] = ()
+BALANCE_CURRICULUM_FROZEN_PATHS = (
+    "balance_curriculum.schedule_seed",
+    "balance_curriculum.start_pnls",
+    "balance_curriculum.validation_episodes",
+)
 TRAINING_POLICY_HEALTH_FROZEN_PATH = "training.short_circuit.policy_health"
 
 
@@ -616,6 +621,44 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         raise ValueError("Stage-2 recovery challenge economics drifted")
 
 
+def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
+    """Validate a one-policy curriculum over ordinary challenge balances."""
+    curriculum = payload.get("balance_curriculum")
+    if curriculum is None:
+        return
+    if payload.get("recovery_curriculum") is not None:
+        raise ValueError(
+            "balance and recovery curricula are mutually exclusive"
+        )
+    if (
+        not isinstance(curriculum, dict)
+        or set(curriculum)
+        != {"schedule_seed", "start_pnls", "validation_episodes"}
+        or isinstance(curriculum["schedule_seed"], bool)
+        or not isinstance(curriculum["schedule_seed"], int)
+        or isinstance(curriculum["validation_episodes"], bool)
+        or not isinstance(curriculum["validation_episodes"], int)
+        or curriculum["validation_episodes"] < 1
+        or not isinstance(curriculum["start_pnls"], list)
+    ):
+        raise ValueError("balance curriculum contract is invalid")
+    start_pnls = curriculum["start_pnls"]
+    maximum_loss = float(challenge["max_loss"])
+    if (
+        not start_pnls
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not -maximum_loss < float(value) <= 0.0
+            for value in start_pnls
+        )
+        or len({float(value) for value in start_pnls}) != len(start_pnls)
+    ):
+        raise ValueError("balance curriculum starting PnLs are invalid")
+    curriculum["start_pnls"] = tuple(float(value) for value in start_pnls)
+
+
 def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
     """Authenticate the optional Stage 2A training-only selectivity contract."""
     specification = payload.get("regime_selectivity")
@@ -1069,6 +1112,7 @@ def load_experiment_config(path: str | Path) -> dict:
         raise ValueError("trade risk and ratchet fields are invalid")
     _validate_entry_supervision(payload, challenge)
     _validate_recovery_curriculum(payload, challenge)
+    _validate_balance_curriculum(payload, challenge)
     cache = payload["cache"]
     if cache["format"] not in {"native", "ffm_frozen_representation_v2"}:
         raise ValueError("cache format must be native or ffm_frozen_representation_v2")
@@ -1670,6 +1714,13 @@ def load_experiment_config(path: str | Path) -> dict:
             raise ValueError(
                 "recovery curriculum revision surface is invalid"
             )
+    if payload.get("balance_curriculum") is not None:
+        if not all(path in frozen for path in BALANCE_CURRICULUM_FROZEN_PATHS):
+            raise ValueError("balance curriculum identity must be frozen")
+        if any(
+            path.startswith("balance_curriculum.") for path in allowed
+        ):
+            raise ValueError("balance curriculum cannot revise during a run")
     revision_bounds = evolution.get("revision_bounds") or {}
     if not isinstance(revision_bounds, dict):
         raise ValueError("evolution revision bounds must be an object")
