@@ -255,10 +255,7 @@ def _is_successful_recovery_pass(episode: Mapping[str, object]) -> bool:
     boundaries = np.flatnonzero(
         recovery_active[:-1] & ~recovery_active[1:]
     )
-    if not boundaries.size:
-        return False
-    healthy_start = int(boundaries[0]) + 1
-    return not bool(recovery_active[healthy_start:].any())
+    return bool(boundaries.size)
 
 
 def _is_healthy_pass(episode: Mapping[str, object]) -> bool:
@@ -292,18 +289,22 @@ def _is_post_recovery_contrast_candidate(
     )
     if not boundaries.size:
         return False
+    boundary = int(boundaries[0])
     healthy_start = int(boundaries[0]) + 1
     relapse_offsets = np.flatnonzero(recovery_active[healthy_start:])
     if not relapse_offsets.size:
         return bool(np.any(
-            (sides[healthy_start:] >= 0) & (wins[healthy_start:] == 1)
+            recovery_active[:boundary + 1]
+            & (sides[:boundary + 1] >= 0)
+            & (wins[:boundary + 1] == 1)
         ))
     if not bool(recovery_active[-1]):
         return False
     relapse_index = healthy_start + int(relapse_offsets[0])
     return bool(np.any(
-        (sides[healthy_start:relapse_index] >= 0)
-        & (wins[healthy_start:relapse_index] == 0)
+        recovery_active[relapse_index:]
+        & (sides[relapse_index:] >= 0)
+        & (wins[relapse_index:] == 0)
     ))
 
 

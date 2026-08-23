@@ -5893,10 +5893,9 @@ def train_agent(
                 replay_transitions,
                 recovery_succeeded=(
                     bool(terminal_info.get("recovery_success", False))
-                    and bool(terminal_info.get(
-                        "recovery_retained",
-                        terminal_info.get("recovery_success", False),
-                    ))
+                    and terminal_pnl >= (
+                        recovery_curriculum.start_state.recovery_success_pnl
+                    )
                 ),
             )
             if causal_prefix is not None:

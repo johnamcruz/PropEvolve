@@ -46,7 +46,10 @@ def _post_recovery_episode(
         Action.ENTER_LONG_1,
         Action.ENTER_SHORT_1,
     )
-    anchor_index = 4
+    # Retained examples teach the last recovery-controlled decision before
+    # breakeven. Relapsed examples teach the first recovery-controlled
+    # decision after V21 has returned the account below zero.
+    anchor_index = 1 if retained else 5
     recovery_active = recovery_pattern or (
         (True, True, False, False, False, False, False, False)
         if retained
@@ -1411,7 +1414,7 @@ def test_recovery_pass_replay_absorbs_only_recent_successes_without_copying() ->
     assert int(sequence[2].observation[0]) == 32
 
 
-def test_recovery_success_replay_admits_retained_nonnegative_timeout() -> None:
+def test_recovery_success_replay_keeps_success_before_later_relapse() -> None:
     source = BalancedSequenceReplay(
         capacity_episodes=4,
         sequence_length=5,
@@ -1445,13 +1448,13 @@ def test_recovery_success_replay_admits_retained_nonnegative_timeout() -> None:
 
     added = priority.absorb_recent_successful_recoveries(source)
 
-    assert added == 1
+    assert added == 2
     assert [
         episode["episode_id"]
         for episode in priority.state_dict()["episodes"]
-    ] == ["retained-timeout"]
+    ] == ["retained-timeout", "relapsed-timeout"]
     sequence = priority.sample_successful_recovery_sequences(1)[0]
-    assert int(sequence[2].observation[0]) == 101
+    assert int(sequence[2].observation[0]) == 201
 
 
 def test_recovery_pass_replay_prioritizes_recency_over_historical_reward() -> None:
@@ -1686,12 +1689,15 @@ def test_post_recovery_contrast_pairs_retained_with_giveback_for_both_sides(
     } == {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
     for rows in pairs.values():
         assert len(rows) == 2
+        assert all(row.recovery_active for row in rows)
         assert rows[0].paired_a_plus_pair_side == rows[1].paired_a_plus_pair_side
         assert {row.paired_a_plus_economic_win for row in rows} == {True, False}
         winner = next(row for row in rows if row.paired_a_plus_economic_win)
         failure = next(row for row in rows if not row.paired_a_plus_economic_win)
         assert winner.entry_action_target == winner.paired_a_plus_pair_side
         assert failure.entry_action_target == Action.WAIT
+        assert int(winner.observation[0]) in {1, 101}
+        assert int(failure.observation[0]) in {25, 125}
 
 
 def test_post_recovery_contrast_replay_admits_and_prefers_current_examples(
@@ -1741,10 +1747,10 @@ def test_post_recovery_contrast_replay_admits_and_prefers_current_examples(
     assert added == 2
     assert {
         int(sequence[2].observation[0]) for sequence in sequences
-    } == {104, 124}
+    } == {101, 125}
 
 
-def test_dynamic_recovery_replay_rejects_recovered_then_relapsed_episode(
+def test_dynamic_recovery_replay_preserves_success_before_later_relapse(
 ) -> None:
     source = BalancedSequenceReplay(
         capacity_episodes=4,
@@ -1776,7 +1782,10 @@ def test_dynamic_recovery_replay_rejects_recovered_then_relapsed_episode(
         seed=87,
     )
 
-    assert recovery_success.absorb_recent_successful_recoveries(source) == 0
+    assert recovery_success.absorb_recent_successful_recoveries(source) == 1
+    recovered = recovery_success.sample_successful_recovery_sequences(1)[0]
+    assert recovered[2].recovery_active is True
+    assert int(recovered[2].observation[0]) == 301
     assert post_recovery.absorb_recent_post_recovery_contrasts(source) == 0
 
 

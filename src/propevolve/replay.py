@@ -1354,7 +1354,7 @@ class BalancedSequenceReplay:
                 for episode in source._episodes.values()
                 if episode.outcome in {"pass", "timeout"}
                 and episode.transition_count >= 2
-                and self._retained_recovery_boundary(episode) is not None
+                and self._first_recovery_boundary(episode) is not None
             ),
             key=lambda episode: (-episode.ended_at_ns, episode.episode_id),
         )[:max_examples]
@@ -1394,7 +1394,6 @@ class BalancedSequenceReplay:
                 continue
             retained_boundary = self._retained_recovery_boundary(episode)
             if retained_boundary is not None:
-                retained_start = retained_boundary + 1
                 for side, winner_indices in (
                     (
                         Action.ENTER_LONG_1,
@@ -1405,7 +1404,10 @@ class BalancedSequenceReplay:
                         episode.paired_a_plus_short_winner_anchor_indices,
                     ),
                 ):
-                    if np.any(winner_indices >= retained_start):
+                    if np.any(
+                        (winner_indices <= retained_boundary)
+                        & episode.recovery_active[winner_indices]
+                    ):
                         buckets[("retained", side)].append(episode)
             if not bool(episode.recovery_active[-1]):
                 continue
@@ -1427,8 +1429,8 @@ class BalancedSequenceReplay:
                 ),
             ):
                 if np.any(
-                    (failure_indices >= healthy_start)
-                    & (failure_indices < relapse_index)
+                    (failure_indices >= relapse_index)
+                    & episode.recovery_active[failure_indices]
                 ):
                     buckets[("relapsed", side)].append(episode)
         selected = {
@@ -1814,7 +1816,7 @@ class BalancedSequenceReplay:
         *,
         max_examples: int = 8,
     ) -> tuple[tuple[Transition, ...], ...]:
-        """Sample retained traces at the causal red-to-breakeven boundary."""
+        """Sample successful traces at the first red-to-breakeven boundary."""
         if count < 1 or max_examples < 1:
             raise ValueError("successful recovery replay count must be positive")
         candidates: list[tuple[int, float, str, _StoredEpisode, int]] = []
@@ -1824,7 +1826,7 @@ class BalancedSequenceReplay:
                 or episode.transition_count < 2
             ):
                 continue
-            boundary_index = self._retained_recovery_boundary(episode)
+            boundary_index = self._first_recovery_boundary(episode)
             if boundary_index is not None:
                 candidates.append((
                     episode.ended_at_ns,
@@ -1913,7 +1915,7 @@ class BalancedSequenceReplay:
         max_examples: int = 8,
         pair_id_start: int = 0,
     ) -> tuple[tuple[Transition, ...], ...]:
-        """Pair retained recovery winners with pre-relapse failures."""
+        """Pair recovery winners with failures after negative reactivation."""
         if (
             count < 1
             or max_examples < 1
@@ -1939,7 +1941,6 @@ class BalancedSequenceReplay:
             score = float(np.sum(episode.rewards, dtype=np.float64))
             retained_boundary = self._retained_recovery_boundary(episode)
             if retained_boundary is not None:
-                retained_start = retained_boundary + 1
                 for side, winner_indices in (
                     (
                         Action.ENTER_LONG_1,
@@ -1951,7 +1952,10 @@ class BalancedSequenceReplay:
                     ),
                 ):
                     for anchor_index in winner_indices:
-                        if int(anchor_index) >= retained_start:
+                        if (
+                            int(anchor_index) <= retained_boundary
+                            and bool(episode.recovery_active[int(anchor_index)])
+                        ):
                             retained[side].append((
                                 episode.ended_at_ns,
                                 score,
@@ -1980,7 +1984,10 @@ class BalancedSequenceReplay:
             ):
                 for anchor_index in failure_indices:
                     anchor_index = int(anchor_index)
-                    if healthy_start <= anchor_index < relapse_index:
+                    if (
+                        anchor_index >= relapse_index
+                        and bool(episode.recovery_active[anchor_index])
+                    ):
                         givebacks[side].append((
                             episode.ended_at_ns,
                             score,
@@ -2049,17 +2056,22 @@ class BalancedSequenceReplay:
         return tuple(sequences)
 
     @staticmethod
-    def _retained_recovery_boundary(episode: _StoredEpisode) -> int | None:
-        """Return the first red-to-breakeven boundary when never relapsed."""
+    def _first_recovery_boundary(episode: _StoredEpisode) -> int | None:
+        """Return the first recovery-controlled red-to-breakeven boundary."""
         if episode.transition_count < 2:
             return None
         boundaries = np.flatnonzero(
             episode.recovery_active[:-1]
             & ~episode.recovery_active[1:]
         )
-        if not boundaries.size:
+        return None if not boundaries.size else int(boundaries[0])
+
+    @staticmethod
+    def _retained_recovery_boundary(episode: _StoredEpisode) -> int | None:
+        """Return the first red-to-breakeven boundary when never relapsed."""
+        boundary = BalancedSequenceReplay._first_recovery_boundary(episode)
+        if boundary is None:
             return None
-        boundary = int(boundaries[0])
         if bool(episode.recovery_active[boundary + 1:].any()):
             return None
         return boundary

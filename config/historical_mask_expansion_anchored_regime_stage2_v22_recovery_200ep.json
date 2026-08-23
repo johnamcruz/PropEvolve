@@ -314,17 +314,11 @@
         "sha256": "7b283c278051e9e2fe5b23c4119288e8155896139913ee463b59852a596312ed",
         "update_period": 8,
         "max_examples": 8
-      },
-      "post_recovery_contrast_replay": {
-        "path": "runs/recovery-pass-replay/v22-r2-exact-post-recovery-contrast-v2.pt",
-        "sha256": "e8d1a583a48f3d351a83f0e9e722b15adf12ea6e52132cd9311830b73da018fb",
-        "update_period": 8,
-        "max_examples": 8
       }
     }
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated zero-blow Stage 2B recovery policy, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values span configured negative PnLs, authenticated recovery passes rehearse successful recovery behavior, authenticated V21 healthy passes sparsely retain the inherited nonnegative A+ entry policy, and current retained-versus-relapsed recovery evidence refines post-recovery behavior. V21 action supervision, challenge outcomes, and teacher-free inference remain unchanged through the inherited Stage 2B policy.",
+    "hypothesis": "Starting from the immutable authenticated zero-blow Stage 2B recovery policy, every recovery-enabled V22 training episode begins with exactly $1,000 of remaining MLL headroom at -$2,000 and keeps WAIT, Long, and Short available while flat until breakeven. Training-only same-state recovery values stop at the breakeven handoff, authenticated recovery passes preserve every successful pre-breakeven recovery, authenticated V21 healthy passes sparsely retain the inherited nonnegative A+ entry policy, and any later V21 relapse starts a new recovery target at the first negative reactivation. Retained-versus-relapsed evidence remains diagnostic only. V21 action supervision, challenge outcomes, and teacher-free inference remain unchanged through the inherited Stage 2B policy.",
     "parent_candidate_ids": [
       "cc33f28d7b4a16f74f3e51f17f2b88dd53354b2b7980b3826694dfcf2111d59e"
     ],

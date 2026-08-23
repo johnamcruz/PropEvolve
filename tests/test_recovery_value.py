@@ -230,7 +230,7 @@ def test_retention_value_does_not_relabel_a_genuine_entry_winner() -> None:
         anchor_economic_success=True,
     )
 
-    assert target.action_values[1] == pytest.approx(-0.025)
+    assert target.action_values[1] == pytest.approx(1.0)
     assert target.anchor_action is Action.ENTER_LONG_1
     assert target.anchor_economic_success is True
 
@@ -353,7 +353,7 @@ def test_recovery_target_forces_each_first_action_from_the_same_causal_state() -
     assert environment.resets == [options, options, options]
 
 
-def test_recovery_target_uses_composite_continuation_and_penalizes_giveback(
+def test_recovery_target_stops_at_breakeven_without_blaming_later_v21_giveback(
 ) -> None:
     class CompositeEnvironment:
         def __init__(self) -> None:
@@ -448,9 +448,9 @@ def test_recovery_target_uses_composite_continuation_and_penalizes_giveback(
         source_identity_sha256="8" * 64,
     )
 
-    assert target.action_values == pytest.approx((-1.0, 1.0, -0.025))
+    assert target.action_values == pytest.approx((-1.0, 1.0, 1.0))
     assert any(call[0] == -100.0 for call in recovery.calls)
-    assert any(call[0] == 0.0 for call in v21.calls)
+    assert v21.calls == []
 
 
 def test_recovery_target_replays_causal_prefix_and_preserves_recurrent_boundary(

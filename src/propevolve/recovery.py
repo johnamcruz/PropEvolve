@@ -562,19 +562,14 @@ def recovery_action_values(
         branch = branches[action]
         if branch.outcome == "blow":
             value = -1.0
-        elif branch.recovered and branch.retained:
-            if branch.terminal_pnl < float(recovery_success_pnl):
-                raise ValueError("recovered branch did not reach recovery PnL")
-            value = 1.0
         elif branch.recovered:
-            minimum = branch.minimum_post_recovery_pnl
-            if minimum is None or minimum >= float(recovery_success_pnl):
-                raise ValueError("relapsed recovery branch is invalid")
-            value = float(np.clip(
-                (minimum - float(recovery_success_pnl)) / distance,
-                -1.0,
-                0.0,
-            ))
+            if branch.terminal_pnl < float(recovery_success_pnl):
+                # A branch may record a later diagnostic relapse, but the
+                # recovery action's credit ended when it first reached the
+                # breakeven handoff. Do not assign V21's later loss backward.
+                if branch.minimum_post_recovery_pnl is None:
+                    raise ValueError("recovered branch did not reach recovery PnL")
+            value = 1.0
         else:
             value = float(np.clip(
                 (branch.terminal_pnl - float(start_pnl)) / distance,
@@ -756,38 +751,29 @@ def build_recovery_value_target(
             raise ValueError("recovery target rollout cannot be truncated")
         step_index = 1
         maximum_pnl = float(info.get("equity_pnl", anchor_pnl))
-        recovered_once = False
-        minimum_post_recovery_pnl: float | None = None
         while True:
             outcome = info.get("outcome")
             realized_pnl = float(info.get("realized_pnl", info.get("equity_pnl")))
             maximum_pnl = max(maximum_pnl, float(info.get("equity_pnl", realized_pnl)))
             blown = terminated and outcome == "blow"
-            if not recovered_once and not blown and realized_pnl >= float(
-                recovery_success_pnl
-            ):
-                recovered_once = True
-                minimum_post_recovery_pnl = realized_pnl
-            elif recovered_once:
-                assert minimum_post_recovery_pnl is not None
-                minimum_post_recovery_pnl = min(
-                    minimum_post_recovery_pnl,
-                    realized_pnl,
-                )
-            relapsed = bool(
-                recovered_once
-                and realized_pnl < float(recovery_success_pnl)
+            recovered = bool(
+                not blown and realized_pnl >= float(recovery_success_pnl)
             )
-            if relapsed or terminated:
+            # Recovery owns decisions only while realized PnL is negative.
+            # Stop its counterfactual return at the breakeven handoff so a
+            # later frozen-V21 loss cannot relabel the recovery action.
+            if recovered or terminated:
                 if outcome is not None and outcome not in {"pass", "blow", "timeout"}:
                     raise ValueError("recovery rollout produced an invalid outcome")
                 branches[forced_action] = RecoveryBranchResult(
                     outcome="timeout" if outcome is None else str(outcome),
                     terminal_pnl=realized_pnl,
-                    recovered=recovered_once,
+                    recovered=recovered,
                     maximum_pnl=maximum_pnl,
-                    retained=recovered_once and not relapsed and not blown,
-                    minimum_post_recovery_pnl=minimum_post_recovery_pnl,
+                    retained=recovered,
+                    minimum_post_recovery_pnl=(
+                        realized_pnl if recovered else None
+                    ),
                 )
                 break
             if step_index % recurrent_horizon == 0:
