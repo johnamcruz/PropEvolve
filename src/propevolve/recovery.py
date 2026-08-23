@@ -415,7 +415,7 @@ def recovery_action_margin(
     *,
     margin: float,
 ) -> torch.Tensor:
-    """Require the unique best recovery action to outrank alternatives."""
+    """Require every better recovery action to outrank worse alternatives."""
     if (
         policy_q_values.shape != recovery_values.shape
         or policy_q_values.shape != (len(RECOVERY_ACTIONS),)
@@ -426,18 +426,15 @@ def recovery_action_margin(
         or float(margin) < 0.0
     ):
         raise ValueError("recovery action margin contract is invalid")
-    maximum = recovery_values.max()
-    winners = recovery_values == maximum
-    if int(winners.sum().item()) != 1:
+    better = recovery_values[:, None] > recovery_values[None, :]
+    if not bool(better.any().item()):
         return policy_q_values.sum() * 0.0
-    winner_index = int(winners.nonzero(as_tuple=False)[0].item())
-    alternatives = torch.cat((
-        policy_q_values[:winner_index],
-        policy_q_values[winner_index + 1:],
-    ))
-    return torch.relu(
-        float(margin) + alternatives.max() - policy_q_values[winner_index]
+    violations = torch.relu(
+        float(margin)
+        + policy_q_values[None, :]
+        - policy_q_values[:, None]
     )
+    return violations[better].mean()
 
 
 def recovery_action_values(

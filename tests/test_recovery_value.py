@@ -753,14 +753,30 @@ def test_recovery_action_margin_requires_the_economic_winner_to_rank_first(
         margin=0.25,
     )
 
-    assert loss.item() == pytest.approx(0.15)
+    assert loss.item() == pytest.approx((0.15 + 0.15 + 0.25) / 3.0)
     loss.backward()
     assert q_values.grad is not None
     assert q_values.grad[1] < 0.0
     assert q_values.grad[0] > 0.0
 
 
-def test_recovery_action_margin_does_not_invent_a_winner_for_economic_ties(
+def test_recovery_action_margin_orders_wait_above_an_economic_blow() -> None:
+    q_values = torch.tensor([0.0, 0.5, 0.2], requires_grad=True)
+
+    loss = recovery_action_margin(
+        q_values,
+        torch.tensor([0.0, 1.0, -1.0]),
+        margin=0.25,
+    )
+
+    assert loss.item() > 0.0
+    loss.backward()
+    assert q_values.grad is not None
+    assert q_values.grad[0] < 0.0
+    assert q_values.grad[2] > 0.0
+
+
+def test_recovery_action_margin_preserves_ties_but_ranks_lower_actions(
 ) -> None:
     loss = recovery_action_margin(
         torch.zeros(3),
@@ -768,7 +784,7 @@ def test_recovery_action_margin_does_not_invent_a_winner_for_economic_ties(
         margin=0.25,
     )
 
-    assert loss.item() == 0.0
+    assert loss.item() == pytest.approx(0.25)
 
 
 def test_recovery_disabled_keeps_the_complete_v21_update_exact() -> None:
