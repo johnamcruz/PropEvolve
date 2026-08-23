@@ -2406,6 +2406,10 @@ class BalanceCurriculumSettings:
     schedule_seed: int
     start_pnls: tuple[float, ...]
     mll_floor_pnl: float
+    pass_replay_update_period: int = 0
+    pass_replay_max_examples: int = 8
+    pass_replay_path: str | None = None
+    pass_replay_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -2420,8 +2424,25 @@ class BalanceCurriculumSettings:
                 for value in self.start_pnls
             )
             or len(set(self.start_pnls)) != len(self.start_pnls)
+            or isinstance(self.pass_replay_update_period, bool)
+            or self.pass_replay_update_period < 0
+            or isinstance(self.pass_replay_max_examples, bool)
+            or self.pass_replay_max_examples < 1
         ):
             raise ValueError("balance curriculum settings are invalid")
+        identity = (self.pass_replay_path, self.pass_replay_sha256)
+        if self.pass_replay_update_period == 0:
+            if any(value is not None for value in identity):
+                raise ValueError("balance pass replay schedule is disabled")
+        elif (
+            not all(isinstance(value, str) and value for value in identity)
+            or len(str(self.pass_replay_sha256)) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in str(self.pass_replay_sha256)
+            )
+        ):
+            raise ValueError("balance pass replay identity is invalid")
 
     def start_state(self, episode_index: int) -> ChallengeStartState:
         if isinstance(episode_index, bool) or episode_index < 0:
@@ -2456,15 +2477,35 @@ def _balance_curriculum_from_config(
     if value is None:
         return None, 0
     required = {"schedule_seed", "start_pnls", "validation_episodes"}
-    if not isinstance(value, Mapping) or set(value) != required:
+    allowed = required | {"pass_replay"}
+    if (
+        not isinstance(value, Mapping)
+        or not required.issubset(value)
+        or not set(value).issubset(allowed)
+    ):
         raise ValueError("balance curriculum fields are invalid")
     start_pnls = value["start_pnls"]
     if not isinstance(start_pnls, (list, tuple)):
         raise ValueError("balance curriculum starting PnLs are invalid")
+    pass_replay = value.get("pass_replay")
+    if pass_replay is not None and not isinstance(pass_replay, Mapping):
+        raise ValueError("balance pass replay fields are invalid")
     settings = BalanceCurriculumSettings(
         schedule_seed=int(value["schedule_seed"]),
         start_pnls=tuple(float(item) for item in start_pnls),
         mll_floor_pnl=-float(max_loss),
+        pass_replay_update_period=(
+            0 if pass_replay is None else int(pass_replay["update_period"])
+        ),
+        pass_replay_max_examples=(
+            8 if pass_replay is None else int(pass_replay["max_examples"])
+        ),
+        pass_replay_path=(
+            None if pass_replay is None else str(pass_replay["path"])
+        ),
+        pass_replay_sha256=(
+            None if pass_replay is None else str(pass_replay["sha256"])
+        ),
     )
     validation_episodes = int(value["validation_episodes"])
     if validation_episodes < 1:
@@ -3032,6 +3073,7 @@ class HistoricalCandidateRunner:
         )
         resume = None
         replay_state = None
+        balance_pass_replay_sampler_state = None
         recovery_value_store_state = None
         recovery_success_replay_sampler_state = None
         healthy_pass_replay_sampler_state = None
@@ -3080,6 +3122,9 @@ class HistoricalCandidateRunner:
             replay_state = manifest.get("replay_state")
             if not manifest.get("replay_restored", False) or replay_state is None:
                 raise ValueError("training recovery is missing replay state")
+            balance_pass_replay_sampler_state = manifest.get(
+                "balance_pass_replay_sampler_state"
+            )
             recovery_value_store_state = manifest.get(
                 "recovery_value_store_state"
             )
@@ -3228,6 +3273,44 @@ class HistoricalCandidateRunner:
         )
         if replay_state is not None:
             replay.load_state_dict(replay_state)
+        balance_pass_replay = None
+        if (
+            balance_curriculum is not None
+            and balance_curriculum.pass_replay_path is not None
+        ):
+            balance_pass_replay = BalancedSequenceReplay(
+                capacity_episodes=(
+                    balance_curriculum.pass_replay_max_examples
+                ),
+                capacity_transitions=None,
+                sequence_length=int(training_config["sequence_length"]),
+                recurrent_burn_in=int(agent.recurrent_burn_in),
+                n_step_return=int(agent.n_step_return),
+                seed=balance_curriculum.schedule_seed + 3,
+            )
+            _load_balance_pass_replay_artifact(
+                _resolve(root, balance_curriculum.pass_replay_path),
+                expected_sha256=str(
+                    balance_curriculum.pass_replay_sha256
+                ),
+                replay=balance_pass_replay,
+            )
+            balance_pass_replay.absorb_recent_passes(
+                replay,
+                max_examples=balance_curriculum.pass_replay_max_examples,
+            )
+            if balance_pass_replay_sampler_state is not None:
+                balance_pass_replay.load_sampler_state_dict(
+                    balance_pass_replay_sampler_state
+                )
+            elif resume is not None:
+                raise ValueError(
+                    "training recovery is missing balance pass sampler state"
+                )
+        elif balance_pass_replay_sampler_state is not None:
+            raise ValueError(
+                "checkpoint contains disabled balance pass sampler state"
+            )
         recovery_success_replay = None
         if (
             recovery_curriculum is not None
@@ -3540,6 +3623,11 @@ class HistoricalCandidateRunner:
                 progress=progress,
                 environment_rng_state=train_environment.rng_state(),
                 replay_state=replay.state_dict(),
+                balance_pass_replay_sampler_state=(
+                    None
+                    if balance_pass_replay is None
+                    else balance_pass_replay.sampler_state_dict()
+                ),
                 recovery_value_store_state=(
                     None
                     if recovery_value_store is None
@@ -3671,6 +3759,7 @@ class HistoricalCandidateRunner:
             training_health_callback=policy_health_monitor,
             near_blow_loss_threshold=near_blow_loss_threshold,
             balance_curriculum=balance_curriculum,
+            balance_pass_replay=balance_pass_replay,
             recovery_curriculum=recovery_curriculum,
             recovery_value_policy=recovery_value_policy,
             recovery_value_environment=recovery_value_environment,
@@ -4343,6 +4432,7 @@ def _save_training_recovery(
     progress: TrainingProgress,
     environment_rng_state: dict,
     replay_state: dict[str, object],
+    balance_pass_replay_sampler_state: dict[str, object] | None = None,
     recovery_value_store_state: dict[str, object] | None = None,
     recovery_success_replay_sampler_state: dict[str, object] | None = None,
     healthy_pass_replay_sampler_state: dict[str, object] | None = None,
@@ -4373,6 +4463,9 @@ def _save_training_recovery(
             "environment_rng_state": environment_rng_state,
             "replay_state": replay_state,
             "replay_restored": True,
+            "balance_pass_replay_sampler_state": (
+                balance_pass_replay_sampler_state
+            ),
             "recovery_value_store_state": recovery_value_store_state,
             "recovery_success_replay_sampler_state": (
                 recovery_success_replay_sampler_state
@@ -5128,6 +5221,22 @@ def _load_recovery_success_replay_artifact(
     )
 
 
+def _load_balance_pass_replay_artifact(
+    path: Path,
+    *,
+    expected_sha256: str,
+    replay: BalancedSequenceReplay,
+) -> None:
+    """Authenticate complete passes for the single-policy balance curriculum."""
+    _load_authenticated_pass_replay_artifact(
+        path,
+        expected_sha256=expected_sha256,
+        expected_schema="propevolve_balance_pass_replay_v1",
+        replay=replay,
+        sample_kind="balance",
+    )
+
+
 def _load_healthy_pass_replay_artifact(
     path: Path,
     *,
@@ -5169,6 +5278,7 @@ def _load_authenticated_pass_replay_artifact(
     sample_kind: str,
 ) -> None:
     if sample_kind not in {
+        "balance",
         "recovery",
         "healthy",
         "post_recovery_contrast",
@@ -5198,8 +5308,17 @@ def _load_authenticated_pass_replay_artifact(
     state = payload.get("replay_state")
     if not isinstance(state, Mapping):
         raise ValueError("pass replay state is invalid")
+    if sample_kind == "balance" and any(
+        not isinstance(episode, Mapping)
+        or episode.get("outcome") != "pass"
+        for episode in state.get("episodes", ())
+    ):
+        raise ValueError("balance pass replay contains a non-pass episode")
     replay.load_state_dict(state)
-    if sample_kind == "healthy":
+    if sample_kind == "balance":
+        sample = replay.sample(1)
+        requirement = "complete pass"
+    elif sample_kind == "healthy":
         sample = replay.sample_healthy_pass_sequences(1)
         requirement = "healthy policy row"
     elif sample_kind == "recovery":
@@ -5351,6 +5470,7 @@ def train_agent(
     collapse_maximum_average_hold_bars: float = math.inf,
     collapse_minimum_voluntary_close_rate: float = 1.0,
     balance_curriculum: BalanceCurriculumSettings | None = None,
+    balance_pass_replay: BalancedSequenceReplay | None = None,
     recovery_curriculum: RecoveryCurriculumSettings | None = None,
     recovery_value_policy: RecurrentC51Agent | None = None,
     recovery_value_environment: HistoricalChallengeEnv | None = None,
@@ -5450,6 +5570,27 @@ def train_agent(
         raise ValueError("teacher diagnostic channels are invalid")
     if balance_curriculum is not None and recovery_curriculum is not None:
         raise ValueError("balance and recovery curricula are mutually exclusive")
+    if balance_curriculum is None:
+        if balance_pass_replay is not None:
+            raise ValueError("balance pass replay requires a curriculum")
+    else:
+        pass_replay_enabled = (
+            balance_curriculum.pass_replay_update_period > 0
+        )
+        if pass_replay_enabled != (balance_pass_replay is not None):
+            raise ValueError("balance pass replay contract is incomplete")
+        if balance_pass_replay is not None and (
+            balance_pass_replay.sequence_length != replay.sequence_length
+            or balance_pass_replay.recurrent_burn_in
+            != replay.recurrent_burn_in
+            or balance_pass_replay.n_step_return != replay.n_step_return
+        ):
+            raise ValueError("balance pass replay recurrent contract drifted")
+        if balance_pass_replay is not None:
+            balance_pass_replay.absorb_recent_passes(
+                replay,
+                max_examples=balance_curriculum.pass_replay_max_examples,
+            )
     recovery_components = (
         recovery_value_policy,
         recovery_value_environment,
@@ -6136,6 +6277,17 @@ def train_agent(
             transitions=replay_transitions,
         )
         replay.add(completed_episode)
+        balance_pass_replay_promoted_passes = 0
+        if outcome == "pass" and balance_pass_replay is not None:
+            assert balance_curriculum is not None
+            balance_pass_replay_promoted_passes = (
+                balance_pass_replay.absorb_recent_passes(
+                    replay,
+                    max_examples=(
+                        balance_curriculum.pass_replay_max_examples
+                    ),
+                )
+            )
         recovery_success_replay_promoted_episodes = 0
         recovery_success_replay_promoted_passes = 0
         healthy_pass_replay_promoted_passes = 0
@@ -6298,6 +6450,7 @@ def train_agent(
                     class_index
                 ]
             ))
+        balance_pass_replay_sequences = 0
         recovery_success_replay_sequences = 0
         healthy_pass_replay_sequences = 0
         post_recovery_contrast_pairs = 0
@@ -6306,9 +6459,20 @@ def train_agent(
                 batch: Sequence[Sequence[Transition]],
                 update_index: int,
             ) -> None:
+                nonlocal balance_pass_replay_sequences
                 nonlocal recovery_success_replay_sequences
                 nonlocal healthy_pass_replay_sequences
                 nonlocal post_recovery_contrast_pairs
+                if (
+                    balance_curriculum is not None
+                    and balance_pass_replay is not None
+                    and (update_index + 1)
+                    % balance_curriculum.pass_replay_update_period
+                    == 0
+                ):
+                    pass_sequences = balance_pass_replay.sample(1)
+                    batch = tuple(batch) + pass_sequences
+                    balance_pass_replay_sequences += len(pass_sequences)
                 if (
                     recovery_curriculum is not None
                     and recovery_success_replay is not None
@@ -6744,6 +6908,12 @@ def train_agent(
                 ),
                 "recovery_wait_decisions": int(
                     terminal_info.get("recovery_wait_decisions", 0)
+                ),
+                "balance_pass_replay_sequences": (
+                    balance_pass_replay_sequences
+                ),
+                "balance_pass_replay_promoted_passes": (
+                    balance_pass_replay_promoted_passes
                 ),
                 "recovery_success_replay_sequences": (
                     recovery_success_replay_sequences

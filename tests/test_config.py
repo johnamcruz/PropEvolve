@@ -139,6 +139,33 @@ def test_config_accepts_single_policy_balance_curriculum_by_values(
     assert config.get("recovery_curriculum") is None
 
 
+def test_config_accepts_authenticated_balance_pass_replay_by_values(
+    tmp_path: Path,
+) -> None:
+    payload = _balance_curriculum_payload()
+    payload["balance_curriculum"]["pass_replay"] = {
+        "path": "runs/recovery-pass-replay/balance-passes.pt",
+        "sha256": "a" * 64,
+        "update_period": 8,
+        "max_examples": 8,
+    }
+    payload["evolution"]["frozen_paths"].append(
+        "balance_curriculum.pass_replay"
+    )
+    path = tmp_path / "arbitrary-unified-balance-recipe.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["balance_curriculum"]["pass_replay"] == {
+        "path": "runs/recovery-pass-replay/balance-passes.pt",
+        "sha256": "a" * 64,
+        "update_period": 8,
+        "max_examples": 8,
+    }
+    assert config.get("recovery_curriculum") is None
+
+
 def test_config_rejects_balance_curriculum_with_recovery_mode(
     tmp_path: Path,
 ) -> None:

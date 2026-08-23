@@ -283,10 +283,16 @@
   "balance_curriculum": {
     "schedule_seed": 37,
     "start_pnls": [-2000],
-    "validation_episodes": 200
+    "validation_episodes": 200,
+    "pass_replay": {
+      "path": "runs/recovery-pass-replay/v22-r14-unified-balance-best8-pass-replay-v1.pt",
+      "sha256": "b52afd254a30bf9d93a0807016ed6c36fa8676bc5774ef86dc69c8b3b641a22a",
+      "update_period": 8,
+      "max_examples": 8
+    }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target will teach balance-aware selectivity without a recovery mode, breakeven label, or policy handoff. Every episode retains the original +$6,000 pass, -$3,000 blow, and 30-day timeout outcomes; crossing $0 has no special meaning, while V21 Expansion-Regime supervision, paired economic contrast, recurrent replay, action space, and teacher-free inference remain unchanged.",
+    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target, with one authenticated side-balanced historical pass sequence added every eight learner updates, will teach balance-aware selectivity without a recovery mode, breakeven label, or policy handoff. Every episode retains the original +$6,000 pass, -$3,000 blow, and 30-day timeout outcomes; crossing $0 has no special meaning, while V21 Expansion-Regime supervision, paired economic contrast, recurrent replay, action space, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -327,6 +333,7 @@
       "balance_curriculum.schedule_seed",
       "balance_curriculum.start_pnls",
       "balance_curriculum.validation_episodes",
+      "balance_curriculum.pass_replay",
       "regime_selectivity.action_order",
       "regime_selectivity.chop_wait_margin",
       "regime_selectivity.dominant_chop_pressure",

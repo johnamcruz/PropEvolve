@@ -1367,6 +1367,36 @@ class BalancedSequenceReplay:
             self._retain_stored_episode(episode)
         return added
 
+    def absorb_recent_passes(
+        self,
+        source: "BalancedSequenceReplay",
+        *,
+        max_examples: int = 8,
+    ) -> int:
+        """Share newest complete passes for a single-policy curriculum."""
+        if not isinstance(source, BalancedSequenceReplay) or max_examples < 1:
+            raise ValueError("recent balance pass replay request is invalid")
+        if (
+            self.sequence_length != source.sequence_length
+            or self.recurrent_burn_in != source.recurrent_burn_in
+            or self.n_step_return != source.n_step_return
+        ):
+            raise ValueError("recent balance pass recurrent contract drifted")
+        candidates = sorted(
+            (
+                episode
+                for episode in source._episodes.values()
+                if episode.outcome == "pass"
+            ),
+            key=lambda episode: (-episode.ended_at_ns, episode.episode_id),
+        )[:max_examples]
+        added = 0
+        for episode in reversed(candidates):
+            if episode.episode_id not in self._episodes:
+                added += 1
+            self._retain_stored_episode(episode)
+        return added
+
     def absorb_recent_post_recovery_contrasts(
         self,
         source: "BalancedSequenceReplay",

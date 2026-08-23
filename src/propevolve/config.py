@@ -77,6 +77,7 @@ BALANCE_CURRICULUM_FROZEN_PATHS = (
     "balance_curriculum.start_pnls",
     "balance_curriculum.validation_episodes",
 )
+BALANCE_PASS_REPLAY_FROZEN_PATH = "balance_curriculum.pass_replay"
 TRAINING_POLICY_HEALTH_FROZEN_PATH = "training.short_circuit.policy_health"
 
 
@@ -630,10 +631,12 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
         raise ValueError(
             "balance and recovery curricula are mutually exclusive"
         )
+    required = {"schedule_seed", "start_pnls", "validation_episodes"}
+    allowed = required | {"pass_replay"}
     if (
         not isinstance(curriculum, dict)
-        or set(curriculum)
-        != {"schedule_seed", "start_pnls", "validation_episodes"}
+        or not required.issubset(curriculum)
+        or not set(curriculum).issubset(allowed)
         or isinstance(curriculum["schedule_seed"], bool)
         or not isinstance(curriculum["schedule_seed"], int)
         or isinstance(curriculum["validation_episodes"], bool)
@@ -642,6 +645,27 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
         or not isinstance(curriculum["start_pnls"], list)
     ):
         raise ValueError("balance curriculum contract is invalid")
+    pass_replay = curriculum.get("pass_replay")
+    if pass_replay is not None and (
+        not isinstance(pass_replay, dict)
+        or set(pass_replay)
+        != {"path", "sha256", "update_period", "max_examples"}
+        or not isinstance(pass_replay["path"], str)
+        or not pass_replay["path"]
+        or not isinstance(pass_replay["sha256"], str)
+        or len(pass_replay["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in pass_replay["sha256"]
+        )
+        or isinstance(pass_replay["update_period"], bool)
+        or not isinstance(pass_replay["update_period"], int)
+        or pass_replay["update_period"] < 1
+        or isinstance(pass_replay["max_examples"], bool)
+        or not isinstance(pass_replay["max_examples"], int)
+        or pass_replay["max_examples"] < 1
+    ):
+        raise ValueError("balance pass replay contract is invalid")
     start_pnls = curriculum["start_pnls"]
     maximum_loss = float(challenge["max_loss"])
     if (
@@ -1717,6 +1741,11 @@ def load_experiment_config(path: str | Path) -> dict:
     if payload.get("balance_curriculum") is not None:
         if not all(path in frozen for path in BALANCE_CURRICULUM_FROZEN_PATHS):
             raise ValueError("balance curriculum identity must be frozen")
+        if (
+            payload["balance_curriculum"].get("pass_replay") is not None
+            and BALANCE_PASS_REPLAY_FROZEN_PATH not in frozen
+        ):
+            raise ValueError("balance pass replay identity must be frozen")
         if any(
             path.startswith("balance_curriculum.") for path in allowed
         ):

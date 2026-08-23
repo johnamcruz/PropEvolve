@@ -38,6 +38,7 @@ from propevolve.training import (
     _assert_recovery_regime_selectivity,
     _entry_action_balance,
     _entry_supervision_frozen_contract,
+    _load_balance_pass_replay_artifact,
     _load_healthy_pass_replay_artifact,
     _load_post_recovery_contrast_replay_artifact,
     _load_recovery_success_replay_artifact,
@@ -213,6 +214,191 @@ def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
         "normal_to_recovery": 0,
     }
     assert replay.recovery_flags == [False, False]
+
+
+def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class ReplayAgent(Agent):
+        recurrent_burn_in = 1
+        n_step_return = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def train_batch(self, sequences, **kwargs) -> float:
+            self.batch_sizes.append(len(sequences))
+            self.last_train_metrics = {}
+            return 0.5
+
+    class PassingEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            return np.array([-2_000.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+                "end": 2,
+                "realized_pnl": float(
+                    options["challenge_start_state"].realized_pnl
+                ),
+                "mll_headroom_fraction": 1.0 / 3.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            terminated = self.steps == 2
+            pnl = 6_000.0 if terminated else 0.0
+            return np.array([pnl], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else flat_actions,
+                "ticker": "NQ",
+                "fill_index": self.steps,
+                "outcome": "pass" if terminated else None,
+                "primary_side": "long",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": pnl,
+                "equity_pnl": pnl,
+                "mll_headroom_fraction": 1.0,
+            }
+
+    pass_replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=73,
+    )
+    pass_replay.add(Episode(
+        episode_id="prior-balance-pass",
+        ticker="ES",
+        outcome="pass",
+        primary_side="short",
+        ended_at_ns=1,
+        transitions=tuple(
+            Transition(
+                observation=np.array([index], np.float32),
+                action=Action.WAIT,
+                reward=1.0,
+                next_observation=np.array([index + 1], np.float32),
+                terminated=index == 3,
+                valid_actions=flat_actions,
+                next_valid_actions=() if index == 3 else flat_actions,
+                recovery_active=False,
+            )
+            for index in range(4)
+        ),
+    ))
+    settings = BalanceCurriculumSettings(
+        schedule_seed=37,
+        start_pnls=(-2_000.0,),
+        mll_floor_pnl=-3_000.0,
+        pass_replay_update_period=2,
+        pass_replay_max_examples=8,
+        pass_replay_path="runs/balance-passes.pt",
+        pass_replay_sha256="a" * 64,
+    )
+    diagnostics: list[dict[str, object]] = []
+    agent = ReplayAgent()
+
+    train_agent(
+        agent,
+        PassingEnvironment(),
+        episodes=1,
+        minimum_environment_steps=2,
+        budget_mode="episodes",
+        replay=BalancedSequenceReplay(
+            capacity_episodes=4,
+            sequence_length=4,
+            recurrent_burn_in=1,
+            n_step_return=1,
+            seed=71,
+        ),
+        warmup_episodes=1,
+        updates_per_episode=2,
+        batch_sequences=1,
+        recurrent_horizon=4,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        balance_curriculum=settings,
+        balance_pass_replay=pass_replay,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert agent.batch_sizes == [1, 2]
+    assert diagnostics[0]["balance_pass_replay_sequences"] == 1
+    assert diagnostics[0]["balance_pass_replay_promoted_passes"] == 1
+    assert {
+        episode["ticker"]
+        for episode in pass_replay.state_dict()["episodes"]
+    } == {"ES", "NQ"}
+
+
+def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
+    tmp_path: Path,
+) -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=79,
+    )
+    source.add(Episode(
+        episode_id="saved-balance-pass",
+        ticker="NQ",
+        outcome="pass",
+        primary_side="long",
+        ended_at_ns=2,
+        transitions=tuple(
+            Transition(
+                observation=np.array([index], np.float32),
+                action=Action.WAIT,
+                reward=1.0,
+                next_observation=np.array([index + 1], np.float32),
+                terminated=index == 3,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=() if index == 3 else (Action.WAIT,),
+                recovery_active=False,
+            )
+            for index in range(4)
+        ),
+    ))
+    artifact = tmp_path / "balance-passes.pt"
+    torch.save({
+        "schema": "propevolve_balance_pass_replay_v1",
+        "source_checkpoints": [{
+            "causal_identity_sha256": "b" * 64,
+            "resume_identity": "frozen-balance-run",
+        }],
+        "replay_state": source.state_dict(),
+    }, artifact)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=83,
+    )
+
+    _load_balance_pass_replay_artifact(
+        artifact,
+        expected_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        replay=restored,
+    )
+
+    assert restored.sample(1)[0][-1].terminated is True
 
 
 def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> None:
@@ -5497,16 +5683,19 @@ def test_recovery_checkpoint_stores_replay_sampler_metadata_only(
         progress=TrainingProgress(completed_episodes=40),
         environment_rng_state={},
         replay_state={"episodes": ["ordinary-replay-is-resumable"]},
+        balance_pass_replay_sampler_state=sampler_state,
         recovery_success_replay_sampler_state=sampler_state,
         healthy_pass_replay_sampler_state=sampler_state,
         post_recovery_contrast_replay_sampler_state=sampler_state,
     )
 
     assert not {
+        "balance_pass_replay_state",
         "recovery_success_replay_state",
         "healthy_pass_replay_state",
         "post_recovery_contrast_replay_state",
     } & set(agent.manifest)
+    assert agent.manifest["balance_pass_replay_sampler_state"] == sampler_state
     assert agent.manifest["recovery_success_replay_sampler_state"] == (
         sampler_state
     )
