@@ -40,13 +40,14 @@ def _post_recovery_episode(
     offset: int,
     outcome: str | None = None,
     recovery_pattern: tuple[bool, ...] | None = None,
+    anchor_index: int = 1,
+    anchor_economic_win: bool | None = True,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
         Action.ENTER_SHORT_1,
     )
-    anchor_index = 4
     recovery_active = recovery_pattern or (
         (True, True, False, False, False, False, False, False)
         if retained
@@ -72,7 +73,8 @@ def _post_recovery_episode(
                 ),
                 entry_action_target=(
                     side
-                    if retained and index == anchor_index
+                    if (retained or anchor_economic_win is True)
+                    and index == anchor_index
                     else Action.WAIT if index == anchor_index else None
                 ),
                 regime_selectivity_headroom_fraction=(
@@ -86,12 +88,58 @@ def _post_recovery_episode(
                 ),
                 paired_a_plus_side=side if index == anchor_index else None,
                 paired_a_plus_economic_win=(
-                    retained if index == anchor_index else None
+                    (
+                        retained
+                        if anchor_economic_win is None
+                        else anchor_economic_win
+                    )
+                    if index == anchor_index
+                    else None
                 ),
             )
             for index in range(8)
         ),
     )
+
+
+def test_post_recovery_contrast_anchors_recovery_owned_handoff_entries() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=4,
+        sequence_length=5,
+        recurrent_burn_in=2,
+        n_step_return=1,
+        seed=72,
+    )
+    replay.add(_post_recovery_episode(
+        episode_id="retained-handoff",
+        side=Action.ENTER_LONG_1,
+        retained=True,
+        offset=0,
+        anchor_index=1,
+        anchor_economic_win=True,
+    ))
+    replay.add(_post_recovery_episode(
+        episode_id="relapsed-handoff",
+        side=Action.ENTER_LONG_1,
+        retained=False,
+        offset=20,
+        anchor_index=1,
+        anchor_economic_win=True,
+    ))
+
+    sequences = replay.sample_post_recovery_contrast_pairs(1)
+
+    assert len(sequences) == 2
+    anchors = [sequence[2] for sequence in sequences]
+    assert all(anchor.recovery_active for anchor in anchors)
+    retained = next(
+        anchor for anchor in anchors if anchor.paired_a_plus_economic_win
+    )
+    relapsed = next(
+        anchor for anchor in anchors if not anchor.paired_a_plus_economic_win
+    )
+    assert retained.entry_action_target == Action.ENTER_LONG_1
+    assert relapsed.entry_action_target == Action.WAIT
 
 
 def test_replay_is_bounded_and_samples_whole_causal_sequences() -> None:
@@ -1741,7 +1789,7 @@ def test_post_recovery_contrast_replay_admits_and_prefers_current_examples(
     assert added == 2
     assert {
         int(sequence[2].observation[0]) for sequence in sequences
-    } == {104, 124}
+    } == {101, 121}
 
 
 def test_dynamic_recovery_replay_rejects_recovered_then_relapsed_episode(

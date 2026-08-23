@@ -1394,43 +1394,29 @@ class BalancedSequenceReplay:
                 continue
             retained_boundary = self._retained_recovery_boundary(episode)
             if retained_boundary is not None:
-                retained_start = retained_boundary + 1
-                for side, winner_indices in (
-                    (
-                        Action.ENTER_LONG_1,
-                        episode.paired_a_plus_long_winner_anchor_indices,
-                    ),
-                    (
-                        Action.ENTER_SHORT_1,
-                        episode.paired_a_plus_short_winner_anchor_indices,
-                    ),
-                ):
-                    if np.any(winner_indices >= retained_start):
-                        buckets[("retained", side)].append(episode)
+                retained_anchor = self._recovery_handoff_anchor(
+                    episode,
+                    boundary=retained_boundary,
+                )
+                if retained_anchor is not None:
+                    side, _ = retained_anchor
+                    buckets[("retained", side)].append(episode)
             if not bool(episode.recovery_active[-1]):
                 continue
-            healthy_start = int(boundaries[0]) + 1
+            relapse_boundary = int(boundaries[0])
+            healthy_start = relapse_boundary + 1
             relapse_offsets = np.flatnonzero(
                 episode.recovery_active[healthy_start:]
             )
             if not relapse_offsets.size:
                 continue
-            relapse_index = healthy_start + int(relapse_offsets[0])
-            for side, failure_indices in (
-                (
-                    Action.ENTER_LONG_1,
-                    episode.paired_a_plus_long_failure_anchor_indices,
-                ),
-                (
-                    Action.ENTER_SHORT_1,
-                    episode.paired_a_plus_short_failure_anchor_indices,
-                ),
-            ):
-                if np.any(
-                    (failure_indices >= healthy_start)
-                    & (failure_indices < relapse_index)
-                ):
-                    buckets[("relapsed", side)].append(episode)
+            relapsed_anchor = self._recovery_handoff_anchor(
+                episode,
+                boundary=relapse_boundary,
+            )
+            if relapsed_anchor is not None:
+                side, _ = relapsed_anchor
+                buckets[("relapsed", side)].append(episode)
         selected = {
             episode.episode_id: episode
             for candidates in buckets.values()
@@ -1913,7 +1899,7 @@ class BalancedSequenceReplay:
         max_examples: int = 8,
         pair_id_start: int = 0,
     ) -> tuple[tuple[Transition, ...], ...]:
-        """Pair retained recovery winners with pre-relapse failures."""
+        """Pair recovery-owned handoffs that retained versus relapsed."""
         if (
             count < 1
             or max_examples < 1
@@ -1939,55 +1925,41 @@ class BalancedSequenceReplay:
             score = float(np.sum(episode.rewards, dtype=np.float64))
             retained_boundary = self._retained_recovery_boundary(episode)
             if retained_boundary is not None:
-                retained_start = retained_boundary + 1
-                for side, winner_indices in (
-                    (
-                        Action.ENTER_LONG_1,
-                        episode.paired_a_plus_long_winner_anchor_indices,
-                    ),
-                    (
-                        Action.ENTER_SHORT_1,
-                        episode.paired_a_plus_short_winner_anchor_indices,
-                    ),
-                ):
-                    for anchor_index in winner_indices:
-                        if int(anchor_index) >= retained_start:
-                            retained[side].append((
-                                episode.ended_at_ns,
-                                score,
-                                episode.episode_id,
-                                episode,
-                                int(anchor_index),
-                            ))
+                retained_anchor = self._recovery_handoff_anchor(
+                    episode,
+                    boundary=retained_boundary,
+                )
+                if retained_anchor is not None:
+                    side, anchor_index = retained_anchor
+                    retained[side].append((
+                        episode.ended_at_ns,
+                        score,
+                        episode.episode_id,
+                        episode,
+                        anchor_index,
+                    ))
             if not bool(episode.recovery_active[-1]):
                 continue
-            healthy_start = int(boundaries[0]) + 1
+            relapse_boundary = int(boundaries[0])
+            healthy_start = relapse_boundary + 1
             relapse_offsets = np.flatnonzero(
                 episode.recovery_active[healthy_start:]
             )
             if not relapse_offsets.size:
                 continue
-            relapse_index = healthy_start + int(relapse_offsets[0])
-            for side, failure_indices in (
-                (
-                    Action.ENTER_LONG_1,
-                    episode.paired_a_plus_long_failure_anchor_indices,
-                ),
-                (
-                    Action.ENTER_SHORT_1,
-                    episode.paired_a_plus_short_failure_anchor_indices,
-                ),
-            ):
-                for anchor_index in failure_indices:
-                    anchor_index = int(anchor_index)
-                    if healthy_start <= anchor_index < relapse_index:
-                        givebacks[side].append((
-                            episode.ended_at_ns,
-                            score,
-                            episode.episode_id,
-                            episode,
-                            anchor_index,
-                        ))
+            relapsed_anchor = self._recovery_handoff_anchor(
+                episode,
+                boundary=relapse_boundary,
+            )
+            if relapsed_anchor is not None:
+                side, anchor_index = relapsed_anchor
+                givebacks[side].append((
+                    episode.ended_at_ns,
+                    score,
+                    episode.episode_id,
+                    episode,
+                    anchor_index,
+                ))
         for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
             retained[side] = sorted(
                 retained[side],
@@ -2029,9 +2001,9 @@ class BalancedSequenceReplay:
             population_count = len(retained[side]) + len(givebacks[side])
             winner_weight = 2.0 * len(retained[side]) / population_count
             failure_weight = 2.0 * len(givebacks[side]) / population_count
-            for episode, anchor_index, population_weight in (
-                (winner_episode, winner_index, winner_weight),
-                (failure_episode, failure_index, failure_weight),
+            for episode, anchor_index, population_weight, retained_outcome in (
+                (winner_episode, winner_index, winner_weight, True),
+                (failure_episode, failure_index, failure_weight, False),
             ):
                 sequence = list(episode.target_anchored_sequence(
                     anchor_index=anchor_index,
@@ -2041,12 +2013,54 @@ class BalancedSequenceReplay:
                 ))
                 sequence[self.recurrent_burn_in] = replace(
                     sequence[self.recurrent_burn_in],
+                    entry_action_target=(
+                        side if retained_outcome else Action.WAIT
+                    ),
+                    paired_a_plus_economic_win=retained_outcome,
                     paired_a_plus_pair_id=pair_id,
                     paired_a_plus_pair_side=side,
                     paired_a_plus_population_weight=population_weight,
                 )
                 sequences.append(tuple(sequence))
         return tuple(sequences)
+
+    @staticmethod
+    def _recovery_handoff_anchor(
+        episode: _StoredEpisode,
+        *,
+        boundary: int,
+    ) -> tuple[Action, int] | None:
+        """Return the latest winning entry owned by recovery before handoff."""
+        if (
+            isinstance(boundary, bool)
+            or boundary < 0
+            or boundary >= episode.transition_count - 1
+            or not bool(episode.recovery_active[boundary])
+            or bool(episode.recovery_active[boundary + 1])
+        ):
+            raise ValueError("recovery handoff boundary is invalid")
+        candidates: list[tuple[int, Action]] = []
+        for side, winner_indices in (
+            (
+                Action.ENTER_LONG_1,
+                episode.paired_a_plus_long_winner_anchor_indices,
+            ),
+            (
+                Action.ENTER_SHORT_1,
+                episode.paired_a_plus_short_winner_anchor_indices,
+            ),
+        ):
+            for anchor_index in winner_indices:
+                anchor_index = int(anchor_index)
+                if (
+                    anchor_index <= boundary
+                    and bool(episode.recovery_active[anchor_index])
+                ):
+                    candidates.append((anchor_index, side))
+        if not candidates:
+            return None
+        anchor_index, side = max(candidates, key=lambda item: item[0])
+        return side, anchor_index
 
     @staticmethod
     def _retained_recovery_boundary(episode: _StoredEpisode) -> int | None:

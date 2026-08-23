@@ -292,19 +292,21 @@ def _is_post_recovery_contrast_candidate(
     )
     if not boundaries.size:
         return False
-    healthy_start = int(boundaries[0]) + 1
+    boundary = int(boundaries[0])
+    recovery_winner = bool(np.any(
+        recovery_active[:boundary + 1]
+        & (sides[:boundary + 1] >= 0)
+        & (wins[:boundary + 1] == 1)
+    ))
+    if not recovery_winner:
+        return False
+    healthy_start = boundary + 1
     relapse_offsets = np.flatnonzero(recovery_active[healthy_start:])
     if not relapse_offsets.size:
-        return bool(np.any(
-            (sides[healthy_start:] >= 0) & (wins[healthy_start:] == 1)
-        ))
+        return True
     if not bool(recovery_active[-1]):
         return False
-    relapse_index = healthy_start + int(relapse_offsets[0])
-    return bool(np.any(
-        (sides[healthy_start:relapse_index] >= 0)
-        & (wins[healthy_start:relapse_index] == 0)
-    ))
+    return True
 
 
 def _with_recovery_state(

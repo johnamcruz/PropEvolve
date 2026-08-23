@@ -3147,26 +3147,26 @@ def test_recovery_healthy_and_post_recovery_replays_are_additive_to_batch(
                     valid_actions=flat_actions,
                     next_valid_actions=() if index == 3 else flat_actions,
                     teacher_target=(
-                        np.ones(4, np.float32) if index == 1 else None
+                        np.ones(4, np.float32) if index == 0 else None
                     ),
                     entry_action_target=(
                         Action.ENTER_LONG_1
-                        if retained and index == 1
-                        else Action.WAIT if index == 1 else None
+                        if index == 0
+                        else None
                     ),
                     regime_selectivity_headroom_fraction=(
-                        0.8 if index == 1 else None
+                        0.8 if index == 0 else None
                     ),
                     recovery_active=recovery_states[index],
                     paired_a_plus_context=(
                         np.full(7, 0.5, np.float32)
-                        if index == 1 else None
+                        if index == 0 else None
                     ),
                     paired_a_plus_side=(
-                        Action.ENTER_LONG_1 if index == 1 else None
+                        Action.ENTER_LONG_1 if index == 0 else None
                     ),
                     paired_a_plus_economic_win=(
-                        retained if index == 1 else None
+                        True if index == 0 else None
                     ),
                 )
                 for index in range(4)
@@ -3428,26 +3428,26 @@ def test_post_recovery_contrast_artifact_is_authenticated_and_paired(
                     valid_actions=flat_actions,
                     next_valid_actions=() if index == 3 else flat_actions,
                     teacher_target=(
-                        np.ones(4, np.float32) if index == 1 else None
+                        np.ones(4, np.float32) if index == 0 else None
                     ),
                     entry_action_target=(
                         Action.ENTER_LONG_1
-                        if retained and index == 1
-                        else Action.WAIT if index == 1 else None
+                        if index == 0
+                        else None
                     ),
                     regime_selectivity_headroom_fraction=(
-                        0.8 if index == 1 else None
+                        0.8 if index == 0 else None
                     ),
                     recovery_active=recovery_states[index],
                     paired_a_plus_context=(
                         np.full(7, 0.5, np.float32)
-                        if index == 1 else None
+                        if index == 0 else None
                     ),
                     paired_a_plus_side=(
-                        Action.ENTER_LONG_1 if index == 1 else None
+                        Action.ENTER_LONG_1 if index == 0 else None
                     ),
                     paired_a_plus_economic_win=(
-                        retained if index == 1 else None
+                        True if index == 0 else None
                     ),
                 )
                 for index in range(4)

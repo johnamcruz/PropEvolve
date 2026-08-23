@@ -71,13 +71,13 @@ def test_healthy_pass_export_excludes_failures_and_all_red_passes() -> None:
 def test_post_recovery_contrast_export_keeps_retained_and_giveback_rows() -> None:
     retained = {
         "recovery_active": np.array([True, False, False, False]),
-        "paired_a_plus_sides": np.array([-1, 1, -1, -1]),
-        "paired_a_plus_economic_wins": np.array([-1, 1, -1, -1]),
+        "paired_a_plus_sides": np.array([1, -1, -1, -1]),
+        "paired_a_plus_economic_wins": np.array([1, -1, -1, -1]),
     }
     giveback = {
         "recovery_active": np.array([True, False, False, True]),
-        "paired_a_plus_sides": np.array([-1, -1, 2, -1]),
-        "paired_a_plus_economic_wins": np.array([-1, -1, 0, -1]),
+        "paired_a_plus_sides": np.array([2, -1, -1, -1]),
+        "paired_a_plus_economic_wins": np.array([1, -1, -1, -1]),
     }
     never_recovered = {
         "recovery_active": np.array([True, True, True, True]),
