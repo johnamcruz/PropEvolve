@@ -491,6 +491,16 @@
             "metric": "recovery_stress.recovery_success_rate",
             "operator": ">",
             "value": 0
+          },
+          {
+            "metric": "recovery_stress.retained_recovery_rate",
+            "operator": ">",
+            "value": 0
+          },
+          {
+            "metric": "recovery_stress.relapse_rate",
+            "operator": "==",
+            "value": 0
           }
         ],
         "parent_improvement_requirements": [
@@ -590,6 +600,16 @@
       {
         "metric": "recovery_stress.recovery_success_rate",
         "operator": ">",
+        "value": 0
+      },
+      {
+        "metric": "recovery_stress.retained_recovery_rate",
+        "operator": ">",
+        "value": 0
+      },
+      {
+        "metric": "recovery_stress.relapse_rate",
+        "operator": "==",
         "value": 0
       }
     ],
