@@ -148,6 +148,7 @@ def test_config_accepts_authenticated_balance_pass_replay_by_values(
         "sha256": "a" * 64,
         "update_period": 8,
         "max_examples": 8,
+        "output": "balance-pass-replay.pt",
     }
     payload["evolution"]["frozen_paths"].append(
         "balance_curriculum.pass_replay"
@@ -162,6 +163,7 @@ def test_config_accepts_authenticated_balance_pass_replay_by_values(
         "sha256": "a" * 64,
         "update_period": 8,
         "max_examples": 8,
+        "output": "balance-pass-replay.pt",
     }
     assert config.get("recovery_curriculum") is None
 

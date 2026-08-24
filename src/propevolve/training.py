@@ -2410,6 +2410,7 @@ class BalanceCurriculumSettings:
     pass_replay_max_examples: int = 8
     pass_replay_path: str | None = None
     pass_replay_sha256: str | None = None
+    pass_replay_output: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -2430,7 +2431,11 @@ class BalanceCurriculumSettings:
             or self.pass_replay_max_examples < 1
         ):
             raise ValueError("balance curriculum settings are invalid")
-        identity = (self.pass_replay_path, self.pass_replay_sha256)
+        identity = (
+            self.pass_replay_path,
+            self.pass_replay_sha256,
+            self.pass_replay_output,
+        )
         if self.pass_replay_update_period == 0:
             if any(value is not None for value in identity):
                 raise ValueError("balance pass replay schedule is disabled")
@@ -2441,6 +2446,9 @@ class BalanceCurriculumSettings:
                 character not in "0123456789abcdef"
                 for character in str(self.pass_replay_sha256)
             )
+            or Path(str(self.pass_replay_output)).is_absolute()
+            or Path(str(self.pass_replay_output)).name
+            != str(self.pass_replay_output)
         ):
             raise ValueError("balance pass replay identity is invalid")
 
@@ -2505,6 +2513,9 @@ def _balance_curriculum_from_config(
         ),
         pass_replay_sha256=(
             None if pass_replay is None else str(pass_replay["sha256"])
+        ),
+        pass_replay_output=(
+            None if pass_replay is None else str(pass_replay["output"])
         ),
     )
     validation_episodes = int(value["validation_episodes"])
@@ -3200,6 +3211,12 @@ class HistoricalCandidateRunner:
                 max_loss=challenge.max_loss,
             )
         )
+        balance_pass_replay_output_path = (
+            None
+            if balance_curriculum is None
+            or balance_curriculum.pass_replay_output is None
+            else output / balance_curriculum.pass_replay_output
+        )
         if recovery_curriculum is not None and balance_curriculum is not None:
             raise ValueError(
                 "balance and recovery curricula are mutually exclusive"
@@ -3288,12 +3305,13 @@ class HistoricalCandidateRunner:
                 n_step_return=int(agent.n_step_return),
                 seed=balance_curriculum.schedule_seed + 3,
             )
-            _load_balance_pass_replay_artifact(
+            _load_balance_pass_replay_source(
                 _resolve(root, balance_curriculum.pass_replay_path),
                 expected_sha256=str(
                     balance_curriculum.pass_replay_sha256
                 ),
                 replay=balance_pass_replay,
+                max_examples=balance_curriculum.pass_replay_max_examples,
             )
             balance_pass_replay.absorb_recent_passes(
                 replay,
@@ -3760,6 +3778,15 @@ class HistoricalCandidateRunner:
             near_blow_loss_threshold=near_blow_loss_threshold,
             balance_curriculum=balance_curriculum,
             balance_pass_replay=balance_pass_replay,
+            balance_pass_replay_callback=(
+                None
+                if balance_pass_replay_output_path is None
+                else lambda state: _save_balance_pass_replay_artifact(
+                    balance_pass_replay_output_path,
+                    replay_state=state,
+                    resume_identity=resume_identity,
+                )
+            ),
             recovery_curriculum=recovery_curriculum,
             recovery_value_policy=recovery_value_policy,
             recovery_value_environment=recovery_value_environment,
@@ -5237,6 +5264,96 @@ def _load_balance_pass_replay_artifact(
     )
 
 
+def _balance_pass_replay_source_paths(path: Path) -> tuple[Path, ...]:
+    if path.is_file():
+        return (path,)
+    if not path.is_dir():
+        raise ValueError("balance pass replay source does not exist")
+    artifacts = tuple(sorted(
+        candidate
+        for candidate in path.iterdir()
+        if candidate.is_file() and candidate.suffix == ".pt"
+    ))
+    if not artifacts:
+        raise ValueError("balance pass replay directory is empty")
+    return artifacts
+
+
+def _balance_pass_replay_source_sha256(path: Path) -> str:
+    artifacts = _balance_pass_replay_source_paths(path)
+    if len(artifacts) == 1 and artifacts[0] == path:
+        return _path_sha256(path)
+    digest = hashlib.sha256()
+    for artifact in artifacts:
+        encoded_name = artifact.name.encode("utf-8")
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(bytes.fromhex(_path_sha256(artifact)))
+    return digest.hexdigest()
+
+
+def _load_balance_pass_replay_source(
+    path: Path,
+    *,
+    expected_sha256: str,
+    replay: BalancedSequenceReplay,
+    max_examples: int,
+) -> None:
+    artifacts = _balance_pass_replay_source_paths(path)
+    if _balance_pass_replay_source_sha256(path) != expected_sha256:
+        raise ValueError("balance pass replay source identity drifted")
+    if len(artifacts) == 1 and artifacts[0] == path:
+        _load_balance_pass_replay_artifact(
+            path,
+            expected_sha256=expected_sha256,
+            replay=replay,
+        )
+        return
+    for index, artifact in enumerate(artifacts):
+        candidate = BalancedSequenceReplay(
+            capacity_episodes=max_examples,
+            capacity_transitions=None,
+            sequence_length=replay.sequence_length,
+            recurrent_burn_in=replay.recurrent_burn_in,
+            n_step_return=replay.n_step_return,
+            seed=index,
+        )
+        _load_balance_pass_replay_artifact(
+            artifact,
+            expected_sha256=_path_sha256(artifact),
+            replay=candidate,
+        )
+        replay.absorb_recent_passes(
+            candidate,
+            max_examples=max_examples,
+        )
+
+
+def _save_balance_pass_replay_artifact(
+    path: Path,
+    *,
+    replay_state: Mapping[str, object],
+    resume_identity: str,
+) -> None:
+    """Atomically persist the bounded, training-only balance-pass library."""
+    if not resume_identity:
+        raise ValueError("balance pass replay source identity is invalid")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(
+        {
+            "schema": "propevolve_balance_pass_replay_v1",
+            "source_checkpoints": [{
+                "causal_identity_sha256": resume_identity,
+                "resume_identity": resume_identity,
+            }],
+            "replay_state": dict(replay_state),
+        },
+        temporary,
+    )
+    os.replace(temporary, path)
+
+
 def _load_healthy_pass_replay_artifact(
     path: Path,
     *,
@@ -5472,6 +5589,9 @@ def train_agent(
     collapse_minimum_voluntary_close_rate: float = 1.0,
     balance_curriculum: BalanceCurriculumSettings | None = None,
     balance_pass_replay: BalancedSequenceReplay | None = None,
+    balance_pass_replay_callback: (
+        Callable[[dict[str, object]], None] | None
+    ) = None,
     recovery_curriculum: RecoveryCurriculumSettings | None = None,
     recovery_value_policy: RecurrentC51Agent | None = None,
     recovery_value_environment: HistoricalChallengeEnv | None = None,
@@ -6289,6 +6409,13 @@ def train_agent(
                     ),
                 )
             )
+            if (
+                balance_pass_replay_promoted_passes > 0
+                and balance_pass_replay_callback is not None
+            ):
+                balance_pass_replay_callback(
+                    balance_pass_replay.state_dict()
+                )
         recovery_success_replay_promoted_episodes = 0
         recovery_success_replay_promoted_passes = 0
         healthy_pass_replay_promoted_passes = 0

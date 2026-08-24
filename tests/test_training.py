@@ -38,7 +38,10 @@ from propevolve.training import (
     _assert_recovery_regime_selectivity,
     _entry_action_balance,
     _entry_supervision_frozen_contract,
+    _balance_pass_replay_source_sha256,
     _load_balance_pass_replay_artifact,
+    _load_balance_pass_replay_source,
+    _save_balance_pass_replay_artifact,
     _load_healthy_pass_replay_artifact,
     _load_post_recovery_contrast_replay_artifact,
     _load_recovery_success_replay_artifact,
@@ -342,8 +345,10 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
         pass_replay_max_examples=8,
         pass_replay_path="runs/balance-passes.pt",
         pass_replay_sha256="a" * 64,
+        pass_replay_output="balance-pass-replay.pt",
     )
     diagnostics: list[dict[str, object]] = []
+    persisted: list[dict[str, object]] = []
     agent = ReplayAgent()
 
     train_agent(
@@ -369,6 +374,7 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
         ticker_seed=5,
         balance_curriculum=settings,
         balance_pass_replay=pass_replay,
+        balance_pass_replay_callback=persisted.append,
         episode_diagnostic_callback=diagnostics.append,
     )
 
@@ -384,6 +390,10 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     assert {
         episode["ticker"]
         for episode in pass_replay.state_dict()["episodes"]
+    } == {"ES", "NQ"}
+    assert len(persisted) == 1
+    assert {
+        episode["ticker"] for episode in persisted[0]["episodes"]
     } == {"ES", "NQ"}
 
 
@@ -468,6 +478,95 @@ def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
     anchor = restored.sample_balance_pass_entry_sequences(1)[0][1]
     assert anchor.entry_action_target == Action.ENTER_LONG_1
     assert anchor.paired_a_plus_economic_win is True
+
+
+def test_balance_pass_replay_directory_loads_all_configured_artifacts(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "arbitrary-replay-source"
+    directory.mkdir()
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    def write_artifact(name: str, episode_id: str, side: Action) -> None:
+        source = BalancedSequenceReplay(
+            capacity_episodes=2,
+            sequence_length=4,
+            recurrent_burn_in=1,
+            n_step_return=1,
+            seed=79,
+        )
+        source.add(Episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            outcome="pass",
+            primary_side="long" if side == Action.ENTER_LONG_1 else "short",
+            ended_at_ns=2,
+            transitions=tuple(
+                Transition(
+                    observation=np.array([index], np.float32),
+                    action=Action.WAIT,
+                    reward=1.0,
+                    next_observation=np.array([index + 1], np.float32),
+                    terminated=index == 3,
+                    valid_actions=flat_actions,
+                    next_valid_actions=() if index == 3 else flat_actions,
+                    teacher_target=(
+                        np.ones(7, np.float32) if index == 1 else None
+                    ),
+                    entry_action_target=(side if index == 1 else None),
+                    regime_selectivity_headroom_fraction=(
+                        0.5 if index == 1 else None
+                    ),
+                    paired_a_plus_context=(
+                        np.asarray(
+                            [0.9, 0.8, 0.1, 0.1, 0.2, 0.7, 0.1],
+                            np.float32,
+                        )
+                        if index == 1 else None
+                    ),
+                    paired_a_plus_side=(side if index == 1 else None),
+                    paired_a_plus_economic_win=(
+                        True if index == 1 else None
+                    ),
+                )
+                for index in range(4)
+            ),
+        ))
+        _save_balance_pass_replay_artifact(
+            directory / name,
+            replay_state=source.state_dict(),
+            resume_identity=episode_id[0] * 64,
+        )
+
+    write_artifact("first.pt", "a-pass", Action.ENTER_LONG_1)
+    write_artifact("second.pt", "b-pass", Action.ENTER_SHORT_1)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=83,
+    )
+
+    _load_balance_pass_replay_source(
+        directory,
+        expected_sha256=_balance_pass_replay_source_sha256(directory),
+        replay=restored,
+        max_examples=2,
+    )
+
+    assert {
+        episode["episode_id"] for episode in restored.state_dict()["episodes"]
+    } == {"a-pass", "b-pass"}
+    anchors = restored.sample_balance_pass_entry_sequences(2)
+    assert {sequence[1].entry_action_target for sequence in anchors} == {
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    }
 
 
 def test_balance_pass_replay_rejects_pass_without_economic_winner(
@@ -3827,12 +3926,12 @@ def test_recovery_pass_replay_artifact_is_authenticated_and_recurrent(
             for index in range(4)
         ),
     ))
-    artifact = tmp_path / "v22-recovery-passes.pt"
+    artifact = tmp_path / "recovery-passes.pt"
     torch.save({
         "schema": "propevolve_recovery_success_replay_v1",
         "source_checkpoints": [{
             "causal_identity_sha256": "b" * 64,
-            "resume_identity": "frozen-v22-run",
+            "resume_identity": "frozen-recovery-source",
         }],
         "replay_state": source.state_dict(),
     }, artifact)
@@ -3999,7 +4098,7 @@ def test_post_recovery_contrast_artifact_is_authenticated_and_paired(
         "schema": "propevolve_post_recovery_contrast_replay_v1",
         "source_checkpoints": [{
             "causal_identity_sha256": "e" * 64,
-            "resume_identity": "frozen-v22-r14-r15",
+            "resume_identity": "frozen-recovery-sources",
         }],
         "replay_state": source.state_dict(),
     }, artifact)

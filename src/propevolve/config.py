@@ -649,7 +649,7 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
     if pass_replay is not None and (
         not isinstance(pass_replay, dict)
         or set(pass_replay)
-        != {"path", "sha256", "update_period", "max_examples"}
+        != {"path", "sha256", "update_period", "max_examples", "output"}
         or not isinstance(pass_replay["path"], str)
         or not pass_replay["path"]
         or not isinstance(pass_replay["sha256"], str)
@@ -664,6 +664,10 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
         or isinstance(pass_replay["max_examples"], bool)
         or not isinstance(pass_replay["max_examples"], int)
         or pass_replay["max_examples"] < 1
+        or not isinstance(pass_replay["output"], str)
+        or not pass_replay["output"]
+        or Path(pass_replay["output"]).is_absolute()
+        or Path(pass_replay["output"]).name != pass_replay["output"]
     ):
         raise ValueError("balance pass replay contract is invalid")
     start_pnls = curriculum["start_pnls"]

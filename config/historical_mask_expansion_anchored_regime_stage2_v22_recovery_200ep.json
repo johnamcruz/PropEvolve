@@ -285,10 +285,11 @@
     "start_pnls": [-1500],
     "validation_episodes": 200,
     "pass_replay": {
-      "path": "runs/recovery-pass-replay/v22-r14-unified-balance-best8-pass-replay-v1.pt",
-      "sha256": "b52afd254a30bf9d93a0807016ed6c36fa8676bc5774ef86dc69c8b3b641a22a",
+      "path": "runs/recovery-pass-replay/balance-curriculum",
+      "sha256": "32ddfd7738b25264d02065ef270e80abfa1089301c89fc6a38a68c80e68413a9",
       "update_period": 8,
-      "max_examples": 8
+      "max_examples": 8,
+      "output": "balance-pass-replay.pt"
     }
   },
   "evolution": {
