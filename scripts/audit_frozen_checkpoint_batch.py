@@ -282,9 +282,17 @@ def main():
     ap = argparse.ArgumentParser(
         description="Audit one frozen recurrent checkpoint and authenticated replay batch."
     )
-    ap.add_argument("--checkpoint", type=Path, required=True)
-    ap.add_argument("--replay-root", type=Path, required=True)
-    ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument(
+        "--attempt-dir",
+        type=Path,
+        help=(
+            "Campaign attempt directory containing training-recovery.pt and "
+            "training-replay; writes frozen-checkpoint-batch-audit.json there"
+        ),
+    )
+    ap.add_argument("--checkpoint", type=Path)
+    ap.add_argument("--replay-root", type=Path)
+    ap.add_argument("--output", type=Path)
     ap.add_argument("--near-blow-pnl", type=float, default=-2250.0)
     ap.add_argument("--pair-count", type=int, default=4)
     args = ap.parse_args()
@@ -296,7 +304,27 @@ def main():
         ap.error(
             "--near-blow-pnl must be negative and --pair-count must be at least two"
         )
-    agent, manifest = RecurrentC51Agent.load(args.checkpoint, device="cpu")
+    explicit_paths = (args.checkpoint, args.replay_root, args.output)
+    if args.attempt_dir is not None:
+        if any(path is not None for path in explicit_paths):
+            ap.error(
+                "--attempt-dir cannot be combined with --checkpoint, "
+                "--replay-root, or --output"
+            )
+        checkpoint = args.attempt_dir / "training-recovery.pt"
+        replay_root = args.attempt_dir / "training-replay"
+        output = args.attempt_dir / "frozen-checkpoint-batch-audit.json"
+    else:
+        if any(path is None for path in explicit_paths):
+            ap.error(
+                "provide --attempt-dir or all of --checkpoint, --replay-root, "
+                "and --output"
+            )
+        checkpoint = args.checkpoint
+        replay_root = args.replay_root
+        output = args.output
+
+    agent, manifest = RecurrentC51Agent.load(checkpoint, device="cpu")
     desc = manifest["replay_checkpoint"]
     contract = desc["contract"]
     population = Counter()
@@ -306,7 +334,7 @@ def main():
     authenticated = 0
     total_bytes = 0
     for number, entry in enumerate(desc["episodes"], 1):
-        path = args.replay_root / entry["path"]
+        path = replay_root / entry["path"]
         digest = sha(path)
         authenticated += int(
             digest == entry["sha256"] and path.stat().st_size == entry["size_bytes"]
@@ -394,7 +422,7 @@ def main():
         selected.extend((w[2], f[2]))
     payloads = []
     for eid in dict.fromkeys(selected):
-        with (args.replay_root / index[eid]["path"]).open("rb") as f:
+        with (replay_root / index[eid]["path"]).open("rb") as f:
             payloads.append(pickle.load(f))
     replay = make_replay(contract, desc["replay_schema_version"], payloads)
     seqs = []
@@ -439,10 +467,10 @@ def main():
         )
     seqs = tuple(seqs)
     before = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
-    td, tdloss = tdgrad(args.checkpoint, seqs)
-    ea, _ = RecurrentC51Agent.load(args.checkpoint, device="cpu")
+    td, tdloss = tdgrad(checkpoint, seqs)
+    ea, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
     eg, el = gradloss(ea, lambda a: exactloss(a, seqs))
-    wg, wl, wrows = waitgrad(args.checkpoint, seqs, td)
+    wg, wl, wrows = waitgrad(checkpoint, seqs, td)
     grads = {"c51_td": td, "exact_action": eg, "chop_wait": wg}
     losses = {"c51_td": tdloss, "exact_action": el, "chop_wait": wl}
     for name in (
@@ -451,7 +479,7 @@ def main():
         "paired_failure",
         "balance_outcome_total",
     ):
-        pa, _ = RecurrentC51Agent.load(args.checkpoint, device="cpu")
+        pa, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
         g, l = gradloss(pa, lambda a, n=name: pairlosses(a, seqs)[n])
         grads[name] = g
         losses[name] = l
@@ -459,7 +487,7 @@ def main():
     cos = {n: {m: cosine(g, h) for m, h in grads.items()} for n, g in grads.items()}
     changes = {}
     for name, g in grads.items():
-        ca, _ = RecurrentC51Agent.load(args.checkpoint, device="cpu")
+        ca, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
         applygrad(ca, g)
         after = qtrace(ca, seqs)[0][:, 0, :3].detach().cpu()
         ba = before.argmax(-1)
@@ -478,11 +506,11 @@ def main():
             "max_abs_q_change": float((after - before).abs().max()),
         }
     par = parity(agent, seqs)
-    rt, _ = RecurrentC51Agent.load(args.checkpoint, device="cpu")
+    rt, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
     report = {
-        "checkpoint": str(args.checkpoint),
+        "checkpoint": str(checkpoint),
         "completed_episodes": manifest["progress"]["completed_episodes"],
         "resume_identity": manifest["resume_identity"],
         "audit_contract": {
@@ -511,7 +539,7 @@ def main():
             Counter(Action(int(x)).name for x in before.argmax(-1))
         ),
     }
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True))
+    output.write_text(json.dumps(report, indent=2, sort_keys=True))
     print(json.dumps(report, indent=2, sort_keys=True))
 
 

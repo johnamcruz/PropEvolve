@@ -20,6 +20,7 @@ def test_frozen_batch_audit_cli_is_path_driven() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+    assert "--attempt-dir" in result.stdout
     assert "--checkpoint" in result.stdout
     assert "--replay-root" in result.stdout
     assert "--output" in result.stdout
