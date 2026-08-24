@@ -58,6 +58,7 @@ class Episode:
     primary_side: str
     ended_at_ns: int
     transitions: tuple[Transition, ...]
+    terminal_pnl: float | None = None
 
     @property
     def bucket(self) -> tuple[str, str, str]:
@@ -119,6 +120,7 @@ class _StoredEpisode:
     outcome: str
     primary_side: str
     ended_at_ns: int
+    terminal_pnl: float | None
     observations: np.ndarray
     actions: np.ndarray
     rewards: np.ndarray
@@ -160,6 +162,10 @@ class _StoredEpisode:
     @classmethod
     def from_episode(cls, episode: Episode) -> "_StoredEpisode":
         transitions = episode.transitions
+        if episode.terminal_pnl is not None and not np.isfinite(
+            episode.terminal_pnl
+        ):
+            raise ValueError("replay episode terminal PnL is invalid")
         if not transitions or not all(item.training_valid is True for item in transitions):
             raise ValueError("replay episodes must contain authentic transitions only")
         if any(
@@ -324,6 +330,11 @@ class _StoredEpisode:
             outcome=episode.outcome,
             primary_side=episode.primary_side,
             ended_at_ns=episode.ended_at_ns,
+            terminal_pnl=(
+                None
+                if episode.terminal_pnl is None
+                else float(episode.terminal_pnl)
+            ),
             observations=observations,
             actions=np.asarray([int(item.action) for item in transitions], np.int8),
             rewards=np.asarray([item.reward for item in transitions], np.float32),
@@ -894,7 +905,7 @@ class BalancedSequenceReplay:
     def checkpoint_metadata(self) -> dict[str, object]:
         """Return the small replay contract and exact sampler state."""
         return {
-            "schema_version": 11,
+            "schema_version": 12,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -987,7 +998,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11}:
+        if schema_version not in {7, 8, 9, 10, 11, 12}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1214,6 +1225,13 @@ class BalancedSequenceReplay:
             episode_id = str(payload.get("episode_id", ""))
             if not episode_id or episode_id in restored:
                 raise ValueError("replay checkpoint episode identity is invalid")
+            terminal_pnl = (
+                None
+                if payload.get("terminal_pnl") is None
+                else float(payload["terminal_pnl"])
+            )
+            if terminal_pnl is not None and not np.isfinite(terminal_pnl):
+                raise ValueError("replay checkpoint terminal PnL is invalid")
             positive_regime_wait = regime_wait_priorities > 0.0
             if np.any(
                 positive_regime_wait
@@ -1242,6 +1260,7 @@ class BalancedSequenceReplay:
                 outcome=str(payload.get("outcome", "")),
                 primary_side=str(payload.get("primary_side", "")),
                 ended_at_ns=int(payload.get("ended_at_ns", 0)),
+                terminal_pnl=terminal_pnl,
                 observations=observations,
                 actions=actions,
                 rewards=rewards,
@@ -2032,6 +2051,132 @@ class BalancedSequenceReplay:
                 recurrent_burn_in=self.recurrent_burn_in,
                 n_step_return=self.n_step_return,
             ))
+        return tuple(sequences)
+
+    def sample_balance_outcome_contrast_pairs(
+        self,
+        count: int,
+        *,
+        near_blow_pnl: float,
+        max_examples: int = 8,
+        pair_id_start: int = 0,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Pair pass winners with context-matched near-blow failures."""
+        if (
+            count < 1
+            or max_examples < 1
+            or isinstance(pair_id_start, bool)
+            or pair_id_start < 0
+            or not np.isfinite(near_blow_pnl)
+            or near_blow_pnl >= 0.0
+        ):
+            raise ValueError("balance outcome contrast request is invalid")
+        winners: dict[
+            Action, list[tuple[int, float, str, _StoredEpisode, int]]
+        ] = defaultdict(list)
+        failures: dict[
+            Action, list[tuple[int, float, str, _StoredEpisode, int]]
+        ] = defaultdict(list)
+        for episode in self._episodes.values():
+            score = float(np.sum(episode.rewards, dtype=np.float64))
+            if episode.outcome == "pass":
+                side_indices = (
+                    (
+                        Action.ENTER_LONG_1,
+                        episode.paired_a_plus_long_winner_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        episode.paired_a_plus_short_winner_anchor_indices,
+                    ),
+                )
+                destination = winners
+            elif (
+                episode.outcome == "timeout"
+                and episode.terminal_pnl is not None
+                and episode.terminal_pnl <= near_blow_pnl
+            ):
+                side_indices = (
+                    (
+                        Action.ENTER_LONG_1,
+                        episode.paired_a_plus_long_failure_anchor_indices,
+                    ),
+                    (
+                        Action.ENTER_SHORT_1,
+                        episode.paired_a_plus_short_failure_anchor_indices,
+                    ),
+                )
+                destination = failures
+            else:
+                continue
+            for side, indices in side_indices:
+                for anchor_index in indices:
+                    destination[side].append((
+                        episode.ended_at_ns,
+                        score,
+                        episode.episode_id,
+                        episode,
+                        int(anchor_index),
+                    ))
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            winners[side] = sorted(
+                winners[side],
+                key=lambda item: (-item[0], -item[1], item[2], item[4]),
+            )[:max_examples]
+            failures[side] = sorted(
+                failures[side],
+                key=lambda item: (-item[0], item[1], item[2], item[4]),
+            )[:max_examples]
+        available_sides = [
+            side
+            for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+            if winners[side] and failures[side]
+        ]
+        if not available_sides:
+            return ()
+        start = self._sample_calls
+        self._sample_calls += count
+        sequences: list[tuple[Transition, ...]] = []
+        for offset in range(count):
+            sample_index = start + offset
+            side = available_sides[sample_index % len(available_sides)]
+            winner = winners[side][
+                (sample_index // len(available_sides)) % len(winners[side])
+            ]
+            _, _, _, winner_episode, winner_index = winner
+            winner_context = self._paired_context_for_side(
+                winner_episode.paired_a_plus_contexts[winner_index], side
+            )
+            failure = min(
+                failures[side],
+                key=lambda item: self._paired_failure_rank(
+                    (item[3], item[4]),
+                    side=side,
+                    winner_context=winner_context,
+                ),
+            )
+            _, _, _, failure_episode, failure_index = failure
+            pair_id = pair_id_start + offset
+            population_count = len(winners[side]) + len(failures[side])
+            winner_weight = 2.0 * len(winners[side]) / population_count
+            failure_weight = 2.0 * len(failures[side]) / population_count
+            for episode, anchor_index, population_weight in (
+                (winner_episode, winner_index, winner_weight),
+                (failure_episode, failure_index, failure_weight),
+            ):
+                sequence = list(episode.target_anchored_sequence(
+                    anchor_index=anchor_index,
+                    length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in,
+                    n_step_return=self.n_step_return,
+                ))
+                sequence[self.recurrent_burn_in] = replace(
+                    sequence[self.recurrent_burn_in],
+                    paired_a_plus_pair_id=pair_id,
+                    paired_a_plus_pair_side=side,
+                    paired_a_plus_population_weight=population_weight,
+                )
+                sequences.append(tuple(sequence))
         return tuple(sequences)
 
     def sample_post_recovery_contrast_pairs(

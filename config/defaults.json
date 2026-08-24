@@ -78,6 +78,9 @@
     "entry_supervision": {
       "action_class_balance": null
     },
+    "balance_curriculum": {
+      "outcome_contrast_replay": null
+    },
     "recovery_curriculum.action_value_supervision": {
       "action_margin": 0.0
     }

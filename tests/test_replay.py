@@ -329,7 +329,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 12
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -566,6 +566,7 @@ def _paired_a_plus_episode(
     offset: int,
     learner_evidence: bool = True,
     outcome: str | None = None,
+    terminal_pnl: float | None = None,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
@@ -606,6 +607,7 @@ def _paired_a_plus_episode(
         primary_side="flat",
         ended_at_ns=offset,
         transitions=transitions,
+        terminal_pnl=terminal_pnl,
     )
 
 
@@ -655,6 +657,148 @@ def test_balance_pass_replay_anchors_economic_winners_and_balances_sides(
         anchor.source_decision_index in {5, 105}
         for anchor in anchors
     )
+
+
+def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=91,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-pass",
+        ticker="GC",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+        outcome="pass",
+        terminal_pnl=6_100.0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-matched-near-blow",
+        ticker="CL",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.88, 0.82, 0.12, 0.11, 0.12, 0.68, 0.20),
+        offset=100,
+        outcome="timeout",
+        terminal_pnl=-2_800.0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-far-near-blow",
+        ticker="ES",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.10, 0.10, 0.85, 0.80, 0.90, 0.05, 0.05),
+        offset=200,
+        outcome="timeout",
+        terminal_pnl=-2_900.0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="not-near-blow",
+        ticker="NQ",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.89, 0.83, 0.11, 0.10, 0.11, 0.69, 0.20),
+        offset=300,
+        outcome="timeout",
+        terminal_pnl=-1_000.0,
+    ))
+
+    sequences = replay.sample_balance_outcome_contrast_pairs(
+        1,
+        near_blow_pnl=-2_250.0,
+        max_examples=8,
+        pair_id_start=11,
+    )
+
+    assert len(sequences) == 2
+    anchors = [sequence[2] for sequence in sequences]
+    assert {anchor.paired_a_plus_pair_id for anchor in anchors} == {11}
+    assert {anchor.paired_a_plus_economic_win for anchor in anchors} == {
+        True,
+        False,
+    }
+    failure = next(
+        anchor for anchor in anchors if not anchor.paired_a_plus_economic_win
+    )
+    assert failure.source_decision_index == 105
+    assert failure.entry_action_target == Action.WAIT
+
+
+def test_replay_schema_11_without_terminal_pnl_remains_loadable() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=92,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="legacy-v21-pass",
+        ticker="NQ",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+        outcome="pass",
+    ))
+    legacy = replay.state_dict()
+    legacy["schema_version"] = 11
+    for episode in legacy["episodes"]:
+        episode.pop("terminal_pnl")
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+
+    restored.load_state_dict(legacy)
+
+    assert restored.transition_count == replay.transition_count
+
+
+def test_replay_checkpoint_rejects_nonfinite_terminal_pnl() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=93,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="pass-with-pnl",
+        ticker="NQ",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+        outcome="pass",
+        terminal_pnl=6_100.0,
+    ))
+    state = replay.state_dict()
+    state["episodes"][0]["terminal_pnl"] = float("nan")
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+
+    with pytest.raises(ValueError, match="terminal PnL is invalid"):
+        restored.load_state_dict(state)
 
 
 def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> None:
@@ -1210,7 +1354,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 12
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -2201,7 +2345,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 11
+    assert state["schema_version"] == 12
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

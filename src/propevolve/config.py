@@ -242,6 +242,9 @@ BALANCE_CURRICULUM_FROZEN_PATHS = (
     "balance_curriculum.validation_episodes",
 )
 BALANCE_PASS_REPLAY_FROZEN_PATH = "balance_curriculum.pass_replay"
+BALANCE_OUTCOME_CONTRAST_FROZEN_PATH = (
+    "balance_curriculum.outcome_contrast_replay"
+)
 TRAINING_POLICY_HEALTH_FROZEN_PATH = "training.short_circuit.policy_health"
 
 
@@ -823,7 +826,7 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
             "balance and recovery curricula are mutually exclusive"
         )
     required = {"schedule_seed", "start_pnls", "validation_episodes"}
-    allowed = required | {"pass_replay"}
+    allowed = required | {"pass_replay", "outcome_contrast_replay"}
     if (
         not isinstance(curriculum, dict)
         or not required.issubset(curriculum)
@@ -861,6 +864,18 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
         or Path(pass_replay["output"]).name != pass_replay["output"]
     ):
         raise ValueError("balance pass replay contract is invalid")
+    outcome_contrast = curriculum.get("outcome_contrast_replay")
+    if outcome_contrast is not None and (
+        not isinstance(outcome_contrast, dict)
+        or set(outcome_contrast) != {"update_period", "max_examples"}
+        or isinstance(outcome_contrast["update_period"], bool)
+        or not isinstance(outcome_contrast["update_period"], int)
+        or outcome_contrast["update_period"] < 1
+        or isinstance(outcome_contrast["max_examples"], bool)
+        or not isinstance(outcome_contrast["max_examples"], int)
+        or outcome_contrast["max_examples"] < 1
+    ):
+        raise ValueError("balance outcome contrast replay contract is invalid")
     start_pnls = curriculum["start_pnls"]
     maximum_loss = float(challenge["max_loss"])
     if (
@@ -1922,6 +1937,14 @@ def load_experiment_config(path: str | Path) -> dict:
             and BALANCE_PASS_REPLAY_FROZEN_PATH not in frozen
         ):
             raise ValueError("balance pass replay identity must be frozen")
+        if (
+            payload["balance_curriculum"].get("outcome_contrast_replay")
+            is not None
+            and BALANCE_OUTCOME_CONTRAST_FROZEN_PATH not in frozen
+        ):
+            raise ValueError(
+                "balance outcome contrast replay identity must be frozen"
+            )
         if any(
             path.startswith("balance_curriculum.") for path in allowed
         ):

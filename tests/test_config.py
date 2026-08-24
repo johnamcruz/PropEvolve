@@ -13,6 +13,7 @@ from tests.recipe_fixtures import (
 
 from propevolve.config import (
     BALANCE_CURRICULUM_FROZEN_PATHS,
+    BALANCE_OUTCOME_CONTRAST_FROZEN_PATH,
     DEFAULT_CONFIG_PATH,
     RECOVERY_CURRICULUM_FROZEN_PATHS,
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
@@ -225,8 +226,31 @@ def test_config_accepts_single_policy_balance_curriculum_by_values(
         "schedule_seed": 37,
         "start_pnls": (-2_000.0,),
         "validation_episodes": 200,
+        "outcome_contrast_replay": None,
     }
     assert config.get("recovery_curriculum") is None
+
+
+def test_config_accepts_optional_balance_outcome_contrast_replay(
+    tmp_path: Path,
+) -> None:
+    payload = _balance_curriculum_payload()
+    payload["balance_curriculum"]["outcome_contrast_replay"] = {
+        "update_period": 8,
+        "max_examples": 8,
+    }
+    payload["evolution"]["frozen_paths"].append(
+        BALANCE_OUTCOME_CONTRAST_FROZEN_PATH
+    )
+    path = tmp_path / "v23-balance-outcome-contrast.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["balance_curriculum"]["outcome_contrast_replay"] == {
+        "update_period": 8,
+        "max_examples": 8,
+    }
 
 
 def test_config_accepts_authenticated_balance_pass_replay_by_values(

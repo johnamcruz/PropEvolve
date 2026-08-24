@@ -2416,6 +2416,23 @@ class RecoveryCurriculumSettings:
 
 
 @dataclass(frozen=True)
+class BalanceOutcomeContrastSettings:
+    """Sparse pass-versus-near-blow recurrent comparison schedule."""
+
+    update_period: int
+    max_examples: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.update_period, bool)
+            or self.update_period < 1
+            or isinstance(self.max_examples, bool)
+            or self.max_examples < 1
+        ):
+            raise ValueError("balance outcome contrast settings are invalid")
+
+
+@dataclass(frozen=True)
 class BalanceCurriculumSettings:
     """Resume-stable ordinary challenge starts for one continuous policy."""
 
@@ -2427,6 +2444,7 @@ class BalanceCurriculumSettings:
     pass_replay_path: str | None = None
     pass_replay_sha256: str | None = None
     pass_replay_output: str | None = None
+    outcome_contrast: BalanceOutcomeContrastSettings | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -2501,7 +2519,7 @@ def _balance_curriculum_from_config(
     if value is None:
         return None, 0
     required = {"schedule_seed", "start_pnls", "validation_episodes"}
-    allowed = required | {"pass_replay"}
+    allowed = required | {"pass_replay", "outcome_contrast_replay"}
     if (
         not isinstance(value, Mapping)
         or not required.issubset(value)
@@ -2514,6 +2532,11 @@ def _balance_curriculum_from_config(
     pass_replay = value.get("pass_replay")
     if pass_replay is not None and not isinstance(pass_replay, Mapping):
         raise ValueError("balance pass replay fields are invalid")
+    outcome_contrast = value.get("outcome_contrast_replay")
+    if outcome_contrast is not None and not isinstance(
+        outcome_contrast, Mapping
+    ):
+        raise ValueError("balance outcome contrast fields are invalid")
     settings = BalanceCurriculumSettings(
         schedule_seed=int(value["schedule_seed"]),
         start_pnls=tuple(float(item) for item in start_pnls),
@@ -2532,6 +2555,14 @@ def _balance_curriculum_from_config(
         ),
         pass_replay_output=(
             None if pass_replay is None else str(pass_replay["output"])
+        ),
+        outcome_contrast=(
+            None
+            if outcome_contrast is None
+            else BalanceOutcomeContrastSettings(
+                update_period=int(outcome_contrast["update_period"]),
+                max_examples=int(outcome_contrast["max_examples"]),
+            )
         ),
     )
     validation_episodes = int(value["validation_episodes"])
@@ -5717,6 +5748,13 @@ def train_agent(
                 replay,
                 max_examples=balance_curriculum.pass_replay_max_examples,
             )
+        if (
+            balance_curriculum.outcome_contrast is not None
+            and near_blow_loss_threshold is None
+        ):
+            raise ValueError(
+                "balance outcome contrast requires a near-blow boundary"
+            )
     recovery_components = (
         recovery_value_policy,
         recovery_value_environment,
@@ -6401,6 +6439,7 @@ def train_agent(
             primary_side=str(terminal_info["primary_side"]),
             ended_at_ns=time.time_ns(),
             transitions=replay_transitions,
+            terminal_pnl=terminal_pnl,
         )
         replay.add(completed_episode)
         balance_pass_replay_promoted_passes = 0
@@ -6584,6 +6623,7 @@ def train_agent(
                 ]
             ))
         balance_pass_replay_sequences = 0
+        balance_outcome_contrast_pairs = 0
         recovery_success_replay_sequences = 0
         healthy_pass_replay_sequences = 0
         post_recovery_contrast_pairs = 0
@@ -6593,6 +6633,7 @@ def train_agent(
                 update_index: int,
             ) -> None:
                 nonlocal balance_pass_replay_sequences
+                nonlocal balance_outcome_contrast_pairs
                 nonlocal recovery_success_replay_sequences
                 nonlocal healthy_pass_replay_sequences
                 nonlocal post_recovery_contrast_pairs
@@ -6618,6 +6659,38 @@ def train_agent(
                         )
                     batch = tuple(batch) + pass_sequences
                     balance_pass_replay_sequences += len(pass_sequences)
+                if (
+                    balance_curriculum is not None
+                    and balance_curriculum.outcome_contrast is not None
+                    and (update_index + 1)
+                    % balance_curriculum.outcome_contrast.update_period
+                    == 0
+                ):
+                    existing_pair_ids = [
+                        int(transition.paired_a_plus_pair_id)
+                        for sequence in batch
+                        for transition in sequence
+                        if transition.paired_a_plus_pair_id is not None
+                    ]
+                    assert near_blow_loss_threshold is not None
+                    contrast_sequences = (
+                        replay.sample_balance_outcome_contrast_pairs(
+                            1,
+                            near_blow_pnl=-near_blow_loss_threshold,
+                            max_examples=(
+                                balance_curriculum
+                                .outcome_contrast.max_examples
+                            ),
+                            pair_id_start=(
+                                max(existing_pair_ids, default=-1) + 1
+                            ),
+                        )
+                    )
+                    if contrast_sequences:
+                        batch = tuple(batch) + contrast_sequences
+                        balance_outcome_contrast_pairs += (
+                            len(contrast_sequences) // 2
+                        )
                 if (
                     recovery_curriculum is not None
                     and recovery_success_replay is not None
@@ -7056,6 +7129,9 @@ def train_agent(
                 ),
                 "balance_pass_replay_sequences": (
                     balance_pass_replay_sequences
+                ),
+                "balance_outcome_contrast_pairs": (
+                    balance_outcome_contrast_pairs
                 ),
                 "balance_pass_replay_promoted_passes": (
                     balance_pass_replay_promoted_passes

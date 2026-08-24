@@ -29,6 +29,7 @@ from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.recovery import RecoveryValueStore
 from propevolve.training import (
     BalanceCurriculumSettings,
+    BalanceOutcomeContrastSettings,
     HistoricalCandidateRunner,
     RecoveryCurriculumSettings,
     RecoveryStressResult,
@@ -39,6 +40,7 @@ from propevolve.training import (
     _entry_action_balance,
     _entry_supervision_frozen_contract,
     _balance_pass_replay_source_sha256,
+    _balance_curriculum_from_config,
     _load_balance_pass_replay_artifact,
     _load_balance_pass_replay_source,
     _save_balance_pass_replay_artifact,
@@ -103,6 +105,28 @@ def test_single_policy_balance_curriculum_is_balanced_and_resume_stable() -> Non
         -2_000.0: 2,
     }
     assert all(state.recovery_success_pnl is None for state in first)
+
+
+def test_balance_curriculum_projects_optional_outcome_contrast() -> None:
+    settings, validation_episodes = _balance_curriculum_from_config(
+        {
+            "schedule_seed": 37,
+            "start_pnls": [-1_500],
+            "validation_episodes": 200,
+            "pass_replay": None,
+            "outcome_contrast_replay": {
+                "update_period": 8,
+                "max_examples": 8,
+            },
+        },
+        max_loss=3_000.0,
+    )
+
+    assert settings is not None
+    assert settings.outcome_contrast is not None
+    assert settings.outcome_contrast.update_period == 8
+    assert settings.outcome_contrast.max_examples == 8
+    assert validation_episodes == 200
 
 
 def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
@@ -217,6 +241,7 @@ def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
         "normal_to_recovery": 0,
     }
     assert replay.recovery_flags == [False, False]
+    assert replay.state_dict()["episodes"][-1]["terminal_pnl"] == 6_000.0
 
 
 def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> None:
@@ -279,6 +304,14 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
 
     class CapturingBalancePassReplay(BalancedSequenceReplay):
         entry_sample_calls = 0
+        absorb_calls = 0
+
+        def absorb_recent_passes(self, replay, *, max_examples=8):
+            self.absorb_calls += 1
+            return super().absorb_recent_passes(
+                replay,
+                max_examples=max_examples,
+            )
 
         def sample(self, count):
             raise AssertionError("balance pass replay must not sample random windows")
@@ -379,6 +412,7 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     )
 
     assert agent.batch_sizes == [1, 2]
+    assert pass_replay.absorb_calls == 2
     assert pass_replay.entry_sample_calls == 1
     assert len(agent.pass_replay_anchors) == 1
     assert agent.pass_replay_anchors[0].entry_action_target == (
@@ -395,6 +429,164 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     assert {
         episode["ticker"] for episode in persisted[0]["episodes"]
     } == {"ES", "NQ"}
+
+
+def test_balance_outcome_contrast_is_sparse_and_additive_to_training() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    context = np.asarray(
+        [0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2], np.float32
+    )
+
+    def outcome_episode(
+        episode_id: str,
+        *,
+        outcome: str,
+        economic_win: bool,
+        terminal_pnl: float,
+        offset: int,
+    ) -> Episode:
+        side = Action.ENTER_LONG_1
+        return Episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            outcome=outcome,
+            primary_side="long",
+            ended_at_ns=offset,
+            terminal_pnl=terminal_pnl,
+            transitions=tuple(
+                Transition(
+                    observation=np.array([offset + index], np.float32),
+                    action=Action.WAIT,
+                    reward=1.0 if economic_win else -1.0,
+                    next_observation=np.array(
+                        [offset + index + 1], np.float32
+                    ),
+                    terminated=index == 3,
+                    valid_actions=flat_actions,
+                    next_valid_actions=() if index == 3 else flat_actions,
+                    teacher_target=context if index == 1 else None,
+                    entry_action_target=(
+                        side if economic_win else Action.WAIT
+                    ) if index == 1 else None,
+                    regime_selectivity_headroom_fraction=(
+                        0.5 if index == 1 else None
+                    ),
+                    paired_a_plus_context=context if index == 1 else None,
+                    paired_a_plus_side=side if index == 1 else None,
+                    paired_a_plus_economic_win=(
+                        economic_win if index == 1 else None
+                    ),
+                )
+                for index in range(4)
+            ),
+        )
+
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=4,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=91,
+    )
+    replay.add(outcome_episode(
+        "pass", outcome="pass", economic_win=True,
+        terminal_pnl=6_100.0, offset=0,
+    ))
+    replay.add(outcome_episode(
+        "near-blow", outcome="timeout", economic_win=False,
+        terminal_pnl=-2_800.0, offset=10,
+    ))
+
+    class CapturingAgent(Agent):
+        recurrent_burn_in = 1
+        n_step_return = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_sizes: list[int] = []
+            self.outcome_pairs: list[bool] = []
+
+        def train_batch(self, sequences, **kwargs) -> float:
+            self.batch_sizes.append(len(sequences))
+            pair_rows = [sequence[1] for sequence in sequences[-2:]]
+            self.outcome_pairs.append(
+                len(sequences) == 3
+                and pair_rows[0].paired_a_plus_pair_id
+                == pair_rows[1].paired_a_plus_pair_id
+                and {
+                    row.paired_a_plus_economic_win for row in pair_rows
+                } == {True, False}
+            )
+            self.last_train_metrics = {}
+            return 0.5
+
+    class TimeoutEnvironment:
+        def __init__(self) -> None:
+            self.steps = 0
+
+        def reset(self, *, options=None):
+            self.steps = 0
+            return np.zeros(1, np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 0,
+                "end": 2,
+                "realized_pnl": -1_500.0,
+            }
+
+        def step(self, action):
+            self.steps += 1
+            terminated = self.steps == 2
+            return np.zeros(1, np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else flat_actions,
+                "ticker": "NQ",
+                "fill_index": self.steps,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": -1_500.0,
+                "equity_pnl": -1_500.0,
+            }
+
+    diagnostics: list[dict[str, object]] = []
+    agent = CapturingAgent()
+    train_agent(
+        agent,
+        TimeoutEnvironment(),
+        episodes=1,
+        minimum_environment_steps=2,
+        budget_mode="episodes",
+        replay=replay,
+        warmup_episodes=1,
+        updates_per_episode=2,
+        batch_sequences=1,
+        recurrent_horizon=4,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        near_blow_loss_threshold=2_250.0,
+        balance_curriculum=BalanceCurriculumSettings(
+            schedule_seed=37,
+            start_pnls=(-1_500.0,),
+            mll_floor_pnl=-3_000.0,
+            outcome_contrast=BalanceOutcomeContrastSettings(
+                update_period=2,
+                max_examples=8,
+            ),
+        ),
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert agent.batch_sizes == [1, 3]
+    assert agent.outcome_pairs == [False, True]
+    assert diagnostics[0]["balance_outcome_contrast_pairs"] == 1
 
 
 def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
