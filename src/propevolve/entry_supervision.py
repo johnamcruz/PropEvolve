@@ -175,16 +175,37 @@ def build_post_launch_entry_supervision(
     short_launch: bool,
     long_economic_good: Sequence[bool],
     short_economic_good: Sequence[bool],
+    fill_offsets: Sequence[int] | None = None,
 ) -> PostLaunchEntrySupervision:
-    """Build five next-open entry targets from side-specific economic truth."""
+    """Build configured next-open entry targets from economic truth."""
 
     if type(long_launch) is not bool or type(short_launch) is not bool:
         raise TypeError("launch flags must be bool")
+    normalized_offsets = tuple(
+        range(1, CANDIDATE_COUNT + 1)
+        if fill_offsets is None
+        else fill_offsets
+    )
+    if (
+        not normalized_offsets
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in normalized_offsets
+        )
+        or tuple(sorted(set(normalized_offsets))) != normalized_offsets
+    ):
+        raise ValueError("fill_offsets must be ordered unique positive integers")
     long_good = _strict_bool_targets(
-        long_economic_good, name="long_economic_good"
+        long_economic_good,
+        name="long_economic_good",
+        count=len(normalized_offsets),
     )
     short_good = _strict_bool_targets(
-        short_economic_good, name="short_economic_good"
+        short_economic_good,
+        name="short_economic_good",
+        count=len(normalized_offsets),
     )
     if not long_launch and not short_launch:
         raise ValueError("post-launch supervision requires at least one launch side")
@@ -195,14 +216,14 @@ def build_post_launch_entry_supervision(
             enter_fill_offset=None,
             candidates=tuple(
                 CandidateEntryTarget(
-                    decision_offset=index,
-                    fill_offset=index + 1,
+                    decision_offset=fill_offset - 1,
+                    fill_offset=fill_offset,
                     action=None,
                     available=False,
                     censored=False,
                     unavailable_reason="ambiguous_side",
                 )
-                for index in range(CANDIDATE_COUNT)
+                for index, fill_offset in enumerate(normalized_offsets)
             ),
         )
     side: Literal["long", "short"] = "long" if long_launch else "short"
@@ -214,14 +235,14 @@ def build_post_launch_entry_supervision(
             enter_fill_offset=None,
             candidates=tuple(
                 CandidateEntryTarget(
-                    decision_offset=index,
-                    fill_offset=index + 1,
+                    decision_offset=fill_offset - 1,
+                    fill_offset=fill_offset,
                     action="WAIT",
                     available=True,
                     censored=False,
                     unavailable_reason=None,
                 )
-                for index in range(CANDIDATE_COUNT)
+                for index, fill_offset in enumerate(normalized_offsets)
             ),
         )
     enter_index = economic_good.index(True)
@@ -230,8 +251,8 @@ def build_post_launch_entry_supervision(
     )
     candidates = tuple(
         CandidateEntryTarget(
-            decision_offset=index,
-            fill_offset=index + 1,
+            decision_offset=fill_offset - 1,
+            fill_offset=fill_offset,
             action=(
                 "WAIT"
                 if index < enter_index
@@ -243,12 +264,12 @@ def build_post_launch_entry_supervision(
             censored=index > enter_index,
             unavailable_reason="after_entry" if index > enter_index else None,
         )
-        for index in range(CANDIDATE_COUNT)
+        for index, fill_offset in enumerate(normalized_offsets)
     )
     return PostLaunchEntrySupervision(
         side=side,
         status="enter",
-        enter_fill_offset=enter_index + 1,
+        enter_fill_offset=normalized_offsets[enter_index],
         candidates=candidates,
     )
 
@@ -268,26 +289,10 @@ _SPEC_KEYS = frozenset({
     "collision",
     "loss_weight",
 })
-_FIXED_SPEC = {
+_INVARIANT_SPEC = {
     "schema": "post_launch_entry_v1",
     "training_only": True,
-    "decision_count": 5,
-    "fill_offsets": (1, 2, 3, 4, 5),
     "execution": "next_bar_open",
-    "risk_dollars": 300.0,
-    "launch": MappingProxyType({
-        "favorable_r": 0.5,
-        "adverse_r": 0.25,
-        "horizon_bars": 3,
-    }),
-    "continuation": MappingProxyType({
-        "favorable_r": 0.5,
-        "adverse_r": 0.25,
-        "horizon_bars": 3,
-    }),
-    "target_r": 2.0,
-    "stop_r": 1.0,
-    "horizon_bars": 150,
     "collision": "stop_first",
 }
 
@@ -323,10 +328,14 @@ def build_entry_action_targets(
         round_trip_fees,
         tickers=tickers,
         risk_dollars=float(contract["risk_dollars"]),
+        contract=contract,
     )
-    if type(training_end_exclusive) is not str or training_end_exclusive != "2025-01-01":
+    if type(training_end_exclusive) is not str or not training_end_exclusive:
         raise ValueError("entry supervision training end contract drifted")
-    boundary = np.datetime64(training_end_exclusive, "ns")
+    try:
+        boundary = np.datetime64(training_end_exclusive, "ns")
+    except ValueError as error:
+        raise ValueError("entry supervision training end contract drifted") from error
     all_targets: dict[str, np.ndarray] = {}
     all_metadata: dict[str, Mapping[int, EntryTargetMetadata]] = {}
     summaries: dict[str, object] = {}
@@ -358,6 +367,7 @@ def build_entry_action_targets(
             rows=len(timestamps),
             role_end=role_end,
             events=events,
+            contract=contract,
         )
         all_targets[ticker] = targets
         all_metadata[ticker] = MappingProxyType(metadata)
@@ -393,7 +403,7 @@ def build_entry_action_targets(
         "point_values": economics["point_values"],
         "round_trip_fees": economics["round_trip_fees"],
         "label_semantics": {
-            "fresh_lookback_bars": 5,
+            "fresh_lookback_bars": max(contract["fill_offsets"]),
             "launch_collision": "adverse_first",
             "continuation_collision": "adverse_first",
             "economic_collision": "stop_first",
@@ -440,34 +450,75 @@ def _validated_contract(
         or tuple(balance.get("action_order", ())) != ENTRY_ACTION_ORDER
     ):
         raise ValueError("entry supervision class balance contract drifted")
-    for name, expected in _FIXED_SPEC.items():
+    if any(spec[name] != expected for name, expected in _INVARIANT_SPEC.items()):
+        raise ValueError("entry supervision causal contract drifted")
+    decision_count = spec["decision_count"]
+    fill_offsets = spec["fill_offsets"]
+    if (
+        isinstance(decision_count, bool)
+        or not isinstance(decision_count, int)
+        or decision_count < 1
+        or isinstance(fill_offsets, (str, bytes))
+    ):
+        raise ValueError("entry supervision decision contract drifted")
+    try:
+        normalized_offsets = tuple(fill_offsets)
+    except TypeError as error:
+        raise ValueError("entry supervision fill_offsets contract drifted") from error
+    if (
+        len(normalized_offsets) != decision_count
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in normalized_offsets
+        )
+        or tuple(sorted(set(normalized_offsets))) != normalized_offsets
+    ):
+        raise ValueError("entry supervision fill_offsets contract drifted")
+    normalized_phases: dict[str, dict[str, object]] = {}
+    for name in ("launch", "continuation"):
         value = spec[name]
-        if name == "fill_offsets":
-            if isinstance(value, (str, bytes)) or tuple(value) != expected:
-                raise ValueError(f"entry supervision {name} contract drifted")
-        elif name in {"launch", "continuation"}:
-            if not isinstance(value, Mapping) or set(value) != set(expected):
-                raise ValueError(f"entry supervision {name} contract drifted")
-            for field, phase_expected in expected.items():
-                phase_value = value[field]
-                if (
-                    isinstance(phase_value, bool)
-                    or not isinstance(phase_value, Real)
-                    or not math.isfinite(float(phase_value))
-                    or float(phase_value) != float(phase_expected)
-                ):
-                    raise ValueError(f"entry supervision {name} contract drifted")
-        elif isinstance(expected, float):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, Real)
-                or not math.isfinite(float(value))
-                or float(value) != expected
-            ):
-                raise ValueError(f"entry supervision {name} contract drifted")
-        elif type(value) is not type(expected) or value != expected:
+        if not isinstance(value, Mapping) or set(value) != {
+            "favorable_r", "adverse_r", "horizon_bars"
+        }:
             raise ValueError(f"entry supervision {name} contract drifted")
-
+        favorable = value["favorable_r"]
+        adverse = value["adverse_r"]
+        horizon = value["horizon_bars"]
+        if (
+            any(
+                isinstance(item, bool)
+                or not isinstance(item, Real)
+                or not math.isfinite(float(item))
+                for item in (favorable, adverse)
+            )
+            or float(favorable) <= 0.0
+            or float(adverse) <= 0.0
+            or isinstance(horizon, bool)
+            or not isinstance(horizon, int)
+            or horizon < 1
+        ):
+            raise ValueError(f"entry supervision {name} contract drifted")
+        normalized_phases[name] = {
+            "favorable_r": float(favorable),
+            "adverse_r": float(adverse),
+            "horizon_bars": int(horizon),
+        }
+    normalized_numeric: dict[str, float | int] = {}
+    for name in ("risk_dollars", "target_r", "stop_r", "loss_weight"):
+        value = spec[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ValueError(f"entry supervision {name} contract drifted")
+        normalized_numeric[name] = float(value)
+    horizon = spec["horizon_bars"]
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("entry supervision horizon_bars contract drifted")
     loss_weight = spec["loss_weight"]
     if (
         isinstance(loss_weight, bool)
@@ -477,11 +528,12 @@ def _validated_contract(
     ):
         raise ValueError("entry supervision loss_weight must be finite and positive")
     normalized: dict[str, object] = {
-        **_FIXED_SPEC,
-        "fill_offsets": tuple(_FIXED_SPEC["fill_offsets"]),
-        "launch": dict(_FIXED_SPEC["launch"]),
-        "continuation": dict(_FIXED_SPEC["continuation"]),
-        "loss_weight": float(loss_weight),
+        **_INVARIANT_SPEC,
+        "decision_count": decision_count,
+        "fill_offsets": normalized_offsets,
+        **normalized_numeric,
+        **normalized_phases,
+        "horizon_bars": int(horizon),
     }
     return normalized
 
@@ -492,6 +544,7 @@ def _validated_market_economics(
     *,
     tickers: tuple[str, ...],
     risk_dollars: float,
+    contract: Mapping[str, object],
 ) -> dict[str, dict[str, float]]:
     normalized: dict[str, dict[str, float]] = {}
     for field in ("point_values", "round_trip_fees"):
@@ -517,9 +570,9 @@ def _validated_market_economics(
     ):
         raise ValueError("entry supervision fees violate the risk contract")
     smallest_adverse_r = min(
-        float(_FIXED_SPEC["launch"]["adverse_r"]),
-        float(_FIXED_SPEC["continuation"]["adverse_r"]),
-        float(_FIXED_SPEC["stop_r"]),
+        float(contract["launch"]["adverse_r"]),
+        float(contract["continuation"]["adverse_r"]),
+        float(contract["stop_r"]),
     )
     if any(
         fee >= smallest_adverse_r * risk_dollars
@@ -560,7 +613,9 @@ def _find_events(
         )
 
     events: list[_Event] = []
-    lookback = CANDIDATE_COUNT
+    fill_offsets = tuple(int(value) for value in contract["fill_offsets"])
+    decision_offsets = tuple(value - 1 for value in fill_offsets)
+    lookback = max(fill_offsets)
     economic_horizon = int(contract["horizon_bars"])
     for side in ("long", "short"):
         fresh = [
@@ -570,15 +625,15 @@ def _find_events(
         ]
         for raw_anchor in fresh:
             anchor = int(raw_anchor)
-            # Candidate four fills at anchor+5.  A complete H-bar path then
-            # ends at anchor+5+H-1, so the exclusive bound is anchor+5+H.
-            resolved = anchor + CANDIDATE_COUNT + economic_horizon <= role_end
+            # The latest configured fill is at anchor+max(fill_offsets).  A
+            # complete H-bar path then ends one bar before this bound.
+            resolved = anchor + max(fill_offsets) + economic_horizon <= role_end
             if not resolved:
                 events.append(_Event(side, anchor, False, None, None, None))
                 continue
             continuation = []
             economic_win = []
-            for offset in range(CANDIDATE_COUNT):
+            for offset in decision_offsets:
                 decision = anchor + offset
                 continuation.append(_target_before_adverse(
                     open_,
@@ -712,6 +767,7 @@ def _materialize_market_targets(
     rows: int,
     role_end: int,
     events: tuple[_Event, ...],
+    contract: Mapping[str, object],
 ) -> tuple[
     np.ndarray,
     dict[int, EntryTargetMetadata],
@@ -719,14 +775,20 @@ def _materialize_market_targets(
 ]:
     targets = np.full(rows, -1, dtype=np.int8)
     metadata: dict[int, EntryTargetMetadata] = {}
+    fill_offsets = tuple(int(value) for value in contract["fill_offsets"])
+    decision_offsets = tuple(value - 1 for value in fill_offsets)
+    maximum_decision_offset = max(decision_offsets)
     ambiguous_ids: set[int] = set()
     ambiguous_anchors: dict[int, tuple[int, ...]] = {}
     for left_id, left in enumerate(events):
         for right_id in range(left_id + 1, len(events)):
             right = events[right_id]
-            if right.anchor > left.anchor + CANDIDATE_COUNT - 1:
+            if right.anchor > left.anchor + maximum_decision_offset:
                 break
-            if left.side != right.side and right.anchor <= left.anchor + CANDIDATE_COUNT - 1:
+            if (
+                left.side != right.side
+                and right.anchor <= left.anchor + maximum_decision_offset
+            ):
                 ambiguous_ids.update((left_id, right_id))
     for event_id in ambiguous_ids:
         event = events[event_id]
@@ -734,14 +796,17 @@ def _materialize_market_targets(
             other.anchor
             for other in events
             if other.side != event.side
-            and other.anchor <= event.anchor + CANDIDATE_COUNT - 1
-            and event.anchor <= other.anchor + CANDIDATE_COUNT - 1
+            and other.anchor <= event.anchor + maximum_decision_offset
+            and event.anchor <= other.anchor + maximum_decision_offset
         } | {event.anchor}))
         ambiguous_anchors[event_id] = anchors
 
     for event_id, event in enumerate(events):
         if event_id in ambiguous_ids:
-            for row in range(event.anchor, min(event.anchor + CANDIDATE_COUNT, role_end)):
+            for decision_offset in decision_offsets:
+                row = event.anchor + decision_offset
+                if row >= role_end:
+                    continue
                 existing = metadata.get(row)
                 anchors = set(ambiguous_anchors[event_id])
                 if existing is not None:
@@ -760,7 +825,9 @@ def _materialize_market_targets(
                 )
             continue
         if not event.resolved:
-            for offset in range(CANDIDATE_COUNT):
+            for offset, fill_offset in zip(
+                decision_offsets, fill_offsets, strict=True
+            ):
                 row = event.anchor + offset
                 if row >= role_end:
                     break
@@ -768,7 +835,7 @@ def _materialize_market_targets(
                     side=event.side,
                     event_anchor_rows=(event.anchor,),
                     candidate_decision_offset=offset,
-                    fill_offset=offset + 1,
+                    fill_offset=fill_offset,
                     continuation=None,
                     economic_win=None,
                     economic_good=None,
@@ -784,13 +851,18 @@ def _materialize_market_targets(
             long_launch=event.side == "long",
             short_launch=event.side == "short",
             long_economic_good=(
-                event.economic_good if event.side == "long" else (False,) * 5
+                event.economic_good
+                if event.side == "long"
+                else (False,) * len(fill_offsets)
             ),
             short_economic_good=(
-                event.economic_good if event.side == "short" else (False,) * 5
+                event.economic_good
+                if event.side == "short"
+                else (False,) * len(fill_offsets)
             ),
+            fill_offsets=fill_offsets,
         )
-        for candidate in supervision.candidates:
+        for candidate_index, candidate in enumerate(supervision.candidates):
             row = event.anchor + candidate.decision_offset
             action = (
                 Action[candidate.action]
@@ -805,15 +877,15 @@ def _materialize_market_targets(
                 candidate_decision_offset=candidate.decision_offset,
                 fill_offset=candidate.fill_offset,
                 continuation=(
-                    event.continuation[candidate.decision_offset]
+                    event.continuation[candidate_index]
                     if visible_outcomes else None
                 ),
                 economic_win=(
-                    event.economic_win[candidate.decision_offset]
+                    event.economic_win[candidate_index]
                     if visible_outcomes else None
                 ),
                 economic_good=(
-                    event.economic_good[candidate.decision_offset]
+                    event.economic_good[candidate_index]
                     if visible_outcomes else None
                 ),
                 available=candidate.available,
@@ -901,13 +973,20 @@ def _deep_freeze(value):
     return value
 
 
-def _strict_bool_targets(values: Sequence[bool], *, name: str) -> tuple[bool, ...]:
+def _strict_bool_targets(
+    values: Sequence[bool],
+    *,
+    name: str,
+    count: int,
+) -> tuple[bool, ...]:
     try:
         targets = tuple(values)
     except TypeError as exc:
-        raise ValueError(f"{name} must contain exactly 5 bool values") from exc
-    if len(targets) != CANDIDATE_COUNT or any(type(value) is not bool for value in targets):
-        raise ValueError(f"{name} must contain exactly 5 bool values")
+        raise ValueError(
+            f"{name} must contain exactly {count} bool values"
+        ) from exc
+    if len(targets) != count or any(type(value) is not bool for value in targets):
+        raise ValueError(f"{name} must contain exactly {count} bool values")
     return targets
 
 

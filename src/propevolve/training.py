@@ -55,7 +55,12 @@ from .final_regime_probe import (
     evaluate_final_regime_probe,
 )
 from .observation import TradeManagementObservationSpec
-from .replay import BalancedSequenceReplay, Episode, Transition
+from .replay import (
+    BalancedSequenceReplay,
+    Episode,
+    ReplayCheckpointStore,
+    Transition,
+)
 from .recovery import (
     RecoveryHandoffPolicy,
     RecoveryValueStore,
@@ -2373,13 +2378,24 @@ class RecoveryCurriculumSettings:
             or self.start_state.realized_pnl not in self.supervision_start_pnls
         ):
             raise ValueError("recovery supervision start PnLs are invalid")
-        if not (
-            math.isclose(self.start_state.realized_pnl, -2_000.0)
-            and math.isclose(self.start_state.equity_pnl, -2_000.0)
-            and math.isclose(self.start_state.peak_equity_pnl, 0.0)
-            and math.isclose(self.start_state.mll_floor_pnl, -3_000.0)
-            and math.isclose(self.start_state.session_pnl, -2_000.0)
-            and math.isclose(self.start_state.recovery_success_pnl, 0.0)
+        if (
+            not math.isclose(
+                self.start_state.realized_pnl,
+                self.start_state.equity_pnl,
+            )
+            or not math.isclose(
+                self.start_state.realized_pnl,
+                self.start_state.session_pnl,
+            )
+            or not self.start_state.mll_floor_pnl
+            < self.start_state.realized_pnl
+            < self.start_state.recovery_success_pnl
+            or self.start_state.peak_equity_pnl
+            < self.start_state.equity_pnl
+            or self.start_state.passmark_locked
+            or self.start_state.position_side != PositionSide.FLAT
+            or self.start_state.position_size != 0
+            or self.start_state.trading_days_elapsed < 0
         ):
             raise ValueError("Stage-2 recovery start contract drifted")
 
@@ -3084,6 +3100,7 @@ class HistoricalCandidateRunner:
         )
         resume = None
         replay_state = None
+        replay_checkpoint = None
         balance_pass_replay_sampler_state = None
         recovery_value_store_state = None
         recovery_success_replay_sampler_state = None
@@ -3131,7 +3148,11 @@ class HistoricalCandidateRunner:
             )
             train_environment.restore_rng_state(manifest["environment_rng_state"])
             replay_state = manifest.get("replay_state")
-            if not manifest.get("replay_restored", False) or replay_state is None:
+            replay_checkpoint = manifest.get("replay_checkpoint")
+            if (
+                not manifest.get("replay_restored", False)
+                or (replay_state is None) == (replay_checkpoint is None)
+            ):
                 raise ValueError("training recovery is missing replay state")
             balance_pass_replay_sampler_state = manifest.get(
                 "balance_pass_replay_sampler_state"
@@ -3288,7 +3309,12 @@ class HistoricalCandidateRunner:
             n_step_return=int(agent.n_step_return),
             seed=seed,
         )
-        if replay_state is not None:
+        replay_checkpoint_store = ReplayCheckpointStore(
+            output / "training-replay"
+        )
+        if replay_checkpoint is not None:
+            replay_checkpoint_store.restore(replay, replay_checkpoint)
+        elif replay_state is not None:
             replay.load_state_dict(replay_state)
         balance_pass_replay = None
         if (
@@ -3597,6 +3623,48 @@ class HistoricalCandidateRunner:
                     )
                 ),
             )
+        def save_training_recovery(progress: TrainingProgress) -> None:
+            replay_descriptor = replay_checkpoint_store.persist(replay)
+            _save_training_recovery(
+                agent,
+                recovery_path,
+                resume_identity=resume_identity,
+                progress=progress,
+                environment_rng_state=train_environment.rng_state(),
+                replay_checkpoint=replay_descriptor,
+                balance_pass_replay_sampler_state=(
+                    None
+                    if balance_pass_replay is None
+                    else balance_pass_replay.sampler_state_dict()
+                ),
+                recovery_value_store_state=(
+                    None
+                    if recovery_value_store is None
+                    else recovery_value_store.state_dict()
+                ),
+                recovery_success_replay_sampler_state=(
+                    None
+                    if recovery_success_replay is None
+                    else recovery_success_replay.sampler_state_dict()
+                ),
+                healthy_pass_replay_sampler_state=(
+                    None
+                    if healthy_pass_replay is None
+                    else healthy_pass_replay.sampler_state_dict()
+                ),
+                post_recovery_contrast_replay_sampler_state=(
+                    None
+                    if post_recovery_contrast_replay is None
+                    else post_recovery_contrast_replay.sampler_state_dict()
+                ),
+                policy_health_probe_path=(
+                    policy_health_probe_path
+                    if policy_health_config is not None
+                    else None
+                ),
+            )
+            replay_checkpoint_store.prune(replay_descriptor)
+
         training = train_agent(
             agent,
             train_environment,
@@ -3634,44 +3702,7 @@ class HistoricalCandidateRunner:
             checkpoint_every_episodes=int(
                 training_config["checkpoint_every_episodes"]
             ),
-            checkpoint_callback=lambda progress: _save_training_recovery(
-                agent,
-                recovery_path,
-                resume_identity=resume_identity,
-                progress=progress,
-                environment_rng_state=train_environment.rng_state(),
-                replay_state=replay.state_dict(),
-                balance_pass_replay_sampler_state=(
-                    None
-                    if balance_pass_replay is None
-                    else balance_pass_replay.sampler_state_dict()
-                ),
-                recovery_value_store_state=(
-                    None
-                    if recovery_value_store is None
-                    else recovery_value_store.state_dict()
-                ),
-                recovery_success_replay_sampler_state=(
-                    None
-                    if recovery_success_replay is None
-                    else recovery_success_replay.sampler_state_dict()
-                ),
-                healthy_pass_replay_sampler_state=(
-                    None
-                    if healthy_pass_replay is None
-                    else healthy_pass_replay.sampler_state_dict()
-                ),
-                post_recovery_contrast_replay_sampler_state=(
-                    None
-                    if post_recovery_contrast_replay is None
-                    else post_recovery_contrast_replay.sampler_state_dict()
-                ),
-                policy_health_probe_path=(
-                    policy_health_probe_path
-                    if policy_health_config is not None
-                    else None
-                ),
-            ),
+            checkpoint_callback=save_training_recovery,
             retention_checkpoint_callback=lambda evidence: _save_retained_policy(
                 agent,
                 retained_policy_path,
@@ -4458,7 +4489,8 @@ def _save_training_recovery(
     resume_identity: str,
     progress: TrainingProgress,
     environment_rng_state: dict,
-    replay_state: dict[str, object],
+    replay_checkpoint: dict[str, object] | None = None,
+    replay_state: dict[str, object] | None = None,
     balance_pass_replay_sampler_state: dict[str, object] | None = None,
     recovery_value_store_state: dict[str, object] | None = None,
     recovery_success_replay_sampler_state: dict[str, object] | None = None,
@@ -4466,6 +4498,8 @@ def _save_training_recovery(
     post_recovery_contrast_replay_sampler_state: dict[str, object] | None = None,
     policy_health_probe_path: Path | None = None,
 ) -> None:
+    if (replay_checkpoint is None) == (replay_state is None):
+        raise ValueError("training recovery requires exactly one replay source")
     policy_health_probe_corpus = None
     if policy_health_probe_path is not None and policy_health_probe_path.exists():
         payload = _load_policy_health_probe_corpus(
@@ -4482,13 +4516,18 @@ def _save_training_recovery(
             "file_sha256": _path_sha256(policy_health_probe_path),
         }
     temporary = path.with_suffix(path.suffix + ".tmp")
+    replay_manifest = (
+        {"replay_checkpoint": replay_checkpoint}
+        if replay_checkpoint is not None
+        else {"replay_state": replay_state}
+    )
     agent.save(
         temporary,
         manifest={
             "resume_identity": resume_identity,
             "progress": asdict(progress),
             "environment_rng_state": environment_rng_state,
-            "replay_state": replay_state,
+            **replay_manifest,
             "replay_restored": True,
             "balance_pass_replay_sampler_state": (
                 balance_pass_replay_sampler_state

@@ -626,6 +626,41 @@ def test_builder_rejects_contract_drift_and_runtime_economic_drift() -> None:
             training_end_exclusive="2025-01-01",
         )
 
+
+def test_builder_uses_alternate_configured_entry_recipe() -> None:
+    specification = _entry_spec()
+    specification.update({
+        "decision_count": 3,
+        "fill_offsets": [1, 3, 5],
+        "risk_dollars": 450.0,
+        "launch": {
+            "favorable_r": 0.6,
+            "adverse_r": 0.3,
+            "horizon_bars": 4,
+        },
+        "continuation": {
+            "favorable_r": 0.75,
+            "adverse_r": 0.35,
+            "horizon_bars": 5,
+        },
+        "target_r": 3.0,
+        "stop_r": 1.25,
+        "horizon_bars": 180,
+    })
+
+    targets = build_entry_action_targets(
+        {"NQ": _market(rows=220)},
+        specification,
+        point_values={"NQ": 148.0},
+        round_trip_fees={"NQ": 4.0},
+        training_end_exclusive="2025-02-01",
+    )
+
+    assert targets.manifest["contract"]["decision_count"] == 3
+    assert targets.manifest["contract"]["fill_offsets"] == (1, 3, 5)
+    assert targets.manifest["contract"]["target_r"] == 3.0
+    assert targets.manifest["training_end_exclusive"] == "2025-02-01"
+
     with pytest.raises(ValueError, match="point_values must exactly match markets"):
         build_entry_action_targets(
             {"NQ": _market()},

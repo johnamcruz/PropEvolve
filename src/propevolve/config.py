@@ -358,6 +358,12 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         "action_class_balance",
     }
     phase_fields = {"favorable_r", "adverse_r", "horizon_bars"}
+    decision_count = specification.get("decision_count") if isinstance(
+        specification, dict
+    ) else None
+    fill_offsets = specification.get("fill_offsets") if isinstance(
+        specification, dict
+    ) else None
     if (
         not isinstance(specification, dict)
         or set(specification) != required
@@ -365,9 +371,18 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         or specification.get("training_only") is not True
         or specification.get("execution") != "next_bar_open"
         or specification.get("collision") != "stop_first"
-        or isinstance(specification.get("decision_count"), bool)
-        or specification.get("decision_count") != 5
-        or specification.get("fill_offsets") != [1, 2, 3, 4, 5]
+        or isinstance(decision_count, bool)
+        or not isinstance(decision_count, int)
+        or decision_count < 1
+        or not isinstance(fill_offsets, (list, tuple))
+        or len(fill_offsets) != decision_count
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in fill_offsets
+        )
+        or list(fill_offsets) != sorted(set(fill_offsets))
     ):
         raise ValueError("entry supervision contract is invalid")
     balance = specification["action_class_balance"]
@@ -384,11 +399,16 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         if (
             not isinstance(values, dict)
             or set(values) != phase_fields
-            or any(isinstance(values[field], bool) for field in phase_fields)
-            or float(values["favorable_r"]) != 0.5
-            or float(values["adverse_r"]) != 0.25
-            or int(values["horizon_bars"]) != 3
-            or float(values["horizon_bars"]) != 3.0
+            or any(
+                isinstance(values[field], bool)
+                or not isinstance(values[field], (int, float))
+                or not math.isfinite(float(values[field]))
+                for field in phase_fields
+            )
+            or float(values["favorable_r"]) <= 0.0
+            or float(values["adverse_r"]) <= 0.0
+            or not isinstance(values["horizon_bars"], int)
+            or int(values["horizon_bars"]) < 1
         ):
             raise ValueError("entry supervision phase contract is invalid")
     numeric = {
@@ -404,13 +424,14 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     if (
         any(isinstance(value, bool) or not isinstance(value, (int, float))
             for value in numeric.values())
-        or float(numeric["risk_dollars"]) != 300.0
+        or any(not math.isfinite(float(value)) for value in numeric.values())
+        or float(numeric["risk_dollars"]) <= 0.0
         or float(numeric["risk_dollars"])
         != float(challenge.get("per_trade_risk_dollars", -1.0))
-        or float(numeric["target_r"]) != 2.0
-        or float(numeric["stop_r"]) != 1.0
-        or int(numeric["horizon_bars"]) != 150
-        or float(numeric["horizon_bars"]) != 150.0
+        or float(numeric["target_r"]) <= 0.0
+        or float(numeric["stop_r"]) <= 0.0
+        or not isinstance(numeric["horizon_bars"], int)
+        or int(numeric["horizon_bars"]) < 1
         or float(numeric["loss_weight"]) <= 0.0
     ):
         raise ValueError("entry supervision economics are invalid")
@@ -418,7 +439,10 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
     if (
         not isinstance(training, dict)
         or float(training.get("teacher_loss_end_scale", -1.0)) != 0.0
-        or float(training.get("teacher_autonomy_start_fraction", -1.0)) != 0.8
+        or isinstance(training.get("teacher_autonomy_start_fraction"), bool)
+        or not 0.0
+        <= float(training.get("teacher_autonomy_start_fraction", -1.0))
+        <= 1.0
     ):
         raise ValueError(
             "entry supervision requires semantic-teacher autonomy for the "
@@ -450,6 +474,7 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         payload.get("evolution", {}).get("frozen_paths", ())
     ):
         raise ValueError("entry supervision schedule must be frozen")
+    specification["fill_offsets"] = tuple(int(value) for value in fill_offsets)
 
 
 def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
@@ -593,31 +618,32 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         not in {float(value) for value in start_pnls}
     ):
         raise ValueError("recovery supervision start PnLs are invalid")
-    exact_start = {
-        "realized_pnl": -2_000.0,
-        "equity_pnl": -2_000.0,
-        "peak_equity_pnl": 0.0,
-        "mll_floor_pnl": -3_000.0,
-        "passmark_locked": False,
-        "position_side": 0,
-        "position_size": 0,
-        "session_pnl": -2_000.0,
-        "trading_days_elapsed": 1,
-    }
-    if any(
-        isinstance(expected, float)
-        and not math.isclose(float(start[field]), expected)
-        or not isinstance(expected, float)
-        and start[field] != expected
-        for field, expected in exact_start.items()
-    ) or not math.isclose(float(curriculum["recovery_success_pnl"]), 0.0):
+    realized = float(start["realized_pnl"])
+    equity = float(start["equity_pnl"])
+    session = float(start["session_pnl"])
+    floor = float(start["mll_floor_pnl"])
+    peak = float(start["peak_equity_pnl"])
+    success = float(curriculum["recovery_success_pnl"])
+    maximum_loss = float(challenge["max_loss"])
+    minimum_headroom = float(challenge["minimum_mll_headroom"])
+    if (
+        not math.isclose(realized, equity)
+        or not math.isclose(realized, session)
+        or not math.isclose(floor, -maximum_loss)
+        or not floor < realized < success <= float(challenge["profit_target"])
+        or peak < equity
+        or start["passmark_locked"] is not False
+        or int(start["position_side"]) != 0
+        or int(start["position_size"]) != 0
+        or int(start["trading_days_elapsed"]) < 0
+        or not 0.0 <= minimum_headroom < maximum_loss
+        or realized - floor < minimum_headroom
+    ):
         raise ValueError("Stage-2 recovery start contract drifted")
     if (
-        not math.isclose(float(challenge["max_loss"]), 3_000.0)
-        or not math.isclose(float(challenge["minimum_mll_headroom"]), 500.0)
-        or not math.isclose(
-            float(challenge.get("per_trade_risk_dollars", math.nan)), 300.0
-        )
+        maximum_loss <= 0.0
+        or float(challenge.get("per_trade_risk_dollars", math.nan)) <= 0.0
+        or float(challenge["minimum_mll_headroom"]) > realized - floor
     ):
         raise ValueError("Stage-2 recovery challenge economics drifted")
 

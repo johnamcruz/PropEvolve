@@ -1052,7 +1052,7 @@ def test_empty_revision_allowlist_requires_explicitly_nonrevisable_campaign(
         (lambda value: value.update({"fill_offsets": [0, 1, 2, 3, 4]}), "contract"),
         (lambda value: value.update({"execution": "same_bar_close"}), "contract"),
         (lambda value: value.update({"risk_dollars": 500}), "economics"),
-        (lambda value: value.update({"target_r": 3.0}), "economics"),
+        (lambda value: value.update({"target_r": 0.0}), "economics"),
         (lambda value: value.update({"collision": "target_first"}), "contract"),
         (lambda value: value.update({"loss_weight": 0.0}), "economics"),
     ),
@@ -1069,6 +1069,57 @@ def test_entry_supervision_contract_fails_closed(
 
     with pytest.raises(ValueError, match=f"entry supervision {match}"):
         load_experiment_config(path)
+
+
+def test_entry_supervision_accepts_alternate_relational_recipe(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["challenge"]["per_trade_risk_dollars"] = 450.0
+    payload["entry_supervision"].update({
+        "decision_count": 3,
+        "fill_offsets": [1, 3, 5],
+        "risk_dollars": 450.0,
+        "launch": {
+            "favorable_r": 0.6,
+            "adverse_r": 0.3,
+            "horizon_bars": 4,
+        },
+        "continuation": {
+            "favorable_r": 0.75,
+            "adverse_r": 0.35,
+            "horizon_bars": 5,
+        },
+        "target_r": 3.0,
+        "stop_r": 1.25,
+        "horizon_bars": 180,
+    })
+    path = tmp_path / "alternate-entry-recipe.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["entry_supervision"]["fill_offsets"] == (1, 3, 5)
+    assert config["entry_supervision"]["target_r"] == 3.0
+
+
+def test_recovery_curriculum_accepts_challenge_relative_start(
+    tmp_path: Path,
+) -> None:
+    payload = _recovery_curriculum_payload()
+    payload["challenge"]["minimum_mll_headroom"] = 300.0
+    payload["recovery_curriculum"]["start_state"].update({
+        "realized_pnl": -1_500.0,
+        "equity_pnl": -1_500.0,
+        "session_pnl": -1_500.0,
+    })
+    path = tmp_path / "alternate-recovery-recipe.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["recovery_curriculum"]["start_state"]["realized_pnl"] == -1_500.0
+    assert config["challenge"]["minimum_mll_headroom"] == 300.0
 
 
 def test_entry_supervision_must_remain_campaign_frozen(tmp_path: Path) -> None:

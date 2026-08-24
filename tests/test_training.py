@@ -739,7 +739,7 @@ def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
         _recovery_curriculum_from_config({
             "schedule_seed": 37,
         })
-    with pytest.raises(ValueError, match="contract drifted"):
+    with pytest.raises(ValueError, match="equity must equal realized"):
         _recovery_curriculum_from_config({
             "schedule_seed": 37,
             "recovery_success_pnl": 0.0,
@@ -755,7 +755,7 @@ def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
             },
             "start_state": {
                 "realized_pnl": -2_100.0,
-                "equity_pnl": -2_100.0,
+                "equity_pnl": -2_000.0,
                 "peak_equity_pnl": 0.0,
                 "mll_floor_pnl": -3_000.0,
                 "passmark_locked": False,
@@ -766,6 +766,36 @@ def test_json_recovery_curriculum_rejects_missing_or_drifted_fields() -> None:
             },
             "stress_evaluation_episodes": 200,
         })
+
+
+def test_json_recovery_curriculum_accepts_alternate_consistent_start() -> None:
+    settings, _ = _recovery_curriculum_from_config({
+        "schedule_seed": 37,
+        "stress_evaluation_episodes": 200,
+        "recovery_success_pnl": 0.0,
+        "action_value_supervision": {
+            "loss_weight": 0.25,
+            "temperature": 1.0,
+            "store_capacity": 200,
+            "target_every_episodes": 1,
+            "start_pnls": [-2_500, -1_500, -500],
+            "retain_nonnegative_entry_policy": True,
+        },
+        "start_state": {
+            "realized_pnl": -1_500.0,
+            "equity_pnl": -1_500.0,
+            "peak_equity_pnl": 0.0,
+            "mll_floor_pnl": -3_000.0,
+            "passmark_locked": False,
+            "position_side": 0,
+            "position_size": 0,
+            "session_pnl": -1_500.0,
+            "trading_days_elapsed": 1,
+        },
+    })
+
+    assert settings is not None
+    assert settings.start_state.realized_pnl == -1_500.0
 
 
 @pytest.mark.parametrize(
@@ -2134,10 +2164,15 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         map_location="cpu",
         weights_only=False,
     )
-    replay_state = recovery["manifest"]["replay_state"]
+    replay_checkpoint = recovery["manifest"]["replay_checkpoint"]
+    assert "replay_state" not in recovery["manifest"]
     assert recovery["manifest"]["replay_restored"] is True
-    assert len(replay_state["episodes"]) == 2
-    assert replay_state["contract"]["sequence_length"] == 1
+    assert len(replay_checkpoint["episodes"]) == 2
+    assert replay_checkpoint["contract"]["sequence_length"] == 1
+    assert all(
+        (tmp_path / "run" / "training-replay" / item["path"]).is_file()
+        for item in replay_checkpoint["episodes"]
+    )
     diagnostic_path = tmp_path / "run" / "training-diagnostics.jsonl"
     assert diagnostic_path.is_file()
     diagnostics = [json.loads(line) for line in diagnostic_path.read_text().splitlines()]
@@ -5925,6 +5960,40 @@ def test_recovery_checkpoint_stores_replay_sampler_metadata_only(
     assert agent.manifest["post_recovery_contrast_replay_sampler_state"] == (
         sampler_state
     )
+
+
+def test_recovery_checkpoint_references_incremental_replay_not_embedded_state(
+    tmp_path: Path,
+) -> None:
+    class SavingAgent:
+        manifest = None
+
+        def save(self, path, *, manifest):
+            self.manifest = manifest
+            Path(path).write_bytes(b"checkpoint")
+
+    descriptor = {
+        "schema_version": 1,
+        "replay_schema_version": 11,
+        "contract": {"sequence_length": 96},
+        "random_state": (3, (), None),
+        "sample_calls": 12,
+        "episodes": [{"episode_id": "episode-1"}],
+    }
+    agent = SavingAgent()
+
+    training_module._save_training_recovery(
+        agent,
+        tmp_path / "training-recovery.pt",
+        resume_identity="recipe-1",
+        progress=TrainingProgress(completed_episodes=40),
+        environment_rng_state={},
+        replay_checkpoint=descriptor,
+    )
+
+    assert "replay_state" not in agent.manifest
+    assert agent.manifest["replay_checkpoint"] == descriptor
+    assert agent.manifest["replay_restored"] is True
 
 
 def test_training_uses_lower_exploration_for_position_management() -> None:

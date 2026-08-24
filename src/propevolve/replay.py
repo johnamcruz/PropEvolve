@@ -6,8 +6,11 @@ from bisect import bisect_right
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, replace
 import hashlib
+import os
+from pathlib import Path
+import pickle
 import random
-from typing import Mapping
+from typing import Iterator, Mapping
 
 import numpy as np
 
@@ -888,8 +891,8 @@ class BalancedSequenceReplay:
                 ))
         return tuple(selected)
 
-    def state_dict(self) -> dict[str, object]:
-        """Return the complete resumable replay state, including sampler RNG."""
+    def checkpoint_metadata(self) -> dict[str, object]:
+        """Return the small replay contract and exact sampler state."""
         return {
             "schema_version": 11,
             "contract": {
@@ -913,23 +916,45 @@ class BalancedSequenceReplay:
             },
             "random_state": self._random.getstate(),
             "sample_calls": self._sample_calls,
+        }
+
+    @staticmethod
+    def _checkpoint_episode_payload(
+        episode: _StoredEpisode,
+    ) -> dict[str, object]:
+        derived_fields = {
+            "entry_long_anchor_indices",
+            "entry_short_anchor_indices",
+            "regime_wait_anchor_indices",
+            "regime_wait_anchor_cumulative_priorities",
+            "regime_wait_priority_sum",
+            "paired_a_plus_long_winner_anchor_indices",
+            "paired_a_plus_long_failure_anchor_indices",
+            "paired_a_plus_short_winner_anchor_indices",
+            "paired_a_plus_short_failure_anchor_indices",
+        }
+        return {
+            field: getattr(episode, field)
+            for field in _StoredEpisode.__dataclass_fields__
+            if field not in derived_fields
+        }
+
+    def checkpoint_episode_payloads(
+        self,
+    ) -> Iterator[tuple[str, dict[str, object]]]:
+        """Yield immutable retained episodes in exact sampler order."""
+        for episode in self._episodes.values():
+            yield (
+                episode.episode_id,
+                self._checkpoint_episode_payload(episode),
+            )
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the legacy monolithic resumable replay state."""
+        return {
+            **self.checkpoint_metadata(),
             "episodes": [
-                {
-                    field: getattr(episode, field)
-                    for field in _StoredEpisode.__dataclass_fields__
-                    if field not in {
-                        "entry_long_anchor_indices",
-                        "entry_short_anchor_indices",
-                        "regime_wait_anchor_indices",
-                        "regime_wait_anchor_cumulative_priorities",
-                        "regime_wait_priority_sum",
-                        "paired_a_plus_long_winner_anchor_indices",
-                        "paired_a_plus_long_failure_anchor_indices",
-                        "paired_a_plus_short_winner_anchor_indices",
-                        "paired_a_plus_short_failure_anchor_indices",
-                    }
-                }
-                for episode in self._episodes.values()
+                payload for _, payload in self.checkpoint_episode_payloads()
             ],
         }
 
@@ -2206,3 +2231,230 @@ class BalancedSequenceReplay:
         )
         distance = float(np.square(winner_context - failure_context).sum())
         return distance, episode.episode_id, anchor_index
+
+
+class _HashingWriter:
+    """Hash pickle bytes while writing so a shard needs only one I/O pass."""
+
+    def __init__(self, stream, hasher) -> None:
+        self._stream = stream
+        self._hasher = hasher
+
+    def write(self, value: bytes) -> int:
+        self._hasher.update(value)
+        return self._stream.write(value)
+
+
+class ReplayCheckpointStore:
+    """Persist immutable replay episodes once and restore them fail closed."""
+
+    _SCHEMA_VERSION = 1
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        self._known: dict[str, dict[str, object]] = {}
+
+    @staticmethod
+    def _shard_name(episode_id: str) -> str:
+        identity = hashlib.sha256(episode_id.encode("utf-8")).hexdigest()
+        return f"episodes/{identity}.pkl"
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _write_shard(
+        self,
+        *,
+        episode_id: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        relative = self._shard_name(episode_id)
+        destination = self.root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        digest = hashlib.sha256()
+        with temporary.open("wb") as raw:
+            pickle.dump(
+                dict(payload),
+                _HashingWriter(raw, digest),
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+            raw.flush()
+            os.fsync(raw.fileno())
+        size_bytes = temporary.stat().st_size
+        os.replace(temporary, destination)
+        return {
+            "episode_id": episode_id,
+            "path": relative,
+            "sha256": digest.hexdigest(),
+            "size_bytes": size_bytes,
+            "ended_at_ns": int(payload["ended_at_ns"]),
+            "transition_count": int(np.asarray(payload["actions"]).size),
+        }
+
+    @staticmethod
+    def _validate_entry(value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "episode_id",
+            "path",
+            "sha256",
+            "size_bytes",
+            "ended_at_ns",
+            "transition_count",
+        }:
+            raise ValueError("replay checkpoint shard identity is invalid")
+        entry = dict(value)
+        episode_id = entry["episode_id"]
+        relative = Path(str(entry["path"]))
+        sha256 = entry["sha256"]
+        integers = (
+            entry["size_bytes"],
+            entry["ended_at_ns"],
+            entry["transition_count"],
+        )
+        if (
+            not isinstance(episode_id, str)
+            or not episode_id
+            or relative.is_absolute()
+            or relative.parts[:1] != ("episodes",)
+            or len(relative.parts) != 2
+            or relative.suffix != ".pkl"
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in integers)
+            or entry["size_bytes"] < 1
+            or entry["transition_count"] < 1
+        ):
+            raise ValueError("replay checkpoint shard identity is invalid")
+        return entry
+
+    def persist(self, replay: BalancedSequenceReplay) -> dict[str, object]:
+        """Append only episodes not already persisted by this process."""
+        entries: list[dict[str, object]] = []
+        for episode_id, payload in replay.checkpoint_episode_payloads():
+            known = self._known.get(episode_id)
+            expected_count = int(np.asarray(payload["actions"]).size)
+            expected_end = int(payload["ended_at_ns"])
+            if known is not None:
+                path = self.root / str(known["path"])
+                reusable = (
+                    path.is_file()
+                    and path.stat().st_size == known["size_bytes"]
+                    and known["transition_count"] == expected_count
+                    and known["ended_at_ns"] == expected_end
+                )
+            else:
+                reusable = False
+            entry = (
+                dict(known)
+                if reusable
+                else self._write_shard(
+                    episode_id=episode_id,
+                    payload=payload,
+                )
+            )
+            entries.append(entry)
+        metadata = replay.checkpoint_metadata()
+        descriptor = {
+            "schema_version": self._SCHEMA_VERSION,
+            "replay_schema_version": metadata["schema_version"],
+            "contract": metadata["contract"],
+            "random_state": metadata["random_state"],
+            "sample_calls": metadata["sample_calls"],
+            "episodes": entries,
+        }
+        self._known.update(
+            (str(entry["episode_id"]), dict(entry)) for entry in entries
+        )
+        return descriptor
+
+    def restore(
+        self,
+        replay: BalancedSequenceReplay,
+        descriptor: Mapping[str, object],
+    ) -> None:
+        """Load every active shard once and restore exact sampling state."""
+        required = {
+            "schema_version",
+            "replay_schema_version",
+            "contract",
+            "random_state",
+            "sample_calls",
+            "episodes",
+        }
+        if (
+            not isinstance(descriptor, Mapping)
+            or set(descriptor) != required
+            or descriptor.get("schema_version") != self._SCHEMA_VERSION
+            or not isinstance(descriptor.get("episodes"), list)
+        ):
+            raise ValueError("replay checkpoint descriptor is invalid")
+        payloads: list[Mapping[str, object]] = []
+        known: dict[str, dict[str, object]] = {}
+        for raw_entry in descriptor["episodes"]:
+            entry = self._validate_entry(raw_entry)
+            episode_id = str(entry["episode_id"])
+            if episode_id in known:
+                raise ValueError("replay checkpoint shard identity is invalid")
+            path = self.root / str(entry["path"])
+            if (
+                not path.is_file()
+                or path.stat().st_size != entry["size_bytes"]
+                or self._file_sha256(path) != entry["sha256"]
+            ):
+                raise ValueError("replay checkpoint shard identity is invalid")
+            try:
+                with path.open("rb") as stream:
+                    payload = pickle.load(stream)
+            except (OSError, pickle.PickleError, EOFError) as error:
+                raise ValueError(
+                    "replay checkpoint shard is unreadable"
+                ) from error
+            if (
+                not isinstance(payload, Mapping)
+                or payload.get("episode_id") != episode_id
+            ):
+                raise ValueError("replay checkpoint shard identity is invalid")
+            payloads.append(payload)
+            known[episode_id] = entry
+        replay.load_state_dict({
+            "schema_version": descriptor["replay_schema_version"],
+            "contract": descriptor["contract"],
+            "random_state": descriptor["random_state"],
+            "sample_calls": descriptor["sample_calls"],
+            "episodes": payloads,
+        })
+        self._known = known
+
+    def prune(self, committed: Mapping[str, object]) -> None:
+        """Remove shards not referenced by an already committed checkpoint."""
+        episodes = committed.get("episodes")
+        if not isinstance(episodes, list):
+            raise ValueError("replay checkpoint descriptor is invalid")
+        retained = {
+            str(self._validate_entry(item)["path"])
+            for item in episodes
+        }
+        directory = self.root / "episodes"
+        if directory.is_dir():
+            for path in directory.glob("*.pkl"):
+                relative = path.relative_to(self.root).as_posix()
+                if relative not in retained:
+                    path.unlink()
+            for path in directory.glob("*.tmp"):
+                path.unlink()
+        active_ids = {
+            str(self._validate_entry(item)["episode_id"])
+            for item in episodes
+        }
+        self._known = {
+            episode_id: entry
+            for episode_id, entry in self._known.items()
+            if episode_id in active_ids
+        }
