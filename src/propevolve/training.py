@@ -5316,8 +5316,8 @@ def _load_authenticated_pass_replay_artifact(
         raise ValueError("balance pass replay contains a non-pass episode")
     replay.load_state_dict(state)
     if sample_kind == "balance":
-        sample = replay.sample(1)
-        requirement = "complete pass"
+        sample = replay.sample_balance_pass_entry_sequences(1)
+        requirement = "economic winner entry"
     elif sample_kind == "healthy":
         sample = replay.sample_healthy_pass_sequences(1)
         requirement = "healthy policy row"
@@ -5328,7 +5328,8 @@ def _load_authenticated_pass_replay_artifact(
         sample = replay.sample_post_recovery_contrast_pairs(1)
         requirement = "retained-versus-giveback pair"
     if not sample:
-        raise ValueError(f"pass replay lacks a {requirement}")
+        article = "an" if requirement.startswith("economic") else "a"
+        raise ValueError(f"pass replay lacks {article} {requirement}")
     replay.load_state_dict(state)
 
 
@@ -6470,7 +6471,19 @@ def train_agent(
                     % balance_curriculum.pass_replay_update_period
                     == 0
                 ):
-                    pass_sequences = balance_pass_replay.sample(1)
+                    pass_sequences = (
+                        balance_pass_replay
+                        .sample_balance_pass_entry_sequences(
+                            1,
+                            max_examples=(
+                                balance_curriculum.pass_replay_max_examples
+                            ),
+                        )
+                    )
+                    if not pass_sequences:
+                        raise ValueError(
+                            "balance pass replay lacks an economic winner entry"
+                        )
                     batch = tuple(batch) + pass_sequences
                     balance_pass_replay_sequences += len(pass_sequences)
                 if (

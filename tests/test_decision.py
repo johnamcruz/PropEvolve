@@ -102,6 +102,32 @@ def test_risk_mask_exposes_only_state_valid_actions() -> None:
     assert masker.valid_actions(long) == (Action.HOLD, Action.CLOSE)
 
 
+def test_configured_guard_allows_one_more_recovery_attempt_without_using_last_100(
+) -> None:
+    masker = ActionMasker(
+        max_position_size=1,
+        max_loss=3_000,
+        minimum_mll_headroom=200,
+    )
+    recoverable = AccountState(
+        equity_pnl=-2_600,
+        mll_headroom=400,
+        position_side=PositionSide.FLAT,
+    )
+    last_buffer = AccountState(
+        equity_pnl=-2_900,
+        mll_headroom=100,
+        position_side=PositionSide.FLAT,
+    )
+
+    assert masker.valid_actions(recoverable) == (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    assert masker.valid_actions(last_buffer) == (Action.WAIT,)
+
+
 def test_recovery_mode_keeps_wait_long_and_short_available_until_terminal() -> None:
     masker = ActionMasker(
         max_position_size=1,

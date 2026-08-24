@@ -1628,6 +1628,24 @@ def load_experiment_config(path: str | Path) -> dict:
     evolution = payload.get("evolution") or {}
     if not str(evolution.get("hypothesis", "")).strip():
         raise ValueError("evolution hypothesis is required")
+    external_parent_economic_overrides = evolution.get(
+        "external_parent_economic_overrides", ()
+    )
+    if (
+        not isinstance(external_parent_economic_overrides, (list, tuple))
+        or any(
+            not isinstance(field, str) or not field
+            for field in external_parent_economic_overrides
+        )
+        or len(set(external_parent_economic_overrides))
+        != len(external_parent_economic_overrides)
+        or set(external_parent_economic_overrides)
+        - {"minimum_mll_headroom"}
+    ):
+        raise ValueError("external parent economic overrides are invalid")
+    evolution["external_parent_economic_overrides"] = tuple(
+        external_parent_economic_overrides
+    )
     allowed = tuple(str(value) for value in evolution.get("allowed_revision_paths", ()))
     frozen = tuple(str(value) for value in evolution.get("frozen_paths", ()))
     campaign_declaration = payload.get("campaign")

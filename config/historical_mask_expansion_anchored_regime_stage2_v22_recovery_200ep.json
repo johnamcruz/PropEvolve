@@ -153,7 +153,7 @@
     "episode_days": 30,
     "bars_per_day": 480,
     "max_position_size": 1,
-    "minimum_mll_headroom": 500,
+    "minimum_mll_headroom": 200,
     "trailing_mll_lock": true,
     "terminal_pass_reward": 250,
     "terminal_blow_reward": -1500,
@@ -292,7 +292,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target, with one authenticated side-balanced historical pass sequence added every eight learner updates, will teach balance-aware selectivity without a recovery mode, breakeven label, or policy handoff. Every episode retains the original +$6,000 pass, -$3,000 blow, and 30-day timeout outcomes; crossing $0 has no special meaning, while V21 Expansion-Regime supervision, paired economic contrast, recurrent replay, action space, and teacher-free inference remain unchanged.",
+    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target, with one authenticated side-balanced historical pass winner anchored at the recurrent learning boundary every eight learner updates, will teach the entry decisions that avoid early low-headroom lockout. A $200 MLL entry guard permits one additional $300-risk recovery attempt from $400 headroom while blocking another entry at $100 headroom; the original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, paired economic contrast, action space, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -302,6 +302,9 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
+    "external_parent_economic_overrides": [
+      "minimum_mll_headroom"
+    ],
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",

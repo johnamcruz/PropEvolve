@@ -1938,6 +1938,77 @@ class BalancedSequenceReplay:
             ))
         return tuple(sequences)
 
+    def sample_balance_pass_entry_sequences(
+        self,
+        count: int,
+        *,
+        max_examples: int = 8,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Replay the earliest economic winner from complete pass traces.
+
+        Balance curricula begin with limited MLL headroom.  Random windows
+        from a complete pass mostly rehearse WAIT or position-management rows
+        and can omit the entry that made the recovery possible.  Anchor the
+        authenticated +2R-before-1R winner at the first learnable row instead,
+        retaining its causal recurrent prefix as burn-in.
+        """
+        if count < 1 or max_examples < 1:
+            raise ValueError("balance pass entry replay count must be positive")
+        candidates: dict[
+            Action, list[tuple[int, float, str, _StoredEpisode, int]]
+        ] = defaultdict(list)
+        for episode in self._episodes.values():
+            if episode.outcome != "pass":
+                continue
+            score = float(np.sum(episode.rewards, dtype=np.float64))
+            for side, winner_indices in (
+                (
+                    Action.ENTER_LONG_1,
+                    episode.paired_a_plus_long_winner_anchor_indices,
+                ),
+                (
+                    Action.ENTER_SHORT_1,
+                    episode.paired_a_plus_short_winner_anchor_indices,
+                ),
+            ):
+                if winner_indices.size:
+                    candidates[side].append((
+                        episode.ended_at_ns,
+                        score,
+                        episode.episode_id,
+                        episode,
+                        int(winner_indices[0]),
+                    ))
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            candidates[side] = sorted(
+                candidates[side],
+                key=lambda item: (-item[0], -item[1], item[2], item[4]),
+            )[:max_examples]
+        available_sides = [
+            side
+            for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+            if candidates[side]
+        ]
+        if not available_sides:
+            return ()
+        start = self._sample_calls
+        self._sample_calls += count
+        sequences = []
+        for offset in range(count):
+            sample_index = start + offset
+            side = available_sides[sample_index % len(available_sides)]
+            side_cycle = sample_index // len(available_sides)
+            _, _, _, episode, anchor_index = candidates[side][
+                side_cycle % len(candidates[side])
+            ]
+            sequences.append(episode.target_anchored_sequence(
+                anchor_index=anchor_index,
+                length=self.sequence_length,
+                recurrent_burn_in=self.recurrent_burn_in,
+                n_step_return=self.n_step_return,
+            ))
+        return tuple(sequences)
+
     def sample_post_recovery_contrast_pairs(
         self,
         count: int,

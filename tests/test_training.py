@@ -230,9 +230,12 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
         def __init__(self) -> None:
             super().__init__()
             self.batch_sizes: list[int] = []
+            self.pass_replay_anchors: list[Transition] = []
 
         def train_batch(self, sequences, **kwargs) -> float:
             self.batch_sizes.append(len(sequences))
+            if len(sequences) == 2:
+                self.pass_replay_anchors.append(sequences[-1][1])
             self.last_train_metrics = {}
             return 0.5
 
@@ -271,7 +274,20 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
                 "mll_headroom_fraction": 1.0,
             }
 
-    pass_replay = BalancedSequenceReplay(
+    class CapturingBalancePassReplay(BalancedSequenceReplay):
+        entry_sample_calls = 0
+
+        def sample(self, count):
+            raise AssertionError("balance pass replay must not sample random windows")
+
+        def sample_balance_pass_entry_sequences(self, count, *, max_examples=8):
+            self.entry_sample_calls += 1
+            return super().sample_balance_pass_entry_sequences(
+                count,
+                max_examples=max_examples,
+            )
+
+    pass_replay = CapturingBalancePassReplay(
         capacity_episodes=8,
         sequence_length=4,
         recurrent_burn_in=1,
@@ -290,12 +306,32 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
                 action=Action.WAIT,
                 reward=1.0,
                 next_observation=np.array([index + 1], np.float32),
-                terminated=index == 3,
+                terminated=index == 7,
                 valid_actions=flat_actions,
-                next_valid_actions=() if index == 3 else flat_actions,
+                next_valid_actions=() if index == 7 else flat_actions,
+                teacher_target=(
+                    np.ones(7, np.float32) if index == 5 else None
+                ),
+                entry_action_target=(
+                    Action.ENTER_SHORT_1 if index == 5 else None
+                ),
+                regime_selectivity_headroom_fraction=(
+                    1.0 / 3.0 if index == 5 else None
+                ),
+                paired_a_plus_context=(
+                    np.asarray(
+                        [0.1, 0.1, 0.9, 0.85, 0.1, 0.7, 0.2],
+                        np.float32,
+                    )
+                    if index == 5 else None
+                ),
+                paired_a_plus_side=(
+                    Action.ENTER_SHORT_1 if index == 5 else None
+                ),
+                paired_a_plus_economic_win=(True if index == 5 else None),
                 recovery_active=False,
             )
-            for index in range(4)
+            for index in range(8)
         ),
     ))
     settings = BalanceCurriculumSettings(
@@ -337,6 +373,12 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     )
 
     assert agent.batch_sizes == [1, 2]
+    assert pass_replay.entry_sample_calls == 1
+    assert len(agent.pass_replay_anchors) == 1
+    assert agent.pass_replay_anchors[0].entry_action_target == (
+        Action.ENTER_SHORT_1
+    )
+    assert agent.pass_replay_anchors[0].paired_a_plus_economic_win is True
     assert diagnostics[0]["balance_pass_replay_sequences"] == 1
     assert diagnostics[0]["balance_pass_replay_promoted_passes"] == 1
     assert {
@@ -348,6 +390,11 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
 def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
     tmp_path: Path,
 ) -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
     source = BalancedSequenceReplay(
         capacity_episodes=8,
         sequence_length=4,
@@ -368,8 +415,28 @@ def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
                 reward=1.0,
                 next_observation=np.array([index + 1], np.float32),
                 terminated=index == 3,
-                valid_actions=(Action.WAIT,),
-                next_valid_actions=() if index == 3 else (Action.WAIT,),
+                valid_actions=flat_actions,
+                next_valid_actions=() if index == 3 else flat_actions,
+                teacher_target=(
+                    np.ones(7, np.float32) if index == 1 else None
+                ),
+                entry_action_target=(
+                    Action.ENTER_LONG_1 if index == 1 else None
+                ),
+                regime_selectivity_headroom_fraction=(
+                    1.0 / 3.0 if index == 1 else None
+                ),
+                paired_a_plus_context=(
+                    np.asarray(
+                        [0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2],
+                        np.float32,
+                    )
+                    if index == 1 else None
+                ),
+                paired_a_plus_side=(
+                    Action.ENTER_LONG_1 if index == 1 else None
+                ),
+                paired_a_plus_economic_win=(True if index == 1 else None),
                 recovery_active=False,
             )
             for index in range(4)
@@ -398,7 +465,63 @@ def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(
         replay=restored,
     )
 
-    assert restored.sample(1)[0][-1].terminated is True
+    anchor = restored.sample_balance_pass_entry_sequences(1)[0][1]
+    assert anchor.entry_action_target == Action.ENTER_LONG_1
+    assert anchor.paired_a_plus_economic_win is True
+
+
+def test_balance_pass_replay_rejects_pass_without_economic_winner(
+    tmp_path: Path,
+) -> None:
+    source = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=2,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=89,
+    )
+    source.add(Episode(
+        episode_id="unteachable-pass",
+        ticker="NQ",
+        outcome="pass",
+        primary_side="flat",
+        ended_at_ns=1,
+        transitions=tuple(
+            Transition(
+                observation=np.array([index], np.float32),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array([index + 1], np.float32),
+                terminated=index == 1,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=() if index == 1 else (Action.WAIT,),
+            )
+            for index in range(2)
+        ),
+    ))
+    artifact = tmp_path / "unteachable-balance-pass.pt"
+    torch.save({
+        "schema": "propevolve_balance_pass_replay_v1",
+        "source_checkpoints": [{
+            "causal_identity_sha256": "c" * 64,
+            "resume_identity": "unteachable-run",
+        }],
+        "replay_state": source.state_dict(),
+    }, artifact)
+    restored = BalancedSequenceReplay(
+        capacity_episodes=2,
+        sequence_length=2,
+        recurrent_burn_in=1,
+        n_step_return=1,
+        seed=97,
+    )
+
+    with pytest.raises(ValueError, match="lacks an economic winner entry"):
+        _load_balance_pass_replay_artifact(
+            artifact,
+            expected_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            replay=restored,
+        )
 
 
 def test_json_recovery_curriculum_projects_complete_frozen_start_contract() -> None:

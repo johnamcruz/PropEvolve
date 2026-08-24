@@ -723,6 +723,47 @@ def test_external_stage1_parent_freezes_ordinary_mll_entry_guard(
     assert runner.configs == []
 
 
+def test_external_parent_accepts_explicit_frozen_mll_guard_override(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(tmp_path)
+    parent_recipe = json.loads(config_path.read_text())
+    parent_recipe["challenge"]["minimum_mll_headroom"] = 500.0
+    parent_recipe["challenge"]["ratchet_lock_floor_r"] = 0.0
+    parent_recipe["campaign"]["budget_stages"] = [
+        _episode_stage(parent_recipe, "balance_curriculum")
+    ]
+    stage1_archive = CandidateArchive(tmp_path / "stage-1-output/archive")
+    parent, evaluation = _register_external_stage1_parent(
+        stage1_archive, parent_recipe
+    )
+    child_recipe = json.loads(json.dumps(parent_recipe))
+    child_recipe["challenge"]["minimum_mll_headroom"] = 200.0
+    child_recipe["evolution"]["external_parent_economic_overrides"] = [
+        "minimum_mll_headroom"
+    ]
+    child_recipe["evolution"]["parent_candidate_ids"] = [parent.candidate_id]
+    child_recipe["evolution"]["base_parent"] = {
+        "archive_root": str(stage1_archive.root),
+        "candidate_id": parent.candidate_id,
+        "evaluation_id": evaluation.evaluation_id,
+        "model_sha256": parent.manifest["model_sha256"],
+    }
+    config_path.write_text(json.dumps(child_recipe))
+    runner = FakeCandidateRunner(tmp_path / "runs/evolution-test")
+
+    state = run_evolution_campaign(
+        config_path,
+        run_id="explicit-mll-entry-guard-override-test",
+        candidate_runner=runner,
+        reasoning=None,
+        skills=ReadySkills(),
+    )
+
+    assert state.phase is Phase.NEEDS_REASONING
+    assert runner.configs[0]["challenge"]["minimum_mll_headroom"] == 200.0
+
+
 def test_same_stage_revision_does_not_promote_failed_attempt_to_parent(
     tmp_path: Path,
 ) -> None:

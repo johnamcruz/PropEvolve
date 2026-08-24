@@ -240,9 +240,24 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
             raise ValueError(
                 f"external parent causal recipe drifted at {path}"
             )
+    economic_overrides = set(
+        config["evolution"].get("external_parent_economic_overrides", ())
+    )
     for field in _EXTERNAL_PARENT_ECONOMIC_FIELDS:
         parent_present = field in parent_recipe["challenge"]
         child_present = field in config["challenge"]
+        if field in economic_overrides:
+            if (
+                not parent_present
+                or not child_present
+                or parent_recipe["challenge"][field]
+                == config["challenge"][field]
+            ):
+                raise ValueError(
+                    "external parent economic override is inactive at "
+                    f"challenge.{field}"
+                )
+            continue
         if parent_present != child_present or (
             parent_present
             and parent_recipe["challenge"][field] != config["challenge"][field]

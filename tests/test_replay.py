@@ -609,6 +609,54 @@ def _paired_a_plus_episode(
     )
 
 
+def test_balance_pass_replay_anchors_economic_winners_and_balances_sides(
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=46,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-pass",
+        ticker="RTY",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+        outcome="pass",
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="short-pass",
+        ticker="SI",
+        target=Action.ENTER_SHORT_1,
+        side=Action.ENTER_SHORT_1,
+        economic_win=True,
+        context=(0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
+        offset=100,
+        outcome="pass",
+    ))
+
+    sequences = replay.sample_balance_pass_entry_sequences(2)
+    anchors = [sequence[replay.recurrent_burn_in] for sequence in sequences]
+
+    assert {anchor.entry_action_target for anchor in anchors} == {
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    }
+    assert all(anchor.paired_a_plus_economic_win is True for anchor in anchors)
+    assert all(
+        anchor.paired_a_plus_side == anchor.entry_action_target
+        for anchor in anchors
+    )
+    assert all(
+        anchor.source_decision_index in {5, 105}
+        for anchor in anchors
+    )
+
+
 def test_paired_recurrent_replay_co_samples_same_side_winner_and_failure() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=8,
