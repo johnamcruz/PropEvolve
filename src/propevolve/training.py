@@ -1426,6 +1426,19 @@ def _persistent_regime_selectivity_summary(
         for regime in _PAIRED_A_PLUS_REGIMES
         for field in _PAIRED_A_PLUS_GROUP_FIELDS
     })
+    update_metrics.update({
+        f"regime_selectivity_paired_a_plus_{side}_{field}": []
+        for side in _PAIRED_A_PLUS_SIDES
+        for field in (
+            "pair_count",
+            "pair_mass",
+            "loss_sum",
+            "good_advantage_sum",
+            "bad_advantage_sum",
+            "winner_population_weight_sum",
+            "failure_population_weight_sum",
+        )
+    })
     for row in rows:
         diagnostics = row.get("persistent_regime_selectivity")
         diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
@@ -1490,6 +1503,32 @@ def _persistent_regime_selectivity_summary(
             ].append(float(paired.get(field, 0.0) or 0.0))
         groups = paired.get("groups")
         groups = groups if isinstance(groups, Mapping) else {}
+        sides = paired.get("sides")
+        sides = sides if isinstance(sides, Mapping) else {}
+        for side in _PAIRED_A_PLUS_SIDES:
+            values = sides.get(side)
+            values = values if isinstance(values, Mapping) else {}
+            pair_mass = float(values.get("pair_mass", 0.0) or 0.0)
+            direct = {
+                field: float(values.get(field, 0.0) or 0.0)
+                for field in (
+                    "pair_count",
+                    "pair_mass",
+                    "loss_sum",
+                    "good_advantage_sum",
+                    "bad_advantage_sum",
+                )
+            }
+            direct["winner_population_weight_sum"] = pair_mass * float(
+                values.get("winner_population_weight_mean", 0.0) or 0.0
+            )
+            direct["failure_population_weight_sum"] = pair_mass * float(
+                values.get("failure_population_weight_mean", 0.0) or 0.0
+            )
+            for field, value in direct.items():
+                update_metrics[
+                    f"regime_selectivity_paired_a_plus_{side}_{field}"
+                ].append(value)
         for side in _PAIRED_A_PLUS_SIDES:
             for regime in _PAIRED_A_PLUS_REGIMES:
                 name = f"{side}_{regime}"
@@ -6581,6 +6620,20 @@ def train_agent(
                     f"regime_selectivity_association_{cohort}_{field}"
                     for cohort in _REGIME_ASSOCIATION_COHORTS
                     for field in _REGIME_ASSOCIATION_ADDITIVE_FIELDS
+                ),
+                *(
+                    "regime_selectivity_paired_a_plus_"
+                    f"{side}_{field}"
+                    for side in _PAIRED_A_PLUS_SIDES
+                    for field in (
+                        "pair_count",
+                        "pair_mass",
+                        "loss_sum",
+                        "good_advantage_sum",
+                        "bad_advantage_sum",
+                        "winner_population_weight_sum",
+                        "failure_population_weight_sum",
+                    )
                 ),
                 *(
                     "regime_selectivity_paired_a_plus_"

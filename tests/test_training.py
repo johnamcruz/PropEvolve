@@ -1253,6 +1253,58 @@ def test_paired_recurrent_diagnostics_expose_population_correction_by_side(
     )
 
 
+def test_training_summary_preserves_direct_recurrent_pair_mass_by_side(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "training-diagnostics.jsonl"
+    destination = tmp_path / "summary.json"
+    row = {
+        "ticker": "NQ",
+        "outcome": "timeout",
+        "persistent_regime_selectivity": {
+            "paired_a_plus": {
+                "pair_mass": 5.0,
+                "sides": {
+                    "long": {
+                        "pair_count": 2.0,
+                        "pair_mass": 2.0,
+                        "loss_sum": 0.4,
+                        "good_advantage_sum": 0.6,
+                        "bad_advantage_sum": -0.2,
+                        "winner_population_weight_mean": 0.75,
+                        "failure_population_weight_mean": 1.25,
+                    },
+                    "short": {
+                        "pair_count": 3.0,
+                        "pair_mass": 3.0,
+                        "loss_sum": 0.9,
+                        "good_advantage_sum": 0.3,
+                        "bad_advantage_sum": -0.6,
+                        "winner_population_weight_mean": 0.5,
+                        "failure_population_weight_mean": 1.5,
+                    },
+                },
+                "groups": {},
+            },
+        },
+    }
+    source.write_text(json.dumps(row) + "\n")
+
+    training_module._write_training_diagnostic_summary(source, destination)
+
+    sides = json.loads(destination.read_text())["overall"][
+        "persistent_regime_selectivity"
+    ]["paired_a_plus"]["sides"]
+    assert sides["long"]["pair_mass"] == pytest.approx(2.0)
+    assert sides["short"]["pair_mass"] == pytest.approx(3.0)
+    assert sides["long"]["winner_population_weight_mean"] == pytest.approx(
+        0.75
+    )
+    assert sides["short"]["failure_population_weight_mean"] == pytest.approx(
+        1.5
+    )
+
+
 @pytest.mark.parametrize(
     "semantics",
     (
