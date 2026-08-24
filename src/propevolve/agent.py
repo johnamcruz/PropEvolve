@@ -538,6 +538,7 @@ def paired_recurrent_a_plus_rank_loss(
     population_weights: torch.Tensor,
     margin: float,
     action_margin: float,
+    winner_loss_weight: float = 1.0,
 ) -> PairedAPlusRankResult:
     """Rank and absolutely anchor explicit recurrent economic pairs."""
     row_shape = flat_action_values.shape[:-1]
@@ -559,6 +560,9 @@ def paired_recurrent_a_plus_rank_loss(
         or isinstance(action_margin, bool)
         or not math.isfinite(float(action_margin))
         or float(action_margin) < 0.0
+        or isinstance(winner_loss_weight, bool)
+        or not math.isfinite(float(winner_loss_weight))
+        or float(winner_loss_weight) <= 0.0
     ):
         raise ValueError("paired recurrent A+ loss contract is invalid")
     if (
@@ -648,7 +652,7 @@ def paired_recurrent_a_plus_rank_loss(
         )
         side_losses[side].append(torch.stack((
             relative_loss,
-            winner_population_weight * winner_loss,
+            float(winner_loss_weight) * winner_population_weight * winner_loss,
             failure_population_weight * failure_loss,
         )).mean())
         good_advantages.append(good_advantage)
@@ -823,6 +827,7 @@ class RecurrentC51Agent:
         regime_selectivity_chop_wait_margin: float = 0.0,
         regime_selectivity_failed_confluence_margin: float = 0.0,
         regime_selectivity_paired_a_plus_margin: float = 0.0,
+        regime_selectivity_paired_a_plus_winner_loss_weight: float = 1.0,
         regime_selectivity_q_temperature: float = 1.0,
         regime_selectivity_side_balance: str = "none",
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
@@ -871,6 +876,13 @@ class RecurrentC51Agent:
             or isinstance(regime_selectivity_paired_a_plus_margin, bool)
             or not np.isfinite(regime_selectivity_paired_a_plus_margin)
             or regime_selectivity_paired_a_plus_margin < 0
+            or isinstance(
+                regime_selectivity_paired_a_plus_winner_loss_weight, bool
+            )
+            or not np.isfinite(
+                regime_selectivity_paired_a_plus_winner_loss_weight
+            )
+            or regime_selectivity_paired_a_plus_winner_loss_weight <= 0
             or policy_retention_loss_weight < 0
         ):
             raise ValueError("teacher settings must be nonnegative")
@@ -984,6 +996,14 @@ class RecurrentC51Agent:
                 "paired A+ margin requires exactly the paired A+ semantics"
             )
         if (
+            float(regime_selectivity_paired_a_plus_winner_loss_weight) != 1.0
+            and regime_selectivity_semantics
+            != PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+        ):
+            raise ValueError(
+                "paired A+ winner weight requires recurrent paired semantics"
+            )
+        if (
             regime_selectivity_semantics
             == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
         ) != (
@@ -1074,6 +1094,9 @@ class RecurrentC51Agent:
         )
         self.regime_selectivity_paired_a_plus_margin = float(
             regime_selectivity_paired_a_plus_margin
+        )
+        self.regime_selectivity_paired_a_plus_winner_loss_weight = float(
+            regime_selectivity_paired_a_plus_winner_loss_weight
         )
         self.regime_selectivity_q_temperature = float(
             regime_selectivity_q_temperature
@@ -2357,6 +2380,9 @@ class RecurrentC51Agent:
                                 )[selectivity_rows],
                                 margin=self.regime_selectivity_paired_a_plus_margin,
                                 action_margin=self.entry_action_margin,
+                                winner_loss_weight=(
+                                    self.regime_selectivity_paired_a_plus_winner_loss_weight
+                                ),
                             )
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss
@@ -3786,6 +3812,7 @@ class RecurrentC51Agent:
         self.regime_selectivity_chop_wait_margin = 0.0
         self.regime_selectivity_failed_confluence_margin = 0.0
         self.regime_selectivity_paired_a_plus_margin = 0.0
+        self.regime_selectivity_paired_a_plus_winner_loss_weight = 1.0
         self.regime_selectivity_side_balance = "none"
         self.regime_selectivity_semantics = STATIC_STATE_SEMANTICS
         self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
@@ -3959,6 +3986,9 @@ class RecurrentC51Agent:
                 "regime_selectivity_paired_a_plus_margin": (
                     self.regime_selectivity_paired_a_plus_margin
                 ),
+                "regime_selectivity_paired_a_plus_winner_loss_weight": (
+                    self.regime_selectivity_paired_a_plus_winner_loss_weight
+                ),
                 "regime_selectivity_q_temperature": (
                     self.regime_selectivity_q_temperature
                 ),
@@ -4069,6 +4099,9 @@ class RecurrentC51Agent:
         config.setdefault("regime_selectivity_chop_wait_margin", 0.0)
         config.setdefault("regime_selectivity_failed_confluence_margin", 0.0)
         config.setdefault("regime_selectivity_paired_a_plus_margin", 0.0)
+        config.setdefault(
+            "regime_selectivity_paired_a_plus_winner_loss_weight", 1.0
+        )
         config.setdefault("regime_selectivity_expansion_centers", None)
         config.setdefault("regime_selectivity_probability_epsilon", 1e-6)
         config.setdefault("regime_selectivity_headroom_pressure", 1.0)
@@ -4096,6 +4129,9 @@ class RecurrentC51Agent:
             config["regime_selectivity_chop_wait_margin"] = 0.0
             config["regime_selectivity_failed_confluence_margin"] = 0.0
             config["regime_selectivity_paired_a_plus_margin"] = 0.0
+            config[
+                "regime_selectivity_paired_a_plus_winner_loss_weight"
+            ] = 1.0
         agent = cls(**config, device=device)
         agent.online.load_state_dict(payload["online"])
         agent.target.load_state_dict(payload["target"])

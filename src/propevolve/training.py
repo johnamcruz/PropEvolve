@@ -246,6 +246,9 @@ def _assert_recovery_regime_selectivity(
     expected_paired_margin = float(
         agent_settings.get("regime_selectivity_paired_a_plus_margin", 0.0)
     )
+    expected_winner_loss_weight = float(agent_settings.get(
+        "regime_selectivity_paired_a_plus_winner_loss_weight", 1.0
+    ))
     undeclared_chop_default = (
         0.0
         if "regime_selectivity_chop_wait_margin" not in agent_settings
@@ -290,6 +293,14 @@ def _assert_recovery_regime_selectivity(
                 0.0,
             )),
             expected_paired_margin,
+        )
+        or not math.isclose(
+            float(getattr(
+                agent,
+                "regime_selectivity_paired_a_plus_winner_loss_weight",
+                1.0,
+            )),
+            expected_winner_loss_weight,
         )
         or getattr(agent, "regime_selectivity_side_balance", None)
         != agent_settings.get("regime_selectivity_side_balance")
@@ -347,6 +358,10 @@ def _regime_selectivity_agent_settings(
         settings["regime_selectivity_paired_a_plus_margin"] = float(
             specification["paired_a_plus_margin"]
         )
+    if "paired_a_plus_winner_loss_weight" in specification:
+        settings[
+            "regime_selectivity_paired_a_plus_winner_loss_weight"
+        ] = float(specification["paired_a_plus_winner_loss_weight"])
     return settings
 
 

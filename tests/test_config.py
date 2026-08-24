@@ -814,6 +814,40 @@ def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
         load_experiment_config(path)
 
 
+def test_paired_recurrent_winner_weight_is_configured_and_frozen(
+    tmp_path: Path,
+) -> None:
+    path = _stage2a_config(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["regime_selectivity"].update({
+        "semantics": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        "formula": PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_FORMULA,
+        "chop_wait_margin": 0.25,
+        "failed_confluence_margin": 0.25,
+        "paired_a_plus_margin": 0.25,
+        "paired_a_plus_winner_loss_weight": 2.0,
+        "side_balance": {
+            "schema": "paired_recurrent_long_short_v1",
+            "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
+        },
+    })
+    payload["evolution"]["frozen_paths"] = sorted(set(
+        payload["evolution"]["frozen_paths"]
+    ) | {
+        "regime_selectivity.chop_wait_margin",
+        "regime_selectivity.failed_confluence_margin",
+        "regime_selectivity.paired_a_plus_margin",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
+    })
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["regime_selectivity"][
+        "paired_a_plus_winner_loss_weight"
+    ] == 2.0
+
+
 def test_paired_recurrent_recipe_loading_is_independent_of_config_filename(
     tmp_path: Path,
 ) -> None:

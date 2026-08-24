@@ -1176,9 +1176,13 @@ def test_stage2a_recipe_projects_configured_paired_a_plus_margin() -> None:
         "chop_wait_margin": 0.25,
         "failed_confluence_margin": 0.25,
         "paired_a_plus_margin": 0.4,
+        "paired_a_plus_winner_loss_weight": 2.0,
     })
 
     assert settings["regime_selectivity_paired_a_plus_margin"] == 0.4
+    assert settings[
+        "regime_selectivity_paired_a_plus_winner_loss_weight"
+    ] == 2.0
 
 
 def test_paired_a_plus_diagnostics_preserve_side_and_regime_evidence() -> None:

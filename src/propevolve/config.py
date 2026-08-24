@@ -950,10 +950,12 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
     }
     margin_fields = {"chop_wait_margin", "failed_confluence_margin"}
     paired_fields = {"paired_a_plus_margin"}
+    weighted_winner_fields = {"paired_a_plus_winner_loss_weight"}
     valid_required_sets = (
         required,
         required | margin_fields,
         required | margin_fields | paired_fields,
+        required | margin_fields | paired_fields | weighted_winner_fields,
     )
     legacy_contract = (
         isinstance(specification, dict)
@@ -1068,6 +1070,26 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
             "chop_wait_margin",
             "failed_confluence_margin",
             "paired_a_plus_margin",
+            "paired_a_plus_winner_loss_weight",
+        )
+    ) if (
+        isinstance(specification, dict)
+        and margin_fields | paired_fields | weighted_winner_fields
+        <= set(specification)
+    ) else tuple(
+        specification.get(field)
+        for field in (
+            "loss_weight",
+            "expansion_long_center",
+            "expansion_short_center",
+            "probability_epsilon",
+            "headroom_pressure",
+            "dominant_chop_pressure",
+            "q_temperature",
+            "persistent_chop_negative_emphasis",
+            "chop_wait_margin",
+            "failed_confluence_margin",
+            "paired_a_plus_margin",
         )
     ) if (
         isinstance(specification, dict)
@@ -1122,13 +1144,19 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
         }
         or specification.get("formula") != expected_formula
         or (
-            semantics
-            in {
-                PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-                PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
-            }
-            and set(specification) != required | margin_fields | paired_fields
-        )
+                semantics
+                in {
+                    PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+                    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+                }
+                and set(specification) not in (
+                    required | margin_fields | paired_fields,
+                    required
+                    | margin_fields
+                    | paired_fields
+                    | weighted_winner_fields,
+                )
+            )
         or (
             semantics
             not in {
@@ -1157,7 +1185,7 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
         or teachers[0].get("kind") != "expansion"
         or not any(teacher.get("kind") == "regime" for teacher in teachers)
         or tuple(teachers[0].get("channels", ())) != EXPANSION_CHANNELS
-        or len(numeric) not in {8, 10, 11}
+        or len(numeric) not in {8, 10, 11, 12}
         or any(
             isinstance(value, bool) or not isinstance(value, (int, float))
             for value in numeric
@@ -1176,6 +1204,9 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
         or float(specification.get("chop_wait_margin", 0.0)) < 0.0
         or float(specification.get("failed_confluence_margin", 0.0)) < 0.0
         or float(specification.get("paired_a_plus_margin", 0.0)) < 0.0
+        or float(specification.get(
+            "paired_a_plus_winner_loss_weight", 1.0
+        )) <= 0.0
         or (
             semantics
             in {
@@ -1183,6 +1214,10 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
                 PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
             }
             and float(specification["paired_a_plus_margin"]) <= 0.0
+        )
+        or (
+            "paired_a_plus_winner_loss_weight" in specification
+            and semantics != PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
         )
         or float(specification["q_temperature"]) <= 0.0
         or (
@@ -1898,6 +1933,16 @@ def load_experiment_config(path: str | Path) -> dict:
                 valid_regime_identity = (
                     valid_regime_identity
                     and "regime_selectivity.paired_a_plus_margin" in frozen
+                )
+            winner_weight_frozen = (
+                "paired_a_plus_winner_loss_weight"
+                in payload["regime_selectivity"]
+            )
+            if winner_weight_frozen:
+                valid_regime_identity = (
+                    valid_regime_identity
+                    and "regime_selectivity.paired_a_plus_winner_loss_weight"
+                    in frozen
                 )
         if not valid_regime_identity:
             raise ValueError(

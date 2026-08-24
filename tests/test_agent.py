@@ -1440,7 +1440,7 @@ def test_paired_a_plus_checkpoint_round_trip_preserves_declared_margin(
     tmp_path: Path,
 ) -> None:
     from propevolve.balance_aware_regime_selectivity import (
-        PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
+        PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
     )
 
     agent = _agent(
@@ -1459,18 +1459,24 @@ def test_paired_a_plus_checkpoint_round_trip_preserves_declared_margin(
         teacher_loss_weight=1e-6,
         regime_selectivity_loss_weight=0.3,
         regime_selectivity_expansion_centers=(0.1, 0.1),
-        regime_selectivity_semantics=PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
-        regime_selectivity_side_balance="equal_long_short_v1",
+        regime_selectivity_semantics=(
+            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+        ),
+        regime_selectivity_side_balance="paired_recurrent_long_short_v1",
         regime_selectivity_persistent_chop_negative_emphasis=2.0,
         regime_selectivity_chop_wait_margin=0.25,
         regime_selectivity_failed_confluence_margin=0.25,
         regime_selectivity_paired_a_plus_margin=0.4,
+        regime_selectivity_paired_a_plus_winner_loss_weight=2.0,
     )
 
     checkpoint = agent.save(tmp_path / "paired-aplus.pt", manifest={})
     restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
 
     assert restored.regime_selectivity_paired_a_plus_margin == 0.4
+    assert (
+        restored.regime_selectivity_paired_a_plus_winner_loss_weight == 2.0
+    )
 
 
 def test_stage2a_equal_present_class_loss_survives_static_regime_conflict() -> None:

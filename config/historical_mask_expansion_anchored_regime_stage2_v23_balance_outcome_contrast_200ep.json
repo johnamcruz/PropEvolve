@@ -134,7 +134,8 @@
     },
     "chop_wait_margin": 0.25,
     "failed_confluence_margin": 0.25,
-    "paired_a_plus_margin": 0.25
+    "paired_a_plus_margin": 0.25,
+    "paired_a_plus_winner_loss_weight": 2
   },
   "observation": {
     "management_state": "entry_risk_v1",
@@ -298,7 +299,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$1,500 realized PnL to the original +$6,000 pass target, while sparsely pairing each same-side successful pass with the nearest normalized Expansion-Regime near-blow timeout, will teach the policy to rank the passing action above WAIT and the matched failed action below WAIT without weakening the existing A+ selector. The original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, action space, and teacher-free inference remain unchanged.",
+    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$1,500 realized PnL to the original +$6,000 pass target, while sparsely pairing each same-side successful pass with the nearest normalized Expansion-Regime near-blow timeout and doubling only the absolute winner action-over-WAIT pressure, will teach the policy to rank the passing action above WAIT while preserving the matched failure below WAIT. The original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, action space, failure pressure, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -353,6 +354,7 @@
       "regime_selectivity.expansion_short_center",
       "regime_selectivity.failed_confluence_margin",
       "regime_selectivity.paired_a_plus_margin",
+      "regime_selectivity.paired_a_plus_winner_loss_weight",
       "regime_selectivity.formula",
       "regime_selectivity.headroom_pressure",
       "regime_selectivity.loss_weight",

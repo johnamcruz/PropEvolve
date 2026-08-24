@@ -272,6 +272,52 @@ def test_paired_recurrent_a_plus_anchors_winner_and_failure_absolutely() -> None
     assert gradient[1, Action.WAIT] < 0.0
 
 
+def test_paired_recurrent_winner_weight_strengthens_only_winner_boundaries(
+) -> None:
+    action_values = torch.tensor(
+        [
+            [0.0, -0.20, 0.0],  # Long winner incorrectly ranks below WAIT.
+            [0.0, -0.30, 0.0],  # Long failure correctly ranks below WAIT.
+            [0.0, 0.0, -0.15],  # Short winner incorrectly ranks below WAIT.
+            [0.0, 0.0, -0.25],  # Short failure correctly ranks below WAIT.
+        ],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    baseline_values = action_values.detach().clone().requires_grad_(True)
+    common = {
+        "pair_ids": torch.tensor([7, 7, 8, 8]),
+        "pair_sides": torch.tensor([1, 1, 2, 2]),
+        "economic_wins": torch.tensor([True, False, True, False]),
+        "population_weights": torch.ones(4, dtype=torch.float64),
+        "margin": 0.25,
+        "action_margin": 0.25,
+    }
+
+    baseline = paired_recurrent_a_plus_rank_loss(
+        baseline_values,
+        **common,
+    )
+    strengthened = paired_recurrent_a_plus_rank_loss(
+        action_values,
+        winner_loss_weight=2.0,
+        **common,
+    )
+    baseline_gradient, = torch.autograd.grad(baseline.loss, baseline_values)
+    strengthened_gradient, = torch.autograd.grad(
+        strengthened.loss, action_values
+    )
+
+    for winner_row, side in ((0, Action.ENTER_LONG_1), (2, Action.ENTER_SHORT_1)):
+        assert strengthened_gradient[winner_row, side] < baseline_gradient[
+            winner_row, side
+        ]
+    for failure_row, side in ((1, Action.ENTER_LONG_1), (3, Action.ENTER_SHORT_1)):
+        assert strengthened_gradient[failure_row, side].item() == pytest.approx(
+            baseline_gradient[failure_row, side].item()
+        )
+
+
 def test_paired_recurrent_a_plus_corrects_balanced_pairs_to_population_prior(
 ) -> None:
     action_values = torch.tensor(
