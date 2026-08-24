@@ -69,6 +69,16 @@ def _lookup_config_reference(root: dict, dotted_path: str) -> object:
     return value
 
 
+def _assign_config_reference(root: dict, dotted_path: str, value: object) -> None:
+    parent_path, _, name = dotted_path.rpartition(".")
+    parent = root if not parent_path else _lookup_config_reference(
+        root, parent_path
+    )
+    if not isinstance(parent, dict):
+        raise ValueError(f"default template path {dotted_path!r} is invalid")
+    parent[name] = value
+
+
 def _apply_default_templates(effective: dict, document: dict) -> dict:
     """Apply JSON-declared defaults to activated objects and list items."""
     for dotted_path, defaults in document.get("object_defaults", {}).items():
@@ -79,38 +89,32 @@ def _apply_default_templates(effective: dict, document: dict) -> dict:
                     f"default object template {dotted_path!r} is invalid"
                 )
             replacement = _merge_config(defaults, target)
-            parent, _, name = dotted_path.rpartition(".")
-            container = (
-                effective
-                if not parent
-                else _lookup_config_reference(effective, parent)
-            )
-            if not isinstance(container, dict):
-                raise ValueError(
-                    f"default object template path {dotted_path!r} is invalid"
-                )
-            container[name] = replacement
+            _assign_config_reference(effective, dotted_path, replacement)
     for dotted_path, defaults in document.get("array_item_defaults", {}).items():
         target = _lookup_config_reference(effective, dotted_path)
         if target is _MISSING:
             continue
-        if not isinstance(target, list) or not isinstance(defaults, dict):
+        if not isinstance(target, (list, tuple)) or not isinstance(defaults, dict):
             raise ValueError(
                 f"default array template {dotted_path!r} is invalid"
             )
-        for index, item in enumerate(target):
+        materialized_items = list(target)
+        for index, item in enumerate(materialized_items):
             if not isinstance(item, dict):
                 raise ValueError(
                     f"default array item {dotted_path}[{index}] is invalid"
                 )
-            target[index] = _merge_config(defaults, item)
+            materialized_items[index] = _merge_config(defaults, item)
+        _assign_config_reference(effective, dotted_path, materialized_items)
     for dotted_path, specification in document.get(
         "array_item_variant_defaults", {}
     ).items():
         target = _lookup_config_reference(effective, dotted_path)
         if target is _MISSING:
             continue
-        if not isinstance(target, list) or not isinstance(specification, dict):
+        if not isinstance(target, (list, tuple)) or not isinstance(
+            specification, dict
+        ):
             raise ValueError(
                 f"default variant template {dotted_path!r} is invalid"
             )
@@ -120,7 +124,8 @@ def _apply_default_templates(effective: dict, document: dict) -> dict:
             raise ValueError(
                 f"default variant template {dotted_path!r} is invalid"
             )
-        for index, item in enumerate(target):
+        materialized_items = list(target)
+        for index, item in enumerate(materialized_items):
             if not isinstance(item, dict):
                 raise ValueError(
                     f"default array item {dotted_path}[{index}] is invalid"
@@ -131,7 +136,8 @@ def _apply_default_templates(effective: dict, document: dict) -> dict:
                     raise ValueError(
                         f"default variant {dotted_path}[{index}] is invalid"
                     )
-                target[index] = _merge_config(defaults, item)
+                materialized_items[index] = _merge_config(defaults, item)
+        _assign_config_reference(effective, dotted_path, materialized_items)
     return effective
 
 

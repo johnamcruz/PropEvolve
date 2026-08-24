@@ -172,6 +172,33 @@ def test_effective_config_rejects_invalid_default_document(
         materialize_effective_config({}, defaults_path=defaults_path)
 
 
+def test_effective_config_rematerializes_normalized_sequences() -> None:
+    effective = materialize_effective_config({
+        "training": {"epsilon_start": 0.2, "epsilon_end": 0.05},
+        "teachers": ({"kind": "regime"},),
+        "campaign": {
+            "budget_stages": ({"name": "stage"},),
+        },
+        "evolution": {"allowed_revision_paths": []},
+    })
+
+    assert effective["teachers"] == [{
+        "entry_search_loss_weight": 0.0,
+        "kind": "regime",
+    }]
+    assert effective["campaign"]["budget_stages"] == [{
+        "allow_revisions": True,
+        "budget_mode": "environment_steps",
+        "curriculum_override": {},
+        "name": "stage",
+        "parent_improvement_any_requirements": [],
+        "parent_improvement_requirements": [],
+        "parent_retention_requirements": [],
+        "revision_paths": [],
+        "warm_start_parent": False,
+    }]
+
+
 def _balance_curriculum_payload() -> dict:
     payload = _generic_payload()
     payload["balance_curriculum"] = {
