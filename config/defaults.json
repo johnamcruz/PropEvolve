@@ -1,0 +1,121 @@
+{
+  "schema": "propevolve_effective_defaults_v1",
+  "values": {
+    "runtime": {
+      "mixed_precision": "off",
+      "compile_model": false,
+      "compile_backend": "inductor",
+      "compile_mode": "default",
+      "mps_prefer_metal": false,
+      "mps_fast_math": false,
+      "benchmark_max_relative_loss_drift": 0.05
+    },
+    "challenge": {
+      "mll_proximity_penalty_coefficient": 0.0,
+      "lead_giveback_penalty_coefficient": 0.0,
+      "large_win_threshold_r": 2.0,
+      "large_win_bonus_coefficient": 0.0,
+      "ratchet_lock_floor_r": 0.0
+    },
+    "agent": {
+      "target_update_mode": "hard",
+      "target_soft_tau": 1.0,
+      "n_step_return": 1,
+      "recurrent_burn_in": 0,
+      "policy_retention_loss_weight": 0.0,
+      "entry_action_loss_reduction": "population_weighted_mean_v1",
+      "entry_action_margin": 0.0
+    },
+    "training": {
+      "prefetch_batches": 0,
+      "short_circuit": null,
+      "terminal_sequence_fraction": 0.0,
+      "safety_sequence_fraction": 0.0,
+      "entry_opportunity_sequence_fraction": 0.0,
+      "regime_wait_sequence_fraction": 0.0,
+      "regime_wait_sequence_update_period": 0,
+      "validation_no_trade_patience_episodes": 0,
+      "greedy_diagnostic_interval_steps": 256,
+      "budget_mode": "environment_steps",
+      "episode_coverage": null,
+      "teacher_loss_end_scale": 1.0,
+      "teacher_guidance_dropout_start": 0.0,
+      "teacher_guidance_dropout_end": 0.0,
+      "teacher_autonomy_start_fraction": 1.0,
+      "management_epsilon_start": {
+        "$ref": "training.epsilon_start"
+      },
+      "management_epsilon_end": {
+        "$ref": "training.epsilon_end"
+      },
+      "entry_supervision_autonomy_start_fraction": {
+        "$ref": "training.teacher_autonomy_start_fraction"
+      },
+      "minimum_environment_steps": 1
+    },
+    "campaign": {
+      "near_blow_loss_fraction": 0.75,
+      "diagnostic_targets": [],
+      "niches": [],
+      "reasoning": {
+        "proposer": "standard"
+      }
+    },
+    "teachers": [],
+    "entry_supervision": null,
+    "regime_selectivity": null,
+    "recovery_curriculum": null,
+    "balance_curriculum": null,
+    "observation": null,
+    "artifact_layout_version": "historical_candidate_v1",
+    "_warm_start_model": null,
+    "_validation_stop_on_blow": false,
+    "_archive_output": {
+      "$ref": "output"
+    }
+  },
+  "object_defaults": {
+    "entry_supervision": {
+      "action_class_balance": null
+    },
+    "recovery_curriculum.action_value_supervision": {
+      "action_margin": 0.0
+    }
+  },
+  "array_item_defaults": {
+    "teachers": {
+      "entry_search_loss_weight": 0.0
+    },
+    "campaign.budget_stages": {
+      "budget_mode": {
+        "$ref": "training.budget_mode"
+      },
+      "allow_revisions": true,
+      "warm_start_parent": false,
+      "curriculum_override": {},
+      "revision_paths": {
+        "$ref": "evolution.allowed_revision_paths"
+      },
+      "parent_improvement_requirements": [],
+      "parent_improvement_any_requirements": [],
+      "parent_retention_requirements": []
+    }
+  },
+  "array_item_variant_defaults": {
+    "teachers": {
+      "discriminator": "kind",
+      "variants": {
+        "expansion": {
+          "entry_search_objective": "raw_probability",
+          "entry_search_long_center": 0.5,
+          "entry_search_short_center": 0.5,
+          "entry_search_probability_epsilon": 0.000001,
+          "entry_search_teacher_temperature": 1.0,
+          "entry_search_q_temperature": 1.0,
+          "entry_search_center_receipt": "",
+          "entry_search_center_receipt_sha256": ""
+        }
+      }
+    }
+  }
+}

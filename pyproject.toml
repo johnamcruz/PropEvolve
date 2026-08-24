@@ -29,6 +29,9 @@ propevolve = "propevolve.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/propevolve"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"config/defaults.json" = "propevolve/defaults.json"
+
 [tool.hatch.metadata]
 allow-direct-references = true
 

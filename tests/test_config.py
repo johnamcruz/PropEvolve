@@ -13,12 +13,14 @@ from tests.recipe_fixtures import (
 
 from propevolve.config import (
     BALANCE_CURRICULUM_FROZEN_PATHS,
+    DEFAULT_CONFIG_PATH,
     RECOVERY_CURRICULUM_FROZEN_PATHS,
     REGIME_SELECTIVITY_FROZEN_IDENTITY_PATHS,
     REGIME_SELECTIVITY_SEMANTICS_REVISION_PATHS,
     TRAINING_POLICY_HEALTH_FROZEN_PATH,
     agent_runtime_settings,
     load_experiment_config,
+    materialize_effective_config,
 )
 from propevolve.balance_aware_regime_selectivity import (
     ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
@@ -107,6 +109,67 @@ def _recovery_curriculum_payload() -> dict:
         RECOVERY_CURRICULUM_FROZEN_PATHS
     )
     return payload
+
+
+def test_effective_config_materialization_is_single_and_idempotent() -> None:
+    source = {
+        "challenge": {},
+        "agent": {},
+        "training": {"epsilon_start": 0.2, "epsilon_end": 0.05},
+    }
+
+    first = materialize_effective_config(source)
+    second = materialize_effective_config(first)
+
+    assert first == second
+    assert source == {
+        "challenge": {},
+        "agent": {},
+        "training": {"epsilon_start": 0.2, "epsilon_end": 0.05},
+    }
+    assert first["runtime"] == json.loads(DEFAULT_CONFIG_PATH.read_text())[
+        "values"
+    ]["runtime"]
+    assert first["training"]["regime_wait_sequence_fraction"] == 0.0
+    assert first["training"]["management_epsilon_start"] == 0.2
+    assert first["agent"]["target_update_mode"] == "hard"
+
+
+def test_effective_config_defaults_are_loaded_from_json(
+    tmp_path: Path,
+) -> None:
+    defaults = json.loads(DEFAULT_CONFIG_PATH.read_text())
+    defaults["values"]["runtime"]["compile_mode"] = "reduce-overhead"
+    defaults["values"]["training"]["minimum_environment_steps"] = 17
+    defaults_path = tmp_path / "arbitrary-default-settings-name.json"
+    defaults_path.write_text(json.dumps(defaults))
+
+    effective = materialize_effective_config(
+        {
+            "output": "runs/example",
+            "training": {
+                "epsilon_start": 0.2,
+                "epsilon_end": 0.05,
+                "minimum_environment_steps": 99,
+            },
+        },
+        defaults_path=defaults_path,
+    )
+
+    assert effective["runtime"]["compile_mode"] == "reduce-overhead"
+    assert effective["training"]["minimum_environment_steps"] == 99
+    assert effective["training"]["management_epsilon_start"] == 0.2
+    assert effective["_archive_output"] == "runs/example"
+
+
+def test_effective_config_rejects_invalid_default_document(
+    tmp_path: Path,
+) -> None:
+    defaults_path = tmp_path / "defaults.json"
+    defaults_path.write_text(json.dumps({"schema": "wrong", "values": {}}))
+
+    with pytest.raises(ValueError, match="default config schema"):
+        materialize_effective_config({}, defaults_path=defaults_path)
 
 
 def _balance_curriculum_payload() -> dict:

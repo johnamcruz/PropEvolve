@@ -26,6 +26,7 @@ from propevolve.agent import (
     chop_specific_wait_margin_losses,
 )
 from propevolve.decision import Action
+from propevolve.config import materialize_effective_config
 from propevolve.replay import Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
@@ -3465,11 +3466,11 @@ def test_active_selectivity_is_plain_in_candidate_contract_and_resume_identity(
     ticker_root = cache_root / "NQ"
     ticker_root.mkdir(parents=True)
     (ticker_root / "manifest.json").write_text("{}")
-    config = {
+    config = materialize_effective_config({
         "_root": str(tmp_path),
         "tickers": ["NQ"],
         "regime_selectivity": specification,
-    }
+    })
     baseline = _training_resume_identity(config, cache_root, ())
     selectivity_path = Path(__file__).parents[1] / "src" / "propevolve" / (
         "balance_aware_regime_selectivity.py"
@@ -3506,7 +3507,10 @@ def test_training_resume_identity_binds_runtime_semantic_dependencies(
     ticker_root = cache_root / "NQ"
     ticker_root.mkdir(parents=True)
     (ticker_root / "manifest.json").write_text("{}")
-    config = {"_root": str(tmp_path), "tickers": ["NQ"]}
+    config = materialize_effective_config({
+        "_root": str(tmp_path),
+        "tickers": ["NQ"],
+    })
     baseline = _training_resume_identity(config, cache_root, ())
     dependency = (
         Path(__file__).parents[1] / "src" / "propevolve" / relative_dependency

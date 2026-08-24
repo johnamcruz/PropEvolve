@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import date
 import hashlib
 import json
@@ -10,15 +11,172 @@ import os
 from pathlib import Path
 
 
-DEFAULT_RUNTIME = {
-    "mixed_precision": "off",
-    "compile_model": False,
-    "compile_backend": "inductor",
-    "compile_mode": "default",
-    "mps_prefer_metal": False,
-    "mps_fast_math": False,
-    "benchmark_max_relative_loss_drift": 0.05,
-}
+DEFAULT_CONFIG_SCHEMA = "propevolve_effective_defaults_v1"
+_REPOSITORY_DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "defaults.json"
+)
+_PACKAGED_DEFAULT_CONFIG_PATH = Path(__file__).with_name("defaults.json")
+DEFAULT_CONFIG_PATH = (
+    _REPOSITORY_DEFAULT_CONFIG_PATH
+    if _REPOSITORY_DEFAULT_CONFIG_PATH.is_file()
+    else _PACKAGED_DEFAULT_CONFIG_PATH
+)
+_MISSING = object()
+
+
+def _load_default_document(path: Path) -> dict:
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load default config {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("default config document must be a mapping")
+    if document.get("schema") != DEFAULT_CONFIG_SCHEMA:
+        raise ValueError(
+            "default config schema must be "
+            f"{DEFAULT_CONFIG_SCHEMA!r}"
+        )
+    for field in (
+        "values",
+        "object_defaults",
+        "array_item_defaults",
+        "array_item_variant_defaults",
+    ):
+        if not isinstance(document.get(field, {}), dict):
+            raise ValueError(f"default config {field} must be a mapping")
+    if "values" not in document:
+        raise ValueError("default config values must be a mapping")
+    return copy.deepcopy(document)
+
+
+def _merge_config(base: dict, override: dict) -> dict:
+    """Recursively overlay a run recipe on its JSON-owned defaults."""
+    merged = copy.deepcopy(base)
+    for name, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(name), dict):
+            merged[name] = _merge_config(merged[name], value)
+        else:
+            merged[name] = copy.deepcopy(value)
+    return merged
+
+
+def _lookup_config_reference(root: dict, dotted_path: str) -> object:
+    value: object = root
+    for part in dotted_path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return _MISSING
+        value = value[part]
+    return value
+
+
+def _apply_default_templates(effective: dict, document: dict) -> dict:
+    """Apply JSON-declared defaults to activated objects and list items."""
+    for dotted_path, defaults in document.get("object_defaults", {}).items():
+        target = _lookup_config_reference(effective, dotted_path)
+        if target is not _MISSING and target is not None:
+            if not isinstance(target, dict) or not isinstance(defaults, dict):
+                raise ValueError(
+                    f"default object template {dotted_path!r} is invalid"
+                )
+            replacement = _merge_config(defaults, target)
+            parent, _, name = dotted_path.rpartition(".")
+            container = (
+                effective
+                if not parent
+                else _lookup_config_reference(effective, parent)
+            )
+            if not isinstance(container, dict):
+                raise ValueError(
+                    f"default object template path {dotted_path!r} is invalid"
+                )
+            container[name] = replacement
+    for dotted_path, defaults in document.get("array_item_defaults", {}).items():
+        target = _lookup_config_reference(effective, dotted_path)
+        if target is _MISSING:
+            continue
+        if not isinstance(target, list) or not isinstance(defaults, dict):
+            raise ValueError(
+                f"default array template {dotted_path!r} is invalid"
+            )
+        for index, item in enumerate(target):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"default array item {dotted_path}[{index}] is invalid"
+                )
+            target[index] = _merge_config(defaults, item)
+    for dotted_path, specification in document.get(
+        "array_item_variant_defaults", {}
+    ).items():
+        target = _lookup_config_reference(effective, dotted_path)
+        if target is _MISSING:
+            continue
+        if not isinstance(target, list) or not isinstance(specification, dict):
+            raise ValueError(
+                f"default variant template {dotted_path!r} is invalid"
+            )
+        discriminator = specification.get("discriminator")
+        variants = specification.get("variants")
+        if not isinstance(discriminator, str) or not isinstance(variants, dict):
+            raise ValueError(
+                f"default variant template {dotted_path!r} is invalid"
+            )
+        for index, item in enumerate(target):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"default array item {dotted_path}[{index}] is invalid"
+                )
+            defaults = variants.get(item.get(discriminator))
+            if defaults is not None:
+                if not isinstance(defaults, dict):
+                    raise ValueError(
+                        f"default variant {dotted_path}[{index}] is invalid"
+                    )
+                target[index] = _merge_config(defaults, item)
+    return effective
+
+
+def _resolve_config_references(value: object, root: dict) -> object:
+    """Resolve declarative JSON references; omit references to absent fields."""
+    if isinstance(value, dict) and set(value) == {"$ref"}:
+        dotted_path = value["$ref"]
+        if not isinstance(dotted_path, str) or not dotted_path:
+            raise ValueError("default config $ref must be a non-empty string")
+        referenced = _lookup_config_reference(root, dotted_path)
+        if referenced is _MISSING:
+            return _MISSING
+        return copy.deepcopy(referenced)
+    if isinstance(value, dict):
+        resolved = {}
+        for name, child in value.items():
+            child_value = _resolve_config_references(child, root)
+            if child_value is not _MISSING:
+                resolved[name] = child_value
+        return resolved
+    if isinstance(value, list):
+        resolved_items = [
+            _resolve_config_references(child, root) for child in value
+        ]
+        return [child for child in resolved_items if child is not _MISSING]
+    return copy.deepcopy(value)
+
+
+def materialize_effective_config(
+    payload: dict,
+    *,
+    defaults_path: str | Path = DEFAULT_CONFIG_PATH,
+) -> dict:
+    """Load JSON defaults, overlay one recipe, and resolve inherited values."""
+    if not isinstance(payload, dict):
+        raise TypeError("experiment config must be a mapping")
+    document = _load_default_document(Path(defaults_path))
+    effective = _merge_config(document["values"], payload)
+    effective = _apply_default_templates(effective, document)
+    resolved = _resolve_config_references(effective, effective)
+    if not isinstance(resolved, dict):
+        raise ValueError("effective experiment config must be a mapping")
+    return resolved
+
+
 AGENT_RUNTIME_FIELDS = (
     "mixed_precision",
     "compile_model",
@@ -300,7 +458,7 @@ def _require_recipe_fields(payload: dict) -> None:
             raise ValueError(f"{section} recipe is missing fields {missing}")
     training = payload["training"]
     if (
-        training.get("budget_mode", "environment_steps")
+        training["budget_mode"]
         == "environment_steps"
         and "minimum_environment_steps" not in training
     ):
@@ -332,15 +490,16 @@ def _recipe_path_exists(payload: dict, path: str) -> bool:
     return True
 
 
-def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
+def _validate_entry_supervision(
+    payload: dict,
+    challenge: dict,
+    *,
+    entry_schedule_explicit: bool | None = None,
+) -> None:
     """Validate the fully frozen, training-only post-launch action contract."""
     specification = payload.get("entry_supervision")
     if specification is None:
         return
-    if isinstance(specification, dict):
-        # Preserve the frozen unweighted v8 negative control while every new
-        # recipe declares its balancing contract explicitly.
-        specification.setdefault("action_class_balance", None)
     required = {
         "schema",
         "training_only",
@@ -450,13 +609,13 @@ def _validate_entry_supervision(payload: dict, challenge: dict) -> None:
         )
     entry_schedule_field = "entry_supervision_autonomy_start_fraction"
     entry_schedule_path = f"training.{entry_schedule_field}"
-    explicitly_declared_entry_schedule = entry_schedule_field in training
+    explicitly_declared_entry_schedule = (
+        entry_schedule_field in training
+        if entry_schedule_explicit is None
+        else entry_schedule_explicit
+    )
     teacher_autonomy_start_fraction = float(
         training["teacher_autonomy_start_fraction"]
-    )
-    training.setdefault(
-        entry_schedule_field,
-        teacher_autonomy_start_fraction,
     )
     entry_autonomy_start_fraction = training[entry_schedule_field]
     if (
@@ -574,7 +733,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
         start["session_pnl"],
         supervision["loss_weight"],
         supervision["temperature"],
-        supervision.get("action_margin", 0.0),
+        supervision["action_margin"],
     )
     if (
         any(
@@ -598,7 +757,7 @@ def _validate_recovery_curriculum(payload: dict, challenge: dict) -> None:
     if (
         not 0.0 < float(supervision["loss_weight"]) <= 1.0
         or float(supervision["temperature"]) <= 0.0
-        or float(supervision.get("action_margin", 0.0)) < 0.0
+        or float(supervision["action_margin"]) < 0.0
         or int(supervision["store_capacity"]) < 1
         or int(supervision["target_every_episodes"]) < 1
     ):
@@ -1085,21 +1244,21 @@ def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
 
 def load_experiment_config(path: str | Path) -> dict:
     path = Path(path).resolve(strict=True)
-    payload = json.loads(path.read_text())
+    declared = json.loads(path.read_text())
+    explicitly_declared_entry_reduction = (
+        "entry_action_loss_reduction" in declared.get("agent", {})
+    )
+    explicitly_declared_entry_schedule = (
+        "entry_supervision_autonomy_start_fraction"
+        in declared.get("training", {})
+    )
+    explicitly_declared_minimum_environment_steps = (
+        "minimum_environment_steps" in declared.get("training", {})
+    )
+    payload = materialize_effective_config(declared)
     if payload.get("schema") != "propevolve_historical_training_v1":
         raise ValueError("unsupported PropEvolve experiment schema")
     root = _workspace_root(payload, config_path=path)
-    # Schema-v1 recipes created before runtime tuning preserve their original
-    # eager FP32 behavior. Current repository recipes serialize these fields.
-    payload.setdefault("runtime", dict(DEFAULT_RUNTIME))
-    if isinstance(payload.get("training"), dict):
-        payload["training"].setdefault("prefetch_batches", 0)
-    if isinstance(payload.get("agent"), dict):
-        # Schema-v1 recipes predate gradual target-network updates. Preserve
-        # their exact hard-sync behavior while allowing new recipes to declare
-        # the safer update contract explicitly.
-        payload["agent"].setdefault("target_update_mode", "hard")
-        payload["agent"].setdefault("target_soft_tau", 1.0)
     _require_recipe_fields(payload)
     try:
         from .observation import TradeManagementObservationSpec
@@ -1125,13 +1284,6 @@ def load_experiment_config(path: str | Path) -> dict:
         if set(values) != set(tickers) or any(float(value) <= 0 for value in values.values()):
             raise ValueError(f"{field} must positively cover the exact ticker population")
     challenge = payload["challenge"]
-    # Schema-v1 receipts predate configurable reward shaping. Normalize their
-    # behavior explicitly while new recipes serialize every setting in JSON.
-    challenge.setdefault("mll_proximity_penalty_coefficient", 0.0)
-    challenge.setdefault("lead_giveback_penalty_coefficient", 0.0)
-    challenge.setdefault("large_win_threshold_r", 2.0)
-    challenge.setdefault("large_win_bonus_coefficient", 0.0)
-    challenge.setdefault("ratchet_lock_floor_r", 0.0)
     if challenge["max_position_size"] != 1:
         raise ValueError("the initial PropEvolve recipe supports one contract")
     if not isinstance(challenge["trailing_mll_lock"], bool):
@@ -1164,7 +1316,11 @@ def load_experiment_config(path: str | Path) -> dict:
         <= float(challenge["ratchet_giveback_r"])
     ):
         raise ValueError("trade risk and ratchet fields are invalid")
-    _validate_entry_supervision(payload, challenge)
+    _validate_entry_supervision(
+        payload,
+        challenge,
+        entry_schedule_explicit=explicitly_declared_entry_schedule,
+    )
     _validate_recovery_curriculum(payload, challenge)
     _validate_balance_curriculum(payload, challenge)
     cache = payload["cache"]
@@ -1173,16 +1329,6 @@ def load_experiment_config(path: str | Path) -> dict:
     if not str(cache["encoder_identity_sha256"]).strip():
         raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
-    explicitly_declared_entry_reduction = (
-        "entry_action_loss_reduction" in agent
-    )
-    agent.setdefault("n_step_return", 1)
-    agent.setdefault("recurrent_burn_in", 0)
-    agent.setdefault("policy_retention_loss_weight", 0.0)
-    agent.setdefault(
-        "entry_action_loss_reduction", "population_weighted_mean_v1"
-    )
-    agent.setdefault("entry_action_margin", 0.0)
     if agent["entry_action_loss_reduction"] not in ENTRY_ACTION_LOSS_REDUCTIONS:
         raise ValueError("entry action loss reduction is invalid")
     if (
@@ -1239,17 +1385,7 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("runtime benchmark loss drift must be between zero and one")
     training = payload["training"]
-    training.setdefault("short_circuit", None)
-    training.setdefault("terminal_sequence_fraction", 0.0)
-    training.setdefault("safety_sequence_fraction", 0.0)
-    training.setdefault("entry_opportunity_sequence_fraction", 0.0)
-    training.setdefault("regime_wait_sequence_fraction", 0.0)
-    training.setdefault("regime_wait_sequence_update_period", 0)
-    training.setdefault("management_epsilon_start", training["epsilon_start"])
-    training.setdefault("management_epsilon_end", training["epsilon_end"])
-    training.setdefault("validation_no_trade_patience_episodes", 0)
-    training.setdefault("greedy_diagnostic_interval_steps", 256)
-    training_budget_mode = training.get("budget_mode", "environment_steps")
+    training_budget_mode = training["budget_mode"]
     if training_budget_mode not in {"environment_steps", "episodes"}:
         raise ValueError("training budget mode is invalid")
     if (
@@ -1269,7 +1405,7 @@ def load_experiment_config(path: str | Path) -> dict:
             or minimum_environment_steps < 1
         ):
             raise ValueError("training environment-step budget is invalid")
-    elif "minimum_environment_steps" in training:
+    elif explicitly_declared_minimum_environment_steps:
         raise ValueError(
             "episode training budget cannot declare minimum environment steps"
         )
@@ -1479,17 +1615,7 @@ def load_experiment_config(path: str | Path) -> dict:
         for index, item in enumerate(teachers):
             if not isinstance(item, dict):
                 raise ValueError("training-only teacher contract is invalid")
-            item.setdefault("entry_search_loss_weight", 0.0)
             kind = item.get("kind")
-            if kind == "expansion":
-                item.setdefault("entry_search_objective", "raw_probability")
-                item.setdefault("entry_search_long_center", 0.5)
-                item.setdefault("entry_search_short_center", 0.5)
-                item.setdefault("entry_search_probability_epsilon", 1e-6)
-                item.setdefault("entry_search_teacher_temperature", 1.0)
-                item.setdefault("entry_search_q_temperature", 1.0)
-                item.setdefault("entry_search_center_receipt", "")
-                item.setdefault("entry_search_center_receipt_sha256", "")
             required_fields = {
                 "kind", "cache_root", "channels", "loss_weight",
                 "entry_search_loss_weight",
@@ -1555,10 +1681,6 @@ def load_experiment_config(path: str | Path) -> dict:
                 )
             if float(item["entry_search_loss_weight"]) > 0 and index != 0:
                 raise ValueError("entry-guiding Expansion teacher must be first")
-        training.setdefault("teacher_loss_end_scale", 1.0)
-        training.setdefault("teacher_guidance_dropout_start", 0.0)
-        training.setdefault("teacher_guidance_dropout_end", 0.0)
-        training.setdefault("teacher_autonomy_start_fraction", 1.0)
         if (
             isinstance(training["teacher_loss_end_scale"], bool)
             or not 0 <= float(training["teacher_loss_end_scale"]) <= 1
@@ -1868,14 +1990,14 @@ def load_experiment_config(path: str | Path) -> dict:
     reasoning = campaign.get("reasoning") or {}
     if reasoning.get("provider") not in {"codex", "manual"}:
         raise ValueError("campaign reasoning provider must be codex or manual")
-    proposer = reasoning.get("proposer", "standard")
+    proposer = reasoning["proposer"]
     if proposer not in {"standard", "gepa_reflective"}:
         raise ValueError(
             "campaign reasoning proposer must be standard or gepa_reflective"
         )
     reasoning["proposer"] = proposer
     campaign["reasoning"] = reasoning
-    near_blow_loss_fraction = campaign.get("near_blow_loss_fraction", 0.75)
+    near_blow_loss_fraction = campaign["near_blow_loss_fraction"]
     if (
         isinstance(near_blow_loss_fraction, bool)
         or not isinstance(near_blow_loss_fraction, (int, float))
@@ -1896,29 +2018,6 @@ def load_experiment_config(path: str | Path) -> dict:
         ):
             raise ValueError("campaign selection requirement is invalid")
     budget_stages = campaign.get("budget_stages")
-    if budget_stages is None:
-        if training_budget_mode == "environment_steps":
-            budget_stages = [{
-                "name": "historical_candidate",
-                "minimum_environment_steps": int(
-                    training["minimum_environment_steps"]
-                ),
-                "selection_requirements": requirements,
-            }]
-        else:
-            stage_short_circuit = training.get("short_circuit")
-            stage = {
-                "name": "historical_candidate",
-                "budget_mode": "episodes",
-                "training_episodes": int(training["episodes"]),
-                "validation_episodes": int(training["validation_episodes"]),
-                "selection_requirements": requirements,
-            }
-            if stage_short_circuit:
-                stage["short_circuit_minimum_episodes"] = int(
-                    stage_short_circuit["minimum_completed_episodes"]
-                )
-            budget_stages = [stage]
     if not isinstance(budget_stages, list) or not budget_stages:
         raise ValueError("campaign budget stages must be a nonempty array")
     names = []
@@ -1943,7 +2042,7 @@ def load_experiment_config(path: str | Path) -> dict:
         ):
             raise ValueError("campaign budget stage contract is invalid")
         name = str(stage["name"])
-        budget_mode = stage.get("budget_mode", "environment_steps")
+        budget_mode = stage["budget_mode"]
         stage_requirements = stage["selection_requirements"]
         if (
             not name
@@ -2064,17 +2163,17 @@ def load_experiment_config(path: str | Path) -> dict:
                 or not isinstance(max_parallel, int)
                 or max_parallel < 1
                 or max_parallel > len(seeds)
-                or stage.get("allow_revisions", True) is not False
+                or stage["allow_revisions"] is not False
             ):
                 raise ValueError("campaign multi-seed stage contract is invalid")
             stage["seeds"] = tuple(seeds)
         elif max_parallel is not None:
             raise ValueError("campaign max_parallel requires seeds")
-        if not isinstance(stage.get("allow_revisions", True), bool):
+        if not isinstance(stage["allow_revisions"], bool):
             raise ValueError("campaign budget stage revision policy is invalid")
-        if not isinstance(stage.get("warm_start_parent", False), bool):
+        if not isinstance(stage["warm_start_parent"], bool):
             raise ValueError("campaign warm-start policy is invalid")
-        curriculum_override = stage.get("curriculum_override", {})
+        curriculum_override = stage["curriculum_override"]
         if not isinstance(curriculum_override, dict) or any(
             not str(path).strip() for path in curriculum_override
         ):
@@ -2136,9 +2235,7 @@ def load_experiment_config(path: str | Path) -> dict:
                 <= float(bounds["maximum"])
             ):
                 raise ValueError("campaign curriculum override exceeds its bounds")
-        revision_paths = stage.get(
-            "revision_paths", payload["evolution"]["allowed_revision_paths"]
-        )
+        revision_paths = stage["revision_paths"]
         if (
             not isinstance(revision_paths, (list, tuple))
             or len(set(revision_paths)) != len(revision_paths)
@@ -2158,7 +2255,7 @@ def load_experiment_config(path: str | Path) -> dict:
                 or not isinstance(requirement.get("value"), (int, float))
             ):
                 raise ValueError("campaign budget stage requirement is invalid")
-        parent_requirements = stage.get("parent_improvement_requirements", [])
+        parent_requirements = stage["parent_improvement_requirements"]
         if not isinstance(parent_requirements, list):
             raise ValueError("campaign parent-improvement requirements must be an array")
         for requirement in parent_requirements:
@@ -2174,9 +2271,9 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError(
                     "campaign parent-improvement requirement is invalid"
                 )
-        parent_any_requirements = stage.get(
-            "parent_improvement_any_requirements", []
-        )
+        parent_any_requirements = stage[
+            "parent_improvement_any_requirements"
+        ]
         if not isinstance(parent_any_requirements, list) or (
             parent_any_requirements and len(parent_any_requirements) < 2
         ):
@@ -2197,9 +2294,9 @@ def load_experiment_config(path: str | Path) -> dict:
                 raise ValueError(
                     "campaign any-parent-improvement requirement is invalid"
                 )
-        parent_retention_requirements = stage.get(
-            "parent_retention_requirements", []
-        )
+        parent_retention_requirements = stage[
+            "parent_retention_requirements"
+        ]
         if not isinstance(parent_retention_requirements, list):
             raise ValueError(
                 "campaign parent-retention requirements must be a list"
@@ -2237,13 +2334,13 @@ def load_experiment_config(path: str | Path) -> dict:
     if (
         base_parent is None
         and evolution["parent_candidate_ids"]
-        and bool(budget_stages[0].get("warm_start_parent", False))
+        and bool(budget_stages[0]["warm_start_parent"])
     ):
         raise ValueError(
             "first-stage external warm start requires a base parent contract"
         )
     if base_parent is not None and not bool(
-        budget_stages[0].get("warm_start_parent", False)
+        budget_stages[0]["warm_start_parent"]
     ):
         raise ValueError(
             "external base parent requires first-stage warm start"
@@ -2281,7 +2378,7 @@ def load_experiment_config(path: str | Path) -> dict:
                 or rule["direction"] not in {"minimize", "maximize"}
             ):
                 raise ValueError("campaign finalization ranking is invalid")
-    diagnostics = campaign.get("diagnostic_targets", [])
+    diagnostics = campaign["diagnostic_targets"]
     if not isinstance(diagnostics, list):
         raise ValueError("campaign diagnostic targets must be an array")
     for target in diagnostics:
@@ -2293,7 +2390,7 @@ def load_experiment_config(path: str | Path) -> dict:
             or not isinstance(target.get("value"), (int, float))
         ):
             raise ValueError("campaign diagnostic target is invalid")
-    niches = campaign.get("niches") or ()
+    niches = campaign["niches"]
     if not isinstance(niches, list) or not niches:
         raise ValueError("campaign niches must be nonempty")
     payload["campaign"] = campaign

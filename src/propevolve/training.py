@@ -32,9 +32,9 @@ from .balance_aware_regime_selectivity import (
 )
 from .cache import load_market_series
 from .config import (
-    DEFAULT_RUNTIME,
     agent_runtime_settings,
     configure_runtime_environment,
+    materialize_effective_config,
 )
 from .decision import Action, PositionSide
 from .environment import (
@@ -2917,7 +2917,8 @@ class HistoricalCandidateRunner:
         parent_candidate_ids: tuple[str, ...],
         hypothesis: str,
     ):
-        configure_runtime_environment(config.get("runtime", DEFAULT_RUNTIME))
+        config = materialize_effective_config(config)
+        configure_runtime_environment(config["runtime"])
         from .agent import RecurrentC51Agent
 
         root = Path(config["_root"])
@@ -2954,7 +2955,7 @@ class HistoricalCandidateRunner:
             end=temporal["validation_end"],
             sealed_start=temporal["sealed_start"],
         )
-        teacher_specs = tuple(config.get("teachers", ()))
+        teacher_specs = tuple(config["teachers"])
         teacher_targets = None
         if teacher_specs:
             from .teachers import load_teacher_targets
@@ -2964,7 +2965,7 @@ class HistoricalCandidateRunner:
                 root=root,
                 markets=train_markets,
             )
-        entry_supervision_spec = config.get("entry_supervision")
+        entry_supervision_spec = config["entry_supervision"]
         entry_action_targets = None
         entry_action_balance_receipt = None
         if entry_supervision_spec is not None:
@@ -2996,14 +2997,10 @@ class HistoricalCandidateRunner:
                 )
         challenge = ChallengeSpec(**config["challenge"])
         observation_spec = TradeManagementObservationSpec.from_config(
-            config.get("observation")
+            config["observation"]
         )
         near_blow_loss_threshold = (
-            float(
-                config.get("campaign", {}).get(
-                    "near_blow_loss_fraction", 0.75
-                )
-            )
+            float(config["campaign"]["near_blow_loss_fraction"])
             * challenge.max_loss
         )
         training_config = config["training"]
@@ -3012,7 +3009,7 @@ class HistoricalCandidateRunner:
             FullDataEpisodeCoverageSpec.from_config(
                 training_config["episode_coverage"]
             )
-            if training_config.get("episode_coverage") is not None
+            if training_config["episode_coverage"] is not None
             else None
         )
         train_environment = HistoricalChallengeEnv(
@@ -3039,11 +3036,11 @@ class HistoricalCandidateRunner:
             raise ValueError("training and selection observation widths differ")
         agent_settings = dict(config["agent"])
         agent_settings.update(
-            agent_runtime_settings(config.get("runtime", DEFAULT_RUNTIME))
+            agent_runtime_settings(config["runtime"])
         )
         if teacher_targets is not None:
             agent_settings.update(agent_teacher_settings(teacher_specs))
-        regime_selectivity_spec = config.get("regime_selectivity")
+        regime_selectivity_spec = config["regime_selectivity"]
         if regime_selectivity_spec is not None:
             from .teachers.expansion import verify_expansion_entry_center_receipt
 
@@ -3092,7 +3089,7 @@ class HistoricalCandidateRunner:
             output / "balance-validation-diagnostics.jsonl"
         )
         resume_identity = _training_resume_identity(config, cache_root, teacher_specs)
-        active_short_circuit = training_config.get("short_circuit")
+        active_short_circuit = training_config["short_circuit"]
         policy_health_config = (
             active_short_circuit.get("policy_health")
             if active_short_circuit is not None
@@ -3192,7 +3189,7 @@ class HistoricalCandidateRunner:
                 or (output / "retained-pass-policies").exists()
             ):
                 raise ValueError("training artifacts exist without resumable recovery")
-            warm_start = config.get("_warm_start_model")
+            warm_start = config["_warm_start_model"]
             if warm_start is None:
                 agent = RecurrentC51Agent(
                     observation_dim,
@@ -3224,11 +3221,11 @@ class HistoricalCandidateRunner:
                 ):
                     raise ValueError("warm-start causal contract drifted")
         recovery_curriculum, recovery_stress_episodes = (
-            _recovery_curriculum_from_config(config.get("recovery_curriculum"))
+            _recovery_curriculum_from_config(config["recovery_curriculum"])
         )
         balance_curriculum, balance_validation_episodes = (
             _balance_curriculum_from_config(
-                config.get("balance_curriculum"),
+                config["balance_curriculum"],
                 max_loss=challenge.max_loss,
             )
         )
@@ -3246,7 +3243,7 @@ class HistoricalCandidateRunner:
         recovery_value_environment = None
         recovery_value_store = None
         if recovery_curriculum is not None:
-            warm_start = config.get("_warm_start_model")
+            warm_start = config["_warm_start_model"]
             if warm_start is None:
                 raise ValueError(
                     "Stage-2 recovery requires the frozen V21 parent policy"
@@ -3293,16 +3290,16 @@ class HistoricalCandidateRunner:
                 training_config["terminal_sequence_fraction"]
             ),
             safety_sequence_fraction=float(
-                training_config.get("safety_sequence_fraction", 0.0)
+                training_config["safety_sequence_fraction"]
             ),
             entry_opportunity_sequence_fraction=float(
-                training_config.get("entry_opportunity_sequence_fraction", 0.0)
+                training_config["entry_opportunity_sequence_fraction"]
             ),
             regime_wait_sequence_fraction=float(
-                training_config.get("regime_wait_sequence_fraction", 0.0)
+                training_config["regime_wait_sequence_fraction"]
             ),
             regime_wait_sequence_update_period=int(
-                training_config.get("regime_wait_sequence_update_period", 0)
+                training_config["regime_wait_sequence_update_period"]
             ),
             **_regime_selectivity_replay_settings(regime_selectivity_spec),
             recurrent_burn_in=int(agent.recurrent_burn_in),
@@ -3372,20 +3369,16 @@ class HistoricalCandidateRunner:
                     training_config["terminal_sequence_fraction"]
                 ),
                 safety_sequence_fraction=float(
-                    training_config.get("safety_sequence_fraction", 0.0)
+                    training_config["safety_sequence_fraction"]
                 ),
                 entry_opportunity_sequence_fraction=float(
-                    training_config.get(
-                        "entry_opportunity_sequence_fraction", 0.0
-                    )
+                    training_config["entry_opportunity_sequence_fraction"]
                 ),
                 regime_wait_sequence_fraction=float(
-                    training_config.get("regime_wait_sequence_fraction", 0.0)
+                    training_config["regime_wait_sequence_fraction"]
                 ),
                 regime_wait_sequence_update_period=int(
-                    training_config.get(
-                        "regime_wait_sequence_update_period", 0
-                    )
+                    training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
                     regime_selectivity_spec
@@ -3433,20 +3426,16 @@ class HistoricalCandidateRunner:
                     training_config["terminal_sequence_fraction"]
                 ),
                 safety_sequence_fraction=float(
-                    training_config.get("safety_sequence_fraction", 0.0)
+                    training_config["safety_sequence_fraction"]
                 ),
                 entry_opportunity_sequence_fraction=float(
-                    training_config.get(
-                        "entry_opportunity_sequence_fraction", 0.0
-                    )
+                    training_config["entry_opportunity_sequence_fraction"]
                 ),
                 regime_wait_sequence_fraction=float(
-                    training_config.get("regime_wait_sequence_fraction", 0.0)
+                    training_config["regime_wait_sequence_fraction"]
                 ),
                 regime_wait_sequence_update_period=int(
-                    training_config.get(
-                        "regime_wait_sequence_update_period", 0
-                    )
+                    training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
                     regime_selectivity_spec
@@ -3495,20 +3484,16 @@ class HistoricalCandidateRunner:
                     training_config["terminal_sequence_fraction"]
                 ),
                 safety_sequence_fraction=float(
-                    training_config.get("safety_sequence_fraction", 0.0)
+                    training_config["safety_sequence_fraction"]
                 ),
                 entry_opportunity_sequence_fraction=float(
-                    training_config.get(
-                        "entry_opportunity_sequence_fraction", 0.0
-                    )
+                    training_config["entry_opportunity_sequence_fraction"]
                 ),
                 regime_wait_sequence_fraction=float(
-                    training_config.get("regime_wait_sequence_fraction", 0.0)
+                    training_config["regime_wait_sequence_fraction"]
                 ),
                 regime_wait_sequence_update_period=int(
-                    training_config.get(
-                        "regime_wait_sequence_update_period", 0
-                    )
+                    training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
                     regime_selectivity_spec
@@ -3670,31 +3655,25 @@ class HistoricalCandidateRunner:
             train_environment,
             episodes=int(training_config["episodes"]),
             minimum_environment_steps=int(
-                training_config.get("minimum_environment_steps", 1)
+                training_config["minimum_environment_steps"]
             ),
-            budget_mode=str(
-                training_config.get("budget_mode", "environment_steps")
-            ),
+            budget_mode=str(training_config["budget_mode"]),
             replay=replay,
             warmup_episodes=int(training_config["warmup_episodes"]),
             updates_per_episode=int(training_config["updates_per_episode"]),
             batch_sequences=int(training_config["batch_sequences"]),
-            prefetch_batches=int(training_config.get("prefetch_batches", 0)),
+            prefetch_batches=int(training_config["prefetch_batches"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
             greedy_diagnostic_interval_steps=int(
-                training_config.get("greedy_diagnostic_interval_steps", 256)
+                training_config["greedy_diagnostic_interval_steps"]
             ),
             epsilon_start=float(training_config["epsilon_start"]),
             epsilon_end=float(training_config["epsilon_end"]),
             management_epsilon_start=float(
-                training_config.get(
-                    "management_epsilon_start", training_config["epsilon_start"]
-                )
+                training_config["management_epsilon_start"]
             ),
             management_epsilon_end=float(
-                training_config.get(
-                    "management_epsilon_end", training_config["epsilon_end"]
-                )
+                training_config["management_epsilon_end"]
             ),
             episode_tickers=tuple(config["tickers"]),
             ticker_seed=seed,
@@ -3726,30 +3705,25 @@ class HistoricalCandidateRunner:
                 else None
             ),
             teacher_loss_end_scale=float(
-                training_config.get("teacher_loss_end_scale", 1.0)
+                training_config["teacher_loss_end_scale"]
             ),
             teacher_guidance_dropout_start=float(
-                training_config.get("teacher_guidance_dropout_start", 0.0)
+                training_config["teacher_guidance_dropout_start"]
             ),
             teacher_guidance_dropout_end=float(
-                training_config.get("teacher_guidance_dropout_end", 0.0)
+                training_config["teacher_guidance_dropout_end"]
             ),
             teacher_autonomy_start_fraction=float(
-                training_config.get("teacher_autonomy_start_fraction", 1.0)
+                training_config["teacher_autonomy_start_fraction"]
             ),
             entry_supervision_autonomy_start_fraction=float(
-                training_config.get(
-                    "entry_supervision_autonomy_start_fraction",
-                    training_config.get("teacher_autonomy_start_fraction", 1.0),
-                )
+                training_config["entry_supervision_autonomy_start_fraction"]
             ),
             short_circuit_minimum_environment_steps=(
                 int(active_short_circuit["minimum_environment_steps"])
                 if (
                     active_short_circuit is not None
-                    and training_config.get(
-                        "budget_mode", "environment_steps"
-                    ) == "environment_steps"
+                    and training_config["budget_mode"] == "environment_steps"
                 )
                 else None
             ),
@@ -3761,9 +3735,7 @@ class HistoricalCandidateRunner:
                 )
                 if (
                     active_short_circuit is not None
-                    and training_config.get(
-                        "budget_mode", "environment_steps"
-                    ) == "episodes"
+                    and training_config["budget_mode"] == "episodes"
                 )
                 else None
             ),
@@ -3921,15 +3893,13 @@ class HistoricalCandidateRunner:
                 recurrent_horizon=int(training_config["recurrent_horizon"]),
                 near_blow_loss_threshold=near_blow_loss_threshold,
                 stop_on_first_blow=bool(
-                    config.get("_validation_stop_on_blow", False)
+                    config["_validation_stop_on_blow"]
                 ),
                 no_trade_patience_episodes=int(
-                    training_config.get(
-                        "validation_no_trade_patience_episodes", 0
-                    )
+                    training_config["validation_no_trade_patience_episodes"]
                 ),
                 greedy_diagnostic_interval_steps=int(
-                    training_config.get("greedy_diagnostic_interval_steps", 256)
+                    training_config["greedy_diagnostic_interval_steps"]
                 ),
                 episode_diagnostic_callback=lambda payload: _append_jsonl(
                     validation_diagnostics_path, payload
@@ -3959,9 +3929,7 @@ class HistoricalCandidateRunner:
                     recurrent_horizon=int(training_config["recurrent_horizon"]),
                     near_blow_loss_threshold=near_blow_loss_threshold,
                     greedy_diagnostic_interval_steps=int(
-                        training_config.get(
-                            "greedy_diagnostic_interval_steps", 256
-                        )
+                        training_config["greedy_diagnostic_interval_steps"]
                     ),
                     episode_diagnostic_callback=lambda payload: _append_jsonl(
                         balance_validation_diagnostics_path, payload
@@ -3996,7 +3964,7 @@ class HistoricalCandidateRunner:
             "sealed_holdout_touched": False,
             "warm_start_parent": (
                 None
-                if config.get("_warm_start_model") is None
+                if config["_warm_start_model"] is None
                 else {
                     "candidate_id": config["_warm_start_model"]["candidate_id"],
                     "model_sha256": config["_warm_start_model"]["model_sha256"],
@@ -4081,10 +4049,10 @@ class HistoricalCandidateRunner:
                 }
             ),
             "recovery_curriculum": _plain_contract_value(
-                config.get("recovery_curriculum")
+                config["recovery_curriculum"]
             ),
             "balance_curriculum": _plain_contract_value(
-                config.get("balance_curriculum")
+                config["balance_curriculum"]
             ),
             "balance_validation_diagnostics": (
                 None
@@ -4099,9 +4067,7 @@ class HistoricalCandidateRunner:
             ),
             "retained_pass_policy_restored": retained_policy_restored,
         }
-        archive_output = _resolve(
-            root, str(config.get("_archive_output", config["output"]))
-        )
+        archive_output = _resolve(root, str(config["_archive_output"]))
         archive = CandidateArchive(archive_output / "archive")
         recipe = {
             key: value for key, value in config.items() if not key.startswith("_")
@@ -4444,7 +4410,7 @@ def _training_resume_identity(
         sort_keys=True,
         separators=(",", ":"),
     ).encode())
-    if config.get("_warm_start_model") is not None:
+    if config["_warm_start_model"] is not None:
         digest.update(json.dumps(
             {
                 "candidate_id": config["_warm_start_model"]["candidate_id"],
