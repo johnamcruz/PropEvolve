@@ -153,7 +153,7 @@
     "episode_days": 30,
     "bars_per_day": 480,
     "max_position_size": 1,
-    "minimum_mll_headroom": 200,
+    "minimum_mll_headroom": 300,
     "trailing_mll_lock": true,
     "terminal_pass_reward": 250,
     "terminal_blow_reward": -1500,
@@ -282,7 +282,7 @@
   },
   "balance_curriculum": {
     "schedule_seed": 37,
-    "start_pnls": [-2000],
+    "start_pnls": [-1500],
     "validation_episodes": 200,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/v22-r14-unified-balance-best8-pass-replay-v1.pt",
