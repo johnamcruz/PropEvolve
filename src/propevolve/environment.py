@@ -251,7 +251,12 @@ class PropChallengeAccount:
 
     def outcome(self, equity_pnl: float | None = None) -> str | None:
         equity = self.realized_pnl if equity_pnl is None else float(equity_pnl)
-        if equity <= self.mll_floor_pnl:
+        if equity <= self.mll_floor_pnl or math.isclose(
+            equity,
+            self.mll_floor_pnl,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
             return "blow"
         if equity >= self.profit_target:
             return "pass"

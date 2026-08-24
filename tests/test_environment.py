@@ -556,6 +556,17 @@ def test_recovery_stop_is_fee_inclusive_and_blows_at_the_mll_floor() -> None:
     assert stopped["recovery_status"] == "not_recovered"
 
 
+def test_account_treats_arithmetic_noise_at_the_mll_floor_as_a_blow() -> None:
+    account = PropChallengeAccount(
+        max_loss=3_000.0,
+        profit_target=6_000.0,
+        trailing_mll_lock=True,
+    )
+
+    assert account.outcome(-2_999.999999999968) == "blow"
+    assert account.outcome(-2_999.99) is None
+
+
 def test_recovery_stop_allows_realistic_gap_through_beyond_max_loss() -> None:
     market = _recovery_market(
         opens=(100.0, 100.0, 80.0, 80.0, 80.0, 80.0),
