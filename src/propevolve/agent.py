@@ -77,6 +77,10 @@ _ENTRY_ACTION_LOSS_REDUCTIONS = {
     "population_weighted_mean_v1",
     "equal_present_class_mean_v1",
 }
+_AUXILIARY_GRADIENT_CONFLICT_MODES = {
+    "none",
+    "pcgrad_safety_opportunity_v1",
+}
 _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "rows",
     "weighted_mass",
@@ -133,12 +137,126 @@ class PairedAPlusRankResult(NamedTuple):
     """Loss and additive evidence for matched economic Entry pairs."""
 
     loss: torch.Tensor
+    relative_loss: torch.Tensor
+    winner_loss: torch.Tensor
+    failure_loss: torch.Tensor
     active_groups: torch.Tensor
     pair_count: torch.Tensor
     pair_mass: torch.Tensor
     good_advantage_sum: torch.Tensor
     bad_advantage_sum: torch.Tensor
     group_metrics: dict[str, torch.Tensor]
+
+
+class GradientConflictBlend(NamedTuple):
+    """One primary gradient plus non-opposing auxiliary gradients."""
+
+    combined_gradients: tuple[torch.Tensor, ...]
+    projected_safety_gradients: tuple[torch.Tensor, ...]
+    projected_opportunity_gradients: tuple[torch.Tensor, ...]
+    pre_projection_cosine: float
+    post_projection_cosine: float
+    conflict_projected: bool
+
+
+def conflict_aware_gradient_blend(
+    *,
+    primary_gradients: Sequence[torch.Tensor],
+    safety_gradients: Sequence[torch.Tensor],
+    opportunity_gradients: Sequence[torch.Tensor],
+) -> GradientConflictBlend:
+    """Preserve primary learning while removing auxiliary gradient opposition."""
+    primary = tuple(primary_gradients)
+    safety = tuple(safety_gradients)
+    opportunity = tuple(opportunity_gradients)
+    if (
+        not primary
+        or len(primary) != len(safety)
+        or len(primary) != len(opportunity)
+        or any(
+            left.shape != middle.shape
+            or left.shape != right.shape
+            or left.device != middle.device
+            or left.device != right.device
+            or left.dtype != middle.dtype
+            or left.dtype != right.dtype
+            or not torch.is_floating_point(left)
+            for left, middle, right in zip(
+                primary, safety, opportunity, strict=True
+            )
+        )
+    ):
+        raise ValueError("gradient conflict blend contract is invalid")
+
+    safety_norm_sq = sum((gradient * gradient).sum() for gradient in safety)
+    opportunity_norm_sq = sum(
+        (gradient * gradient).sum() for gradient in opportunity
+    )
+    dot = sum(
+        (left * right).sum()
+        for left, right in zip(safety, opportunity, strict=True)
+    )
+    zero = dot.new_zeros(())
+    negative_dot = torch.minimum(dot, zero)
+    safety_coefficient = negative_dot / opportunity_norm_sq.clamp_min(
+        torch.finfo(dot.dtype).tiny
+    )
+    opportunity_coefficient = negative_dot / safety_norm_sq.clamp_min(
+        torch.finfo(dot.dtype).tiny
+    )
+    projected_safety = tuple(
+        left - safety_coefficient * right
+        for left, right in zip(safety, opportunity, strict=True)
+    )
+    projected_opportunity = tuple(
+        right - opportunity_coefficient * left
+        for left, right in zip(safety, opportunity, strict=True)
+    )
+    projected_dot = sum(
+        (left * right).sum()
+        for left, right in zip(
+            projected_safety, projected_opportunity, strict=True
+        )
+    )
+    projected_safety_norm_sq = sum(
+        (gradient * gradient).sum() for gradient in projected_safety
+    )
+    projected_opportunity_norm_sq = sum(
+        (gradient * gradient).sum() for gradient in projected_opportunity
+    )
+
+    def cosine(
+        numerator: torch.Tensor,
+        left_norm_sq: torch.Tensor,
+        right_norm_sq: torch.Tensor,
+    ) -> float:
+        denominator = (left_norm_sq * right_norm_sq).sqrt()
+        if float(denominator.detach()) == 0.0:
+            return 0.0
+        return float((numerator / denominator).detach())
+
+    return GradientConflictBlend(
+        combined_gradients=tuple(
+            base + safe + profitable
+            for base, safe, profitable in zip(
+                primary,
+                projected_safety,
+                projected_opportunity,
+                strict=True,
+            )
+        ),
+        projected_safety_gradients=projected_safety,
+        projected_opportunity_gradients=projected_opportunity,
+        pre_projection_cosine=cosine(
+            dot, safety_norm_sq, opportunity_norm_sq
+        ),
+        post_projection_cosine=cosine(
+            projected_dot,
+            projected_safety_norm_sq,
+            projected_opportunity_norm_sq,
+        ),
+        conflict_projected=bool((dot < 0.0).detach()),
+    )
 
 
 def resolve_device(device: str) -> torch.device:
@@ -518,8 +636,12 @@ def paired_a_plus_rank_loss(
         ) * side_active
         pair_count = pair_count + side_pair_count * side_active
         active_sides = active_sides + side_active
+    balanced_loss = balanced_side_loss_sum / active_sides.clamp_min(1.0)
     return PairedAPlusRankResult(
-        loss=balanced_side_loss_sum / active_sides.clamp_min(1.0),
+        loss=balanced_loss,
+        relative_loss=balanced_loss,
+        winner_loss=zero,
+        failure_loss=zero,
         active_groups=active_groups,
         pair_count=pair_count,
         pair_mass=pair_mass,
@@ -574,6 +696,18 @@ def paired_recurrent_a_plus_rank_loss(
     zero = flat_action_values.sum() * 0.0
     active_pair_ids = torch.unique(pair_ids[pair_ids >= 0]).tolist()
     side_losses: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_relative_losses: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_winner_losses: dict[int, list[torch.Tensor]] = {
+        int(Action.ENTER_LONG_1): [],
+        int(Action.ENTER_SHORT_1): [],
+    }
+    side_failure_losses: dict[int, list[torch.Tensor]] = {
         int(Action.ENTER_LONG_1): [],
         int(Action.ENTER_SHORT_1): [],
     }
@@ -650,10 +784,17 @@ def paired_recurrent_a_plus_rank_loss(
         failure_loss = nn.functional.softplus(
             float(action_margin) + bad_advantage
         )
+        weighted_winner_loss = (
+            float(winner_loss_weight) * winner_population_weight * winner_loss
+        )
+        weighted_failure_loss = failure_population_weight * failure_loss
+        side_relative_losses[side].append(relative_loss)
+        side_winner_losses[side].append(weighted_winner_loss)
+        side_failure_losses[side].append(weighted_failure_loss)
         side_losses[side].append(torch.stack((
             relative_loss,
-            float(winner_loss_weight) * winner_population_weight * winner_loss,
-            failure_population_weight * failure_loss,
+            weighted_winner_loss,
+            weighted_failure_loss,
         )).mean())
         good_advantages.append(good_advantage)
         bad_advantages.append(bad_advantage)
@@ -662,6 +803,9 @@ def paired_recurrent_a_plus_rank_loss(
         side_winner_population_weights[side].append(winner_population_weight)
         side_failure_population_weights[side].append(failure_population_weight)
     present_side_losses: list[torch.Tensor] = []
+    present_relative_losses: list[torch.Tensor] = []
+    present_winner_losses: list[torch.Tensor] = []
+    present_failure_losses: list[torch.Tensor] = []
     for side_name, side in (
         ("long", int(Action.ENTER_LONG_1)),
         ("short", int(Action.ENTER_SHORT_1)),
@@ -669,6 +813,15 @@ def paired_recurrent_a_plus_rank_loss(
         losses = side_losses[side]
         if losses:
             present_side_losses.append(torch.stack(losses).mean())
+            present_relative_losses.append(
+                torch.stack(side_relative_losses[side]).mean()
+            )
+            present_winner_losses.append(
+                torch.stack(side_winner_losses[side]).mean()
+            )
+            present_failure_losses.append(
+                torch.stack(side_failure_losses[side]).mean()
+            )
         group_metrics[f"{side_name}_pair_count"] = torch.tensor(
             float(len(losses)),
             dtype=flat_action_values.dtype,
@@ -707,6 +860,21 @@ def paired_recurrent_a_plus_rank_loss(
         loss=(
             torch.stack(present_side_losses).mean()
             if present_side_losses
+            else zero
+        ),
+        relative_loss=(
+            torch.stack(present_relative_losses).mean()
+            if present_relative_losses
+            else zero
+        ),
+        winner_loss=(
+            torch.stack(present_winner_losses).mean()
+            if present_winner_losses
+            else zero
+        ),
+        failure_loss=(
+            torch.stack(present_failure_losses).mean()
+            if present_failure_losses
             else zero
         ),
         active_groups=torch.tensor(
@@ -833,6 +1001,7 @@ class RecurrentC51Agent:
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
         regime_selectivity_persistent_chop_negative_emphasis: float = 0.0,
         policy_retention_loss_weight: float = 0.0,
+        auxiliary_gradient_conflict_mode: str = "none",
         mixed_precision: str = "off",
         compile_model: bool = False,
         compile_backend: str = "inductor",
@@ -944,6 +1113,19 @@ class RecurrentC51Agent:
             raise ValueError("entry action loss reduction is invalid")
         if mixed_precision not in {"off", "fp16"}:
             raise ValueError("mixed precision must be off or fp16")
+        if (
+            auxiliary_gradient_conflict_mode
+            not in _AUXILIARY_GRADIENT_CONFLICT_MODES
+        ):
+            raise ValueError("auxiliary gradient conflict mode is invalid")
+        if (
+            auxiliary_gradient_conflict_mode
+            == "pcgrad_safety_opportunity_v1"
+            and mixed_precision != "off"
+        ):
+            raise ValueError(
+                "auxiliary gradient conflict projection requires fp32 training"
+            )
         if regime_selectivity_side_balance not in {
             "none",
             "equal_long_short_v1",
@@ -1128,6 +1310,9 @@ class RecurrentC51Agent:
             else None
         )
         self.policy_retention_loss_weight = float(policy_retention_loss_weight)
+        self.auxiliary_gradient_conflict_mode = str(
+            auxiliary_gradient_conflict_mode
+        )
         self.retention_anchor: RecurrentC51Network | None = None
         self.retention_anchor_applies_to_all_management_rows = False
         self.last_train_metrics: dict[str, float] = {}
@@ -1687,6 +1872,8 @@ class RecurrentC51Agent:
         td_losses = -(projected * chosen_logits.log_softmax(-1)).sum(-1)
         rl_loss = td_losses[learnable_rows].mean()
         loss = rl_loss
+        gradient_safety_loss = rl_loss * 0.0
+        gradient_opportunity_loss = rl_loss * 0.0
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
@@ -1709,6 +1896,11 @@ class RecurrentC51Agent:
         regime_selectivity_side_conditioned_loss = teacher_loss
         regime_selectivity_side_conditioned_active_sides = teacher_loss
         regime_selectivity_paired_a_plus_loss = teacher_loss
+        regime_selectivity_paired_a_plus_relative_loss = teacher_loss
+        regime_selectivity_paired_a_plus_winner_loss = teacher_loss
+        regime_selectivity_paired_a_plus_failure_loss = teacher_loss
+        regime_selectivity_safety_loss = teacher_loss
+        regime_selectivity_opportunity_loss = teacher_loss
         regime_selectivity_paired_a_plus_active_groups = teacher_loss
         regime_selectivity_paired_a_plus_pair_count = teacher_loss
         regime_selectivity_paired_a_plus_pair_mass = teacher_loss
@@ -2273,6 +2465,15 @@ class RecurrentC51Agent:
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss
                             )
+                            regime_selectivity_paired_a_plus_relative_loss = (
+                                paired_result.relative_loss
+                            )
+                            regime_selectivity_paired_a_plus_winner_loss = (
+                                paired_result.winner_loss
+                            )
+                            regime_selectivity_paired_a_plus_failure_loss = (
+                                paired_result.failure_loss
+                            )
                             regime_selectivity_paired_a_plus_active_groups = (
                                 paired_result.active_groups
                             )
@@ -2387,6 +2588,15 @@ class RecurrentC51Agent:
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss
                             )
+                            regime_selectivity_paired_a_plus_relative_loss = (
+                                paired_result.relative_loss
+                            )
+                            regime_selectivity_paired_a_plus_winner_loss = (
+                                paired_result.winner_loss
+                            )
+                            regime_selectivity_paired_a_plus_failure_loss = (
+                                paired_result.failure_loss
+                            )
                             regime_selectivity_paired_a_plus_active_groups = (
                                 paired_result.active_groups
                             )
@@ -2455,6 +2665,13 @@ class RecurrentC51Agent:
                             ).sum()
                             / chop_margin_membership.sum().clamp_min(1.0)
                         )
+                        selectivity_group_denominator = (
+                            wait_active
+                            + long_active
+                            + short_active
+                            + association_group_active
+                            + side_conditioned_group_active
+                        ).clamp_min(1.0)
                         regime_selectivity_loss = (
                             regime_selectivity_exact_wait_loss * wait_active
                             + regime_selectivity_positive_long_loss * long_active
@@ -2462,13 +2679,37 @@ class RecurrentC51Agent:
                             + regime_selectivity_association_loss
                             + regime_selectivity_side_conditioned_loss
                             * side_conditioned_group_active
-                        ) / (
-                            wait_active
-                            + long_active
-                            + short_active
-                            + association_group_active
-                            + side_conditioned_group_active
-                        ).clamp_min(1.0)
+                        ) / selectivity_group_denominator
+                        paired_component_divisor = (
+                            3.0
+                            if self.regime_selectivity_semantics
+                            == PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+                            else 1.0
+                        )
+                        regime_selectivity_safety_loss = (
+                            regime_selectivity_exact_wait_loss
+                            * wait_active
+                            / selectivity_group_denominator
+                            + chop_margin_loss * chop_margin_active
+                            + regime_selectivity_paired_a_plus_failure_loss
+                            * paired_a_plus_group_active
+                            / paired_component_divisor
+                        )
+                        regime_selectivity_opportunity_loss = (
+                            (
+                                regime_selectivity_positive_long_loss
+                                * long_active
+                                + regime_selectivity_positive_short_loss
+                                * short_active
+                            )
+                            / selectivity_group_denominator
+                            + (
+                                regime_selectivity_paired_a_plus_relative_loss
+                                + regime_selectivity_paired_a_plus_winner_loss
+                            )
+                            * paired_a_plus_group_active
+                            / paired_component_divisor
+                        )
                         regime_selectivity_loss = (
                             regime_selectivity_loss
                             + chop_margin_loss * chop_margin_active
@@ -2634,9 +2875,20 @@ class RecurrentC51Agent:
                         regime_selectivity_positive_short_loss = (
                             selectivity_row_losses * short_loss_rows
                         ).sum() / short_loss_rows.sum().clamp_min(1.0)
-                    loss = loss + entry_action_weight_scale * (
-                        self.regime_selectivity_loss_weight
-                        * regime_selectivity_loss
+                    weighted_regime_selectivity = (
+                        entry_action_weight_scale
+                        * self.regime_selectivity_loss_weight
+                    )
+                    loss = loss + (
+                        weighted_regime_selectivity * regime_selectivity_loss
+                    )
+                    gradient_safety_loss = gradient_safety_loss + (
+                        weighted_regime_selectivity
+                        * regime_selectivity_safety_loss
+                    )
+                    gradient_opportunity_loss = gradient_opportunity_loss + (
+                        weighted_regime_selectivity
+                        * regime_selectivity_opportunity_loss
                     )
 
                     target_wait = selectivity_targets[:, int(Action.WAIT)]
@@ -2930,10 +3182,14 @@ class RecurrentC51Agent:
                         (selected_targets == class_index)
                         & (selected_predictions == class_index)
                     ).sum()
-                loss = loss + (
+                weighted_entry_action_loss = (
                     entry_action_weight_scale
                     * self.entry_action_loss_weight
                     * (entry_action_loss + entry_action_margin_loss)
+                )
+                loss = loss + weighted_entry_action_loss
+                gradient_opportunity_loss = (
+                    gradient_opportunity_loss + weighted_entry_action_loss
                 )
         management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
@@ -3093,8 +3349,12 @@ class RecurrentC51Agent:
                 recovery_economic_values,
                 margin=float(recovery_action_margin),
             )
-            loss = loss + float(recovery_value_loss_weight) * (
+            weighted_recovery_value_loss = float(recovery_value_loss_weight) * (
                 recovery_value_loss + recovery_action_margin_loss
+            )
+            loss = loss + weighted_recovery_value_loss
+            gradient_opportunity_loss = (
+                gradient_opportunity_loss + weighted_recovery_value_loss
             )
             recovery_value_rows = torch.as_tensor(
                 float(recovery_target_has_unique_winner),
@@ -3112,9 +3372,96 @@ class RecurrentC51Agent:
                 dtype=torch.float32,
                 device=self.device,
             )
+        gradient_conflict_primary_norm = 0.0
+        gradient_conflict_safety_norm = 0.0
+        gradient_conflict_opportunity_norm = 0.0
+        gradient_conflict_pre_projection_cosine = 0.0
+        gradient_conflict_post_projection_cosine = 0.0
+        gradient_conflict_projected = 0.0
         self.optimizer.zero_grad(set_to_none=True)
-        self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
+        if (
+            self.auxiliary_gradient_conflict_mode
+            == "pcgrad_safety_opportunity_v1"
+        ):
+            trainable_parameters = tuple(
+                parameter
+                for parameter in self.online.parameters()
+                if parameter.requires_grad
+            )
+
+            def materialized_gradients(
+                component_loss: torch.Tensor,
+                *,
+                retain_graph: bool,
+            ) -> tuple[torch.Tensor, ...]:
+                gradients = torch.autograd.grad(
+                    component_loss,
+                    trainable_parameters,
+                    retain_graph=retain_graph,
+                    allow_unused=True,
+                )
+                return tuple(
+                    torch.zeros_like(parameter)
+                    if gradient is None
+                    else gradient
+                    for parameter, gradient in zip(
+                        trainable_parameters, gradients, strict=True
+                    )
+                )
+
+            primary_gradients = materialized_gradients(
+                loss - gradient_safety_loss - gradient_opportunity_loss,
+                retain_graph=True,
+            )
+            safety_gradients = materialized_gradients(
+                gradient_safety_loss,
+                retain_graph=True,
+            )
+            opportunity_gradients = materialized_gradients(
+                gradient_opportunity_loss,
+                retain_graph=False,
+            )
+            gradient_blend = conflict_aware_gradient_blend(
+                primary_gradients=primary_gradients,
+                safety_gradients=safety_gradients,
+                opportunity_gradients=opportunity_gradients,
+            )
+            for parameter, gradient in zip(
+                trainable_parameters,
+                gradient_blend.combined_gradients,
+                strict=True,
+            ):
+                parameter.grad = gradient
+
+            def gradient_group_norm(
+                gradients: Sequence[torch.Tensor],
+            ) -> float:
+                squared_norm = sum(
+                    (gradient * gradient).sum() for gradient in gradients
+                )
+                return float(squared_norm.sqrt().detach())
+
+            gradient_conflict_primary_norm = gradient_group_norm(
+                primary_gradients
+            )
+            gradient_conflict_safety_norm = gradient_group_norm(
+                safety_gradients
+            )
+            gradient_conflict_opportunity_norm = gradient_group_norm(
+                opportunity_gradients
+            )
+            gradient_conflict_pre_projection_cosine = (
+                gradient_blend.pre_projection_cosine
+            )
+            gradient_conflict_post_projection_cosine = (
+                gradient_blend.post_projection_cosine
+            )
+            gradient_conflict_projected = float(
+                gradient_blend.conflict_projected
+            )
+        else:
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
         try:
             gradient_norm = nn.utils.clip_grad_norm_(
                 self.online.parameters(),
@@ -3731,6 +4078,22 @@ class RecurrentC51Agent:
             "entry_action_weight_scale": entry_action_weight_scale,
             "total_loss": total_loss,
             "gradient_norm": gradient_norm_value,
+            "gradient_conflict_primary_norm": (
+                gradient_conflict_primary_norm
+            ),
+            "gradient_conflict_safety_norm": (
+                gradient_conflict_safety_norm
+            ),
+            "gradient_conflict_opportunity_norm": (
+                gradient_conflict_opportunity_norm
+            ),
+            "gradient_conflict_pre_projection_cosine": (
+                gradient_conflict_pre_projection_cosine
+            ),
+            "gradient_conflict_post_projection_cosine": (
+                gradient_conflict_post_projection_cosine
+            ),
+            "gradient_conflict_projected": gradient_conflict_projected,
             "sampled_management_row_fraction": management_row_fraction,
             "sampled_hold_reward": sampled_hold_reward,
             "sampled_close_reward": sampled_close_reward,
@@ -3803,6 +4166,7 @@ class RecurrentC51Agent:
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
+        self.auxiliary_gradient_conflict_mode = "none"
         self.entry_action_loss_weight = 0.0
         self.teacher_loss_weight = 0.0
         self.teacher_entry_search_loss_weight = 0.0
@@ -3868,6 +4232,7 @@ class RecurrentC51Agent:
             or self.teacher_loss_weight != 0.0
             or self.teacher_entry_search_loss_weight != 0.0
             or self.entry_action_loss_weight != 0.0
+            or self.auxiliary_gradient_conflict_mode != "none"
             or self.regime_selectivity_loss_weight != 0.0
             or self.regime_selectivity is not None
             or self.retention_anchor is not None
@@ -4002,6 +4367,9 @@ class RecurrentC51Agent:
                     self.regime_selectivity_persistent_chop_negative_emphasis
                 ),
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
+                "auxiliary_gradient_conflict_mode": (
+                    self.auxiliary_gradient_conflict_mode
+                ),
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
                 "compile_backend": self.compile_backend,
@@ -4083,6 +4451,7 @@ class RecurrentC51Agent:
         config.setdefault("n_step_return", 1)
         config.setdefault("recurrent_burn_in", 0)
         config.setdefault("policy_retention_loss_weight", 0.0)
+        config.setdefault("auxiliary_gradient_conflict_mode", "none")
         config.setdefault("teacher_entry_search_objective", "raw_probability")
         config.setdefault("teacher_entry_search_centers", (0.5, 0.5))
         config.setdefault("teacher_entry_search_probability_epsilon", 1e-6)

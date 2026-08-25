@@ -10,6 +10,7 @@ from propevolve.agent import (
     RecurrentC51Agent,
     RecurrentC51Network,
     centered_entry_search_target,
+    conflict_aware_gradient_blend,
     resolve_device,
 )
 from propevolve.config import configure_runtime_environment
@@ -44,6 +45,46 @@ def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
     assert logits.shape == (3, 5, 5, 21)
     assert hidden.shape == (1, 3, 16)
     torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 5))
+
+
+def test_conflict_aware_gradient_blend_preserves_primary_and_projects_auxiliaries(
+) -> None:
+    result = conflict_aware_gradient_blend(
+        primary_gradients=(torch.tensor([2.0, 3.0]),),
+        safety_gradients=(torch.tensor([1.0, 0.0]),),
+        opportunity_gradients=(torch.tensor([-1.0, 1.0]),),
+    )
+
+    torch.testing.assert_close(
+        result.combined_gradients[0],
+        torch.tensor([2.5, 4.5]),
+    )
+    assert result.pre_projection_cosine == pytest.approx(-2 ** -0.5)
+    assert result.post_projection_cosine == pytest.approx(2 ** -0.5)
+    assert result.conflict_projected
+
+
+def test_conflict_aware_gradient_blend_leaves_aligned_auxiliaries_unchanged(
+) -> None:
+    safety = (torch.tensor([1.0, 0.0]),)
+    opportunity = (torch.tensor([1.0, 1.0]),)
+
+    result = conflict_aware_gradient_blend(
+        primary_gradients=(torch.tensor([2.0, 3.0]),),
+        safety_gradients=safety,
+        opportunity_gradients=opportunity,
+    )
+
+    torch.testing.assert_close(result.projected_safety_gradients[0], safety[0])
+    torch.testing.assert_close(
+        result.projected_opportunity_gradients[0], opportunity[0]
+    )
+    torch.testing.assert_close(
+        result.combined_gradients[0], torch.tensor([4.0, 4.0])
+    )
+    assert result.pre_projection_cosine == pytest.approx(2 ** -0.5)
+    assert result.post_projection_cosine == pytest.approx(2 ** -0.5)
+    assert not result.conflict_projected
 
 
 def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
@@ -103,6 +144,11 @@ def test_lazy_compilation_failure_retries_the_update_eagerly(
 def test_fp16_runtime_rejects_cpu_instead_of_silently_changing_precision() -> None:
     with pytest.raises(ValueError, match="mixed precision"):
         _agent(4, mixed_precision="fp16")
+
+
+def test_agent_rejects_unknown_auxiliary_gradient_conflict_mode() -> None:
+    with pytest.raises(ValueError, match="gradient conflict mode"):
+        _agent(4, auxiliary_gradient_conflict_mode="arbitrary")
 
 
 def test_mps_runtime_flags_are_applied_before_training(
@@ -274,6 +320,42 @@ def test_recurrent_double_dqn_targets_preserve_the_current_state_history() -> No
     assert agent.last_train_metrics["sampled_management_row_fraction"] == 1.0
     assert agent.last_train_metrics["sampled_management_close_fraction"] == 0.0
     assert np.isfinite(agent.last_train_metrics["management_hold_minus_close_q"])
+
+
+def test_pcgrad_mode_leaves_primary_c51_only_update_unchanged() -> None:
+    sequence = tuple(
+        Transition(
+            observation=np.array([float(index), float(index % 2)], np.float32),
+            action=Action.HOLD,
+            reward=0.05 * index,
+            next_observation=np.array(
+                [float(index + 1), float((index + 1) % 2)], np.float32
+            ),
+            terminated=index == 3,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+        )
+        for index in range(4)
+    )
+    baseline = _agent(2, seed=47)
+    projected = _agent(
+        2,
+        seed=47,
+        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
+    )
+
+    baseline.train_batch((sequence,))
+    projected.train_batch((sequence,))
+
+    for expected, actual in zip(
+        baseline.online.parameters(), projected.online.parameters(), strict=True
+    ):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert projected.last_train_metrics["gradient_conflict_safety_norm"] == 0.0
+    assert (
+        projected.last_train_metrics["gradient_conflict_opportunity_norm"]
+        == 0.0
+    )
 
 
 def test_recurrent_double_dqn_propagates_configured_multi_step_returns() -> None:
@@ -1414,6 +1496,7 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
         entry_action_margin=0.25,
         regime_selectivity_chop_wait_margin=0.25,
         regime_selectivity_failed_confluence_margin=0.35,
+        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
     )
     rows = (
         _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),
@@ -1429,6 +1512,10 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
     assert restored.entry_action_margin == 0.25
     assert restored.regime_selectivity_chop_wait_margin == 0.25
     assert restored.regime_selectivity_failed_confluence_margin == 0.35
+    assert (
+        restored.auxiliary_gradient_conflict_mode
+        == "pcgrad_safety_opportunity_v1"
+    )
     restored.train_batch(rows)
     for action_name in ("wait", "long", "short"):
         assert restored.last_train_metrics[
@@ -1846,6 +1933,7 @@ def test_discard_teacher_and_checkpoint_round_trip_preserve_policy(
         teacher_entry_search_loss_weight=0.3,
         teacher_entry_search_objective="centered_log_odds",
         teacher_entry_search_centers=(0.10, 0.11),
+        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
     )
     observations = tuple(
         np.array([index / 10.0, 0.25, -0.5], np.float32)
@@ -1872,6 +1960,7 @@ def test_discard_teacher_and_checkpoint_round_trip_preserve_policy(
 
     before = trace(agent)
     agent.discard_teacher()
+    assert agent.auxiliary_gradient_conflict_mode == "none"
     after = trace(agent)
     checkpoint = agent.save(tmp_path / "teacher-free.pt", manifest={})
     restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")

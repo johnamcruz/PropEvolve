@@ -24,7 +24,8 @@
       "recurrent_burn_in": 0,
       "policy_retention_loss_weight": 0.0,
       "entry_action_loss_reduction": "population_weighted_mean_v1",
-      "entry_action_margin": 0.0
+      "entry_action_margin": 0.0,
+      "auxiliary_gradient_conflict_mode": "none"
     },
     "training": {
       "prefetch_batches": 0,

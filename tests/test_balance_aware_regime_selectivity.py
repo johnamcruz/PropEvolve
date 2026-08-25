@@ -266,6 +266,15 @@ def test_paired_recurrent_a_plus_anchors_winner_and_failure_absolutely() -> None
     # The worked three-term mean is:
     # mean(softplus(-0.04), softplus(-0.13), softplus(0.34)).
     assert result.loss.item() == pytest.approx(0.7270442627858384)
+    assert result.relative_loss.item() == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(-0.04)).item()
+    )
+    assert result.winner_loss.item() == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(-0.13)).item()
+    )
+    assert result.failure_loss.item() == pytest.approx(
+        torch.nn.functional.softplus(torch.tensor(0.34)).item()
+    )
     assert gradient[0, Action.ENTER_LONG_1] < 0.0
     assert gradient[0, Action.WAIT] > 0.0
     assert gradient[1, Action.ENTER_LONG_1] > 0.0
@@ -1099,6 +1108,7 @@ def _agent(
     chop_wait_margin: float = 0.0,
     failed_confluence_margin: float = 0.0,
     paired_a_plus_margin: float = 0.0,
+    auxiliary_gradient_conflict_mode: str = "none",
     expansion_centers: tuple[float, float] = (0.10, 0.10),
     device: str = "cpu",
 ) -> RecurrentC51Agent:
@@ -1140,6 +1150,7 @@ def _agent(
         regime_selectivity_chop_wait_margin=chop_wait_margin,
         regime_selectivity_failed_confluence_margin=failed_confluence_margin,
         regime_selectivity_paired_a_plus_margin=paired_a_plus_margin,
+        auxiliary_gradient_conflict_mode=auxiliary_gradient_conflict_mode,
         **optional_settings,
     )
 
@@ -1227,6 +1238,58 @@ def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None
     assert agent.last_train_metrics[
         "regime_selectivity_paired_a_plus_pair_count"
     ] == 1.0
+
+
+def test_pcgrad_learner_prevents_safety_and_opportunity_cancellation() -> None:
+    agent = _agent(
+        seed=502,
+        selectivity_weight=1.0,
+        entry_action_weight=1.0,
+        entry_action_margin=0.25,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
+    )
+    dominant_chop = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.90,
+        neutral=0.05,
+        trend=0.05,
+    )
+    winner = _sequence(
+        (1.0, 0.0, 0.0),
+        dominant_chop,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=True,
+    )
+    failure = _sequence(
+        (0.0, 1.0, 0.0),
+        dominant_chop,
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=7,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+    )
+
+    agent.train_batch((winner, failure))
+
+    assert agent.last_train_metrics["gradient_conflict_primary_norm"] > 0.0
+    assert agent.last_train_metrics["gradient_conflict_safety_norm"] > 0.0
+    assert agent.last_train_metrics["gradient_conflict_opportunity_norm"] > 0.0
+    assert agent.last_train_metrics[
+        "gradient_conflict_post_projection_cosine"
+    ] >= -1e-6
 
 
 def test_paired_recurrent_learner_rejects_missing_population_correction() -> None:

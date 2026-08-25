@@ -1394,6 +1394,19 @@ def load_experiment_config(path: str | Path) -> dict:
         or float(agent["entry_action_margin"]) < 0.0
     ):
         raise ValueError("entry action margin is invalid")
+    if agent["auxiliary_gradient_conflict_mode"] not in {
+        "none",
+        "pcgrad_safety_opportunity_v1",
+    }:
+        raise ValueError("auxiliary gradient conflict mode is invalid")
+    if (
+        agent["auxiliary_gradient_conflict_mode"]
+        == "pcgrad_safety_opportunity_v1"
+        and payload["runtime"]["mixed_precision"] != "off"
+    ):
+        raise ValueError(
+            "auxiliary gradient conflict projection requires fp32 training"
+        )
     if (
         "agent.entry_action_loss_reduction"
         in payload.get("evolution", {}).get("frozen_paths", ())

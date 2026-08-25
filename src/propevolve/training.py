@@ -213,6 +213,9 @@ def _assert_recovery_entry_balance(
         "entry_action_loss_reduction", "population_weighted_mean_v1"
     ))
     expected_margin = float(agent_settings.get("entry_action_margin", 0.0))
+    expected_gradient_conflict_mode = str(
+        agent_settings.get("auxiliary_gradient_conflict_mode", "none")
+    )
     if (
         agent.entry_action_class_weights != expected
         or getattr(
@@ -222,6 +225,8 @@ def _assert_recovery_entry_balance(
         )
         != expected_reduction
         or getattr(agent, "entry_action_margin", 0.0) != expected_margin
+        or getattr(agent, "auxiliary_gradient_conflict_mode", "none")
+        != expected_gradient_conflict_mode
     ):
         raise ValueError("training recovery entry balance drifted")
 
@@ -4035,6 +4040,9 @@ class HistoricalCandidateRunner:
             "entry_action_loss_reduction": str(
                 agent.entry_action_loss_reduction
             ),
+            "auxiliary_gradient_conflict_mode": str(
+                config["agent"]["auxiliary_gradient_conflict_mode"]
+            ),
             "runtime_source_modules_sha256": (
                 _runtime_source_modules_sha256(config)
             ),
@@ -6565,6 +6573,12 @@ def train_agent(
             key: []
             for key in (
                 "gradient_norm",
+                "gradient_conflict_primary_norm",
+                "gradient_conflict_safety_norm",
+                "gradient_conflict_opportunity_norm",
+                "gradient_conflict_pre_projection_cosine",
+                "gradient_conflict_post_projection_cosine",
+                "gradient_conflict_projected",
                 "sampled_management_row_fraction",
                 "sampled_hold_reward",
                 "sampled_close_reward",

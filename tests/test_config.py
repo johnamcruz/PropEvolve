@@ -134,6 +134,7 @@ def test_effective_config_materialization_is_single_and_idempotent() -> None:
     assert first["training"]["regime_wait_sequence_fraction"] == 0.0
     assert first["training"]["management_epsilon_start"] == 0.2
     assert first["agent"]["target_update_mode"] == "hard"
+    assert first["agent"]["auxiliary_gradient_conflict_mode"] == "none"
 
 
 def test_effective_config_defaults_are_loaded_from_json(
@@ -1123,6 +1124,18 @@ def test_entry_action_margin_fails_closed_on_invalid_value(tmp_path: Path) -> No
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="entry action margin is invalid"):
+        load_experiment_config(path)
+
+
+def test_auxiliary_gradient_conflict_mode_fails_closed_on_unknown_value(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["agent"]["auxiliary_gradient_conflict_mode"] = "arbitrary"
+    path = tmp_path / "invalid-gradient-conflict-mode.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="gradient conflict mode is invalid"):
         load_experiment_config(path)
 
 

@@ -1470,6 +1470,24 @@ def test_recovery_rejects_entry_action_margin_drift() -> None:
         })
 
 
+def test_recovery_rejects_auxiliary_gradient_conflict_mode_drift() -> None:
+    class Agent:
+        entry_action_class_weights = (0.5, 2.0, 2.0)
+        entry_action_loss_reduction = "equal_present_class_mean_v1"
+        entry_action_margin = 0.25
+        auxiliary_gradient_conflict_mode = "none"
+
+    with pytest.raises(ValueError, match="recovery entry balance drifted"):
+        _assert_recovery_entry_balance(Agent(), {
+            "entry_action_class_weights": (0.5, 2.0, 2.0),
+            "entry_action_loss_reduction": "equal_present_class_mean_v1",
+            "entry_action_margin": 0.25,
+            "auxiliary_gradient_conflict_mode": (
+                "pcgrad_safety_opportunity_v1"
+            ),
+        })
+
+
 def test_recovery_rejects_regime_learning_identity_drift() -> None:
     class Agent:
         regime_selectivity_semantics = "static_state_v1"
