@@ -19,6 +19,7 @@ from propevolve.balance_aware_regime_selectivity import (
 )
 from propevolve.agent import (
     RecurrentC51Agent,
+    challenge_return_self_imitation_bonus,
     exact_action_margin_losses,
     paired_a_plus_rank_loss,
     paired_recurrent_a_plus_rank_loss,
@@ -77,6 +78,74 @@ def test_all_dominant_chop_actions_receive_learned_wait_margin_membership(
     )
 
 
+def test_exact_economic_winners_are_excluded_from_dominant_chop_wait_pressure(
+) -> None:
+    compiler = BalanceAwareRegimeSelectivity(
+        channel_names=CHANNELS,
+        expansion_centers=(0.1, 0.1),
+        semantics=ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+    )
+    teacher_probabilities = torch.tensor(
+        [
+            [0.4, 0.8, 0.1, 0.8, 0.70, 0.20, 0.10],
+            [0.1, 0.8, 0.4, 0.8, 0.60, 0.25, 0.15],
+            [0.1, 0.1, 0.1, 0.1, 0.80, 0.10, 0.10],
+        ],
+        dtype=torch.float32,
+    )
+    exact_targets = torch.tensor(
+        [
+            int(Action.ENTER_LONG_1),
+            int(Action.ENTER_SHORT_1),
+            int(Action.WAIT),
+        ],
+        dtype=torch.long,
+    )
+
+    membership = compiler.dominant_chop_margin_membership(
+        teacher_probabilities,
+        economic_entry_targets=exact_targets,
+    )
+
+    torch.testing.assert_close(
+        membership,
+        torch.tensor([0.0, 0.0, 0.70], dtype=torch.float32),
+        rtol=0.0,
+        atol=1e-7,
+    )
+
+
+def test_challenge_return_self_imitation_only_rewards_realized_q_improvement(
+) -> None:
+    q_values = torch.tensor(
+        [
+            [0.20, -0.30, -0.50],
+            [0.20, 0.60, -0.50],
+            [0.20, -0.30, 0.80],
+        ],
+        dtype=torch.float64,
+    )
+    actions = torch.tensor(
+        [int(Action.ENTER_LONG_1), int(Action.ENTER_LONG_1), int(Action.WAIT)]
+    )
+    returns = torch.tensor([1.20, 0.40, 0.10], dtype=torch.float64)
+    active = torch.tensor([True, True, False])
+
+    bonus = challenge_return_self_imitation_bonus(
+        q_values,
+        actions=actions,
+        challenge_returns=returns,
+        active=active,
+        weight=0.10,
+    )
+
+    torch.testing.assert_close(
+        bonus,
+        torch.tensor([0.10, 0.0, 0.0], dtype=torch.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
 def test_exact_action_margin_penalizes_correct_but_weak_action_separation() -> None:
     action_values = torch.tensor(
         [
@@ -1109,6 +1178,9 @@ def _agent(
     failed_confluence_margin: float = 0.0,
     paired_a_plus_margin: float = 0.0,
     auxiliary_gradient_conflict_mode: str = "none",
+    exclude_economic_winners_from_chop_wait: bool = False,
+    challenge_return_self_imitation_weight: float = 0.0,
+    challenge_return_discount: float = 1.0,
     expansion_centers: tuple[float, float] = (0.10, 0.10),
     device: str = "cpu",
 ) -> RecurrentC51Agent:
@@ -1151,6 +1223,13 @@ def _agent(
         regime_selectivity_failed_confluence_margin=failed_confluence_margin,
         regime_selectivity_paired_a_plus_margin=paired_a_plus_margin,
         auxiliary_gradient_conflict_mode=auxiliary_gradient_conflict_mode,
+        exclude_economic_winners_from_chop_wait=(
+            exclude_economic_winners_from_chop_wait
+        ),
+        challenge_return_self_imitation_weight=(
+            challenge_return_self_imitation_weight
+        ),
+        challenge_return_discount=challenge_return_discount,
         **optional_settings,
     )
 
@@ -1165,13 +1244,15 @@ def _sequence(
     pair_id: int | None = None,
     pair_side: Action | None = None,
     economic_win: bool | None = None,
+    action: Action = Action.WAIT,
+    challenge_return_to_go: float | None = None,
     training_valid: bool = True,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
     return (
         Transition(
             observation=np.asarray(observation, np.float32),
-            action=Action.WAIT,
+            action=action,
             reward=0.0,
             next_observation=np.zeros(3, np.float32),
             terminated=True,
@@ -1187,11 +1268,108 @@ def _sequence(
             paired_a_plus_population_weight=(
                 1.0 if pair_id is not None else None
             ),
+            challenge_return_to_go=challenge_return_to_go,
             training_valid=training_valid,
         ),
     )
 
 
+def test_challenge_return_bonus_trains_only_authenticated_pass_winner_anchor(
+) -> None:
+    agent = _agent(
+        seed=540,
+        selectivity_weight=0.3,
+        entry_action_weight=0.3,
+        entry_action_margin=0.25,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+        exclude_economic_winners_from_chop_wait=True,
+        challenge_return_self_imitation_weight=0.1,
+        challenge_return_discount=0.99995,
+    )
+    chop = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.90,
+        neutral=0.05,
+        trend=0.05,
+    )
+    winner = _sequence(
+        (1.0, 0.0, 0.0),
+        chop,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        pair_id=31,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=True,
+        action=Action.ENTER_LONG_1,
+        challenge_return_to_go=4.0,
+    )
+    failure = _sequence(
+        (0.0, 1.0, 0.0),
+        chop,
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=31,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+    )
+
+    agent.train_batch((winner, failure))
+
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_rows"
+    ] == 1.0
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_bonus_mean"
+    ] > 0.0
+    assert agent.last_train_metrics[
+        "regime_selectivity_persistent_dead_chop_rows"
+    ] > 0.0
+    agent.discard_teacher()
+    assert agent.exclude_economic_winners_from_chop_wait is False
+    assert agent.challenge_return_self_imitation_weight == 0.0
+    assert agent.challenge_return_discount == 1.0
+    agent.assert_teacher_free()
+
+
+def test_challenge_return_rejects_failure_or_wait_anchor() -> None:
+    agent = _agent(
+        seed=541,
+        selectivity_weight=0.0,
+        challenge_return_self_imitation_weight=0.1,
+        challenge_return_discount=0.99995,
+    )
+    invalid = _sequence(
+        (1.0, 0.0, 0.0),
+        _teacher_row(
+            long_attempt=0.10,
+            long_clean=0.10,
+            short_attempt=0.10,
+            short_clean=0.10,
+            chop=0.90,
+            neutral=0.05,
+            trend=0.05,
+        ),
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=32,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+        challenge_return_to_go=2.0,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="challenge return requires an authenticated pass winner",
+    ):
+        agent.train_batch((invalid,))
 def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None:
     agent = _agent(
         seed=502,

@@ -1401,6 +1401,24 @@ def load_experiment_config(path: str | Path) -> dict:
     }:
         raise ValueError("auxiliary gradient conflict mode is invalid")
     if (
+        type(agent["exclude_economic_winners_from_chop_wait"]) is not bool
+        or isinstance(agent["challenge_return_self_imitation_weight"], bool)
+        or not isinstance(
+            agent["challenge_return_self_imitation_weight"], (int, float)
+        )
+        or not math.isfinite(
+            float(agent["challenge_return_self_imitation_weight"])
+        )
+        or float(agent["challenge_return_self_imitation_weight"]) < 0.0
+        or isinstance(agent["challenge_return_discount"], bool)
+        or not isinstance(agent["challenge_return_discount"], (int, float))
+        or not math.isfinite(float(agent["challenge_return_discount"]))
+        or not 0.0 < float(agent["challenge_return_discount"]) <= 1.0
+        or float(agent["challenge_return_self_imitation_weight"]) > 0.0
+        and payload.get("balance_curriculum") is None
+    ):
+        raise ValueError("challenge-return learning config is invalid")
+    if (
         agent["auxiliary_gradient_conflict_mode"]
         in {
             "pcgrad_safety_opportunity_v1",

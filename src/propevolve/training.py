@@ -6766,6 +6766,19 @@ def train_agent(
                             pair_id_start=(
                                 max(existing_pair_ids, default=-1) + 1
                             ),
+                            challenge_return_discount=(
+                                float(getattr(
+                                    agent,
+                                    "challenge_return_discount",
+                                    1.0,
+                                ))
+                                if float(getattr(
+                                    agent,
+                                    "challenge_return_self_imitation_weight",
+                                    0.0,
+                                )) > 0.0
+                                else None
+                            ),
                         )
                     )
                     if contrast_sequences:

@@ -387,6 +387,41 @@ def chop_specific_wait_margin_losses(
     return dominant_loss + long_loss + short_loss
 
 
+def challenge_return_self_imitation_bonus(
+    action_values: torch.Tensor,
+    *,
+    actions: torch.Tensor,
+    challenge_returns: torch.Tensor,
+    active: torch.Tensor,
+    weight: float,
+) -> torch.Tensor:
+    """Return a positive-only SAIL bonus for authenticated pass actions."""
+    if (
+        action_values.ndim != 2
+        or not torch.is_floating_point(action_values)
+        or actions.shape != action_values.shape[:-1]
+        or actions.dtype != torch.long
+        or challenge_returns.shape != actions.shape
+        or not torch.is_floating_point(challenge_returns)
+        or active.shape != actions.shape
+        or active.dtype != torch.bool
+        or isinstance(weight, bool)
+        or not math.isfinite(float(weight))
+        or float(weight) < 0.0
+    ):
+        raise ValueError("challenge-return self-imitation contract is invalid")
+    if float(weight) == 0.0:
+        return torch.zeros_like(challenge_returns)
+    chosen = action_values.gather(1, actions[:, None]).squeeze(1)
+    best = action_values.max(dim=1).values
+    improvement = torch.maximum(challenge_returns, chosen) - best
+    return (
+        float(weight)
+        * improvement.clamp_min(0.0)
+        * active.to(challenge_returns.dtype)
+    )
+
+
 def persistent_chop_association_rank_loss(
     flat_action_values: torch.Tensor,
     *,
@@ -1008,6 +1043,9 @@ class RecurrentC51Agent:
         regime_selectivity_persistent_chop_negative_emphasis: float = 0.0,
         policy_retention_loss_weight: float = 0.0,
         auxiliary_gradient_conflict_mode: str = "none",
+        exclude_economic_winners_from_chop_wait: bool = False,
+        challenge_return_self_imitation_weight: float = 0.0,
+        challenge_return_discount: float = 1.0,
         mixed_precision: str = "off",
         compile_model: bool = False,
         compile_backend: str = "inductor",
@@ -1063,6 +1101,16 @@ class RecurrentC51Agent:
             raise ValueError("teacher settings must be nonnegative")
         if bool(teacher_channels) != bool(teacher_loss_weight):
             raise ValueError("teacher channels and loss weight must be enabled together")
+        if (
+            type(exclude_economic_winners_from_chop_wait) is not bool
+            or isinstance(challenge_return_self_imitation_weight, bool)
+            or not np.isfinite(challenge_return_self_imitation_weight)
+            or challenge_return_self_imitation_weight < 0.0
+            or isinstance(challenge_return_discount, bool)
+            or not np.isfinite(challenge_return_discount)
+            or not 0.0 < challenge_return_discount <= 1.0
+        ):
+            raise ValueError("challenge-return learning settings are invalid")
         teacher_channel_names = tuple(
             str(value) for value in (teacher_channel_names or ())
         )
@@ -1322,6 +1370,13 @@ class RecurrentC51Agent:
         self.auxiliary_gradient_conflict_mode = str(
             auxiliary_gradient_conflict_mode
         )
+        self.exclude_economic_winners_from_chop_wait = bool(
+            exclude_economic_winners_from_chop_wait
+        )
+        self.challenge_return_self_imitation_weight = float(
+            challenge_return_self_imitation_weight
+        )
+        self.challenge_return_discount = float(challenge_return_discount)
         self.retention_anchor: RecurrentC51Network | None = None
         self.retention_anchor_applies_to_all_management_rows = False
         self.last_train_metrics: dict[str, float] = {}
@@ -1666,6 +1721,31 @@ class RecurrentC51Agent:
             dtype=torch.float32,
             device=self.device,
         )
+        challenge_return_rows = np.full(reward_rows.shape, np.nan, np.float32)
+        for batch_index, sequence in enumerate(sequences):
+            for time_index, transition in enumerate(sequence):
+                value = transition.challenge_return_to_go
+                if value is None:
+                    continue
+                if (
+                    not np.isfinite(value)
+                    or transition.paired_a_plus_pair_id is None
+                    or transition.paired_a_plus_economic_win is not True
+                    or transition.action not in {
+                        Action.ENTER_LONG_1,
+                        Action.ENTER_SHORT_1,
+                    }
+                    or transition.entry_action_target != transition.action
+                ):
+                    raise ValueError(
+                        "challenge return requires an authenticated pass winner"
+                    )
+                challenge_return_rows[batch_index, time_index] = float(value)
+        all_challenge_returns = torch.as_tensor(
+            challenge_return_rows,
+            dtype=torch.float32,
+            device=self.device,
+        )
         all_terminated = torch.as_tensor(
             [[item.terminated for item in sequence] for sequence in sequences],
             dtype=torch.bool,
@@ -1868,6 +1948,36 @@ class RecurrentC51Agent:
             online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
+            target_current_logits = target_causal[:, :training_steps]
+            target_current_q = (
+                target_current_logits.float().softmax(-1) * self.support
+            ).sum(-1)
+            current_valid_masks = valid_masks[
+                :, learning_start:learning_start + training_steps
+            ]
+            target_current_q = target_current_q.masked_fill(
+                ~current_valid_masks, -torch.inf
+            )
+            challenge_returns = all_challenge_returns[
+                :, learning_start:learning_start + training_steps
+            ]
+            challenge_return_active = (
+                torch.isfinite(challenge_returns) & learnable_rows
+            )
+            safe_challenge_returns = torch.where(
+                challenge_return_active,
+                challenge_returns,
+                torch.zeros_like(challenge_returns),
+            )
+            challenge_return_bonus = challenge_return_self_imitation_bonus(
+                target_current_q.reshape(-1, len(Action)),
+                actions=actions.reshape(-1),
+                challenge_returns=safe_challenge_returns.reshape(-1),
+                active=challenge_return_active.reshape(-1),
+                weight=self.challenge_return_self_imitation_weight,
+            ).reshape_as(n_step_rewards)
+            base_n_step_rewards = n_step_rewards
+            n_step_rewards = n_step_rewards + challenge_return_bonus
             target_distribution = target_next.float().softmax(-1).gather(
                 2,
                 next_actions[..., None, None].expand(-1, -1, 1, self.atoms),
@@ -1878,6 +1988,23 @@ class RecurrentC51Agent:
                 terminal_targets,
                 bootstrap_discount=self.gamma**self.n_step_return,
             )
+            bootstrap = (
+                self.gamma**self.n_step_return
+                * (~terminal_targets).to(n_step_rewards.dtype)
+            )[..., None] * self.support
+            base_support = base_n_step_rewards[..., None] + bootstrap
+            boosted_support = n_step_rewards[..., None] + bootstrap
+            base_clipped = (
+                (base_support < self.value_min)
+                | (base_support > self.value_max)
+            ).any(-1)
+            boosted_clipped = (
+                (boosted_support < self.value_min)
+                | (boosted_support > self.value_max)
+            ).any(-1)
+            challenge_return_added_clip_rows = (
+                challenge_return_active & boosted_clipped & ~base_clipped
+            ).sum().to(torch.float32)
         td_losses = -(projected * chosen_logits.log_softmax(-1)).sum(-1)
         rl_loss = td_losses[learnable_rows].mean()
         loss = rl_loss
@@ -2630,7 +2757,12 @@ class RecurrentC51Agent:
                             ).to(exact_losses.dtype)
                         dominant_chop_margin_membership = (
                             compiler.dominant_chop_margin_membership(
-                                selected_teachers
+                                selected_teachers,
+                                economic_entry_targets=(
+                                    selected_actions
+                                    if self.exclude_economic_winners_from_chop_wait
+                                    else None
+                                ),
                             )
                             if self.regime_selectivity_semantics
                             in {
@@ -3525,6 +3657,13 @@ class RecurrentC51Agent:
             device=self.device,
         )
         terminal_truncated_rows = learnable_rows & terminal_targets
+        challenge_return_rows_value = challenge_return_active.sum().to(torch.float32)
+        challenge_return_bonus_sum = challenge_return_bonus.sum()
+        challenge_return_bonus_mean = (
+            challenge_return_bonus_sum
+            / challenge_return_rows_value.clamp_min(1.0)
+        )
+        challenge_return_bonus_max = challenge_return_bonus.max()
 
         diagnostic_values = torch.stack((
             rl_loss,
@@ -3567,6 +3706,11 @@ class RecurrentC51Agent:
             recovery_wait_minus_short_q,
             recovery_action_margin_loss,
             recovery_recurrent_rows,
+            challenge_return_rows_value,
+            challenge_return_bonus_sum,
+            challenge_return_bonus_mean,
+            challenge_return_bonus_max,
+            challenge_return_added_clip_rows,
             loss,
             gradient_norm.float(),
             management_rows.sum().to(torch.float32)
@@ -3642,6 +3786,11 @@ class RecurrentC51Agent:
             recovery_wait_minus_short_q_value,
             recovery_action_margin_loss_value,
             recovery_recurrent_rows_value,
+            challenge_return_rows_metric,
+            challenge_return_bonus_sum_metric,
+            challenge_return_bonus_mean_metric,
+            challenge_return_bonus_max_metric,
+            challenge_return_added_clip_rows_metric,
             total_loss,
             gradient_norm_value,
             management_row_fraction,
@@ -4090,6 +4239,19 @@ class RecurrentC51Agent:
             "recovery_wait_minus_short_q": recovery_wait_minus_short_q_value,
             "recovery_action_margin_loss": recovery_action_margin_loss_value,
             "recovery_recurrent_rows": recovery_recurrent_rows_value,
+            "challenge_return_self_imitation_rows": challenge_return_rows_metric,
+            "challenge_return_self_imitation_bonus_sum": (
+                challenge_return_bonus_sum_metric
+            ),
+            "challenge_return_self_imitation_bonus_mean": (
+                challenge_return_bonus_mean_metric
+            ),
+            "challenge_return_self_imitation_bonus_max": (
+                challenge_return_bonus_max_metric
+            ),
+            "challenge_return_self_imitation_added_clip_rows": (
+                challenge_return_added_clip_rows_metric
+            ),
             "teacher_weight_scale": teacher_weight_scale,
             "entry_action_weight_scale": entry_action_weight_scale,
             "total_loss": total_loss,
@@ -4183,6 +4345,9 @@ class RecurrentC51Agent:
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
         self.auxiliary_gradient_conflict_mode = "none"
+        self.exclude_economic_winners_from_chop_wait = False
+        self.challenge_return_self_imitation_weight = 0.0
+        self.challenge_return_discount = 1.0
         self.entry_action_loss_weight = 0.0
         self.teacher_loss_weight = 0.0
         self.teacher_entry_search_loss_weight = 0.0
@@ -4249,6 +4414,8 @@ class RecurrentC51Agent:
             or self.teacher_entry_search_loss_weight != 0.0
             or self.entry_action_loss_weight != 0.0
             or self.auxiliary_gradient_conflict_mode != "none"
+            or self.exclude_economic_winners_from_chop_wait
+            or self.challenge_return_self_imitation_weight != 0.0
             or self.regime_selectivity_loss_weight != 0.0
             or self.regime_selectivity is not None
             or self.retention_anchor is not None
@@ -4386,6 +4553,13 @@ class RecurrentC51Agent:
                 "auxiliary_gradient_conflict_mode": (
                     self.auxiliary_gradient_conflict_mode
                 ),
+                "exclude_economic_winners_from_chop_wait": (
+                    self.exclude_economic_winners_from_chop_wait
+                ),
+                "challenge_return_self_imitation_weight": (
+                    self.challenge_return_self_imitation_weight
+                ),
+                "challenge_return_discount": self.challenge_return_discount,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
                 "compile_backend": self.compile_backend,
@@ -4468,6 +4642,9 @@ class RecurrentC51Agent:
         config.setdefault("recurrent_burn_in", 0)
         config.setdefault("policy_retention_loss_weight", 0.0)
         config.setdefault("auxiliary_gradient_conflict_mode", "none")
+        config.setdefault("exclude_economic_winners_from_chop_wait", False)
+        config.setdefault("challenge_return_self_imitation_weight", 0.0)
+        config.setdefault("challenge_return_discount", 1.0)
         config.setdefault("teacher_entry_search_objective", "raw_probability")
         config.setdefault("teacher_entry_search_centers", (0.5, 0.5))
         config.setdefault("teacher_entry_search_probability_epsilon", 1e-6)

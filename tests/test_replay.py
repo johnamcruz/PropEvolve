@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -667,7 +668,7 @@ def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
         n_step_return=2,
         seed=91,
     )
-    replay.add(_paired_a_plus_episode(
+    pass_episode = _paired_a_plus_episode(
         episode_id="long-pass",
         ticker="GC",
         target=Action.ENTER_LONG_1,
@@ -677,6 +678,19 @@ def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
         offset=0,
         outcome="pass",
         terminal_pnl=6_100.0,
+    )
+    replay.add(replace(
+        pass_episode,
+        transitions=tuple(
+            replace(
+                transition,
+                reward=float(index + 1) / 10.0,
+                action=(
+                    Action.ENTER_LONG_1 if index == 5 else transition.action
+                ),
+            )
+            for index, transition in enumerate(pass_episode.transitions)
+        ),
     ))
     replay.add(_paired_a_plus_episode(
         episode_id="long-matched-near-blow",
@@ -717,6 +731,7 @@ def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
         near_blow_pnl=-2_250.0,
         max_examples=8,
         pair_id_start=11,
+        challenge_return_discount=0.5,
     )
 
     assert len(sequences) == 2
@@ -731,6 +746,63 @@ def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
     )
     assert failure.source_decision_index == 105
     assert failure.entry_action_target == Action.WAIT
+    winner = next(
+        anchor for anchor in anchors if anchor.paired_a_plus_economic_win
+    )
+    assert winner.action == Action.ENTER_LONG_1
+    assert winner.challenge_return_to_go == pytest.approx(
+        sum(
+            (0.5 ** offset) * reward
+            for offset, reward in enumerate((0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2))
+        )
+    )
+    assert failure.challenge_return_to_go is None
+
+
+def test_challenge_return_is_not_attached_to_missed_winner_wait() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=191,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="waited-through-pass-winner",
+        ticker="GC",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0,
+        outcome="pass",
+        terminal_pnl=6_100.0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="near-blow-failure",
+        ticker="CL",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=(0.88, 0.82, 0.12, 0.11, 0.12, 0.68, 0.20),
+        offset=100,
+        outcome="timeout",
+        terminal_pnl=-2_800.0,
+    ))
+
+    sequences = replay.sample_balance_outcome_contrast_pairs(
+        1,
+        near_blow_pnl=-2_250.0,
+        challenge_return_discount=0.99995,
+    )
+
+    winner = next(
+        sequence[2]
+        for sequence in sequences
+        if sequence[2].paired_a_plus_economic_win
+    )
+    assert winner.action == Action.WAIT
+    assert winner.challenge_return_to_go is None
 
 
 def test_replay_schema_11_without_terminal_pnl_remains_loadable() -> None:

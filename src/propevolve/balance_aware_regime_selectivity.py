@@ -15,6 +15,8 @@ from typing import NamedTuple, Sequence
 import numpy as np
 import torch
 
+from .decision import Action
+
 
 EXPANSION_CHANNELS = (
     "long_attempt_probability",
@@ -239,8 +241,10 @@ class BalanceAwareRegimeSelectivity:
     def dominant_chop_margin_membership(
         self,
         teacher_probabilities: torch.Tensor,
+        *,
+        economic_entry_targets: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return soft dominance mass for learned WAIT pressure on every action."""
+        """Return soft dominance mass, optionally excluding exact winners."""
         if self.semantics not in {
             ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
             PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
@@ -258,11 +262,24 @@ class BalanceAwareRegimeSelectivity:
             raise ValueError(
                 "teacher probabilities violate the dominant-chop margin contract"
             )
+        if economic_entry_targets is not None and (
+            economic_entry_targets.shape != teacher_probabilities.shape[:-1]
+            or economic_entry_targets.dtype == torch.bool
+            or torch.is_floating_point(economic_entry_targets)
+        ):
+            raise ValueError(
+                "economic Entry targets violate the dominant-chop margin contract"
+            )
         selected = teacher_probabilities[..., list(self._transition_indices)]
-        return (
+        membership = (
             selected[..., 0]
             - torch.maximum(selected[..., 1], selected[..., 2])
         ).clamp_min(0.0)
+        if economic_entry_targets is not None:
+            membership = membership * (
+                economic_entry_targets == int(Action.WAIT)
+            ).to(membership.dtype)
+        return membership
 
     def target_probabilities(
         self,

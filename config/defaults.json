@@ -25,7 +25,10 @@
       "policy_retention_loss_weight": 0.0,
       "entry_action_loss_reduction": "population_weighted_mean_v1",
       "entry_action_margin": 0.0,
-      "auxiliary_gradient_conflict_mode": "none"
+      "auxiliary_gradient_conflict_mode": "none",
+      "exclude_economic_winners_from_chop_wait": false,
+      "challenge_return_self_imitation_weight": 0.0,
+      "challenge_return_discount": 1.0
     },
     "training": {
       "prefetch_batches": 0,

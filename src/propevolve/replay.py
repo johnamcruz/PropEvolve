@@ -48,6 +48,7 @@ class Transition:
     paired_a_plus_pair_id: int | None = None
     paired_a_plus_pair_side: Action | None = None
     paired_a_plus_population_weight: float | None = None
+    challenge_return_to_go: float | None = None
 
 
 @dataclass(frozen=True)
@@ -2060,6 +2061,7 @@ class BalancedSequenceReplay:
         near_blow_pnl: float,
         max_examples: int = 8,
         pair_id_start: int = 0,
+        challenge_return_discount: float | None = None,
     ) -> tuple[tuple[Transition, ...], ...]:
         """Pair pass winners with context-matched near-blow failures."""
         if (
@@ -2069,6 +2071,12 @@ class BalancedSequenceReplay:
             or pair_id_start < 0
             or not np.isfinite(near_blow_pnl)
             or near_blow_pnl >= 0.0
+            or challenge_return_discount is not None
+            and (
+                isinstance(challenge_return_discount, bool)
+                or not np.isfinite(challenge_return_discount)
+                or not 0.0 < challenge_return_discount <= 1.0
+            )
         ):
             raise ValueError("balance outcome contrast request is invalid")
         winners: dict[
@@ -2160,9 +2168,9 @@ class BalancedSequenceReplay:
             population_count = len(winners[side]) + len(failures[side])
             winner_weight = 2.0 * len(winners[side]) / population_count
             failure_weight = 2.0 * len(failures[side]) / population_count
-            for episode, anchor_index, population_weight in (
-                (winner_episode, winner_index, winner_weight),
-                (failure_episode, failure_index, failure_weight),
+            for episode, anchor_index, population_weight, economic_winner in (
+                (winner_episode, winner_index, winner_weight, True),
+                (failure_episode, failure_index, failure_weight, False),
             ):
                 sequence = list(episode.target_anchored_sequence(
                     anchor_index=anchor_index,
@@ -2175,9 +2183,34 @@ class BalancedSequenceReplay:
                     paired_a_plus_pair_id=pair_id,
                     paired_a_plus_pair_side=side,
                     paired_a_plus_population_weight=population_weight,
+                    challenge_return_to_go=(
+                        self._challenge_return_to_go(
+                            episode,
+                            anchor_index=anchor_index,
+                            discount=float(challenge_return_discount),
+                        )
+                        if economic_winner
+                        and challenge_return_discount is not None
+                        and Action(int(episode.actions[anchor_index])) == side
+                        else None
+                    ),
                 )
                 sequences.append(tuple(sequence))
         return tuple(sequences)
+
+    @staticmethod
+    def _challenge_return_to_go(
+        episode: _StoredEpisode,
+        *,
+        anchor_index: int,
+        discount: float,
+    ) -> float:
+        value = 0.0
+        for reward in episode.rewards[anchor_index:][::-1]:
+            value = float(reward) + discount * value
+        if not np.isfinite(value):
+            raise ValueError("challenge return-to-go is invalid")
+        return value
 
     def sample_post_recovery_contrast_pairs(
         self,

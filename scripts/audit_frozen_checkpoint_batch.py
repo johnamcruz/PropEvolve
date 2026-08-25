@@ -22,6 +22,39 @@ def sha(path):
     return d.hexdigest()
 
 
+def discounted_returns_to_go(rewards: np.ndarray, *, discount: float) -> np.ndarray:
+    if (
+        rewards.ndim != 1
+        or not np.isfinite(rewards).all()
+        or isinstance(discount, bool)
+        or not np.isfinite(discount)
+        or not 0.0 < discount <= 1.0
+    ):
+        raise ValueError("challenge return audit contract is invalid")
+    result = np.empty(len(rewards), dtype=np.float64)
+    value = 0.0
+    for index in range(len(rewards) - 1, -1, -1):
+        value = float(rewards[index]) + discount * value
+        result[index] = value
+    return result
+
+
+def challenge_outcome_cohort(
+    outcome: str,
+    terminal_pnl: float,
+    near_blow_pnl: float,
+) -> str:
+    if outcome == "pass":
+        return "pass"
+    if outcome == "blow":
+        return "blow"
+    if terminal_pnl >= 0.0:
+        return "nonnegative_timeout"
+    if terminal_pnl <= near_blow_pnl:
+        return "near_blow_timeout"
+    return "negative_timeout"
+
+
 def make_replay(contract, schema, payloads):
     r = BalancedSequenceReplay(
         capacity_episodes=contract["capacity_episodes"],
@@ -295,11 +328,21 @@ def main():
     ap.add_argument("--output", type=Path)
     ap.add_argument("--near-blow-pnl", type=float, default=-2250.0)
     ap.add_argument("--pair-count", type=int, default=4)
+    ap.add_argument(
+        "--challenge-return-discount",
+        type=float,
+        default=0.5 ** (1.0 / (30 * 480)),
+    )
+    ap.add_argument("--challenge-return-weight", type=float, default=0.05)
     args = ap.parse_args()
     if (
         not np.isfinite(args.near_blow_pnl)
         or args.near_blow_pnl >= 0
         or args.pair_count < 2
+        or not np.isfinite(args.challenge_return_discount)
+        or not 0.0 < args.challenge_return_discount <= 1.0
+        or not np.isfinite(args.challenge_return_weight)
+        or args.challenge_return_weight < 0.0
     ):
         ap.error(
             "--near-blow-pnl must be negative and --pair-count must be at least two"
@@ -333,6 +376,14 @@ def main():
     index = {}
     authenticated = 0
     total_bytes = 0
+    challenge_cohort_returns = defaultdict(list)
+    labeled_return_count = 0
+    labeled_returns_above_support = 0
+    labeled_returns_below_support = 0
+    winner_dominant_chop_rows = 0
+    winner_dominant_chop_mass = 0.0
+    failure_dominant_chop_rows = 0
+    failure_dominant_chop_mass = 0.0
     for number, entry in enumerate(desc["episodes"], 1):
         path = replay_root / entry["path"]
         digest = sha(path)
@@ -347,6 +398,37 @@ def main():
         sides = np.asarray(p["paired_a_plus_sides"])
         wins = np.asarray(p["paired_a_plus_economic_wins"])
         contexts = np.asarray(p["paired_a_plus_contexts"])
+        rewards = np.asarray(p["rewards"], dtype=np.float64)
+        returns_to_go = discounted_returns_to_go(
+            rewards,
+            discount=args.challenge_return_discount,
+        )
+        terminal_pnl = float(p["terminal_pnl"])
+        cohort = challenge_outcome_cohort(
+            str(p["outcome"]), terminal_pnl, args.near_blow_pnl
+        )
+        challenge_cohort_returns[cohort].append(float(returns_to_go[0]))
+        labeled_rows = wins >= 0
+        labeled_return_count += int(labeled_rows.sum())
+        labeled_returns_above_support += int(
+            (returns_to_go[labeled_rows] > agent.value_max).sum()
+        )
+        labeled_returns_below_support += int(
+            (returns_to_go[labeled_rows] < agent.value_min).sum()
+        )
+        teacher_targets = np.asarray(p["teacher_targets"])
+        if teacher_targets.shape[1] >= 7:
+            chop_mass = np.maximum(
+                0.0,
+                teacher_targets[:, 4]
+                - np.maximum(teacher_targets[:, 5], teacher_targets[:, 6]),
+            )
+            winner_rows = wins == 1
+            failure_rows = wins == 0
+            winner_dominant_chop_rows += int((winner_rows & (chop_mass > 0)).sum())
+            winner_dominant_chop_mass += float(chop_mass[winner_rows].sum())
+            failure_dominant_chop_rows += int((failure_rows & (chop_mass > 0)).sum())
+            failure_dominant_chop_mass += float(chop_mass[failure_rows].sum())
         rows = (sides >= 0) | (wins >= 0)
         violations["partial_pair_evidence"] += int(np.sum((sides >= 0) != (wins >= 0)))
         violations["invalid_context"] += int(
@@ -387,6 +469,7 @@ def main():
                                 p["episode_id"],
                                 int(ix),
                                 contexts[ix].copy(),
+                                float(returns_to_go[ix]),
                             )
                         )
         del p
@@ -455,6 +538,7 @@ def main():
                     "economic_win": win,
                     "exact_target": Action(anchor.entry_action_target).name,
                     "population_weight": weight,
+                    "challenge_return_to_go": item[5],
                 }
             )
         pair_report.append(
@@ -509,6 +593,18 @@ def main():
     rt, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
+    challenge_bonuses = []
+    for row_index, pair in enumerate(pair_report):
+        winner = pair["anchors"][0]
+        side = SIDES[0] if pair["side"] == "long" else SIDES[1]
+        values = before[row_index * 2]
+        improvement = max(
+            float(winner["challenge_return_to_go"]),
+            float(values[int(side)]),
+        ) - float(values.max())
+        challenge_bonuses.append(
+            args.challenge_return_weight * max(0.0, improvement)
+        )
     report = {
         "checkpoint": str(checkpoint),
         "completed_episodes": manifest["progress"]["completed_episodes"],
@@ -524,6 +620,34 @@ def main():
         },
         "economic_label_population": dict(population),
         "economic_label_violations": dict(violations),
+        "challenge_return_audit": {
+            "discount": args.challenge_return_discount,
+            "weight": args.challenge_return_weight,
+            "c51_support": [agent.value_min, agent.value_max],
+            "cohorts": {
+                name: {
+                    "episodes": len(values),
+                    "mean_episode_return": float(np.mean(values)),
+                    "minimum_episode_return": float(np.min(values)),
+                    "maximum_episode_return": float(np.max(values)),
+                }
+                for name, values in sorted(challenge_cohort_returns.items())
+            },
+            "labeled_anchor_count": labeled_return_count,
+            "labeled_returns_above_support": labeled_returns_above_support,
+            "labeled_returns_below_support": labeled_returns_below_support,
+            "audited_pass_winner_bonus_count": len(challenge_bonuses),
+            "audited_pass_winner_bonus_mean": float(np.mean(challenge_bonuses)),
+            "audited_pass_winner_bonus_max": float(np.max(challenge_bonuses)),
+        },
+        "economic_winner_chop_conflict": {
+            "legacy_winner_rows": winner_dominant_chop_rows,
+            "legacy_winner_membership_mass": winner_dominant_chop_mass,
+            "corrected_winner_rows": 0,
+            "corrected_winner_membership_mass": 0.0,
+            "retained_failure_rows": failure_dominant_chop_rows,
+            "retained_failure_membership_mass": failure_dominant_chop_mass,
+        },
         "candidate_pool": {
             f'{SN[k[0]]}_{"winner" if k[1] else "failure"}': len(v)
             for k, v in candidates.items()

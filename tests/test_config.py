@@ -135,6 +135,9 @@ def test_effective_config_materialization_is_single_and_idempotent() -> None:
     assert first["training"]["management_epsilon_start"] == 0.2
     assert first["agent"]["target_update_mode"] == "hard"
     assert first["agent"]["auxiliary_gradient_conflict_mode"] == "none"
+    assert first["agent"]["exclude_economic_winners_from_chop_wait"] is False
+    assert first["agent"]["challenge_return_self_imitation_weight"] == 0.0
+    assert first["agent"]["challenge_return_discount"] == 1.0
 
 
 def test_effective_config_defaults_are_loaded_from_json(
