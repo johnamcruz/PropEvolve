@@ -81,6 +81,7 @@ class EntryTargetMetadata:
     available: bool
     censored: bool
     unavailable_reason: UnavailableReason | None
+    candidate_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,6 +823,7 @@ def _materialize_market_targets(
                     available=False,
                     censored=False,
                     unavailable_reason="ambiguous_side",
+                    candidate_count=len(fill_offsets),
                 )
             continue
         if not event.resolved:
@@ -842,6 +844,7 @@ def _materialize_market_targets(
                     available=False,
                     censored=False,
                     unavailable_reason="unresolved_split_end",
+                    candidate_count=len(fill_offsets),
                 )
             continue
         assert event.continuation is not None
@@ -870,27 +873,22 @@ def _materialize_market_targets(
                 else None
             )
             targets[row] = -1 if action is None else int(action)
-            visible_outcomes = not candidate.censored
             metadata[row] = EntryTargetMetadata(
                 side=event.side,
                 event_anchor_rows=(event.anchor,),
                 candidate_decision_offset=candidate.decision_offset,
                 fill_offset=candidate.fill_offset,
-                continuation=(
-                    event.continuation[candidate_index]
-                    if visible_outcomes else None
-                ),
-                economic_win=(
-                    event.economic_win[candidate_index]
-                    if visible_outcomes else None
-                ),
-                economic_good=(
-                    event.economic_good[candidate_index]
-                    if visible_outcomes else None
-                ),
+                # Censored rows remain unavailable to every learning loss.
+                # Retain their resolved outcomes only for the post-policy
+                # timing audit, which distinguishes late valid entries from
+                # entries made after the opportunity invalidated.
+                continuation=event.continuation[candidate_index],
+                economic_win=event.economic_win[candidate_index],
+                economic_good=event.economic_good[candidate_index],
                 available=candidate.available,
                 censored=candidate.censored,
                 unavailable_reason=candidate.unavailable_reason,
+                candidate_count=len(fill_offsets),
             )
     targets.setflags(write=False)
     return (

@@ -44,6 +44,7 @@ from .environment import (
     MarketSeries,
 )
 from .episode_coverage import FullDataEpisodeCoverageSpec
+from .entry_timing_audit import audit_entry_timing_episode
 from .evolution import (
     CandidateArchive,
     EvaluationGate,
@@ -6046,6 +6047,8 @@ def train_agent(
             Action.ENTER_LONG_1: 0,
             Action.ENTER_SHORT_1: 0,
         }
+        entry_timing_flat_actions: dict[int, Action] = {}
+        entry_timing_metadata: dict[int, object] = {}
         recovery_entries_used = 0
         total_reward = 0.0
         # Legacy recipes decay against market interaction. Explicit episode
@@ -6162,6 +6165,8 @@ def train_agent(
                     ] += 1
                 previous_policy_state = policy_state
             action_counts[Action(action)] += 1
+            if flat_actions.issubset(valid):
+                entry_timing_flat_actions[decision_index] = Action(action)
             if diagnostic_probe:
                 assert action_values is not None
                 values = np.asarray(action_values, dtype=np.float64)
@@ -6222,6 +6227,13 @@ def train_agent(
                 )
                 else None
             )
+            entry_action_metadata = (
+                entry_action_metadata_lookup(episode_ticker, decision_index)
+                if entry_action_metadata_lookup is not None
+                else None
+            )
+            if entry_action_metadata is not None:
+                entry_timing_metadata[decision_index] = entry_action_metadata
             regime_selectivity_headroom_fraction = None
             if (
                 float(
@@ -6307,9 +6319,6 @@ def train_agent(
             paired_a_plus_economic_win = None
             if paired_recurrent_a_plus and entry_action_target is not None:
                 assert entry_action_metadata_lookup is not None
-                metadata = entry_action_metadata_lookup(
-                    episode_ticker, decision_index
-                )
                 (
                     paired_a_plus_context,
                     paired_a_plus_side,
@@ -6318,7 +6327,7 @@ def train_agent(
                     teacher_target=teacher_target,
                     teacher_channels=teacher_channels,
                     entry_action_target=entry_action_target,
-                    metadata=metadata,
+                    metadata=entry_action_metadata,
                 )
             transitions.append(Transition(
                 observation=observation,
@@ -7328,6 +7337,14 @@ def train_agent(
                     action.name: entry_action_target_counts[action]
                     for action in entry_action_target_counts
                 },
+                "entry_timing_audit": (
+                    audit_entry_timing_episode(
+                        flat_actions=entry_timing_flat_actions,
+                        metadata_by_decision=entry_timing_metadata,
+                    )
+                    if entry_action_metadata_lookup is not None
+                    else None
+                ),
                 "sampled_entry_action_target_counts": {
                     action: int(round(sum(learner_diagnostics[key])))
                     for action, key in {

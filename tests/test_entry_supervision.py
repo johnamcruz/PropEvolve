@@ -323,13 +323,23 @@ def test_economic_builder_uses_next_open_and_fee_inclusive_300_dollar_risk() -> 
     assert metadata is not None
     assert metadata.side == "long"
     assert metadata.event_anchor_rows == (0,)
+    assert metadata.candidate_count == 5
     assert metadata.candidate_decision_offset == 0
     assert metadata.fill_offset == 1
     assert metadata.continuation is True
     assert metadata.economic_win is True
     assert metadata.economic_good is True
     assert targets.target("NQ", 1) is None
-    assert targets.metadata("NQ", 1).unavailable_reason == "after_entry"
+    after_entry = targets.metadata("NQ", 1)
+    assert after_entry.unavailable_reason == "after_entry"
+    assert after_entry.available is False
+    assert after_entry.censored is True
+    # Censoring still excludes the row from learning. The outcome remains
+    # available only to the post-policy Stage 1 timing audit so it can separate
+    # a late but valid entry from entry after invalidation.
+    assert after_entry.continuation is True
+    assert after_entry.economic_win is True
+    assert after_entry.economic_good is True
 
     assert isinstance(targets.manifest, MappingProxyType)
     assert targets.manifest["schema"] == "post_launch_entry_v1"

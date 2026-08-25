@@ -4670,6 +4670,134 @@ def test_teacher_dropout_does_not_remove_exact_action_or_confluence_supervision(
     assert diagnostics[0]["entry_action_target_counts"]["WAIT"] == 0
 
 
+def test_training_diagnostic_reports_stage1_entry_timing_outcome() -> None:
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+
+    class TimingAgent(Agent):
+        def select_action(self, observation, **kwargs):
+            index = int(observation[0])
+            action = Action.ENTER_LONG_1 if index == 1 else Action.WAIT
+            values = (
+                np.zeros(len(Action), np.float32)
+                if kwargs.get("return_action_values", False)
+                else None
+            )
+            return action, None, values
+
+    class TimingEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self):
+            self.index = 0
+            return np.array([0.0], np.float32), {
+                "valid_actions": flat_actions,
+                "ticker": "NQ",
+                "start": 10,
+            }
+
+        def step(self, action):
+            del action
+            self.index += 1
+            terminated = self.index == 3
+            return np.array([self.index], np.float32), 0.0, terminated, False, {
+                "valid_actions": () if terminated else flat_actions,
+                "ticker": "NQ",
+                "fill_index": 10 + self.index,
+                "outcome": "timeout" if terminated else None,
+                "primary_side": "flat",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "realized_pnl": 0.0,
+                "equity_pnl": 0.0,
+            }
+
+    good = (False, True, True)
+
+    def metadata_lookup(ticker: str, decision_index: int):
+        assert ticker == "NQ"
+        offset = decision_index - 10
+        if not 0 <= offset < len(good):
+            return None
+        return EntryTargetMetadata(
+            side="long",
+            event_anchor_rows=(10,),
+            candidate_decision_offset=offset,
+            fill_offset=offset + 1,
+            continuation=good[offset],
+            economic_win=good[offset],
+            economic_good=good[offset],
+            available=offset <= 1,
+            censored=offset > 1,
+            unavailable_reason="after_entry" if offset > 1 else None,
+            candidate_count=3,
+        )
+
+    diagnostics: list[dict[str, object]] = []
+    train_agent(
+        TimingAgent(),
+        TimingEnvironment(),
+        episodes=1,
+        minimum_environment_steps=3,
+        replay=BalancedSequenceReplay(
+            capacity_episodes=2,
+            sequence_length=1,
+            seed=73,
+        ),
+        warmup_episodes=99,
+        updates_per_episode=1,
+        batch_sequences=1,
+        recurrent_horizon=3,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=None,
+        ticker_seed=17,
+        entry_action_lookup=lambda ticker, index: (
+            Action.WAIT if index == 10 else
+            Action.ENTER_LONG_1 if index == 11 else None
+        ),
+        entry_action_metadata_lookup=metadata_lookup,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert diagnostics[0]["entry_timing_audit"] == {
+        "schema": "propevolve_entry_timing_audit_v1",
+        "classified_events": 1,
+        "unclassified_events": 0,
+        "counts": {
+            "entered_too_early": 0,
+            "entered_at_first_valid_bar": 1,
+            "entered_late": 0,
+            "missed_valid_window": 0,
+            "entered_after_invalidation": 0,
+            "correctly_waited": 0,
+        },
+        "by_side": {
+            "long": {
+                "entered_too_early": 0,
+                "entered_at_first_valid_bar": 1,
+                "entered_late": 0,
+                "missed_valid_window": 0,
+                "entered_after_invalidation": 0,
+                "correctly_waited": 0,
+            },
+            "short": {
+                "entered_too_early": 0,
+                "entered_at_first_valid_bar": 0,
+                "entered_late": 0,
+                "missed_valid_window": 0,
+                "entered_after_invalidation": 0,
+                "correctly_waited": 0,
+            },
+        },
+    }
+
+
 def test_exact_entry_supervision_remains_active_after_imitation_autonomy() -> None:
     flat_actions = (
         Action.WAIT,
