@@ -1397,11 +1397,15 @@ def load_experiment_config(path: str | Path) -> dict:
     if agent["auxiliary_gradient_conflict_mode"] not in {
         "none",
         "pcgrad_safety_opportunity_v1",
+        "pcgrad_preserve_opportunity_v2",
     }:
         raise ValueError("auxiliary gradient conflict mode is invalid")
     if (
         agent["auxiliary_gradient_conflict_mode"]
-        == "pcgrad_safety_opportunity_v1"
+        in {
+            "pcgrad_safety_opportunity_v1",
+            "pcgrad_preserve_opportunity_v2",
+        }
         and payload["runtime"]["mixed_precision"] != "off"
     ):
         raise ValueError(

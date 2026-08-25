@@ -80,6 +80,7 @@ _ENTRY_ACTION_LOSS_REDUCTIONS = {
 _AUXILIARY_GRADIENT_CONFLICT_MODES = {
     "none",
     "pcgrad_safety_opportunity_v1",
+    "pcgrad_preserve_opportunity_v2",
 }
 _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "rows",
@@ -164,6 +165,7 @@ def conflict_aware_gradient_blend(
     primary_gradients: Sequence[torch.Tensor],
     safety_gradients: Sequence[torch.Tensor],
     opportunity_gradients: Sequence[torch.Tensor],
+    preserve_opportunity: bool = False,
 ) -> GradientConflictBlend:
     """Preserve primary learning while removing auxiliary gradient opposition."""
     primary = tuple(primary_gradients)
@@ -171,6 +173,7 @@ def conflict_aware_gradient_blend(
     opportunity = tuple(opportunity_gradients)
     if (
         not primary
+        or not isinstance(preserve_opportunity, bool)
         or len(primary) != len(safety)
         or len(primary) != len(opportunity)
         or any(
@@ -201,17 +204,20 @@ def conflict_aware_gradient_blend(
     safety_coefficient = negative_dot / opportunity_norm_sq.clamp_min(
         torch.finfo(dot.dtype).tiny
     )
-    opportunity_coefficient = negative_dot / safety_norm_sq.clamp_min(
-        torch.finfo(dot.dtype).tiny
-    )
     projected_safety = tuple(
         left - safety_coefficient * right
         for left, right in zip(safety, opportunity, strict=True)
     )
-    projected_opportunity = tuple(
-        right - opportunity_coefficient * left
-        for left, right in zip(safety, opportunity, strict=True)
-    )
+    if preserve_opportunity:
+        projected_opportunity = opportunity
+    else:
+        opportunity_coefficient = negative_dot / safety_norm_sq.clamp_min(
+            torch.finfo(dot.dtype).tiny
+        )
+        projected_opportunity = tuple(
+            right - opportunity_coefficient * left
+            for left, right in zip(safety, opportunity, strict=True)
+        )
     projected_dot = sum(
         (left * right).sum()
         for left, right in zip(
@@ -1120,7 +1126,10 @@ class RecurrentC51Agent:
             raise ValueError("auxiliary gradient conflict mode is invalid")
         if (
             auxiliary_gradient_conflict_mode
-            == "pcgrad_safety_opportunity_v1"
+            in {
+                "pcgrad_safety_opportunity_v1",
+                "pcgrad_preserve_opportunity_v2",
+            }
             and mixed_precision != "off"
         ):
             raise ValueError(
@@ -3381,7 +3390,10 @@ class RecurrentC51Agent:
         self.optimizer.zero_grad(set_to_none=True)
         if (
             self.auxiliary_gradient_conflict_mode
-            == "pcgrad_safety_opportunity_v1"
+            in {
+                "pcgrad_safety_opportunity_v1",
+                "pcgrad_preserve_opportunity_v2",
+            }
         ):
             trainable_parameters = tuple(
                 parameter
@@ -3425,6 +3437,10 @@ class RecurrentC51Agent:
                 primary_gradients=primary_gradients,
                 safety_gradients=safety_gradients,
                 opportunity_gradients=opportunity_gradients,
+                preserve_opportunity=(
+                    self.auxiliary_gradient_conflict_mode
+                    == "pcgrad_preserve_opportunity_v2"
+                ),
             )
             for parameter, gradient in zip(
                 trainable_parameters,

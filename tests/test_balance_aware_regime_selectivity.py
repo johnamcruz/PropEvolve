@@ -1240,7 +1240,8 @@ def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None
     ] == 1.0
 
 
-def test_pcgrad_learner_prevents_safety_and_opportunity_cancellation() -> None:
+def test_pcgrad_preserve_opportunity_learner_prevents_auxiliary_cancellation(
+) -> None:
     agent = _agent(
         seed=502,
         selectivity_weight=1.0,
@@ -1252,7 +1253,7 @@ def test_pcgrad_learner_prevents_safety_and_opportunity_cancellation() -> None:
         chop_wait_margin=0.25,
         failed_confluence_margin=0.25,
         paired_a_plus_margin=0.25,
-        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
+        auxiliary_gradient_conflict_mode="pcgrad_preserve_opportunity_v2",
     )
     dominant_chop = _teacher_row(
         long_attempt=0.90,

@@ -1139,6 +1139,24 @@ def test_auxiliary_gradient_conflict_mode_fails_closed_on_unknown_value(
         load_experiment_config(path)
 
 
+def test_preserve_opportunity_gradient_conflict_mode_is_config_driven(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["agent"]["auxiliary_gradient_conflict_mode"] = (
+        "pcgrad_preserve_opportunity_v2"
+    )
+    path = tmp_path / "preserve-opportunity-gradient-conflict.json"
+    path.write_text(json.dumps(payload))
+
+    loaded = load_experiment_config(path)
+
+    assert (
+        loaded["agent"]["auxiliary_gradient_conflict_mode"]
+        == "pcgrad_preserve_opportunity_v2"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (

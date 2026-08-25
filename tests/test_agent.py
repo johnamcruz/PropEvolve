@@ -47,7 +47,34 @@ def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
     torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 5))
 
 
-def test_conflict_aware_gradient_blend_preserves_primary_and_projects_auxiliaries(
+def test_conflict_aware_gradient_blend_preserves_primary_and_opportunity(
+) -> None:
+    opportunity = (torch.tensor([-1.0, 1.0]),)
+    result = conflict_aware_gradient_blend(
+        primary_gradients=(torch.tensor([2.0, 3.0]),),
+        safety_gradients=(torch.tensor([1.0, 0.0]),),
+        opportunity_gradients=opportunity,
+        preserve_opportunity=True,
+    )
+
+    torch.testing.assert_close(
+        result.combined_gradients[0],
+        torch.tensor([1.5, 4.5]),
+    )
+    torch.testing.assert_close(
+        result.projected_safety_gradients[0],
+        torch.tensor([0.5, 0.5]),
+    )
+    torch.testing.assert_close(
+        result.projected_opportunity_gradients[0],
+        opportunity[0],
+    )
+    assert result.pre_projection_cosine == pytest.approx(-2 ** -0.5)
+    assert result.post_projection_cosine == pytest.approx(0.0, abs=1e-7)
+    assert result.conflict_projected
+
+
+def test_conflict_aware_gradient_blend_keeps_symmetric_v1_compatibility(
 ) -> None:
     result = conflict_aware_gradient_blend(
         primary_gradients=(torch.tensor([2.0, 3.0]),),
@@ -341,7 +368,7 @@ def test_pcgrad_mode_leaves_primary_c51_only_update_unchanged() -> None:
     projected = _agent(
         2,
         seed=47,
-        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
+        auxiliary_gradient_conflict_mode="pcgrad_preserve_opportunity_v2",
     )
 
     baseline.train_batch((sequence,))
@@ -1496,7 +1523,7 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
         entry_action_margin=0.25,
         regime_selectivity_chop_wait_margin=0.25,
         regime_selectivity_failed_confluence_margin=0.35,
-        auxiliary_gradient_conflict_mode="pcgrad_safety_opportunity_v1",
+        auxiliary_gradient_conflict_mode="pcgrad_preserve_opportunity_v2",
     )
     rows = (
         _entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),
@@ -1514,7 +1541,7 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
     assert restored.regime_selectivity_failed_confluence_margin == 0.35
     assert (
         restored.auxiliary_gradient_conflict_mode
-        == "pcgrad_safety_opportunity_v1"
+        == "pcgrad_preserve_opportunity_v2"
     )
     restored.train_batch(rows)
     for action_name in ("wait", "long", "short"):
