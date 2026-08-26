@@ -211,20 +211,59 @@ def build_post_launch_entry_supervision(
     if not long_launch and not short_launch:
         raise ValueError("post-launch supervision requires at least one launch side")
     if long_launch and short_launch:
+        dominant_index = next(
+            (
+                index
+                for index, (long_value, short_value) in enumerate(
+                    zip(long_good, short_good, strict=True)
+                )
+                if long_value != short_value
+            ),
+            None,
+        )
+        if dominant_index is not None:
+            side = "long" if long_good[dominant_index] else "short"
+            enter_action: EntryAction = (
+                "ENTER_LONG_1" if side == "long" else "ENTER_SHORT_1"
+            )
+            return PostLaunchEntrySupervision(
+                side=side,
+                status="enter",
+                enter_fill_offset=normalized_offsets[dominant_index],
+                candidates=tuple(
+                    CandidateEntryTarget(
+                        decision_offset=fill_offset - 1,
+                        fill_offset=fill_offset,
+                        action=(
+                            "WAIT"
+                            if index < dominant_index
+                            else enter_action
+                            if index == dominant_index
+                            else None
+                        ),
+                        available=index <= dominant_index,
+                        censored=index > dominant_index,
+                        unavailable_reason=(
+                            "after_entry" if index > dominant_index else None
+                        ),
+                    )
+                    for index, fill_offset in enumerate(normalized_offsets)
+                ),
+            )
         return PostLaunchEntrySupervision(
             side="ambiguous",
-            status="ambiguous",
+            status="abstain",
             enter_fill_offset=None,
             candidates=tuple(
                 CandidateEntryTarget(
                     decision_offset=fill_offset - 1,
                     fill_offset=fill_offset,
-                    action=None,
-                    available=False,
+                    action="WAIT",
+                    available=True,
                     censored=False,
-                    unavailable_reason="ambiguous_side",
+                    unavailable_reason=None,
                 )
-                for index, fill_offset in enumerate(normalized_offsets)
+                for fill_offset in normalized_offsets
             ),
         )
     side: Literal["long", "short"] = "long" if long_launch else "short"
@@ -408,6 +447,7 @@ def build_entry_action_targets(
             "launch_collision": "adverse_first",
             "continuation_collision": "adverse_first",
             "economic_collision": "stop_first",
+            "opposite_side_overlap": "exact_wait",
             "action_order": ENTRY_ACTION_ORDER,
             "unavailable_sentinel": -1,
         },
@@ -780,7 +820,6 @@ def _materialize_market_targets(
     decision_offsets = tuple(value - 1 for value in fill_offsets)
     maximum_decision_offset = max(decision_offsets)
     ambiguous_ids: set[int] = set()
-    ambiguous_anchors: dict[int, tuple[int, ...]] = {}
     for left_id, left in enumerate(events):
         for right_id in range(left_id + 1, len(events)):
             right = events[right_id]
@@ -791,40 +830,116 @@ def _materialize_market_targets(
                 and right.anchor <= left.anchor + maximum_decision_offset
             ):
                 ambiguous_ids.update((left_id, right_id))
+
+    ambiguous_rows: dict[
+        int,
+        list[tuple[_Event, int, CandidateEntryTarget]],
+    ] = {}
+    unresolved_ambiguous_rows: set[int] = set()
     for event_id in ambiguous_ids:
         event = events[event_id]
-        anchors = tuple(sorted({
-            other.anchor
-            for other in events
-            if other.side != event.side
-            and other.anchor <= event.anchor + maximum_decision_offset
-            and event.anchor <= other.anchor + maximum_decision_offset
-        } | {event.anchor}))
-        ambiguous_anchors[event_id] = anchors
+        if not event.resolved:
+            unresolved_ambiguous_rows.update(
+                event.anchor + offset
+                for offset in decision_offsets
+                if event.anchor + offset < role_end
+            )
+            continue
+        assert event.economic_good is not None
+        supervision = build_post_launch_entry_supervision(
+            long_launch=event.side == "long",
+            short_launch=event.side == "short",
+            long_economic_good=(
+                event.economic_good
+                if event.side == "long"
+                else (False,) * len(fill_offsets)
+            ),
+            short_economic_good=(
+                event.economic_good
+                if event.side == "short"
+                else (False,) * len(fill_offsets)
+            ),
+            fill_offsets=fill_offsets,
+        )
+        for candidate_index, candidate in enumerate(supervision.candidates):
+            row = event.anchor + candidate.decision_offset
+            if row < role_end:
+                ambiguous_rows.setdefault(row, []).append(
+                    (event, candidate_index, candidate)
+                )
+
+    for row, candidates in ambiguous_rows.items():
+        anchors = tuple(sorted({event.anchor for event, _, _ in candidates}))
+        if row in unresolved_ambiguous_rows:
+            metadata[row] = EntryTargetMetadata(
+                side="ambiguous",
+                event_anchor_rows=anchors,
+                candidate_decision_offset=None,
+                fill_offset=None,
+                continuation=None,
+                economic_win=None,
+                economic_good=None,
+                available=False,
+                censored=False,
+                unavailable_reason="unresolved_split_end",
+                candidate_count=len(fill_offsets),
+            )
+            continue
+        available = [
+            item
+            for item in candidates
+            if item[2].available and item[2].action is not None
+        ]
+        entries = [item for item in available if item[2].action != "WAIT"]
+        entry_actions = {item[2].action for item in entries}
+        selected: tuple[_Event, int, CandidateEntryTarget] | None = None
+        if len(entry_actions) == 1:
+            selected = entries[0]
+            action = Action[selected[2].action]
+        elif len(entry_actions) > 1:
+            action = Action.WAIT
+        else:
+            waits = [item for item in available if item[2].action == "WAIT"]
+            action = Action.WAIT if waits else None
+            wait_sides = {item[0].side for item in waits}
+            if len(wait_sides) == 1:
+                selected = waits[0]
+        targets[row] = -1 if action is None else int(action)
+        if selected is None:
+            metadata[row] = EntryTargetMetadata(
+                side="ambiguous",
+                event_anchor_rows=anchors,
+                candidate_decision_offset=None,
+                fill_offset=None,
+                continuation=None,
+                economic_win=None,
+                economic_good=None,
+                available=action is not None,
+                censored=False,
+                unavailable_reason=(None if action is not None else "ambiguous_side"),
+                candidate_count=len(fill_offsets),
+            )
+            continue
+        event, candidate_index, candidate = selected
+        assert event.continuation is not None
+        assert event.economic_win is not None
+        assert event.economic_good is not None
+        metadata[row] = EntryTargetMetadata(
+            side=event.side,
+            event_anchor_rows=anchors,
+            candidate_decision_offset=candidate.decision_offset,
+            fill_offset=candidate.fill_offset,
+            continuation=event.continuation[candidate_index],
+            economic_win=event.economic_win[candidate_index],
+            economic_good=event.economic_good[candidate_index],
+            available=True,
+            censored=False,
+            unavailable_reason=None,
+            candidate_count=len(fill_offsets),
+        )
 
     for event_id, event in enumerate(events):
         if event_id in ambiguous_ids:
-            for decision_offset in decision_offsets:
-                row = event.anchor + decision_offset
-                if row >= role_end:
-                    continue
-                existing = metadata.get(row)
-                anchors = set(ambiguous_anchors[event_id])
-                if existing is not None:
-                    anchors.update(existing.event_anchor_rows)
-                metadata[row] = EntryTargetMetadata(
-                    side="ambiguous",
-                    event_anchor_rows=tuple(sorted(anchors)),
-                    candidate_decision_offset=None,
-                    fill_offset=None,
-                    continuation=None,
-                    economic_win=None,
-                    economic_good=None,
-                    available=False,
-                    censored=False,
-                    unavailable_reason="ambiguous_side",
-                    candidate_count=len(fill_offsets),
-                )
             continue
         if not event.resolved:
             for offset, fill_offset in zip(

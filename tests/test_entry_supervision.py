@@ -4,8 +4,10 @@ from types import MappingProxyType
 
 import numpy as np
 import pytest
+import torch
 
 import propevolve.entry_supervision as entry_supervision_module
+from propevolve.agent import exact_action_margin_losses
 from propevolve.decision import Action
 from propevolve.balance_aware_regime_selectivity import (
     EXPANSION_CHANNELS,
@@ -132,7 +134,14 @@ def _fill_five_market(*, rows: int = 160) -> MarketSeries:
     return _market_from_paths(high, low)
 
 
-def _ambiguous_market(*, rows: int = 160) -> MarketSeries:
+def _ambiguous_market(
+    *,
+    rows: int = 160,
+    long_economic_win: bool = False,
+    short_economic_win: bool = False,
+) -> MarketSeries:
+    if long_economic_win and short_economic_win:
+        raise ValueError("ambiguous fixture supports at most one dominant side")
     high = np.full(rows, 100.2)
     low = np.full(rows, 99.8)
     high[1] = 101.1
@@ -140,6 +149,10 @@ def _ambiguous_market(*, rows: int = 160) -> MarketSeries:
     # five-state window without making the first launch bar itself ambiguous.
     high[3] = 100.2
     low[3] = 98.9
+    if long_economic_win:
+        high[4] = 104.1
+    if short_economic_win:
+        low[4] = 95.9
     return _market_from_paths(high, low)
 
 
@@ -241,24 +254,51 @@ def test_no_good_entry_keeps_all_five_states_available_as_wait() -> None:
     )
 
 
-def test_overlapping_long_and_short_launches_are_unavailable_not_direction_selected() -> None:
+def test_tied_long_short_launch_waits_until_long_becomes_dominant() -> None:
+    supervision = build_post_launch_entry_supervision(
+        long_launch=True,
+        short_launch=True,
+        long_economic_good=(True, True, False, False, False),
+        short_economic_good=(True, False, False, False, False),
+    )
+
+    assert supervision.side == "long"
+    assert supervision.status == "enter"
+    assert supervision.enter_fill_offset == 2
+    assert [state.action for state in supervision.candidates] == [
+        "WAIT", "ENTER_LONG_1", None, None, None
+    ]
+
+
+def test_tied_long_short_launch_waits_until_short_becomes_dominant() -> None:
     supervision = build_post_launch_entry_supervision(
         long_launch=True,
         short_launch=True,
         long_economic_good=(True, False, False, False, False),
-        short_economic_good=(False, True, False, False, False),
+        short_economic_good=(True, True, False, False, False),
+    )
+
+    assert supervision.side == "short"
+    assert supervision.status == "enter"
+    assert supervision.enter_fill_offset == 2
+    assert [state.action for state in supervision.candidates] == [
+        "WAIT", "ENTER_SHORT_1", None, None, None
+    ]
+
+
+def test_long_short_launch_that_never_resolves_stays_exact_wait() -> None:
+    supervision = build_post_launch_entry_supervision(
+        long_launch=True,
+        short_launch=True,
+        long_economic_good=(True, False, True, False, False),
+        short_economic_good=(True, False, True, False, False),
     )
 
     assert supervision.side == "ambiguous"
-    assert supervision.status == "ambiguous"
+    assert supervision.status == "abstain"
     assert supervision.enter_fill_offset is None
-    assert all(state.action is None for state in supervision.candidates)
-    assert not any(state.available for state in supervision.candidates)
-    assert not any(state.censored for state in supervision.candidates)
-    assert all(
-        state.unavailable_reason == "ambiguous_side"
-        for state in supervision.candidates
-    )
+    assert [state.action for state in supervision.candidates] == ["WAIT"] * 5
+    assert all(state.available for state in supervision.candidates)
 
 
 def test_post_launch_builder_rejects_an_event_without_a_launch_side() -> None:
@@ -597,15 +637,57 @@ def test_outcome_path_may_not_cross_the_2025_training_boundary() -> None:
     assert targets.metadata("NQ", 154) is None
 
 
-def test_overlapping_opposite_side_events_are_masked_by_full_builder() -> None:
+def test_overlapping_opposite_side_events_teach_exact_wait_in_full_builder() -> None:
     targets = _build_targets(_ambiguous_market())
 
     for row in range(5):
-        assert targets.target("NQ", row) is None
+        assert targets.target("NQ", row) is Action.WAIT
         metadata = targets.metadata("NQ", row)
         assert metadata is not None
-        assert metadata.side == "ambiguous"
-        assert metadata.unavailable_reason == "ambiguous_side"
+        assert metadata.side == ("long" if row == 0 else "ambiguous")
+        assert metadata.available is True
+        assert metadata.censored is False
+        assert metadata.unavailable_reason is None
+
+
+@pytest.mark.parametrize(
+    ("market", "row", "expected"),
+    (
+        (_ambiguous_market(long_economic_win=True), 0, Action.ENTER_LONG_1),
+        (_ambiguous_market(short_economic_win=True), 1, Action.ENTER_SHORT_1),
+    ),
+    ids=("dominant-long", "dominant-short"),
+)
+def test_overlapping_events_preserve_the_sole_economic_winner(
+    market: MarketSeries,
+    row: int,
+    expected: Action,
+) -> None:
+    targets = _build_targets(market)
+
+    assert targets.target("NQ", row) is expected
+
+
+def test_ambiguous_direction_target_raises_wait_above_both_entries() -> None:
+    targets = _build_targets(_ambiguous_market())
+    action_values = torch.tensor(
+        [[0.00, 0.10, 0.10]], dtype=torch.float64, requires_grad=True
+    )
+
+    exact_target = torch.tensor([int(targets.target("NQ", 0))])
+    loss = (
+        torch.nn.functional.cross_entropy(action_values, exact_target)
+        + exact_action_margin_losses(
+            action_values,
+            exact_target,
+            margin=0.25,
+        ).mean()
+    )
+    gradient, = torch.autograd.grad(loss, action_values)
+
+    assert gradient[0, Action.WAIT] < 0.0
+    assert gradient[0, Action.ENTER_LONG_1] > 0.0
+    assert gradient[0, Action.ENTER_SHORT_1] > 0.0
 
 
 def test_target_storage_is_compact_read_only_and_metadata_is_sparse() -> None:
