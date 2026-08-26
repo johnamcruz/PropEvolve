@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import numpy as np
+
+from propevolve.agent import RecurrentC51Agent
+from propevolve.balance_aware_regime_selectivity import (
+    PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+)
+from propevolve.decision import Action
+from propevolve.entry_supervision import EntryTargetMetadata
+from propevolve.environment import ChallengeStartState
+from propevolve.replay import BalancedSequenceReplay, Episode, Transition
+from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
+from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
+from propevolve.training import BalanceCurriculumSettings, train_agent
+
+
+TEACHER_CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+FLAT_ACTIONS = (
+    Action.WAIT,
+    Action.ENTER_LONG_1,
+    Action.ENTER_SHORT_1,
+)
+
+
+def _economic_episode(
+    *,
+    episode_id: str,
+    side: Action,
+    economic_win: bool,
+    context: tuple[float, ...],
+    offset: float,
+) -> Episode:
+    target = side if economic_win else Action.WAIT
+    outcome = "pass" if economic_win else "timeout"
+    transitions = []
+    for index in range(12):
+        anchor = index == 5
+        observation = np.asarray(
+            (offset + index / 100.0, context[0], context[2]),
+            dtype=np.float32,
+        )
+        next_observation = np.asarray(
+            (offset + (index + 1) / 100.0, context[0], context[2]),
+            dtype=np.float32,
+        )
+        transitions.append(Transition(
+            observation=observation,
+            action=side if anchor else Action.WAIT,
+            reward=2.0 if economic_win and anchor else (-1.0 if anchor else 0.0),
+            next_observation=next_observation,
+            terminated=index == 11,
+            valid_actions=FLAT_ACTIONS,
+            next_valid_actions=() if index == 11 else FLAT_ACTIONS,
+            teacher_target=(
+                np.asarray(context, dtype=np.float32) if anchor else None
+            ),
+            entry_action_target=target if anchor else None,
+            regime_selectivity_headroom_fraction=1.0 if anchor else None,
+            paired_a_plus_context=(
+                np.asarray(context, dtype=np.float32) if anchor else None
+            ),
+            paired_a_plus_side=side if anchor else None,
+            paired_a_plus_economic_win=economic_win if anchor else None,
+            source_decision_index=int(offset * 100) + index,
+        ))
+    return Episode(
+        episode_id=episode_id,
+        ticker="NQ",
+        outcome=outcome,
+        primary_side="long" if side == Action.ENTER_LONG_1 else "short",
+        ended_at_ns=int(offset * 1_000),
+        transitions=tuple(transitions),
+        terminal_pnl=6_100.0 if economic_win else -2_800.0,
+    )
+
+
+def _replay(*, seed: int) -> BalancedSequenceReplay:
+    return BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=seed,
+    )
+
+
+def _agent() -> RecurrentC51Agent:
+    return RecurrentC51Agent(
+        3,
+        hidden_dim=24,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=0.03,
+        weight_decay=0.0,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        n_step_return=2,
+        recurrent_burn_in=2,
+        device="cpu",
+        seed=601,
+        teacher_channels=len(TEACHER_CHANNELS),
+        teacher_channel_names=TEACHER_CHANNELS,
+        teacher_loss_weight=1e-6,
+        teacher_entry_search_centers=(0.10, 0.10),
+        entry_action_loss_weight=1.0,
+        entry_action_margin=0.25,
+        regime_selectivity_loss_weight=1.0,
+        regime_selectivity_expansion_centers=(0.10, 0.10),
+        regime_selectivity_chop_wait_margin=0.25,
+        regime_selectivity_failed_confluence_margin=0.25,
+        regime_selectivity_paired_a_plus_margin=0.25,
+        regime_selectivity_side_balance="paired_recurrent_long_short_v1",
+        regime_selectivity_semantics=(
+            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+        ),
+        regime_selectivity_persistent_chop_negative_emphasis=2.0,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+        exclude_economic_winners_from_chop_wait=True,
+    )
+
+
+def _boundary_margins(
+    agent: RecurrentC51Agent,
+    paired_sequences: tuple[tuple[Transition, ...], ...],
+) -> dict[tuple[int, str], float]:
+    margins: dict[tuple[int, str], float] = {}
+    for sequence in paired_sequences:
+        hidden = None
+        action_values = None
+        for transition in sequence:
+            _, hidden, action_values = agent.select_action(
+                transition.observation,
+                hidden=hidden,
+                valid_actions=transition.valid_actions,
+                epsilon=0.0,
+                return_action_values=True,
+            )
+        assert action_values is not None
+        anchor = sequence[2]
+        assert anchor.paired_a_plus_pair_id is not None
+        assert anchor.paired_a_plus_pair_side is not None
+        side = anchor.paired_a_plus_pair_side
+        pair_id = anchor.paired_a_plus_pair_id
+        if anchor.paired_a_plus_economic_win:
+            opposite = (
+                Action.ENTER_SHORT_1
+                if side == Action.ENTER_LONG_1
+                else Action.ENTER_LONG_1
+            )
+            margins[(pair_id, "winner_vs_wait")] = float(
+                action_values[int(side)] - action_values[int(Action.WAIT)]
+            )
+            margins[(pair_id, "winner_vs_opposite")] = float(
+                action_values[int(side)] - action_values[int(opposite)]
+            )
+        else:
+            margins[(pair_id, "wait_vs_failure")] = float(
+                action_values[int(Action.WAIT)] - action_values[int(side)]
+            )
+    return margins
+
+
+def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
+) -> None:
+    """Exercise pass promotion through replay pairing and the real V30 update."""
+    long_context = (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)
+    short_context = (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)
+    ordinary = _replay(seed=602)
+    for episode in (
+        _economic_episode(
+            episode_id="long-pass",
+            side=Action.ENTER_LONG_1,
+            economic_win=True,
+            context=long_context,
+            offset=0.0,
+        ),
+        _economic_episode(
+            episode_id="long-failure",
+            side=Action.ENTER_LONG_1,
+            economic_win=False,
+            context=long_context,
+            offset=1.0,
+        ),
+        _economic_episode(
+            episode_id="short-pass",
+            side=Action.ENTER_SHORT_1,
+            economic_win=True,
+            context=short_context,
+            offset=2.0,
+        ),
+        _economic_episode(
+            episode_id="short-failure",
+            side=Action.ENTER_SHORT_1,
+            economic_win=False,
+            context=short_context,
+            offset=3.0,
+        ),
+    ):
+        ordinary.add(episode)
+
+    pass_replay = _replay(seed=603)
+    assert pass_replay.absorb_recent_passes(ordinary, max_examples=8) == 2
+
+    restored_ordinary = _replay(seed=999)
+    restored_ordinary.load_state_dict(ordinary.state_dict())
+    restored_pass_replay = _replay(seed=998)
+    restored_pass_replay.load_state_dict(pass_replay.state_dict())
+
+    pass_sequences = restored_pass_replay.sample_balance_pass_entry_sequences(2)
+    pass_anchors = {sequence[2].entry_action_target for sequence in pass_sequences}
+    assert pass_anchors == {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+    assert all(
+        sequence[2].paired_a_plus_economic_win is True
+        for sequence in pass_sequences
+    )
+
+    paired_sequences = restored_ordinary.sample(4)
+    pair_anchors = [sequence[2] for sequence in paired_sequences]
+    assert len({anchor.paired_a_plus_pair_id for anchor in pair_anchors}) == 2
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        side_anchors = [
+            anchor
+            for anchor in pair_anchors
+            if anchor.paired_a_plus_pair_side == side
+        ]
+        assert len(side_anchors) == 2
+        assert {anchor.paired_a_plus_economic_win for anchor in side_anchors} == {
+            True,
+            False,
+        }
+        assert {anchor.entry_action_target for anchor in side_anchors} == {
+            side,
+            Action.WAIT,
+        }
+
+    agent = _agent()
+    before = _boundary_margins(agent, paired_sequences)
+    agent.train_batch((*paired_sequences, *pass_sequences))
+    after = _boundary_margins(agent, paired_sequences)
+
+    assert before.keys() == after.keys()
+    assert all(after[key] >= before[key] - 1e-7 for key in before)
+    assert any(after[key] > before[key] for key in before)
+    assert agent.last_train_metrics["economic_boundary_count"] == 6.0
+    assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
+) -> None:
+    """Prove the campaign training seam retains every economic-flow receipt."""
+    long_context = np.asarray(
+        (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        dtype=np.float32,
+    )
+    short_context = (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)
+
+    class PassingEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self, *, options=None):
+            self.index = 0
+            assert options is not None
+            start = options["challenge_start_state"]
+            return np.asarray((0.0, 0.90, 0.10), np.float32), {
+                "valid_actions": FLAT_ACTIONS,
+                "ticker": "NQ",
+                "start": 0,
+                "end": 12,
+                "realized_pnl": float(start.realized_pnl),
+                "mll_headroom_fraction": 0.5,
+            }
+
+        def step(self, action):
+            del action
+            self.index += 1
+            terminated = self.index == 12
+            pnl = 6_100.0 if terminated else -1_500.0 + 650.0 * self.index
+            return (
+                np.asarray((self.index / 100.0, 0.90, 0.10), np.float32),
+                1.0 if terminated else 0.0,
+                terminated,
+                False,
+                {
+                    "valid_actions": () if terminated else FLAT_ACTIONS,
+                    "ticker": "NQ",
+                    "fill_index": self.index,
+                    "outcome": "pass" if terminated else None,
+                    "primary_side": "long",
+                    "trade_count": 1,
+                    "win_count": 1,
+                    "winning_r_sum": 2.0,
+                    "win_rate": 1.0,
+                    "avg_win_r": 2.0,
+                    "realized_pnl": pnl,
+                    "equity_pnl": pnl,
+                    "mll_headroom_fraction": 0.5,
+                },
+            )
+
+    ordinary = _replay(seed=604)
+    for episode in (
+        _economic_episode(
+            episode_id="long-failure-seed",
+            side=Action.ENTER_LONG_1,
+            economic_win=False,
+            context=tuple(long_context),
+            offset=1.0,
+        ),
+        _economic_episode(
+            episode_id="short-pass-seed",
+            side=Action.ENTER_SHORT_1,
+            economic_win=True,
+            context=short_context,
+            offset=2.0,
+        ),
+        _economic_episode(
+            episode_id="short-failure-seed",
+            side=Action.ENTER_SHORT_1,
+            economic_win=False,
+            context=short_context,
+            offset=3.0,
+        ),
+    ):
+        ordinary.add(episode)
+
+    pass_replay = _replay(seed=605)
+    persisted: list[dict[str, object]] = []
+    diagnostics: list[dict[str, object]] = []
+    metadata = EntryTargetMetadata(
+        side="long",
+        event_anchor_rows=(5,),
+        candidate_decision_offset=0,
+        fill_offset=1,
+        continuation=True,
+        economic_win=True,
+        economic_good=True,
+        available=True,
+        censored=False,
+        unavailable_reason=None,
+    )
+
+    result = train_agent(
+        _agent(),
+        PassingEnvironment(),
+        episodes=1,
+        minimum_environment_steps=12,
+        budget_mode="episodes",
+        replay=ordinary,
+        warmup_episodes=1,
+        updates_per_episode=1,
+        batch_sequences=4,
+        recurrent_horizon=6,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("NQ",),
+        ticker_seed=5,
+        teacher_lookup=(
+            lambda ticker, index: long_context.copy() if index == 5 else None
+        ),
+        teacher_channels=TEACHER_CHANNELS,
+        entry_action_lookup=(
+            lambda ticker, index: Action.ENTER_LONG_1 if index == 5 else None
+        ),
+        entry_action_metadata_lookup=(
+            lambda ticker, index: metadata if index == 5 else None
+        ),
+        balance_curriculum=BalanceCurriculumSettings(
+            schedule_seed=37,
+            start_pnls=(-1_500.0,),
+            mll_floor_pnl=-3_000.0,
+            pass_replay_update_period=1,
+            pass_replay_max_examples=8,
+            pass_replay_path="runs/e2e-pass-replay.pt",
+            pass_replay_sha256="a" * 64,
+            pass_replay_output="e2e-pass-replay.pt",
+        ),
+        balance_pass_replay=pass_replay,
+        balance_pass_replay_callback=persisted.append,
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    assert result.passes == 1
+    assert result.blows == result.timeouts == 0
+    assert len(persisted) == 1
+    assert {
+        episode["episode_id"] for episode in persisted[0]["episodes"]
+    } == {"short-pass-seed", next(
+        episode["episode_id"]
+        for episode in persisted[0]["episodes"]
+        if episode["episode_id"].startswith("historical-")
+    )}
+    diagnostic = diagnostics[0]
+    assert diagnostic["balance_pass_replay_promoted_passes"] == 1
+    assert diagnostic["balance_pass_replay_sequences"] == 1
+    assert diagnostic["updates"] == 1
+    assert diagnostic["mean_regime_selectivity_paired_a_plus_pair_count"] == 2.0
+    assert diagnostic[
+        "mean_regime_selectivity_paired_a_plus_long_pair_count"
+    ] == 1.0
+    assert diagnostic[
+        "mean_regime_selectivity_paired_a_plus_short_pair_count"
+    ] == 1.0
+    assert diagnostic["mean_economic_boundary_count"] == 6.0
+    assert diagnostic["mean_economic_boundary_backtracks"] == 0.0
+    assert diagnostic["mean_economic_boundary_final_min_margin_delta"] >= -1e-7
+    assert diagnostic[
+        "mean_economic_boundary_long_winner_min_margin_delta"
+    ] >= -1e-7
+    assert diagnostic[
+        "mean_economic_boundary_short_winner_min_margin_delta"
+    ] >= -1e-7
+    assert diagnostic[
+        "mean_economic_boundary_failed_long_min_margin_delta"
+    ] >= -1e-7
+    assert diagnostic[
+        "mean_economic_boundary_failed_short_min_margin_delta"
+    ] >= -1e-7

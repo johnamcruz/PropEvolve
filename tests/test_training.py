@@ -2100,6 +2100,14 @@ class Agent:
             "entry_action_correct_wait_rows": 3.0,
             "entry_action_correct_long_rows": 1.0,
             "entry_action_correct_short_rows": 1.0,
+            "economic_boundary_backtracks": 0.0,
+            "economic_boundary_count": 6.0,
+            "economic_boundary_initial_min_margin_delta": 0.01,
+            "economic_boundary_final_min_margin_delta": 0.02,
+            "economic_boundary_long_winner_min_margin_delta": 0.03,
+            "economic_boundary_short_winner_min_margin_delta": 0.04,
+            "economic_boundary_failed_long_min_margin_delta": 0.05,
+            "economic_boundary_failed_short_min_margin_delta": 0.06,
         }
         return 0.5
 
@@ -2930,6 +2938,26 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1]["mean_sampled_close_td_loss"] == 2.4
     assert diagnostics[-1]["mean_management_hold_minus_close_q"] == 0.15
     assert diagnostics[-1]["mean_sampled_management_close_fraction"] == 0.2
+    assert diagnostics[-1]["mean_economic_boundary_backtracks"] == 0.0
+    assert diagnostics[-1]["mean_economic_boundary_count"] == 6.0
+    assert diagnostics[-1][
+        "mean_economic_boundary_initial_min_margin_delta"
+    ] == 0.01
+    assert diagnostics[-1][
+        "mean_economic_boundary_final_min_margin_delta"
+    ] == 0.02
+    assert diagnostics[-1][
+        "mean_economic_boundary_long_winner_min_margin_delta"
+    ] == 0.03
+    assert diagnostics[-1][
+        "mean_economic_boundary_short_winner_min_margin_delta"
+    ] == 0.04
+    assert diagnostics[-1][
+        "mean_economic_boundary_failed_long_min_margin_delta"
+    ] == 0.05
+    assert diagnostics[-1][
+        "mean_economic_boundary_failed_short_min_margin_delta"
+    ] == 0.06
     assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
     assert diagnostics[-1]["cumulative_blow_rate"] == 0.0
     assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0
