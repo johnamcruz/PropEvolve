@@ -171,7 +171,7 @@ def _reticker(market: MarketSeries, *, ticker: str) -> MarketSeries:
     )
 
 
-def test_earliest_long_economic_good_is_enter_and_later_states_are_censored() -> None:
+def test_earliest_long_economic_good_is_enter_and_only_later_winners_are_censored() -> None:
     supervision = build_post_launch_entry_supervision(
         long_launch=True,
         short_launch=False,
@@ -197,8 +197,59 @@ def test_earliest_long_economic_good_is_enter_and_later_states_are_censored() ->
         (1, 2, "WAIT", True, False, None),
         (2, 3, "ENTER_LONG_1", True, False, None),
         (3, 4, None, False, True, "after_entry"),
-        (4, 5, None, False, True, "after_entry"),
+        (4, 5, "WAIT", True, False, None),
     ]
+
+
+@pytest.mark.parametrize(
+    ("long_launch", "short_launch", "long_good", "short_good", "enter_action"),
+    [
+        (
+            True,
+            False,
+            (False, True, False, False, False),
+            (False, False, False, False, False),
+            "ENTER_LONG_1",
+        ),
+        (
+            False,
+            True,
+            (False, False, False, False, False),
+            (False, True, False, False, False),
+            "ENTER_SHORT_1",
+        ),
+    ],
+)
+def test_invalidated_rows_after_first_valid_entry_are_explicit_wait_targets(
+    long_launch: bool,
+    short_launch: bool,
+    long_good: tuple[bool, ...],
+    short_good: tuple[bool, ...],
+    enter_action: str,
+) -> None:
+    supervision = build_post_launch_entry_supervision(
+        long_launch=long_launch,
+        short_launch=short_launch,
+        long_economic_good=long_good,
+        short_economic_good=short_good,
+    )
+
+    assert [state.action for state in supervision.candidates] == [
+        "WAIT",
+        enter_action,
+        "WAIT",
+        "WAIT",
+        "WAIT",
+    ]
+    assert [state.fill_offset for state in supervision.candidates] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert all(state.available for state in supervision.candidates)
+    assert not any(state.censored for state in supervision.candidates)
 
 
 def test_short_side_uses_its_independent_economic_targets() -> None:
@@ -347,6 +398,10 @@ def test_economic_builder_uses_next_open_and_fee_inclusive_300_dollar_risk() -> 
     assert targets.manifest["point_values"] == {"NQ": 148.0}
     assert targets.manifest["round_trip_fees"] == {"NQ": 4.0}
     assert targets.manifest["label_semantics"]["fresh_lookback_bars"] == 5
+    assert (
+        targets.manifest["label_semantics"]["post_entry_invalidated_action"]
+        == "WAIT"
+    )
     assert targets.manifest["label_semantics"]["action_order"] == (
         "WAIT",
         "ENTER_LONG_1",
@@ -356,8 +411,8 @@ def test_economic_builder_uses_next_open_and_fee_inclusive_300_dollar_risk() -> 
 
 
 def test_manifest_reports_exact_action_target_counts_per_market_and_aggregate() -> None:
-    # One Long winner, one Short winner, and one launch with no executable
-    # economic entry provide a literal 5 WAIT : 1 LONG : 1 SHORT fixture.
+    # Each winner contributes one later invalidated WAIT, while the launch
+    # without an executable economic entry contributes five WAIT targets.
     markets = {
         "NQ": _market(),
         "ES": _reticker(_short_market(), ticker="ES"),
@@ -375,18 +430,18 @@ def test_manifest_reports_exact_action_target_counts_per_market_and_aggregate() 
     )
 
     expected_aggregate = {
-        "WAIT": 5,
+        "WAIT": 7,
         "ENTER_LONG_1": 1,
         "ENTER_SHORT_1": 1,
     }
     assert targets.manifest["action_target_counts"] == expected_aggregate
     assert targets.manifest["markets"]["NQ"]["action_target_counts"] == {
-        "WAIT": 0,
+        "WAIT": 1,
         "ENTER_LONG_1": 1,
         "ENTER_SHORT_1": 0,
     }
     assert targets.manifest["markets"]["ES"]["action_target_counts"] == {
-        "WAIT": 0,
+        "WAIT": 1,
         "ENTER_LONG_1": 0,
         "ENTER_SHORT_1": 1,
     }
@@ -405,9 +460,9 @@ def test_manifest_reports_exact_action_target_counts_per_market_and_aggregate() 
     ]
     assert receipt["target_counts"] == expected_aggregate
     assert receipt["class_weights"] == {
-        "WAIT": pytest.approx(7.0 / 15.0),
-        "ENTER_LONG_1": pytest.approx(7.0 / 3.0),
-        "ENTER_SHORT_1": pytest.approx(7.0 / 3.0),
+        "WAIT": pytest.approx(3.0 / 7.0),
+        "ENTER_LONG_1": pytest.approx(3.0),
+        "ENTER_SHORT_1": pytest.approx(3.0),
     }
     assert len(receipt["identity_sha256"]) == 64
 
