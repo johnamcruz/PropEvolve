@@ -6351,7 +6351,10 @@ def train_agent(
                     regime_selectivity_headroom_fraction
                 ),
                 recovery_active=(
-                    recovery_curriculum is not None
+                    (
+                        recovery_curriculum is not None
+                        or balance_curriculum is not None
+                    )
                     and float(terminal_info["realized_pnl"]) < 0.0
                 ),
                 safety_priority=float(
@@ -6900,6 +6903,8 @@ def train_agent(
                     "teacher_weight_scale": teacher_weight_scale,
                     "entry_action_weight_scale": entry_action_weight_scale,
                 }
+                if balance_curriculum is not None:
+                    train_kwargs["retain_nonnegative_entry_policy"] = True
                 if recovery_curriculum is not None:
                     train_kwargs.update({
                         "recovery_target": recovery_target,

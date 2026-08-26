@@ -129,7 +129,7 @@ def test_balance_curriculum_projects_optional_outcome_contrast() -> None:
     assert validation_episodes == 200
 
 
-def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
+def test_balance_curriculum_marks_deficit_learning_across_breakeven() -> None:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -240,7 +240,7 @@ def test_balance_curriculum_uses_one_policy_across_breakeven() -> None:
         "recovery_to_normal": 0,
         "normal_to_recovery": 0,
     }
-    assert replay.recovery_flags == [False, False]
+    assert replay.recovery_flags == [True, False]
     assert replay.state_dict()["episodes"][-1]["terminal_pnl"] == 6_000.0
 
 
@@ -259,9 +259,13 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
             super().__init__()
             self.batch_sizes: list[int] = []
             self.pass_replay_anchors: list[Transition] = []
+            self.retain_nonnegative_entry_policy: list[bool] = []
 
         def train_batch(self, sequences, **kwargs) -> float:
             self.batch_sizes.append(len(sequences))
+            self.retain_nonnegative_entry_policy.append(
+                bool(kwargs.get("retain_nonnegative_entry_policy", False))
+            )
             if len(sequences) == 2:
                 self.pass_replay_anchors.append(sequences[-1][1])
             self.last_train_metrics = {}
@@ -412,6 +416,7 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     )
 
     assert agent.batch_sizes == [1, 2]
+    assert agent.retain_nonnegative_entry_policy == [True, True]
     assert pass_replay.absorb_calls == 2
     assert pass_replay.entry_sample_calls == 1
     assert len(agent.pass_replay_anchors) == 1
