@@ -283,6 +283,96 @@ def applygrad(a, g):
             off += n
 
 
+def grouped_economic_margins(q_values, seqs, *, recurrent_burn_in):
+    values = defaultdict(list)
+    for row, sequence in zip(q_values, seqs, strict=True):
+        anchor = sequence[recurrent_burn_in]
+        side = Action(anchor.paired_a_plus_pair_side)
+        side_name = SN[side]
+        if anchor.paired_a_plus_economic_win:
+            opposite = SIDES[1] if side == SIDES[0] else SIDES[0]
+            values[f"{side_name}_winner_over_wait"].append(
+                float(row[int(side)] - row[int(Action.WAIT)])
+            )
+            values[f"{side_name}_winner_over_opposite"].append(
+                float(row[int(side)] - row[int(opposite)])
+            )
+        else:
+            values[f"{side_name}_wait_over_failure"].append(
+                float(row[int(Action.WAIT)] - row[int(side)])
+            )
+    return {name: float(np.mean(rows)) for name, rows in values.items()}
+
+
+def actual_configured_update(checkpoint, seqs, before):
+    """Measure the real optimizer path on the frozen recurrent batch."""
+    agent, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    parameters_before = tuple(
+        parameter.detach().clone() for parameter in agent.online.parameters()
+    )
+    margins_before = grouped_economic_margins(
+        before,
+        seqs,
+        recurrent_burn_in=agent.recurrent_burn_in,
+    )
+    agent.train_batch(seqs)
+    after = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
+    margins_after = grouped_economic_margins(
+        after,
+        seqs,
+        recurrent_burn_in=agent.recurrent_burn_in,
+    )
+    parameter_delta_norm = sum(
+        ((after_parameter.detach() - before_parameter) ** 2).sum()
+        for before_parameter, after_parameter in zip(
+            parameters_before, agent.online.parameters(), strict=True
+        )
+    ).sqrt()
+    metrics = agent.last_train_metrics
+    return {
+        "parameter_delta_norm": float(parameter_delta_norm),
+        "mean_abs_q_change": float((after - before).abs().mean()),
+        "max_abs_q_change": float((after - before).abs().max()),
+        "greedy_changed_rows": int(
+            (before.argmax(-1) != after.argmax(-1)).sum()
+        ),
+        "economic_boundary_count": float(
+            metrics["economic_boundary_count"]
+        ),
+        "economic_boundary_active_constraint_count": float(
+            metrics["economic_boundary_active_constraint_count"]
+        ),
+        "economic_boundary_backtracks": float(
+            metrics["economic_boundary_backtracks"]
+        ),
+        "economic_boundary_initial_min_margin_delta": float(
+            metrics["economic_boundary_initial_min_margin_delta"]
+        ),
+        "economic_boundary_final_min_margin_delta": float(
+            metrics["economic_boundary_final_min_margin_delta"]
+        ),
+        "economic_boundary_final_min_required_headroom": float(
+            metrics["economic_boundary_final_min_required_headroom"]
+        ),
+        "grouped_margins_before": margins_before,
+        "grouped_margins_after": margins_after,
+        "grouped_margin_deltas": {
+            name: margins_after[name] - value
+            for name, value in margins_before.items()
+        },
+        "gradient_norm": float(metrics["gradient_norm"]),
+        "gradient_conflict_primary_norm": float(
+            metrics["gradient_conflict_primary_norm"]
+        ),
+        "gradient_conflict_safety_norm": float(
+            metrics["gradient_conflict_safety_norm"]
+        ),
+        "gradient_conflict_opportunity_norm": float(
+            metrics["gradient_conflict_opportunity_norm"]
+        ),
+    }
+
+
 def parity(a, seqs):
     q, causal, resets = qtrace(a, seqs)
     with torch.no_grad():
@@ -551,6 +641,28 @@ def main():
         )
     seqs = tuple(seqs)
     before = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
+    boundary_margins_before = []
+    for pair_index, pair in enumerate(pair_report):
+        side = SIDES[0] if pair["side"] == "long" else SIDES[1]
+        opposite = SIDES[1] if side == SIDES[0] else SIDES[0]
+        winner_q = before[pair_index * 2]
+        failure_q = before[pair_index * 2 + 1]
+        boundary_margins_before.extend((
+            {
+                "name": f"paired_{pair_index}_winner_over_wait",
+                "margin": float(winner_q[int(side)] - winner_q[0]),
+            },
+            {
+                "name": f"paired_{pair_index}_winner_over_opposite",
+                "margin": float(
+                    winner_q[int(side)] - winner_q[int(opposite)]
+                ),
+            },
+            {
+                "name": f"paired_{pair_index}_wait_over_failure",
+                "margin": float(failure_q[0] - failure_q[int(side)]),
+            },
+        ))
     td, tdloss = tdgrad(checkpoint, seqs)
     ea, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
     eg, el = gradloss(ea, lambda a: exactloss(a, seqs))
@@ -593,6 +705,7 @@ def main():
     rt, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
+    configured_update = actual_configured_update(checkpoint, seqs, before)
     challenge_bonuses = []
     for row_index, pair in enumerate(pair_report):
         winner = pair["anchors"][0]
@@ -653,11 +766,13 @@ def main():
             for k, v in candidates.items()
         },
         "audited_pairs": pair_report,
+        "economic_boundary_margins_before": boundary_margins_before,
         "audited_pair_mass": dict(Counter(x["side"] for x in pair_report)),
         "gradient_components": norms,
         "gradient_cosine": cos,
         "chop_wait_rows": wrows,
         "greedy_action_changes_one_sgd_step_at_configured_lr": changes,
+        "actual_configured_optimizer_update": configured_update,
         "recurrent_parity": par,
         "probe_greedy_before": dict(
             Counter(Action(int(x)).name for x in before.argmax(-1))

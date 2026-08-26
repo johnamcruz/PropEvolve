@@ -161,6 +161,25 @@ class GradientConflictBlend(NamedTuple):
     conflict_projected: bool
 
 
+def economic_boundary_required_margin(
+    margin_before: torch.Tensor,
+    *,
+    target_margin: float,
+) -> torch.Tensor:
+    """Allow slack above a satisfied margin while forbidding regression below it."""
+    if (
+        not torch.is_floating_point(margin_before)
+        or isinstance(target_margin, bool)
+        or not math.isfinite(target_margin)
+        or target_margin < 0.0
+    ):
+        raise ValueError("economic boundary margin contract is invalid")
+    return torch.minimum(
+        margin_before,
+        margin_before.new_full(margin_before.shape, target_margin),
+    )
+
+
 def _project_vector_onto_economic_boundaries(
     vector: Sequence[torch.Tensor],
     boundaries: Sequence[Sequence[torch.Tensor]],
@@ -2134,8 +2153,10 @@ class RecurrentC51Agent:
         ] = []
         economic_boundary_margin_before: list[torch.Tensor] = []
         economic_boundary_backtracks = 0
+        economic_boundary_active_constraint_count = 0
         economic_boundary_initial_margin_deltas: dict[str, float] = {}
         economic_boundary_final_margin_deltas: dict[str, float] = {}
+        economic_boundary_final_required_headrooms: dict[str, float] = {}
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
@@ -2889,11 +2910,16 @@ class RecurrentC51Agent:
                                 boundary_all_flat_q = all_flat_q
                                 boundary_flat_q = flat_q
                                 active_pair_ids = []
+                            active_pair_ids_by_side: dict[int, list[int]] = {
+                                int(Action.ENTER_LONG_1): [],
+                                int(Action.ENTER_SHORT_1): [],
+                            }
                             for pair_id in active_pair_ids:
-                                pair_rows = selected_pair_ids == int(pair_id)
                                 records = pair_records[int(pair_id)]
+                                pair_sides = {side for side, _ in records}
                                 if (
                                     len(records) != 2
+                                    or len(pair_sides) != 1
                                     or sum(
                                         economic_win
                                         for _, economic_win in records
@@ -2901,26 +2927,54 @@ class RecurrentC51Agent:
                                 ):
                                     continue
                                 pair_side = records[0][0]
+                                active_pair_ids_by_side[pair_side].append(
+                                    int(pair_id)
+                                )
+                            for pair_side, side_pair_ids in (
+                                active_pair_ids_by_side.items()
+                            ):
+                                if not side_pair_ids:
+                                    continue
+                                selected_side_pair_rows = torch.zeros_like(
+                                    selected_pair_ids,
+                                    dtype=torch.bool,
+                                )
+                                learning_side_pair_rows = torch.zeros_like(
+                                    learning_pair_ids,
+                                    dtype=torch.bool,
+                                )
+                                for pair_id in side_pair_ids:
+                                    selected_side_pair_rows |= (
+                                        selected_pair_ids == pair_id
+                                    )
+                                    learning_side_pair_rows |= (
+                                        learning_pair_ids == pair_id
+                                    )
                                 opposite_side = (
                                     int(Action.ENTER_SHORT_1)
                                     if pair_side == int(Action.ENTER_LONG_1)
                                     else int(Action.ENTER_LONG_1)
                                 )
+                                side_name = (
+                                    "long"
+                                    if pair_side == int(Action.ENTER_LONG_1)
+                                    else "short"
+                                )
                                 paired_boundary_actions = (
                                     (
-                                        f"paired_{pair_id}_winner_over_wait",
+                                        f"paired_{side_name}_winner_over_wait",
                                         pair_side,
                                         int(Action.WAIT),
                                         True,
                                     ),
                                     (
-                                        f"paired_{pair_id}_winner_over_opposite",
+                                        f"paired_{side_name}_winner_over_opposite",
                                         pair_side,
                                         opposite_side,
                                         True,
                                     ),
                                     (
-                                        f"paired_{pair_id}_wait_over_failure",
+                                        f"paired_{side_name}_wait_over_failure",
                                         int(Action.WAIT),
                                         pair_side,
                                         False,
@@ -2933,7 +2987,7 @@ class RecurrentC51Agent:
                                     economic_win,
                                 ) in paired_boundary_actions:
                                     selected_boundary_rows = (
-                                        pair_rows
+                                        selected_side_pair_rows
                                         & (
                                             selected_economic_wins
                                             == economic_win
@@ -2958,10 +3012,7 @@ class RecurrentC51Agent:
                                     )
                                     boundary_full_rows = (
                                         selectivity_rows
-                                        & (
-                                            learning_pair_ids
-                                            == int(pair_id)
-                                        )
+                                        & learning_side_pair_rows
                                         & (
                                             learning_economic_wins
                                             == economic_win
@@ -3980,20 +4031,30 @@ class RecurrentC51Agent:
                 retain_graph=preserve_economic_boundaries,
             )
             if preserve_economic_boundaries:
-                boundary_losses = tuple(
+                protected_boundary_losses = tuple(
                     gradient_economic_boundary_losses[name]
-                    for name in active_economic_boundary_names
+                    for name, margin_before in zip(
+                        active_economic_boundary_names,
+                        economic_boundary_margin_before,
+                        strict=True,
+                    )
+                    if float(margin_before.detach())
+                    < self.entry_action_margin
                 )
                 economic_boundary_gradients = tuple(
                     materialized_gradients(
                         boundary_loss,
                         retain_graph=(
-                            boundary_index < len(boundary_losses) - 1
+                            boundary_index
+                            < len(protected_boundary_losses) - 1
                         ),
                     )
                     for boundary_index, boundary_loss in enumerate(
-                        boundary_losses
+                        protected_boundary_losses
                     )
+                )
+                economic_boundary_active_constraint_count = len(
+                    economic_boundary_gradients
                 )
             gradient_blend = conflict_aware_gradient_blend(
                 primary_gradients=primary_gradients,
@@ -4159,20 +4220,37 @@ class RecurrentC51Agent:
                             strict=True,
                         )
                     }
+                    boundary_required_headrooms = {
+                        name: float((
+                            after
+                            - economic_boundary_required_margin(
+                                before,
+                                target_margin=self.entry_action_margin,
+                            )
+                        ).detach())
+                        for (
+                            (name, _, _, _),
+                            before,
+                            after,
+                        ) in zip(
+                            economic_boundary_specs,
+                            economic_boundary_margin_before,
+                            boundary_margin_after,
+                            strict=True,
+                        )
+                    }
                     if boundary_attempt == 0:
                         economic_boundary_initial_margin_deltas = (
                             boundary_deltas
                         )
                     if all(
-                        float(after.detach()) + boundary_tolerance
-                        >= float(before.detach())
-                        for before, after in zip(
-                            economic_boundary_margin_before,
-                            boundary_margin_after,
-                            strict=True,
-                        )
+                        headroom + boundary_tolerance >= 0.0
+                        for headroom in boundary_required_headrooms.values()
                     ):
                         economic_boundary_final_margin_deltas = boundary_deltas
+                        economic_boundary_final_required_headrooms = (
+                            boundary_required_headrooms
+                        )
                         break
                     economic_boundary_backtracks += 1
                     constrained_descent = tuple(
@@ -4188,6 +4266,10 @@ class RecurrentC51Agent:
                             parameter.copy_(before - update)
                 else:
                     economic_boundary_final_margin_deltas = {
+                        name: 0.0
+                        for name, _, _, _ in economic_boundary_specs
+                    }
+                    economic_boundary_final_required_headrooms = {
                         name: 0.0
                         for name, _, _, _ in economic_boundary_specs
                     }
@@ -4921,6 +5003,9 @@ class RecurrentC51Agent:
                 economic_boundary_backtracks
             ),
             "economic_boundary_count": float(len(economic_boundary_specs)),
+            "economic_boundary_active_constraint_count": float(
+                economic_boundary_active_constraint_count
+            ),
             "economic_boundary_initial_min_margin_delta": (
                 min(economic_boundary_initial_margin_deltas.values())
                 if economic_boundary_initial_margin_deltas
@@ -4929,6 +5014,11 @@ class RecurrentC51Agent:
             "economic_boundary_final_min_margin_delta": (
                 min(economic_boundary_final_margin_deltas.values())
                 if economic_boundary_final_margin_deltas
+                else 0.0
+            ),
+            "economic_boundary_final_min_required_headroom": (
+                min(economic_boundary_final_required_headrooms.values())
+                if economic_boundary_final_required_headrooms
                 else 0.0
             ),
             "economic_boundary_long_winner_min_margin_delta": (

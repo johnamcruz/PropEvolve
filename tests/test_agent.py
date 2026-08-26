@@ -9,6 +9,7 @@ import torch
 from propevolve.agent import (
     RecurrentC51Agent,
     RecurrentC51Network,
+    economic_boundary_required_margin,
     centered_entry_search_target,
     conflict_aware_gradient_blend,
     resolve_device,
@@ -72,6 +73,17 @@ def test_conflict_aware_gradient_blend_preserves_primary_and_opportunity(
     assert result.pre_projection_cosine == pytest.approx(-2 ** -0.5)
     assert result.post_projection_cosine == pytest.approx(0.0, abs=1e-7)
     assert result.conflict_projected
+
+
+def test_economic_boundary_requires_progress_only_until_target_margin() -> None:
+    before = torch.tensor([-0.40, 0.10, 0.25, 0.80])
+
+    required = economic_boundary_required_margin(before, target_margin=0.25)
+
+    torch.testing.assert_close(
+        required,
+        torch.tensor([-0.40, 0.10, 0.25, 0.25]),
+    )
 
 
 def test_conflict_aware_gradient_blend_protects_both_economic_boundaries_from_primary(

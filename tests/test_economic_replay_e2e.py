@@ -134,7 +134,8 @@ def _boundary_margins(
     for sequence in paired_sequences:
         hidden = None
         action_values = None
-        for transition in sequence:
+        anchor_action_values = None
+        for transition_index, transition in enumerate(sequence):
             _, hidden, action_values = agent.select_action(
                 transition.observation,
                 hidden=hidden,
@@ -142,7 +143,9 @@ def _boundary_margins(
                 epsilon=0.0,
                 return_action_values=True,
             )
-        assert action_values is not None
+            if transition_index == agent.recurrent_burn_in:
+                anchor_action_values = action_values
+        assert anchor_action_values is not None
         anchor = sequence[2]
         assert anchor.paired_a_plus_pair_id is not None
         assert anchor.paired_a_plus_pair_side is not None
@@ -155,16 +158,47 @@ def _boundary_margins(
                 else Action.ENTER_LONG_1
             )
             margins[(pair_id, "winner_vs_wait")] = float(
-                action_values[int(side)] - action_values[int(Action.WAIT)]
+                anchor_action_values[int(side)]
+                - anchor_action_values[int(Action.WAIT)]
             )
             margins[(pair_id, "winner_vs_opposite")] = float(
-                action_values[int(side)] - action_values[int(opposite)]
+                anchor_action_values[int(side)]
+                - anchor_action_values[int(opposite)]
             )
         else:
             margins[(pair_id, "wait_vs_failure")] = float(
-                action_values[int(Action.WAIT)] - action_values[int(side)]
+                anchor_action_values[int(Action.WAIT)]
+                - anchor_action_values[int(side)]
             )
     return margins
+
+
+def _grouped_boundary_margins(
+    agent: RecurrentC51Agent,
+    paired_sequences: tuple[tuple[Transition, ...], ...],
+) -> dict[str, float]:
+    per_group: dict[str, list[float]] = {}
+    individual = _boundary_margins(agent, paired_sequences)
+    for sequence in paired_sequences:
+        anchor = sequence[agent.recurrent_burn_in]
+        assert anchor.paired_a_plus_pair_id is not None
+        assert anchor.paired_a_plus_pair_side is not None
+        side_name = (
+            "long"
+            if anchor.paired_a_plus_pair_side == Action.ENTER_LONG_1
+            else "short"
+        )
+        if anchor.paired_a_plus_economic_win:
+            suffixes = ("winner_vs_wait", "winner_vs_opposite")
+        else:
+            suffixes = ("wait_vs_failure",)
+        for suffix in suffixes:
+            per_group.setdefault(f"{side_name}_{suffix}", []).append(
+                individual[(anchor.paired_a_plus_pair_id, suffix)]
+            )
+    return {
+        name: float(np.mean(values)) for name, values in per_group.items()
+    }
 
 
 def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
@@ -249,7 +283,54 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
     assert all(after[key] >= before[key] - 1e-7 for key in before)
     assert any(after[key] > before[key] for key in before)
     assert agent.last_train_metrics["economic_boundary_count"] == 6.0
+    assert (
+        agent.last_train_metrics["economic_boundary_active_constraint_count"]
+        <= 6.0
+    )
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_four_economic_pairs_update_six_grouped_boundaries_without_stalling(
+) -> None:
+    """More pair examples must strengthen learning, not reject the update."""
+    contexts = (
+        (Action.ENTER_LONG_1, (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)),
+        (Action.ENTER_SHORT_1, (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)),
+        (Action.ENTER_LONG_1, (0.62, 0.51, 0.42, 0.39, 0.15, 0.55, 0.30)),
+        (Action.ENTER_SHORT_1, (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30)),
+    )
+    replay = _replay(seed=91)
+    for index, (side, context) in enumerate(contexts):
+        replay.add(_economic_episode(
+            episode_id=f"winner-{index}",
+            side=side,
+            economic_win=True,
+            context=context,
+            offset=float(index * 2),
+        ))
+        replay.add(_economic_episode(
+            episode_id=f"failure-{index}",
+            side=side,
+            economic_win=False,
+            context=context,
+            offset=float(index * 2 + 1),
+        ))
+    paired_sequences = replay.sample(8)
+    agent = _agent()
+    before = _grouped_boundary_margins(agent, paired_sequences)
+
+    agent.train_batch(paired_sequences)
+
+    after = _grouped_boundary_margins(agent, paired_sequences)
+    assert agent.last_train_metrics["economic_boundary_count"] == 6.0
+    assert (
+        agent.last_train_metrics["economic_boundary_active_constraint_count"]
+        <= 6.0
+    )
+    assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
+    assert before.keys() == after.keys()
+    assert all(after[name] >= before[name] - 1e-7 for name in before)
+    assert any(after[name] > before[name] for name in before)
 
 
 def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
@@ -409,8 +490,14 @@ def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
         "mean_regime_selectivity_paired_a_plus_short_pair_count"
     ] == 1.0
     assert diagnostic["mean_economic_boundary_count"] == 6.0
+    assert diagnostic[
+        "mean_economic_boundary_active_constraint_count"
+    ] <= 6.0
     assert diagnostic["mean_economic_boundary_backtracks"] == 0.0
     assert diagnostic["mean_economic_boundary_final_min_margin_delta"] >= -1e-7
+    assert diagnostic[
+        "mean_economic_boundary_final_min_required_headroom"
+    ] >= -1e-7
     assert diagnostic[
         "mean_economic_boundary_long_winner_min_margin_delta"
     ] >= -1e-7
