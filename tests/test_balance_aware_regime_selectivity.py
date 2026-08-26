@@ -123,14 +123,20 @@ def test_challenge_return_self_imitation_only_rewards_realized_q_improvement(
             [0.20, -0.30, -0.50],
             [0.20, 0.60, -0.50],
             [0.20, -0.30, 0.80],
+            [0.20, 0.10, -0.10],
         ],
         dtype=torch.float64,
     )
     actions = torch.tensor(
-        [int(Action.ENTER_LONG_1), int(Action.ENTER_LONG_1), int(Action.WAIT)]
+        [
+            int(Action.ENTER_LONG_1),
+            int(Action.ENTER_LONG_1),
+            int(Action.WAIT),
+            int(Action.WAIT),
+        ]
     )
-    returns = torch.tensor([1.20, 0.40, 0.10], dtype=torch.float64)
-    active = torch.tensor([True, True, False])
+    returns = torch.tensor([1.20, 0.40, 0.10, 0.70], dtype=torch.float64)
+    active = torch.tensor([True, True, False, True])
 
     bonus = challenge_return_self_imitation_bonus(
         q_values,
@@ -142,9 +148,55 @@ def test_challenge_return_self_imitation_only_rewards_realized_q_improvement(
 
     torch.testing.assert_close(
         bonus,
-        torch.tensor([0.10, 0.0, 0.0], dtype=torch.float64),
+        torch.tensor([0.10, 0.0, 0.0, 0.05], dtype=torch.float64),
         rtol=0.0,
         atol=1e-12,
+    )
+
+
+def test_aplus_winner_and_failure_quarter_r_boundaries_are_symmetric() -> None:
+    action_values = torch.tensor(
+        [
+            [0.00, 0.25, -0.10],
+            [0.00, -0.10, 0.25],
+            [0.25, 0.00, -0.10],
+            [0.25, -0.10, 0.00],
+        ],
+        dtype=torch.float64,
+    )
+
+    winner_losses = exact_action_margin_losses(
+        action_values[:2],
+        torch.tensor([
+            int(Action.ENTER_LONG_1),
+            int(Action.ENTER_SHORT_1),
+        ]),
+        margin=0.25,
+    )
+    failure_losses = chop_specific_wait_margin_losses(
+        action_values[2:],
+        dominant_chop_membership=torch.zeros(2, dtype=torch.float64),
+        failed_long_membership=torch.tensor(
+            [1.0, 0.0], dtype=torch.float64
+        ),
+        failed_short_membership=torch.tensor(
+            [0.0, 1.0], dtype=torch.float64
+        ),
+        chop_margin=0.25,
+        failed_confluence_margin=0.25,
+    )
+
+    torch.testing.assert_close(
+        winner_losses,
+        torch.zeros(2, dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    torch.testing.assert_close(
+        failure_losses,
+        torch.zeros(2, dtype=torch.float64),
+        rtol=0.0,
+        atol=0.0,
     )
 def test_exact_action_margin_penalizes_correct_but_weak_action_separation() -> None:
     action_values = torch.tensor(
@@ -1246,6 +1298,7 @@ def _sequence(
     economic_win: bool | None = None,
     action: Action = Action.WAIT,
     challenge_return_to_go: float | None = None,
+    competence_anchor: bool = False,
     training_valid: bool = True,
 ) -> tuple[Transition, ...]:
     flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
@@ -1258,6 +1311,7 @@ def _sequence(
             terminated=True,
             valid_actions=flat,
             next_valid_actions=(),
+            competence_anchor=competence_anchor,
             teacher_target=teacher.numpy(),
             teacher_imitation_visible=teacher_imitation_visible,
             entry_action_target=target,
@@ -1310,6 +1364,7 @@ def test_challenge_return_bonus_trains_only_authenticated_pass_winner_anchor(
         economic_win=True,
         action=Action.ENTER_LONG_1,
         challenge_return_to_go=4.0,
+        competence_anchor=True,
     )
     failure = _sequence(
         (0.0, 1.0, 0.0),
@@ -1339,7 +1394,7 @@ def test_challenge_return_bonus_trains_only_authenticated_pass_winner_anchor(
     agent.assert_teacher_free()
 
 
-def test_challenge_return_rejects_failure_or_wait_anchor() -> None:
+def test_challenge_return_rejects_unauthenticated_failure_anchor() -> None:
     agent = _agent(
         seed=541,
         selectivity_weight=0.0,
@@ -1367,7 +1422,7 @@ def test_challenge_return_rejects_failure_or_wait_anchor() -> None:
 
     with pytest.raises(
         ValueError,
-        match="challenge return requires an authenticated pass winner",
+        match="challenge return requires an authenticated exact pass action",
     ):
         agent.train_batch((invalid,))
 def test_paired_recurrent_sequences_both_receive_td_and_anchor_ranking() -> None:

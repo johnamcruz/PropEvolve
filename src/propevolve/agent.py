@@ -1729,16 +1729,17 @@ class RecurrentC51Agent:
                     continue
                 if (
                     not np.isfinite(value)
-                    or transition.paired_a_plus_pair_id is None
-                    or transition.paired_a_plus_economic_win is not True
+                    or transition.competence_anchor is not True
                     or transition.action not in {
+                        Action.WAIT,
                         Action.ENTER_LONG_1,
                         Action.ENTER_SHORT_1,
                     }
                     or transition.entry_action_target != transition.action
                 ):
                     raise ValueError(
-                        "challenge return requires an authenticated pass winner"
+                        "challenge return requires an authenticated exact "
+                        "pass action"
                     )
                 challenge_return_rows[batch_index, time_index] = float(value)
         all_challenge_returns = torch.as_tensor(
@@ -3664,6 +3665,25 @@ class RecurrentC51Agent:
             / challenge_return_rows_value.clamp_min(1.0)
         )
         challenge_return_bonus_max = challenge_return_bonus.max()
+        challenge_return_action_rows = torch.stack(tuple(
+            (
+                challenge_return_active
+                & (actions == int(action))
+            ).sum().to(torch.float32)
+            for action in (
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            )
+        ))
+        challenge_return_action_bonus_sums = torch.stack(tuple(
+            challenge_return_bonus[actions == int(action)].sum()
+            for action in (
+                Action.WAIT,
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            )
+        ))
 
         diagnostic_values = torch.stack((
             rl_loss,
@@ -3711,6 +3731,8 @@ class RecurrentC51Agent:
             challenge_return_bonus_mean,
             challenge_return_bonus_max,
             challenge_return_added_clip_rows,
+            *challenge_return_action_rows.unbind(),
+            *challenge_return_action_bonus_sums.unbind(),
             loss,
             gradient_norm.float(),
             management_rows.sum().to(torch.float32)
@@ -3791,6 +3813,12 @@ class RecurrentC51Agent:
             challenge_return_bonus_mean_metric,
             challenge_return_bonus_max_metric,
             challenge_return_added_clip_rows_metric,
+            challenge_return_wait_rows_metric,
+            challenge_return_long_rows_metric,
+            challenge_return_short_rows_metric,
+            challenge_return_wait_bonus_sum_metric,
+            challenge_return_long_bonus_sum_metric,
+            challenge_return_short_bonus_sum_metric,
             total_loss,
             gradient_norm_value,
             management_row_fraction,
@@ -4251,6 +4279,24 @@ class RecurrentC51Agent:
             ),
             "challenge_return_self_imitation_added_clip_rows": (
                 challenge_return_added_clip_rows_metric
+            ),
+            "challenge_return_self_imitation_wait_rows": (
+                challenge_return_wait_rows_metric
+            ),
+            "challenge_return_self_imitation_long_rows": (
+                challenge_return_long_rows_metric
+            ),
+            "challenge_return_self_imitation_short_rows": (
+                challenge_return_short_rows_metric
+            ),
+            "challenge_return_self_imitation_wait_bonus_sum": (
+                challenge_return_wait_bonus_sum_metric
+            ),
+            "challenge_return_self_imitation_long_bonus_sum": (
+                challenge_return_long_bonus_sum_metric
+            ),
+            "challenge_return_self_imitation_short_bonus_sum": (
+                challenge_return_short_bonus_sum_metric
             ),
             "teacher_weight_scale": teacher_weight_scale,
             "entry_action_weight_scale": entry_action_weight_scale,

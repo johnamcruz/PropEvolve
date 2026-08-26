@@ -2178,22 +2178,60 @@ class BalancedSequenceReplay:
                     recurrent_burn_in=self.recurrent_burn_in,
                     n_step_return=self.n_step_return,
                 ))
+                if economic_winner and challenge_return_discount is not None:
+                    credit_rows: list[tuple[int, int]] = []
+                    anchor_action = int(episode.actions[anchor_index])
+                    anchor_target = int(
+                        episode.entry_action_targets[anchor_index]
+                    )
+                    if anchor_action == anchor_target == int(side):
+                        credit_rows.append((
+                            self.recurrent_burn_in,
+                            anchor_index,
+                        ))
+                    exact_wait_rows: list[tuple[int, int]] = []
+                    for sequence_index, transition in enumerate(sequence):
+                        episode_index = (
+                            anchor_index
+                            + sequence_index
+                            - self.recurrent_burn_in
+                        )
+                        if not 0 <= episode_index < episode.transition_count:
+                            continue
+                        target = int(
+                            episode.entry_action_targets[episode_index]
+                        )
+                        action = int(episode.actions[episode_index])
+                        if action == target == int(Action.WAIT):
+                            exact_wait_rows.append((
+                                sequence_index,
+                                episode_index,
+                            ))
+                    if exact_wait_rows:
+                        credit_rows.append(min(
+                            exact_wait_rows,
+                            key=lambda item: (
+                                item[0] >= self.recurrent_burn_in,
+                                abs(item[0] - self.recurrent_burn_in),
+                            ),
+                        ))
+                    for sequence_index, episode_index in credit_rows:
+                        transition = sequence[sequence_index]
+                        sequence[sequence_index] = replace(
+                            transition,
+                            challenge_return_to_go=(
+                                self._challenge_return_to_go(
+                                    episode,
+                                    anchor_index=episode_index,
+                                    discount=float(challenge_return_discount),
+                                )
+                            ),
+                        )
                 sequence[self.recurrent_burn_in] = replace(
                     sequence[self.recurrent_burn_in],
                     paired_a_plus_pair_id=pair_id,
                     paired_a_plus_pair_side=side,
                     paired_a_plus_population_weight=population_weight,
-                    challenge_return_to_go=(
-                        self._challenge_return_to_go(
-                            episode,
-                            anchor_index=anchor_index,
-                            discount=float(challenge_return_discount),
-                        )
-                        if economic_winner
-                        and challenge_return_discount is not None
-                        and Action(int(episode.actions[anchor_index])) == side
-                        else None
-                    ),
                 )
                 sequences.append(tuple(sequence))
         return tuple(sequences)

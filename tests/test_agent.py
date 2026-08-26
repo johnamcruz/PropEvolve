@@ -114,6 +114,50 @@ def test_conflict_aware_gradient_blend_leaves_aligned_auxiliaries_unchanged(
     assert not result.conflict_projected
 
 
+def test_challenge_return_accepts_exact_wait_on_authenticated_pass_path() -> None:
+    agent = _agent(
+        1,
+        recurrent_burn_in=0,
+        n_step_return=1,
+        challenge_return_self_imitation_weight=0.05,
+    )
+    flat_actions = (
+        Action.WAIT,
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([index], np.float32),
+            action=Action.WAIT,
+            reward=0.0,
+            next_observation=np.array([index + 1], np.float32),
+            terminated=index == 1,
+            valid_actions=flat_actions,
+            next_valid_actions=() if index == 1 else flat_actions,
+            competence_anchor=True,
+            entry_action_target=Action.WAIT,
+            challenge_return_to_go=1.0 if index == 0 else None,
+        )
+        for index in range(2)
+    )
+
+    agent.train_batch((sequence,))
+
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_rows"
+    ] == 1.0
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_wait_rows"
+    ] == 1.0
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_long_rows"
+    ] == 0.0
+    assert agent.last_train_metrics[
+        "challenge_return_self_imitation_short_rows"
+    ] == 0.0
+
+
 def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)

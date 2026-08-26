@@ -521,7 +521,30 @@ def test_balance_outcome_contrast_is_sparse_and_additive_to_training() -> None:
                     row.paired_a_plus_economic_win for row in pair_rows
                 } == {True, False}
             )
-            self.last_train_metrics = {}
+            credited = len(sequences) == 3
+            self.last_train_metrics = {
+                "challenge_return_self_imitation_rows": (
+                    2.0 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_bonus_sum": (
+                    0.3 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_added_clip_rows": 0.0,
+                "challenge_return_self_imitation_wait_rows": (
+                    1.0 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_long_rows": (
+                    1.0 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_short_rows": 0.0,
+                "challenge_return_self_imitation_wait_bonus_sum": (
+                    0.1 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_long_bonus_sum": (
+                    0.2 if credited else 0.0
+                ),
+                "challenge_return_self_imitation_short_bonus_sum": 0.0,
+            }
             return 0.5
 
     class TimeoutEnvironment:
@@ -587,6 +610,29 @@ def test_balance_outcome_contrast_is_sparse_and_additive_to_training() -> None:
     assert agent.batch_sizes == [1, 3]
     assert agent.outcome_pairs == [False, True]
     assert diagnostics[0]["balance_outcome_contrast_pairs"] == 1
+    assert diagnostics[0]["challenge_return_self_imitation"] == {
+        "rows": 2,
+        "bonus_sum": pytest.approx(0.3),
+        "bonus_mean": pytest.approx(0.15),
+        "added_clip_rows": 0,
+        "actions": {
+            "WAIT": {
+                "rows": 1,
+                "bonus_sum": pytest.approx(0.1),
+                "bonus_mean": pytest.approx(0.1),
+            },
+            "ENTER_LONG_1": {
+                "rows": 1,
+                "bonus_sum": pytest.approx(0.2),
+                "bonus_mean": pytest.approx(0.2),
+            },
+            "ENTER_SHORT_1": {
+                "rows": 0,
+                "bonus_sum": pytest.approx(0.0),
+                "bonus_mean": None,
+            },
+        },
+    }
 
 
 def test_balance_pass_replay_artifact_is_authenticated_and_pass_only(

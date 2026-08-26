@@ -64,6 +64,25 @@ def _record(
         "regime_trade_economics": {
             "groups": economics,
         },
+        "challenge_return_self_imitation": {
+            "rows": 2,
+            "bonus_sum": 0.3,
+            "bonus_mean": 0.15,
+            "added_clip_rows": 0,
+            "actions": {
+                "WAIT": {"rows": 1, "bonus_sum": 0.1, "bonus_mean": 0.1},
+                "ENTER_LONG_1": {
+                    "rows": 1,
+                    "bonus_sum": 0.2,
+                    "bonus_mean": 0.2,
+                },
+                "ENTER_SHORT_1": {
+                    "rows": 0,
+                    "bonus_sum": 0.0,
+                    "bonus_mean": None,
+                },
+            },
+        },
     }
 
 
@@ -198,6 +217,25 @@ def test_pass_timeout_analysis_compares_sides_and_true_chop_entries(
         "exact_wait_recall": 7 / 10,
     }
     assert report["selection"]["recent"]["episode_range"] == [2, 2]
+    assert report["challenge_return_self_imitation"] == {
+        "rows": 4,
+        "bonus_sum": 0.6,
+        "bonus_mean": 0.15,
+        "added_clip_rows": 0,
+        "actions": {
+            "WAIT": {"rows": 2, "bonus_sum": 0.2, "bonus_mean": 0.1},
+            "ENTER_LONG_1": {
+                "rows": 2,
+                "bonus_sum": 0.4,
+                "bonus_mean": 0.2,
+            },
+            "ENTER_SHORT_1": {
+                "rows": 0,
+                "bonus_sum": 0.0,
+                "bonus_mean": None,
+            },
+        },
+    }
     assert report["outcome_comparison"]["pass"]["nonchop"]["realized_r_sum"] == 3.0
     assert report["outcome_comparison"]["timeout"]["dominant_chop"][
         "realized_r_sum"

@@ -6639,6 +6639,14 @@ def train_agent(
                 "recovery_wait_minus_short_q",
                 "recovery_action_margin_loss",
                 "recovery_recurrent_rows",
+                "challenge_return_self_imitation_rows",
+                "challenge_return_self_imitation_bonus_sum",
+                "challenge_return_self_imitation_added_clip_rows",
+                *(
+                    f"challenge_return_self_imitation_{action}_{field}"
+                    for action in ("wait", "long", "short")
+                    for field in ("rows", "bonus_sum")
+                ),
                 *(
                     f"regime_selectivity_association_{cohort}_{field}"
                     for cohort in _REGIME_ASSOCIATION_COHORTS
@@ -7126,6 +7134,36 @@ def train_agent(
             episode_diagnostic_callback is not None
             or training_health_callback is not None
         ):
+            challenge_return_rows = int(round(sum(
+                learner_diagnostics[
+                    "challenge_return_self_imitation_rows"
+                ]
+            )))
+            challenge_return_bonus_sum = float(sum(
+                learner_diagnostics[
+                    "challenge_return_self_imitation_bonus_sum"
+                ]
+            ))
+            challenge_return_actions = {}
+            for action_name, metric_name in (
+                ("WAIT", "wait"),
+                ("ENTER_LONG_1", "long"),
+                ("ENTER_SHORT_1", "short"),
+            ):
+                rows = int(round(sum(learner_diagnostics[
+                    f"challenge_return_self_imitation_{metric_name}_rows"
+                ])))
+                bonus_sum = float(sum(learner_diagnostics[
+                    "challenge_return_self_imitation_"
+                    f"{metric_name}_bonus_sum"
+                ]))
+                challenge_return_actions[action_name] = {
+                    "rows": rows,
+                    "bonus_sum": bonus_sum,
+                    "bonus_mean": (
+                        bonus_sum / rows if rows else None
+                    ),
+                }
             diagnostic = {
                 "schema": "propevolve_episode_diagnostic_v1",
                 "episode": progress.completed_episodes,
@@ -7237,6 +7275,20 @@ def train_agent(
                 "balance_outcome_contrast_pairs": (
                     balance_outcome_contrast_pairs
                 ),
+                "challenge_return_self_imitation": {
+                    "rows": challenge_return_rows,
+                    "bonus_sum": challenge_return_bonus_sum,
+                    "bonus_mean": (
+                        challenge_return_bonus_sum / challenge_return_rows
+                        if challenge_return_rows else None
+                    ),
+                    "added_clip_rows": int(round(sum(
+                        learner_diagnostics[
+                            "challenge_return_self_imitation_added_clip_rows"
+                        ]
+                    ))),
+                    "actions": challenge_return_actions,
+                },
                 "balance_pass_replay_promoted_passes": (
                     balance_pass_replay_promoted_passes
                 ),

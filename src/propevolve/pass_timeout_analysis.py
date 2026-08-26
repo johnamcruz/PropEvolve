@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 
-SCHEMA = "propevolve_pass_timeout_analysis_v2"
+SCHEMA = "propevolve_pass_timeout_analysis_v3"
 _ACTIONS = {
     "wait": "WAIT",
     "long": "ENTER_LONG_1",
@@ -332,6 +332,65 @@ def _risk_summary(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
+def _challenge_return_summary(
+    records: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    rows = added_clip_rows = 0
+    bonus_sum = 0.0
+    action_totals = {
+        action: {"rows": 0, "bonus_sum": 0.0}
+        for action in _ACTIONS.values()
+    }
+    for record in records:
+        payload = record.get("challenge_return_self_imitation", {})
+        if not isinstance(payload, dict):
+            raise ValueError("challenge-return diagnostic is invalid")
+        rows += _count(payload.get("rows", 0), name="challenge-return rows")
+        bonus_sum += _number(
+            payload.get("bonus_sum", 0.0),
+            name="challenge-return bonus",
+        )
+        added_clip_rows += _count(
+            payload.get("added_clip_rows", 0),
+            name="challenge-return clipped rows",
+        )
+        actions = payload.get("actions", {})
+        if not isinstance(actions, dict):
+            raise ValueError("challenge-return action diagnostic is invalid")
+        for action in action_totals:
+            action_payload = actions.get(action, {})
+            if not isinstance(action_payload, dict):
+                raise ValueError(
+                    f"challenge-return {action} diagnostic is invalid"
+                )
+            action_totals[action]["rows"] += _count(
+                action_payload.get("rows", 0),
+                name=f"challenge-return {action} rows",
+            )
+            action_totals[action]["bonus_sum"] += _number(
+                action_payload.get("bonus_sum", 0.0),
+                name=f"challenge-return {action} bonus",
+            )
+    actions = {
+        action: {
+            "rows": int(values["rows"]),
+            "bonus_sum": float(values["bonus_sum"]),
+            "bonus_mean": (
+                float(values["bonus_sum"]) / int(values["rows"])
+                if values["rows"] else None
+            ),
+        }
+        for action, values in action_totals.items()
+    }
+    return {
+        "rows": rows,
+        "bonus_sum": bonus_sum,
+        "bonus_mean": bonus_sum / rows if rows else None,
+        "added_clip_rows": added_clip_rows,
+        "actions": actions,
+    }
+
+
 def _default_output_dir(diagnostics: Path) -> Path:
     parents = diagnostics.resolve().parents
     if len(parents) < 5 or parents[3].name != "campaign-runs":
@@ -392,6 +451,7 @@ def analyze_pass_timeout_diagnostics(
             for outcome in ("pass", "timeout", "blow")
         },
         "risk": _risk_summary(records),
+        "challenge_return_self_imitation": _challenge_return_summary(records),
         "passes": _pass_rows(records),
         "inputs": {
             "training_diagnostics_path": str(diagnostics),
@@ -409,7 +469,7 @@ def analyze_pass_timeout_diagnostics(
     )
     destination.mkdir(parents=True, exist_ok=True)
     output = destination / (
-        f"pass-timeout-v2-through-episode-{episodes[-1]:06d}-"
+        f"pass-timeout-v3-through-episode-{episodes[-1]:06d}-"
         f"{source_sha256[:12]}.json"
     )
     report["output_path"] = str(output)

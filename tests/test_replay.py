@@ -759,6 +759,115 @@ def test_balance_outcome_contrast_pairs_pass_with_matched_near_blow() -> None:
     assert failure.challenge_return_to_go is None
 
 
+@pytest.mark.parametrize(
+    ("side", "context"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
+        ),
+    ),
+)
+def test_challenge_return_credits_exact_wait_and_entry_on_pass_path(
+    side: Action,
+    context: tuple[float, ...],
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=192,
+    )
+    pass_episode = _paired_a_plus_episode(
+        episode_id=f"{side.name.lower()}-pass-path",
+        ticker="NQ",
+        target=side,
+        side=side,
+        economic_win=True,
+        context=context,
+        offset=0,
+        outcome="pass",
+        terminal_pnl=6_100.0,
+    )
+    replay.add(replace(
+        pass_episode,
+        transitions=tuple(
+            replace(
+                transition,
+                reward=float(index + 1) / 10.0,
+                action=(
+                    side if index == 5 else transition.action
+                ),
+                entry_action_target=(
+                    Action.WAIT
+                    if index in {3, 4}
+                    else transition.entry_action_target
+                ),
+            )
+            for index, transition in enumerate(pass_episode.transitions)
+        ),
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id=f"{side.name.lower()}-near-blow",
+        ticker="CL",
+        target=Action.WAIT,
+        side=side,
+        economic_win=False,
+        context=context,
+        offset=100,
+        outcome="timeout",
+        terminal_pnl=-2_800.0,
+    ))
+
+    sequences = replay.sample_balance_outcome_contrast_pairs(
+        1,
+        near_blow_pnl=-2_250.0,
+        challenge_return_discount=0.5,
+    )
+
+    pass_rows = next(
+        sequence for sequence in sequences if sequence[2].competence_anchor
+    )
+    exact_wait = next(
+        row for row in pass_rows if row.source_decision_index == 4
+    )
+    exact_entry = next(
+        row for row in pass_rows if row.source_decision_index == 5
+    )
+    earlier_wait = next(
+        row for row in pass_rows if row.source_decision_index == 3
+    )
+    assert earlier_wait.challenge_return_to_go is None
+    assert exact_wait.action == exact_wait.entry_action_target == Action.WAIT
+    assert exact_wait.challenge_return_to_go == pytest.approx(
+        sum(
+            (0.5 ** offset) * reward
+            for offset, reward in enumerate((0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2))
+        )
+    )
+    assert exact_entry.action == exact_entry.entry_action_target == side
+    assert exact_entry.challenge_return_to_go == pytest.approx(
+        sum(
+            (0.5 ** offset) * reward
+            for offset, reward in enumerate((0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2))
+        )
+    )
+    assert sum(
+        row.challenge_return_to_go is not None for row in pass_rows
+    ) == 2
+    assert all(
+        row.challenge_return_to_go is None
+        for sequence in sequences
+        if not sequence[2].competence_anchor
+        for row in sequence
+    )
+
+
 def test_challenge_return_is_not_attached_to_missed_winner_wait() -> None:
     replay = BalancedSequenceReplay(
         capacity_episodes=8,
