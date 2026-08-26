@@ -81,6 +81,7 @@ _AUXILIARY_GRADIENT_CONFLICT_MODES = {
     "none",
     "pcgrad_safety_opportunity_v1",
     "pcgrad_preserve_opportunity_v2",
+    "pcgrad_preserve_economic_boundaries_v3",
 }
 _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "rows",
@@ -160,20 +161,58 @@ class GradientConflictBlend(NamedTuple):
     conflict_projected: bool
 
 
+def _project_vector_onto_economic_boundaries(
+    vector: Sequence[torch.Tensor],
+    boundaries: Sequence[Sequence[torch.Tensor]],
+) -> tuple[torch.Tensor, ...]:
+    """Keep a descent vector non-opposing to every economic boundary."""
+    projected = tuple(vector)
+    materialized_boundaries = tuple(tuple(group) for group in boundaries)
+    if not materialized_boundaries:
+        return projected
+    zero = projected[0].new_zeros(())
+    # Fixed cyclic projections avoid accelerator synchronization. The zero
+    # vector is always feasible, so these half-space constraints cannot be
+    # mutually infeasible.
+    for _ in range(8):
+        for boundary in materialized_boundaries:
+            boundary_norm_sq = sum(
+                (gradient * gradient).sum() for gradient in boundary
+            )
+            candidate_dot = sum(
+                (left * right).sum()
+                for left, right in zip(projected, boundary, strict=True)
+            )
+            coefficient = torch.minimum(candidate_dot, zero) / (
+                boundary_norm_sq.clamp_min(
+                    torch.finfo(candidate_dot.dtype).tiny
+                )
+            )
+            projected = tuple(
+                left - coefficient * right
+                for left, right in zip(projected, boundary, strict=True)
+            )
+    return projected
+
+
 def conflict_aware_gradient_blend(
     *,
     primary_gradients: Sequence[torch.Tensor],
     safety_gradients: Sequence[torch.Tensor],
     opportunity_gradients: Sequence[torch.Tensor],
+    economic_boundary_gradients: Sequence[Sequence[torch.Tensor]] = (),
     preserve_opportunity: bool = False,
+    preserve_economic_boundaries: bool = False,
 ) -> GradientConflictBlend:
     """Preserve primary learning while removing auxiliary gradient opposition."""
     primary = tuple(primary_gradients)
     safety = tuple(safety_gradients)
     opportunity = tuple(opportunity_gradients)
+    boundaries = tuple(tuple(group) for group in economic_boundary_gradients)
     if (
         not primary
         or not isinstance(preserve_opportunity, bool)
+        or not isinstance(preserve_economic_boundaries, bool)
         or len(primary) != len(safety)
         or len(primary) != len(opportunity)
         or any(
@@ -187,6 +226,19 @@ def conflict_aware_gradient_blend(
             for left, middle, right in zip(
                 primary, safety, opportunity, strict=True
             )
+        )
+        or any(
+            len(boundary) != len(primary)
+            or any(
+                candidate.shape != reference.shape
+                or candidate.device != reference.device
+                or candidate.dtype != reference.dtype
+                or not torch.is_floating_point(candidate)
+                for candidate, reference in zip(
+                    boundary, primary, strict=True
+                )
+            )
+            for boundary in boundaries
         )
     ):
         raise ValueError("gradient conflict blend contract is invalid")
@@ -230,6 +282,27 @@ def conflict_aware_gradient_blend(
     projected_opportunity_norm_sq = sum(
         (gradient * gradient).sum() for gradient in projected_opportunity
     )
+    projected_primary = primary
+    if preserve_economic_boundaries:
+        for boundary in (projected_opportunity, projected_safety):
+            boundary_norm_sq = sum(
+                (gradient * gradient).sum() for gradient in boundary
+            )
+            primary_dot = sum(
+                (left * right).sum()
+                for left, right in zip(
+                    projected_primary, boundary, strict=True
+                )
+            )
+            coefficient = torch.minimum(primary_dot, zero) / (
+                boundary_norm_sq.clamp_min(torch.finfo(primary_dot.dtype).tiny)
+            )
+            projected_primary = tuple(
+                left - coefficient * right
+                for left, right in zip(
+                    projected_primary, boundary, strict=True
+                )
+            )
 
     def cosine(
         numerator: torch.Tensor,
@@ -241,16 +314,24 @@ def conflict_aware_gradient_blend(
             return 0.0
         return float((numerator / denominator).detach())
 
+    combined_gradients = tuple(
+        base + safe + profitable
+        for base, safe, profitable in zip(
+            projected_primary if preserve_economic_boundaries else primary,
+            projected_safety,
+            projected_opportunity,
+            strict=True,
+        )
+    )
+    if preserve_economic_boundaries:
+        # Aggregate safety/opportunity cosines can be positive while one
+        # Long, Short, or WAIT boundary still regresses.
+        combined_gradients = _project_vector_onto_economic_boundaries(
+            combined_gradients, boundaries
+        )
+
     return GradientConflictBlend(
-        combined_gradients=tuple(
-            base + safe + profitable
-            for base, safe, profitable in zip(
-                primary,
-                projected_safety,
-                projected_opportunity,
-                strict=True,
-            )
-        ),
+        combined_gradients=combined_gradients,
         projected_safety_gradients=projected_safety,
         projected_opportunity_gradients=projected_opportunity,
         pre_projection_cosine=cosine(
@@ -1177,6 +1258,7 @@ class RecurrentC51Agent:
             in {
                 "pcgrad_safety_opportunity_v1",
                 "pcgrad_preserve_opportunity_v2",
+                "pcgrad_preserve_economic_boundaries_v3",
             }
             and mixed_precision != "off"
         ):
@@ -1919,6 +2001,30 @@ class RecurrentC51Agent:
             )
         logits = logits.float()
         online_next = online_next.float()
+        economic_boundary_q_cache: torch.Tensor | None = None
+
+        def economic_boundary_q_values() -> torch.Tensor:
+            """Recompute boundary Q values through the complete burn-in graph."""
+            nonlocal economic_boundary_q_cache
+            if economic_boundary_q_cache is None:
+                with self._autocast():
+                    boundary_recurrent, _ = (
+                        self._recurrent_features_with_resets(
+                            self.online,
+                            causal_observations,
+                            causal_reset_rows,
+                        )
+                    )
+                    boundary_logits = self.online.distribution_logits(
+                        boundary_recurrent[
+                            :, self.recurrent_burn_in:-1
+                        ]
+                    )
+                economic_boundary_q_cache = (
+                    boundary_logits.float().softmax(-1) * self.support
+                ).sum(-1)
+            return economic_boundary_q_cache
+
         chosen_logits = logits.gather(
             2,
             actions[..., None, None].expand(-1, -1, 1, self.atoms),
@@ -2011,6 +2117,25 @@ class RecurrentC51Agent:
         loss = rl_loss
         gradient_safety_loss = rl_loss * 0.0
         gradient_opportunity_loss = rl_loss * 0.0
+        gradient_economic_boundary_losses = {
+            name: rl_loss * 0.0
+            for name in (
+                "long_over_wait",
+                "long_over_short",
+                "short_over_wait",
+                "short_over_long",
+                "wait_over_long",
+                "wait_over_short",
+            )
+        }
+        active_economic_boundary_names: list[str] = []
+        economic_boundary_specs: list[
+            tuple[str, int, int, torch.Tensor]
+        ] = []
+        economic_boundary_margin_before: list[torch.Tensor] = []
+        economic_boundary_backtracks = 0
+        economic_boundary_initial_margin_deltas: dict[str, float] = {}
+        economic_boundary_final_margin_deltas: dict[str, float] = {}
         teacher_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_search_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         entry_action_loss = torch.zeros((), dtype=torch.float32, device=self.device)
@@ -2408,9 +2533,10 @@ class RecurrentC51Agent:
                         all_logits[:, :training_steps].float().softmax(-1)
                         * self.support
                     ).sum(-1)
-                    flat_q = q_values.index_select(
+                    all_flat_q = q_values.index_select(
                         -1, self._flat_action_indices
-                    )[selectivity_rows]
+                    )
+                    flat_q = all_flat_q[selectivity_rows]
                     model_log_probabilities = nn.functional.log_softmax(
                         flat_q / self.regime_selectivity_q_temperature,
                         dim=-1,
@@ -2678,50 +2804,183 @@ class RecurrentC51Agent:
                                     population_weights[batch_index, time_index] = (
                                         float(population_weight)
                                     )
+                            pair_slice = slice(
+                                self.recurrent_burn_in,
+                                self.recurrent_burn_in + training_steps,
+                            )
+                            learning_pair_ids = torch.as_tensor(
+                                pair_ids[:, pair_slice],
+                                dtype=torch.long,
+                                device=self.device,
+                            )
+                            learning_pair_sides = torch.as_tensor(
+                                pair_sides[:, pair_slice],
+                                dtype=torch.long,
+                                device=self.device,
+                            )
+                            learning_economic_wins = torch.as_tensor(
+                                economic_wins[:, pair_slice],
+                                dtype=torch.bool,
+                                device=self.device,
+                            )
+                            learning_population_weights = torch.as_tensor(
+                                population_weights[:, pair_slice],
+                                dtype=flat_q.dtype,
+                                device=self.device,
+                            )
+                            selected_pair_ids = learning_pair_ids[
+                                selectivity_rows
+                            ]
+                            selected_pair_sides = learning_pair_sides[
+                                selectivity_rows
+                            ]
+                            selected_economic_wins = learning_economic_wins[
+                                selectivity_rows
+                            ]
+                            selected_population_weights = (
+                                learning_population_weights[selectivity_rows]
+                            )
                             paired_result = paired_recurrent_a_plus_rank_loss(
                                 flat_q,
-                                pair_ids=torch.as_tensor(
-                                    pair_ids[
-                                        :,
-                                        self.recurrent_burn_in:
-                                        self.recurrent_burn_in + training_steps,
-                                    ],
-                                    dtype=torch.long,
-                                    device=self.device,
-                                )[selectivity_rows],
-                                pair_sides=torch.as_tensor(
-                                    pair_sides[
-                                        :,
-                                        self.recurrent_burn_in:
-                                        self.recurrent_burn_in + training_steps,
-                                    ],
-                                    dtype=torch.long,
-                                    device=self.device,
-                                )[selectivity_rows],
-                                economic_wins=torch.as_tensor(
-                                    economic_wins[
-                                        :,
-                                        self.recurrent_burn_in:
-                                        self.recurrent_burn_in + training_steps,
-                                    ],
-                                    dtype=torch.bool,
-                                    device=self.device,
-                                )[selectivity_rows],
-                                population_weights=torch.as_tensor(
-                                    population_weights[
-                                        :,
-                                        self.recurrent_burn_in:
-                                        self.recurrent_burn_in + training_steps,
-                                    ],
-                                    dtype=flat_q.dtype,
-                                    device=self.device,
-                                )[selectivity_rows],
+                                pair_ids=selected_pair_ids,
+                                pair_sides=selected_pair_sides,
+                                economic_wins=selected_economic_wins,
+                                population_weights=selected_population_weights,
                                 margin=self.regime_selectivity_paired_a_plus_margin,
                                 action_margin=self.entry_action_margin,
                                 winner_loss_weight=(
                                     self.regime_selectivity_paired_a_plus_winner_loss_weight
                                 ),
                             )
+                            if (
+                                self.auxiliary_gradient_conflict_mode
+                                == "pcgrad_preserve_economic_boundaries_v3"
+                            ):
+                                boundary_all_flat_q = (
+                                    economic_boundary_q_values()[
+                                        :, :training_steps
+                                    ].index_select(
+                                        -1, self._flat_action_indices
+                                    )
+                                )
+                                boundary_flat_q = boundary_all_flat_q[
+                                    selectivity_rows
+                                ]
+                                paired_boundary_evidence = torch.stack((
+                                    selected_pair_ids,
+                                    selected_pair_sides,
+                                    selected_economic_wins.to(torch.long),
+                                ), dim=-1).tolist()
+                                pair_records: dict[
+                                    int, list[tuple[int, bool]]
+                                ] = {}
+                                for pair_id, pair_side, economic_win in (
+                                    paired_boundary_evidence
+                                ):
+                                    if int(pair_id) < 0:
+                                        continue
+                                    pair_records.setdefault(
+                                        int(pair_id), []
+                                    ).append((
+                                        int(pair_side), bool(economic_win)
+                                    ))
+                                active_pair_ids = sorted(pair_records)
+                            else:
+                                boundary_all_flat_q = all_flat_q
+                                boundary_flat_q = flat_q
+                                active_pair_ids = []
+                            for pair_id in active_pair_ids:
+                                pair_rows = selected_pair_ids == int(pair_id)
+                                records = pair_records[int(pair_id)]
+                                if (
+                                    len(records) != 2
+                                    or sum(
+                                        economic_win
+                                        for _, economic_win in records
+                                    ) != 1
+                                ):
+                                    continue
+                                pair_side = records[0][0]
+                                opposite_side = (
+                                    int(Action.ENTER_SHORT_1)
+                                    if pair_side == int(Action.ENTER_LONG_1)
+                                    else int(Action.ENTER_LONG_1)
+                                )
+                                paired_boundary_actions = (
+                                    (
+                                        f"paired_{pair_id}_winner_over_wait",
+                                        pair_side,
+                                        int(Action.WAIT),
+                                        True,
+                                    ),
+                                    (
+                                        f"paired_{pair_id}_winner_over_opposite",
+                                        pair_side,
+                                        opposite_side,
+                                        True,
+                                    ),
+                                    (
+                                        f"paired_{pair_id}_wait_over_failure",
+                                        int(Action.WAIT),
+                                        pair_side,
+                                        False,
+                                    ),
+                                )
+                                for (
+                                    boundary_name,
+                                    preferred_action,
+                                    alternative_action,
+                                    economic_win,
+                                ) in paired_boundary_actions:
+                                    selected_boundary_rows = (
+                                        pair_rows
+                                        & (
+                                            selected_economic_wins
+                                            == economic_win
+                                        )
+                                    )
+                                    boundary_loss = nn.functional.softplus(
+                                        self.entry_action_margin
+                                        + boundary_flat_q[:, alternative_action]
+                                        - boundary_flat_q[:, preferred_action]
+                                    )
+                                    boundary_weight = (
+                                        selected_population_weights
+                                        * selected_boundary_rows.to(flat_q.dtype)
+                                    )
+                                    gradient_economic_boundary_losses[
+                                        boundary_name
+                                    ] = (
+                                        boundary_loss * boundary_weight
+                                    ).sum() / boundary_weight.sum().clamp_min(1.0)
+                                    active_economic_boundary_names.append(
+                                        boundary_name
+                                    )
+                                    boundary_full_rows = (
+                                        selectivity_rows
+                                        & (
+                                            learning_pair_ids
+                                            == int(pair_id)
+                                        )
+                                        & (
+                                            learning_economic_wins
+                                            == economic_win
+                                        )
+                                    )
+                                    economic_boundary_specs.append((
+                                        boundary_name,
+                                        preferred_action,
+                                        alternative_action,
+                                        boundary_full_rows.detach(),
+                                    ))
+                                    economic_boundary_margin_before.append((
+                                        boundary_all_flat_q[
+                                            ..., preferred_action
+                                        ]
+                                        - boundary_all_flat_q[
+                                            ..., alternative_action
+                                        ]
+                                    )[boundary_full_rows].mean().detach())
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss
                             )
@@ -3225,6 +3484,30 @@ class RecurrentC51Agent:
                 )
                 selected_entry_q = entry_q[timing_rows]
                 selected_timing_targets = timing_targets[timing_rows]
+                if (
+                    self.auxiliary_gradient_conflict_mode
+                    == "pcgrad_preserve_economic_boundaries_v3"
+                ):
+                    boundary_q_values = economic_boundary_q_values()[
+                        :, :training_steps
+                    ]
+                    boundary_entry_q = torch.stack(
+                        tuple(
+                            boundary_q_values[..., int(action)]
+                            for action in (
+                                Action.WAIT,
+                                Action.ENTER_LONG_1,
+                                Action.ENTER_SHORT_1,
+                            )
+                        ),
+                        dim=-1,
+                    )
+                    selected_boundary_entry_q = boundary_entry_q[
+                        timing_rows
+                    ]
+                else:
+                    boundary_entry_q = entry_q
+                    selected_boundary_entry_q = selected_entry_q
                 unweighted_entry_ce = nn.functional.cross_entropy(
                     selected_entry_q,
                     selected_timing_targets,
@@ -3259,6 +3542,21 @@ class RecurrentC51Agent:
                     entry_action_margin_loss = class_margin_means[
                         present_classes
                     ].mean()
+                    entry_action_class_loss_contributions = (
+                        (class_ce_means + class_margin_means)
+                        * present_classes.to(unweighted_entry_ce.dtype)
+                        / present_classes.sum().to(
+                            unweighted_entry_ce.dtype
+                        ).clamp_min(1.0)
+                    )
+                    entry_action_row_weights = 1.0 / (
+                        selected_class_counts.index_select(
+                            0, selected_timing_targets
+                        ).clamp_min(1.0)
+                        * present_classes.sum().to(
+                            unweighted_entry_ce.dtype
+                        ).clamp_min(1.0)
+                    )
                 else:
                     entry_action_loss = nn.functional.cross_entropy(
                         selected_entry_q,
@@ -3271,6 +3569,21 @@ class RecurrentC51Agent:
                     entry_action_margin_loss = (
                         unweighted_margin * selected_class_weights
                     ).sum() / selected_class_weights.sum()
+                    entry_action_class_loss_contributions = torch.stack(tuple(
+                        (
+                            (unweighted_entry_ce + unweighted_margin)
+                            * (selected_timing_targets == class_index).to(
+                                unweighted_entry_ce.dtype
+                            )
+                            * selected_class_weights
+                        ).sum()
+                        / selected_class_weights.sum().clamp_min(1.0)
+                        for class_index in range(3)
+                    ))
+                    entry_action_row_weights = (
+                        selected_class_weights
+                        / selected_class_weights.sum().clamp_min(1.0)
+                    )
                 entry_action_supervised_rows = timing_rows.sum().to(
                     dtype=torch.float32
                 )
@@ -3329,10 +3642,100 @@ class RecurrentC51Agent:
                     * self.entry_action_loss_weight
                     * (entry_action_loss + entry_action_margin_loss)
                 )
-                loss = loss + weighted_entry_action_loss
-                gradient_opportunity_loss = (
-                    gradient_opportunity_loss + weighted_entry_action_loss
+                weighted_entry_action_class_losses = (
+                    entry_action_weight_scale
+                    * self.entry_action_loss_weight
+                    * entry_action_class_loss_contributions
                 )
+                loss = loss + weighted_entry_action_loss
+                gradient_safety_loss = (
+                    gradient_safety_loss
+                    + weighted_entry_action_class_losses[int(Action.WAIT)]
+                )
+                gradient_opportunity_loss = (
+                    gradient_opportunity_loss
+                    + weighted_entry_action_class_losses[
+                        int(Action.ENTER_LONG_1)
+                    ]
+                    + weighted_entry_action_class_losses[
+                        int(Action.ENTER_SHORT_1)
+                    ]
+                )
+                economic_boundary_actions = {
+                    "long_over_wait": (
+                        Action.ENTER_LONG_1, Action.WAIT
+                    ),
+                    "long_over_short": (
+                        Action.ENTER_LONG_1, Action.ENTER_SHORT_1
+                    ),
+                    "short_over_wait": (
+                        Action.ENTER_SHORT_1, Action.WAIT
+                    ),
+                    "short_over_long": (
+                        Action.ENTER_SHORT_1, Action.ENTER_LONG_1
+                    ),
+                    "wait_over_long": (
+                        Action.WAIT, Action.ENTER_LONG_1
+                    ),
+                    "wait_over_short": (
+                        Action.WAIT, Action.ENTER_SHORT_1
+                    ),
+                }
+                protect_exact_boundaries = (
+                    self.auxiliary_gradient_conflict_mode
+                    == "pcgrad_preserve_economic_boundaries_v3"
+                    and not any(
+                        name.startswith("paired_")
+                        for name in active_economic_boundary_names
+                    )
+                )
+                for boundary_name, (
+                    preferred_action,
+                    alternative_action,
+                ) in economic_boundary_actions.items():
+                    if not protect_exact_boundaries:
+                        continue
+                    boundary_rows = (
+                        selected_timing_targets == int(preferred_action)
+                    )
+                    if not bool(boundary_rows.any().item()):
+                        continue
+                    boundary_row_weights = boundary_rows.to(
+                        selected_entry_q.dtype
+                    )
+                    boundary_losses = nn.functional.softplus(
+                        self.entry_action_margin
+                        + selected_boundary_entry_q[
+                            :, int(alternative_action)
+                        ]
+                        - selected_boundary_entry_q[
+                            :, int(preferred_action)
+                        ]
+                    )
+                    gradient_economic_boundary_losses[boundary_name] = (
+                        gradient_economic_boundary_losses[boundary_name]
+                        + entry_action_weight_scale
+                        * self.entry_action_loss_weight
+                        * (
+                            boundary_losses
+                            * boundary_row_weights
+                            * entry_action_row_weights
+                        ).sum()
+                    )
+                    active_economic_boundary_names.append(boundary_name)
+                    boundary_full_rows = timing_rows & (
+                        timing_targets == int(preferred_action)
+                    )
+                    economic_boundary_specs.append((
+                        boundary_name,
+                        int(preferred_action),
+                        int(alternative_action),
+                        boundary_full_rows.detach(),
+                    ))
+                    economic_boundary_margin_before.append((
+                        boundary_entry_q[..., int(preferred_action)]
+                        - boundary_entry_q[..., int(alternative_action)]
+                    )[boundary_full_rows].mean().detach())
         management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
             & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
@@ -3520,12 +3923,18 @@ class RecurrentC51Agent:
         gradient_conflict_pre_projection_cosine = 0.0
         gradient_conflict_post_projection_cosine = 0.0
         gradient_conflict_projected = 0.0
+        preserve_economic_boundaries = False
+        economic_boundary_gradients: tuple[
+            tuple[torch.Tensor, ...], ...
+        ] = ()
+        trainable_parameters: tuple[torch.nn.Parameter, ...] = ()
         self.optimizer.zero_grad(set_to_none=True)
         if (
             self.auxiliary_gradient_conflict_mode
             in {
                 "pcgrad_safety_opportunity_v1",
                 "pcgrad_preserve_opportunity_v2",
+                "pcgrad_preserve_economic_boundaries_v3",
             }
         ):
             trainable_parameters = tuple(
@@ -3562,18 +3971,43 @@ class RecurrentC51Agent:
                 gradient_safety_loss,
                 retain_graph=True,
             )
+            preserve_economic_boundaries = (
+                self.auxiliary_gradient_conflict_mode
+                == "pcgrad_preserve_economic_boundaries_v3"
+            )
             opportunity_gradients = materialized_gradients(
                 gradient_opportunity_loss,
-                retain_graph=False,
+                retain_graph=preserve_economic_boundaries,
             )
+            if preserve_economic_boundaries:
+                boundary_losses = tuple(
+                    gradient_economic_boundary_losses[name]
+                    for name in active_economic_boundary_names
+                )
+                economic_boundary_gradients = tuple(
+                    materialized_gradients(
+                        boundary_loss,
+                        retain_graph=(
+                            boundary_index < len(boundary_losses) - 1
+                        ),
+                    )
+                    for boundary_index, boundary_loss in enumerate(
+                        boundary_losses
+                    )
+                )
             gradient_blend = conflict_aware_gradient_blend(
                 primary_gradients=primary_gradients,
                 safety_gradients=safety_gradients,
                 opportunity_gradients=opportunity_gradients,
+                economic_boundary_gradients=economic_boundary_gradients,
                 preserve_opportunity=(
                     self.auxiliary_gradient_conflict_mode
-                    == "pcgrad_preserve_opportunity_v2"
+                    in {
+                        "pcgrad_preserve_opportunity_v2",
+                        "pcgrad_preserve_economic_boundaries_v3",
+                    }
                 ),
+                preserve_economic_boundaries=preserve_economic_boundaries,
             )
             for parameter, gradient in zip(
                 trainable_parameters,
@@ -3622,8 +4056,148 @@ class RecurrentC51Agent:
                 raise
             self.optimizer.zero_grad(set_to_none=True)
             raise ValueError("training loss is non-finite") from error
+        parameter_snapshots = (
+            tuple(parameter.detach().clone() for parameter in trainable_parameters)
+            if preserve_economic_boundaries
+            else ()
+        )
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        if preserve_economic_boundaries:
+            optimizer_descent = tuple(
+                before - parameter.detach()
+                for before, parameter in zip(
+                    parameter_snapshots, trainable_parameters, strict=True
+                )
+            )
+            projected_descent = _project_vector_onto_economic_boundaries(
+                optimizer_descent,
+                economic_boundary_gradients,
+            )
+            with torch.no_grad():
+                for before, parameter, update in zip(
+                    parameter_snapshots,
+                    trainable_parameters,
+                    projected_descent,
+                    strict=True,
+                ):
+                    parameter.copy_(before - update)
+            if economic_boundary_specs:
+                def current_economic_boundary_margins(
+                ) -> tuple[torch.Tensor, ...]:
+                    with torch.no_grad(), self._autocast():
+                        boundary_hidden = None
+                        if self.recurrent_burn_in:
+                            _, boundary_hidden = (
+                                self._recurrent_features_with_resets(
+                                    self.online,
+                                    causal_observations[
+                                        :, :self.recurrent_burn_in
+                                    ],
+                                    burn_in_reset_rows,
+                                )
+                            )
+                        boundary_recurrent, _ = (
+                            self._recurrent_features_with_resets(
+                                self.online,
+                                causal_observations[
+                                    :, self.recurrent_burn_in:
+                                ],
+                                learning_reset_rows,
+                                boundary_hidden,
+                            )
+                        )
+                        boundary_logits = self.online.distribution_logits(
+                            boundary_recurrent[:, :-1]
+                        )
+                        boundary_q = (
+                            boundary_logits[:, :training_steps]
+                            .float()
+                            .softmax(-1)
+                            * self.support
+                        ).sum(-1)
+                        boundary_entry_q = torch.stack(
+                            tuple(
+                                boundary_q[:, :, int(action)]
+                                for action in (
+                                    Action.WAIT,
+                                    Action.ENTER_LONG_1,
+                                    Action.ENTER_SHORT_1,
+                                )
+                            ),
+                            dim=-1,
+                        )
+                        return tuple(
+                            (
+                                boundary_entry_q[..., preferred_action]
+                                - boundary_entry_q[..., alternative_action]
+                            )[boundary_rows].mean()
+                            for (
+                                _,
+                                preferred_action,
+                                alternative_action,
+                                boundary_rows,
+                            ) in economic_boundary_specs
+                        )
+
+                boundary_tolerance = 1e-7
+                constrained_descent = projected_descent
+                for boundary_attempt in range(12):
+                    boundary_margin_after = (
+                        current_economic_boundary_margins()
+                    )
+                    boundary_deltas = {
+                        name: float((after - before).detach())
+                        for (
+                            (name, _, _, _),
+                            before,
+                            after,
+                        ) in zip(
+                            economic_boundary_specs,
+                            economic_boundary_margin_before,
+                            boundary_margin_after,
+                            strict=True,
+                        )
+                    }
+                    if boundary_attempt == 0:
+                        economic_boundary_initial_margin_deltas = (
+                            boundary_deltas
+                        )
+                    if all(
+                        float(after.detach()) + boundary_tolerance
+                        >= float(before.detach())
+                        for before, after in zip(
+                            economic_boundary_margin_before,
+                            boundary_margin_after,
+                            strict=True,
+                        )
+                    ):
+                        economic_boundary_final_margin_deltas = boundary_deltas
+                        break
+                    economic_boundary_backtracks += 1
+                    constrained_descent = tuple(
+                        update * 0.5 for update in constrained_descent
+                    )
+                    with torch.no_grad():
+                        for before, parameter, update in zip(
+                            parameter_snapshots,
+                            trainable_parameters,
+                            constrained_descent,
+                            strict=True,
+                        ):
+                            parameter.copy_(before - update)
+                else:
+                    economic_boundary_final_margin_deltas = {
+                        name: 0.0
+                        for name, _, _, _ in economic_boundary_specs
+                    }
+                    with torch.no_grad():
+                        for before, parameter in zip(
+                            parameter_snapshots,
+                            trainable_parameters,
+                            strict=True,
+                        ):
+                            parameter.copy_(before)
         self._updates += 1
         self._update_target_network()
         q_values = (logits.softmax(-1) * self.support).sum(-1)
@@ -4170,6 +4744,31 @@ class RecurrentC51Agent:
                     regime_selectivity_metric_values[prefix + total_field] / rows
                     if rows else 0.0
                 )
+        economic_boundary_actions_by_name = {
+            name: (preferred_action, alternative_action)
+            for name, preferred_action, alternative_action, _
+            in economic_boundary_specs
+        }
+
+        def economic_boundary_min_delta(
+            values: Mapping[str, float],
+            *,
+            preferred_action: Action,
+            alternative_action: Action | None = None,
+        ) -> float:
+            selected = tuple(
+                value
+                for name, value in values.items()
+                if economic_boundary_actions_by_name[name][0]
+                == int(preferred_action)
+                and (
+                    alternative_action is None
+                    or economic_boundary_actions_by_name[name][1]
+                    == int(alternative_action)
+                )
+            )
+            return min(selected) if selected else 0.0
+
         self.last_train_metrics = {
             "rl_loss": rl_loss_value,
             "teacher_loss": teacher_loss_value,
@@ -4318,6 +4917,46 @@ class RecurrentC51Agent:
                 gradient_conflict_post_projection_cosine
             ),
             "gradient_conflict_projected": gradient_conflict_projected,
+            "economic_boundary_backtracks": float(
+                economic_boundary_backtracks
+            ),
+            "economic_boundary_count": float(len(economic_boundary_specs)),
+            "economic_boundary_initial_min_margin_delta": (
+                min(economic_boundary_initial_margin_deltas.values())
+                if economic_boundary_initial_margin_deltas
+                else 0.0
+            ),
+            "economic_boundary_final_min_margin_delta": (
+                min(economic_boundary_final_margin_deltas.values())
+                if economic_boundary_final_margin_deltas
+                else 0.0
+            ),
+            "economic_boundary_long_winner_min_margin_delta": (
+                economic_boundary_min_delta(
+                    economic_boundary_final_margin_deltas,
+                    preferred_action=Action.ENTER_LONG_1,
+                )
+            ),
+            "economic_boundary_short_winner_min_margin_delta": (
+                economic_boundary_min_delta(
+                    economic_boundary_final_margin_deltas,
+                    preferred_action=Action.ENTER_SHORT_1,
+                )
+            ),
+            "economic_boundary_failed_long_min_margin_delta": (
+                economic_boundary_min_delta(
+                    economic_boundary_final_margin_deltas,
+                    preferred_action=Action.WAIT,
+                    alternative_action=Action.ENTER_LONG_1,
+                )
+            ),
+            "economic_boundary_failed_short_min_margin_delta": (
+                economic_boundary_min_delta(
+                    economic_boundary_final_margin_deltas,
+                    preferred_action=Action.WAIT,
+                    alternative_action=Action.ENTER_SHORT_1,
+                )
+            ),
             "sampled_management_row_fraction": management_row_fraction,
             "sampled_hold_reward": sampled_hold_reward,
             "sampled_close_reward": sampled_close_reward,

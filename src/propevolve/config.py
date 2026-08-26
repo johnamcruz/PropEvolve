@@ -1398,6 +1398,7 @@ def load_experiment_config(path: str | Path) -> dict:
         "none",
         "pcgrad_safety_opportunity_v1",
         "pcgrad_preserve_opportunity_v2",
+        "pcgrad_preserve_economic_boundaries_v3",
     }:
         raise ValueError("auxiliary gradient conflict mode is invalid")
     if (
@@ -1423,6 +1424,7 @@ def load_experiment_config(path: str | Path) -> dict:
         in {
             "pcgrad_safety_opportunity_v1",
             "pcgrad_preserve_opportunity_v2",
+            "pcgrad_preserve_economic_boundaries_v3",
         }
         and payload["runtime"]["mixed_precision"] != "off"
     ):

@@ -1526,6 +1526,278 @@ def test_pcgrad_preserve_opportunity_learner_prevents_auxiliary_cancellation(
     ] >= -1e-6
 
 
+@pytest.mark.parametrize("recurrent_burn_in", (0, 2))
+def test_economic_boundary_projection_preserves_mixed_long_short_pairs(
+    recurrent_burn_in: int,
+) -> None:
+    """One recurrent update must not average away either side of a pair."""
+    agent = _agent(
+        seed=505,
+        selectivity_weight=1.0,
+        recurrent_burn_in=recurrent_burn_in,
+        entry_action_weight=1.0,
+        entry_action_margin=0.25,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+        exclude_economic_winners_from_chop_wait=True,
+    )
+    ready_long = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    ready_short = _teacher_row(
+        long_attempt=0.10,
+        long_clean=0.10,
+        short_attempt=0.90,
+        short_clean=0.90,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    sequences = (
+        _sequence(
+            (1.0, 0.0, 0.0),
+            ready_long,
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+            pair_id=7,
+            pair_side=Action.ENTER_LONG_1,
+            economic_win=True,
+        ),
+        _sequence(
+            (0.0, 1.0, 0.0),
+            ready_long,
+            headroom=1.0,
+            target=Action.WAIT,
+            pair_id=7,
+            pair_side=Action.ENTER_LONG_1,
+            economic_win=False,
+            action=Action.ENTER_LONG_1,
+        ),
+        _sequence(
+            (0.0, 0.0, 1.0),
+            ready_short,
+            headroom=1.0,
+            target=Action.ENTER_SHORT_1,
+            pair_id=8,
+            pair_side=Action.ENTER_SHORT_1,
+            economic_win=True,
+        ),
+        _sequence(
+            (0.5, 0.5, 0.0),
+            ready_short,
+            headroom=1.0,
+            target=Action.WAIT,
+            pair_id=8,
+            pair_side=Action.ENTER_SHORT_1,
+            economic_win=False,
+            action=Action.ENTER_SHORT_1,
+        ),
+    )
+    if recurrent_burn_in:
+        prefixed_sequences = []
+        for sequence_index, sequence in enumerate(sequences):
+            anchor = sequence[0]
+            first_observation = np.asarray(
+                (0.1 * (sequence_index + 1), 0.2, -0.1), np.float32
+            )
+            second_observation = np.asarray(
+                (0.1 * (sequence_index + 1), -0.1, 0.2), np.float32
+            )
+            first = replace(
+                anchor,
+                observation=first_observation,
+                next_observation=second_observation,
+                terminated=False,
+                entry_action_target=None,
+                paired_a_plus_pair_id=None,
+                paired_a_plus_pair_side=None,
+                paired_a_plus_economic_win=None,
+                paired_a_plus_population_weight=None,
+            )
+            second = replace(
+                first,
+                observation=second_observation,
+                next_observation=anchor.observation,
+            )
+            prefixed_sequences.append((first, second, anchor))
+        sequences = tuple(prefixed_sequences)
+
+    def values(sequence: tuple[Transition, ...]) -> np.ndarray:
+        hidden = None
+        action_values = None
+        for transition in sequence:
+            _, hidden, action_values = agent.select_action(
+                transition.observation,
+                hidden=hidden,
+                valid_actions=transition.valid_actions,
+                epsilon=0.0,
+                return_action_values=True,
+            )
+        assert action_values is not None
+        return action_values
+
+    def boundaries() -> tuple[float, ...]:
+        long_winner, long_failure, short_winner, short_failure = tuple(
+            values(sequence) for sequence in sequences
+        )
+        return (
+            float(long_winner[int(Action.ENTER_LONG_1)] - long_winner[int(Action.WAIT)]),
+            float(long_winner[int(Action.ENTER_LONG_1)] - long_winner[int(Action.ENTER_SHORT_1)]),
+            float(long_failure[int(Action.WAIT)] - long_failure[int(Action.ENTER_LONG_1)]),
+            float(short_winner[int(Action.ENTER_SHORT_1)] - short_winner[int(Action.WAIT)]),
+            float(short_winner[int(Action.ENTER_SHORT_1)] - short_winner[int(Action.ENTER_LONG_1)]),
+            float(short_failure[int(Action.WAIT)] - short_failure[int(Action.ENTER_SHORT_1)]),
+        )
+
+    before = boundaries()
+    agent.train_batch(tuple(
+        tuple(
+            replace(transition, reward=2.5)
+            if transition_index == len(sequence) - 1
+            else transition
+            for transition_index, transition in enumerate(sequence)
+        )
+        for sequence in sequences
+    ))
+    after = boundaries()
+
+    assert all(
+        after_value >= before_value - 1e-7
+        for before_value, after_value in zip(before, after, strict=True)
+    ), {"before": before, "after": after}
+    assert any(
+        after_value > before_value
+        for before_value, after_value in zip(before, after, strict=True)
+    )
+    assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_economic_boundary_projection_uses_reconstructed_burn_in_state(
+) -> None:
+    """Boundary gradients and post-update Q values must share recurrent state."""
+    agent = _agent(
+        seed=506,
+        selectivity_weight=1.0,
+        n_step_return=1,
+        recurrent_burn_in=2,
+        entry_action_weight=1.0,
+        entry_action_margin=0.25,
+        side_balance="paired_recurrent_long_short_v1",
+        selectivity_semantics=PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
+        persistent_chop_negative_emphasis=2.0,
+        chop_wait_margin=0.25,
+        failed_confluence_margin=0.25,
+        paired_a_plus_margin=0.25,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+        exclude_economic_winners_from_chop_wait=True,
+    )
+    teacher = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    winner_anchor = _sequence(
+        (1.0, 0.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.ENTER_LONG_1,
+        pair_id=9,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=True,
+    )[0]
+    failure_anchor = _sequence(
+        (0.0, 1.0, 0.0),
+        teacher,
+        headroom=1.0,
+        target=Action.WAIT,
+        pair_id=9,
+        pair_side=Action.ENTER_LONG_1,
+        economic_win=False,
+        action=Action.ENTER_LONG_1,
+    )[0]
+
+    def prefixed(anchor: Transition, offset: float) -> tuple[Transition, ...]:
+        first_observation = np.asarray((offset, 0.2, -0.1), np.float32)
+        second_observation = np.asarray((offset, -0.1, 0.2), np.float32)
+        first = replace(
+            anchor,
+            observation=first_observation,
+            next_observation=second_observation,
+            terminated=False,
+            entry_action_target=None,
+            paired_a_plus_pair_id=None,
+            paired_a_plus_pair_side=None,
+            paired_a_plus_economic_win=None,
+            paired_a_plus_population_weight=None,
+        )
+        second = replace(
+            first,
+            observation=second_observation,
+            next_observation=anchor.observation,
+        )
+        return first, second, anchor
+
+    sequences = (
+        prefixed(winner_anchor, 0.3),
+        prefixed(failure_anchor, -0.3),
+    )
+
+    def margins() -> tuple[float, float, float]:
+        values = []
+        for sequence in sequences:
+            hidden = None
+            action_values = None
+            for transition in sequence:
+                _, hidden, action_values = agent.select_action(
+                    transition.observation,
+                    hidden=hidden,
+                    valid_actions=transition.valid_actions,
+                    epsilon=0.0,
+                    return_action_values=True,
+                )
+            assert action_values is not None
+            values.append(action_values)
+        winner, failure = values
+        return (
+            float(winner[int(Action.ENTER_LONG_1)] - winner[int(Action.WAIT)]),
+            float(winner[int(Action.ENTER_LONG_1)] - winner[int(Action.ENTER_SHORT_1)]),
+            float(failure[int(Action.WAIT)] - failure[int(Action.ENTER_LONG_1)]),
+        )
+
+    before = margins()
+    agent.train_batch(sequences)
+    after = margins()
+
+    assert all(
+        after_value >= before_value - 1e-7
+        for before_value, after_value in zip(before, after, strict=True)
+    )
+    assert any(
+        after_value > before_value
+        for before_value, after_value in zip(before, after, strict=True)
+    )
+    assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
 def test_paired_recurrent_learner_rejects_missing_population_correction() -> None:
     agent = _agent(
         seed=503,

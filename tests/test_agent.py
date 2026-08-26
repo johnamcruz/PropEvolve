@@ -74,6 +74,25 @@ def test_conflict_aware_gradient_blend_preserves_primary_and_opportunity(
     assert result.conflict_projected
 
 
+def test_conflict_aware_gradient_blend_protects_both_economic_boundaries_from_primary(
+) -> None:
+    """Reproduce V29: C51 must not reverse either economic boundary."""
+    safety = (torch.tensor([1.0, 0.0]),)
+    opportunity = (torch.tensor([0.0, 1.0]),)
+    result = conflict_aware_gradient_blend(
+        primary_gradients=(torch.tensor([-3.0, -3.0]),),
+        safety_gradients=safety,
+        opportunity_gradients=opportunity,
+        preserve_opportunity=True,
+        preserve_economic_boundaries=True,
+    )
+
+    combined = result.combined_gradients[0]
+    assert float(torch.dot(combined, safety[0])) >= 0.0
+    assert float(torch.dot(combined, opportunity[0])) >= 0.0
+    torch.testing.assert_close(combined, torch.tensor([1.0, 1.0]))
+
+
 def test_conflict_aware_gradient_blend_keeps_symmetric_v1_compatibility(
 ) -> None:
     result = conflict_aware_gradient_blend(
@@ -1424,6 +1443,162 @@ def _entry_action_sequence(
     )
 
 
+def test_exact_wait_supervision_is_safety_not_opportunity() -> None:
+    """V29 grouped exact WAIT with Entry opportunity and blurred PCGrad."""
+    agent = _agent(
+        3,
+        seed=397,
+        entry_action_loss_weight=1.0,
+        entry_action_margin=0.25,
+        auxiliary_gradient_conflict_mode="pcgrad_preserve_opportunity_v2",
+    )
+
+    agent.train_batch(
+        (_entry_action_sequence((0.0, 1.0, 0.0), Action.WAIT),)
+    )
+
+    assert agent.last_train_metrics["gradient_conflict_safety_norm"] > 0.0
+    assert agent.last_train_metrics["gradient_conflict_opportunity_norm"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("target", "behavior_action"),
+    (
+        (Action.ENTER_LONG_1, Action.WAIT),
+        (Action.ENTER_SHORT_1, Action.WAIT),
+        (Action.WAIT, Action.ENTER_LONG_1),
+        (Action.WAIT, Action.ENTER_SHORT_1),
+    ),
+)
+def test_combined_training_preserves_each_economic_entry_boundary(
+    target: Action,
+    behavior_action: Action,
+) -> None:
+    """The real optimizer must not let positive C51 credit reverse exact labels."""
+    observation = np.asarray((0.7, -0.3, 0.2), dtype=np.float32)
+    transition = Transition(
+        observation=observation,
+        action=behavior_action,
+        reward=2.5,
+        next_observation=np.zeros(3, dtype=np.float32),
+        terminated=True,
+        valid_actions=_FLAT_ENTRY_ACTIONS,
+        next_valid_actions=(),
+        entry_action_target=target,
+    )
+    agent = _agent(
+        3,
+        seed=398,
+        learning_rate=0.001,
+        weight_decay=0.0,
+        entry_action_loss_weight=1.0,
+        entry_action_margin=0.25,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+    )
+
+    def economic_margin() -> float:
+        _, _, values = agent.select_action(
+            observation,
+            hidden=None,
+            valid_actions=_FLAT_ENTRY_ACTIONS,
+            epsilon=0.0,
+            return_action_values=True,
+        )
+        assert values is not None
+        if target == Action.WAIT:
+            return float(values[int(Action.WAIT)] - values[int(behavior_action)])
+        opposite = (
+            Action.ENTER_SHORT_1
+            if target == Action.ENTER_LONG_1
+            else Action.ENTER_LONG_1
+        )
+        return float(
+            values[int(target)]
+            - max(values[int(Action.WAIT)], values[int(opposite)])
+        )
+
+    before = economic_margin()
+    agent.train_batch(((transition,),))
+    after = economic_margin()
+
+    assert after > before
+
+
+def test_combined_training_preserves_all_economic_entry_boundaries_together(
+) -> None:
+    """Reproduce V29: one mixed update must improve every action boundary."""
+    cases = (
+        (np.asarray((1.0, 0.0, 0.0, 0.0), dtype=np.float32), Action.ENTER_LONG_1, Action.WAIT),
+        (np.asarray((0.0, 1.0, 0.0, 0.0), dtype=np.float32), Action.ENTER_SHORT_1, Action.WAIT),
+        (np.asarray((0.0, 0.0, 1.0, 0.0), dtype=np.float32), Action.WAIT, Action.ENTER_LONG_1),
+        (np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float32), Action.WAIT, Action.ENTER_SHORT_1),
+    )
+    agent = _agent(
+        4,
+        seed=399,
+        learning_rate=0.001,
+        weight_decay=0.0,
+        entry_action_loss_weight=1.0,
+        entry_action_margin=0.25,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+    )
+
+    def margin(
+        observation: np.ndarray,
+        target: Action,
+        behavior_action: Action,
+    ) -> float:
+        _, _, values = agent.select_action(
+            observation,
+            hidden=None,
+            valid_actions=_FLAT_ENTRY_ACTIONS,
+            epsilon=0.0,
+            return_action_values=True,
+        )
+        assert values is not None
+        if target == Action.WAIT:
+            return float(values[int(Action.WAIT)] - values[int(behavior_action)])
+        opposite = (
+            Action.ENTER_SHORT_1
+            if target == Action.ENTER_LONG_1
+            else Action.ENTER_LONG_1
+        )
+        return float(
+            values[int(target)]
+            - max(values[int(Action.WAIT)], values[int(opposite)])
+        )
+
+    before = tuple(margin(*case) for case in cases)
+    sequences = tuple(
+        (
+            Transition(
+                observation=observation,
+                action=behavior_action,
+                reward=2.5,
+                next_observation=np.zeros(4, dtype=np.float32),
+                terminated=True,
+                valid_actions=_FLAT_ENTRY_ACTIONS,
+                next_valid_actions=(),
+                entry_action_target=target,
+            ),
+        )
+        for observation, target, behavior_action in cases
+    )
+
+    agent.train_batch(sequences)
+
+    after = tuple(margin(*case) for case in cases)
+    assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+    assert all(
+        after_margin > before_margin
+        for before_margin, after_margin in zip(before, after, strict=True)
+    ), {"before": before, "after": after}
+
+
 def _five_wait_to_one_enter_sequences(
     entry_action: Action,
 ) -> tuple[tuple[Transition, ...], ...]:
@@ -1592,6 +1767,24 @@ def test_equal_present_class_entry_loss_recovery_round_trip_preserves_mode(
         assert restored.last_train_metrics[
             f"entry_balance_{action_name}_weighted_mass_fraction"
         ] == pytest.approx(1.0 / 3.0)
+
+
+def test_economic_boundary_projection_checkpoint_round_trip(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(
+        3,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+    )
+
+    checkpoint = agent.save(tmp_path / "economic-boundaries.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    assert restored.auxiliary_gradient_conflict_mode == (
+        "pcgrad_preserve_economic_boundaries_v3"
+    )
 
 
 def test_paired_a_plus_checkpoint_round_trip_preserves_declared_margin(

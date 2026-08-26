@@ -1160,6 +1160,23 @@ def test_preserve_opportunity_gradient_conflict_mode_is_config_driven(
     )
 
 
+def test_preserve_economic_boundaries_mode_is_config_driven(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["agent"]["auxiliary_gradient_conflict_mode"] = (
+        "pcgrad_preserve_economic_boundaries_v3"
+    )
+    path = tmp_path / "preserve-economic-boundaries.json"
+    path.write_text(json.dumps(payload))
+
+    loaded = load_experiment_config(path)
+
+    assert loaded["agent"]["auxiliary_gradient_conflict_mode"] == (
+        "pcgrad_preserve_economic_boundaries_v3"
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
