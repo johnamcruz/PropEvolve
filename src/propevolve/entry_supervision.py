@@ -257,21 +257,13 @@ def build_post_launch_entry_supervision(
             action=(
                 "WAIT"
                 if index < enter_index
-                or (index > enter_index and not economic_good[index])
                 else enter_action
                 if index == enter_index
                 else None
             ),
-            available=(
-                index <= enter_index
-                or (index > enter_index and not economic_good[index])
-            ),
-            censored=index > enter_index and economic_good[index],
-            unavailable_reason=(
-                "after_entry"
-                if index > enter_index and economic_good[index]
-                else None
-            ),
+            available=index <= enter_index,
+            censored=index > enter_index,
+            unavailable_reason="after_entry" if index > enter_index else None,
         )
         for index, fill_offset in enumerate(normalized_offsets)
     )
@@ -413,7 +405,6 @@ def build_entry_action_targets(
         "round_trip_fees": economics["round_trip_fees"],
         "label_semantics": {
             "fresh_lookback_bars": max(contract["fill_offsets"]),
-            "post_entry_invalidated_action": "WAIT",
             "launch_collision": "adverse_first",
             "continuation_collision": "adverse_first",
             "economic_collision": "stop_first",

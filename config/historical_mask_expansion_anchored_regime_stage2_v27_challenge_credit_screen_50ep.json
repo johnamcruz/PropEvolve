@@ -255,8 +255,8 @@
   },
   "training": {
     "prefetch_batches": 0,
-    "episodes": 100,
-    "validation_episodes": 100,
+    "episodes": 50,
+    "validation_episodes": 50,
     "validation_no_trade_patience_episodes": 5,
     "greedy_diagnostic_interval_steps": 256,
     "replay_capacity_episodes": 500,
@@ -288,7 +288,7 @@
   "balance_curriculum": {
     "schedule_seed": 37,
     "start_pnls": [-1500],
-    "validation_episodes": 100,
+    "validation_episodes": 50,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/balance-curriculum",
       "sha256": "32ddfd7738b25264d02065ef270e80abfa1089301c89fc6a38a68c80e68413a9",
@@ -302,7 +302,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "On the unchanged immutable V21 parent and V23 recurrent paired curriculum, preserving the exact Stage 1 fill-offset 1-5 window while converting later economically invalidated candidates from censored rows into explicit WAIT targets will reduce entries after invalidation and improve first-window Expansion transfer without weakening authenticated winner entry targets, dominant-chop safety, or teacher-free inference.",
+    "hypothesis": "On the unchanged immutable V21 parent and V23 recurrent paired curriculum, removing contradictory dominant-chop WAIT pressure only from authenticated exact economic winners and adding a bounded 0.05 challenge-return self-imitation bonus only to actions that actually produced passes will improve full-challenge credit assignment and pass conversion without weakening failure WAIT pressure or teacher-free inference. This 50-episode matched screen rejects the change unless both teacher-free validations preserve zero blows and improve pass conversion before any 200-episode run.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -415,14 +415,14 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v28_entry_window_transfer_100ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v27_challenge_credit_screen_50ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "entry_window_transfer_100ep",
+        "name": "challenge_credit_screen_50ep",
         "budget_mode": "episodes",
-        "training_episodes": 100,
-        "validation_episodes": 100,
+        "training_episodes": 50,
+        "validation_episodes": 50,
         "allow_revisions": false,
         "warm_start_parent": true,
         "curriculum_override": {},
@@ -660,5 +660,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v28_entry_window_transfer_100ep"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v27_challenge_credit_screen_50ep"
 }
