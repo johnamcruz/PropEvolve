@@ -342,6 +342,9 @@ def actual_configured_update(checkpoint, seqs, before):
         "economic_boundary_active_constraint_count": float(
             metrics["economic_boundary_active_constraint_count"]
         ),
+        "economic_boundary_hard_constraint_count": float(
+            metrics["economic_boundary_hard_constraint_count"]
+        ),
         "economic_boundary_backtracks": float(
             metrics["economic_boundary_backtracks"]
         ),

@@ -2154,6 +2154,7 @@ class RecurrentC51Agent:
         economic_boundary_margin_before: list[torch.Tensor] = []
         economic_boundary_backtracks = 0
         economic_boundary_active_constraint_count = 0
+        economic_boundary_hard_constraint_count = 0
         economic_boundary_initial_margin_deltas: dict[str, float] = {}
         economic_boundary_final_margin_deltas: dict[str, float] = {}
         economic_boundary_final_required_headrooms: dict[str, float] = {}
@@ -4134,6 +4135,22 @@ class RecurrentC51Agent:
                 ):
                     parameter.copy_(before - update)
             if economic_boundary_specs:
+                hard_constraint_indices = frozenset(
+                    boundary_index
+                    for boundary_index, (
+                        (_, _, _, _),
+                        margin_before,
+                    ) in enumerate(zip(
+                        economic_boundary_specs,
+                        economic_boundary_margin_before,
+                        strict=True,
+                    ))
+                    if float(margin_before) >= self.entry_action_margin
+                )
+                economic_boundary_hard_constraint_count = len(
+                    hard_constraint_indices
+                )
+
                 def current_economic_boundary_margins(
                 ) -> tuple[torch.Tensor, ...]:
                     with torch.no_grad(), self._autocast():
@@ -4198,36 +4215,39 @@ class RecurrentC51Agent:
                         current_economic_boundary_margins()
                     )
                     boundary_deltas = {
-                        name: float((after - before).detach())
-                        for (
+                        f"{name}#{boundary_index}": float(
+                            (after - before).detach()
+                        )
+                        for boundary_index, (
                             (name, _, _, _),
                             before,
                             after,
-                        ) in zip(
+                        ) in enumerate(zip(
                             economic_boundary_specs,
                             economic_boundary_margin_before,
                             boundary_margin_after,
                             strict=True,
-                        )
+                        ))
                     }
                     boundary_required_headrooms = {
-                        name: float((
+                        f"{name}#{boundary_index}": float((
                             after
                             - economic_boundary_required_margin(
                                 before,
                                 target_margin=self.entry_action_margin,
                             )
                         ).detach())
-                        for (
+                        for boundary_index, (
                             (name, _, _, _),
                             before,
                             after,
-                        ) in zip(
+                        ) in enumerate(zip(
                             economic_boundary_specs,
                             economic_boundary_margin_before,
                             boundary_margin_after,
                             strict=True,
-                        )
+                        ))
+                        if boundary_index in hard_constraint_indices
                     }
                     if boundary_attempt == 0:
                         economic_boundary_initial_margin_deltas = (
@@ -4256,12 +4276,16 @@ class RecurrentC51Agent:
                             parameter.copy_(before - update)
                 else:
                     economic_boundary_final_margin_deltas = {
-                        name: 0.0
-                        for name, _, _, _ in economic_boundary_specs
+                        f"{name}#{boundary_index}": 0.0
+                        for boundary_index, (name, _, _, _) in enumerate(
+                            economic_boundary_specs
+                        )
                     }
                     economic_boundary_final_required_headrooms = {
-                        name: 0.0
-                        for name, _, _, _ in economic_boundary_specs
+                        f"{name}#{boundary_index}": 0.0
+                        for boundary_index, (name, _, _, _) in enumerate(
+                            economic_boundary_specs
+                        )
                     }
                     with torch.no_grad():
                         for before, parameter in zip(
@@ -4817,9 +4841,13 @@ class RecurrentC51Agent:
                     if rows else 0.0
                 )
         economic_boundary_actions_by_name = {
-            name: (preferred_action, alternative_action)
-            for name, preferred_action, alternative_action, _
-            in economic_boundary_specs
+            f"{name}#{boundary_index}": (preferred_action, alternative_action)
+            for boundary_index, (
+                name,
+                preferred_action,
+                alternative_action,
+                _,
+            ) in enumerate(economic_boundary_specs)
         }
 
         def economic_boundary_min_delta(
@@ -4995,6 +5023,9 @@ class RecurrentC51Agent:
             "economic_boundary_count": float(len(economic_boundary_specs)),
             "economic_boundary_active_constraint_count": float(
                 economic_boundary_active_constraint_count
+            ),
+            "economic_boundary_hard_constraint_count": float(
+                economic_boundary_hard_constraint_count
             ),
             "economic_boundary_initial_min_margin_delta": (
                 min(economic_boundary_initial_margin_deltas.values())

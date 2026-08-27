@@ -321,19 +321,37 @@ def test_four_economic_pairs_update_all_optimizer_boundaries_without_stalling(
     paired_sequences = replay.sample(8)
     agent = _agent()
     before = _grouped_boundary_margins(agent, paired_sequences)
+    satisfied = {
+        name for name, margin in before.items() if margin >= 0.25
+    }
+    parameters_before = tuple(
+        parameter.detach().clone() for parameter in agent.online.parameters()
+    )
 
     agent.train_batch(paired_sequences)
 
     after = _grouped_boundary_margins(agent, paired_sequences)
+    parameter_delta = sum(
+        ((updated.detach() - original) ** 2).sum()
+        for original, updated in zip(
+            parameters_before, agent.online.parameters(), strict=True
+        )
+    ).sqrt()
     assert agent.last_train_metrics["economic_boundary_count"] == 12.0
     assert (
         agent.last_train_metrics["economic_boundary_active_constraint_count"]
         == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
+    assert (
+        agent.last_train_metrics["economic_boundary_hard_constraint_count"]
+        <= agent.last_train_metrics[
+            "economic_boundary_active_constraint_count"
+        ]
+    )
     assert before.keys() == after.keys()
-    assert all(after[name] >= before[name] - 1e-7 for name in before)
-    assert any(after[name] > before[name] for name in before)
+    assert float(parameter_delta) > 0.0
+    assert all(after[name] >= 0.25 - 1e-7 for name in satisfied)
 
 
 def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
@@ -366,6 +384,9 @@ def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
 
     for _ in range(3):
         before = _grouped_boundary_margins(agent, sequences)
+        satisfied = {
+            name for name, margin in before.items() if margin >= 0.25
+        }
         agent.train_batch(sequences)
         after = _grouped_boundary_margins(agent, sequences)
 
@@ -377,10 +398,69 @@ def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
             == 12.0
         )
         assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
+        assert (
+            agent.last_train_metrics[
+                "economic_boundary_hard_constraint_count"
+            ]
+            <= agent.last_train_metrics[
+                "economic_boundary_active_constraint_count"
+            ]
+        )
         assert all(
-            after[name] >= min(before[name], 0.25) - 1e-7
-            for name in before
+            after[name] >= 0.25 - 1e-7 for name in satisfied
         ), {"before": before, "after": after}
+
+
+def test_unsatisfied_boundary_cannot_rollback_the_whole_optimizer_step_e2e(
+) -> None:
+    """Reproduce v31: learning must continue while correct margins stay safe."""
+    contexts = (
+        (Action.ENTER_LONG_1, (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)),
+        (Action.ENTER_SHORT_1, (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)),
+        (Action.ENTER_LONG_1, (0.62, 0.51, 0.42, 0.39, 0.15, 0.55, 0.30)),
+        (Action.ENTER_SHORT_1, (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30)),
+    )
+    replay = _replay(seed=91)
+    for index, (side, context) in enumerate(contexts):
+        for economic_win, kind in ((True, "winner"), (False, "failure")):
+            replay.add(_economic_episode(
+                episode_id=f"{kind}-{index}",
+                side=side,
+                economic_win=economic_win,
+                context=context,
+                offset=float(index * 2 + int(not economic_win)),
+            ))
+    sequences = replay.sample(8)
+    agent = _agent()
+    agent.regime_selectivity_paired_a_plus_winner_loss_weight = 2.0
+    for _ in range(41):
+        agent.train_batch(sequences)
+
+    margins_before = _grouped_boundary_margins(agent, sequences)
+    satisfied = {
+        name for name, margin in margins_before.items() if margin >= 0.25
+    }
+    unsatisfied = set(margins_before) - satisfied
+    assert satisfied
+    if not unsatisfied:
+        assert all(margin >= 0.25 for margin in margins_before.values())
+        return
+    parameters_before = tuple(
+        parameter.detach().clone() for parameter in agent.online.parameters()
+    )
+
+    agent.train_batch(sequences)
+
+    margins_after = _grouped_boundary_margins(agent, sequences)
+    parameter_delta = sum(
+        ((after.detach() - before) ** 2).sum()
+        for before, after in zip(
+            parameters_before, agent.online.parameters(), strict=True
+        )
+    ).sqrt()
+    assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
+    assert float(parameter_delta) > 0.0
+    assert all(margins_after[name] >= 0.25 - 1e-7 for name in satisfied)
 
 
 def test_repeated_short_pairs_learn_both_entry_and_wait_boundaries_e2e(
