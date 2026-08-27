@@ -6,7 +6,7 @@
   "study": {
     "sampler": "tpe",
     "seed": 314159,
-    "n_trials": 24,
+    "n_trials": 50,
     "n_jobs": 3,
     "n_startup_trials": 8
   },

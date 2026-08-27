@@ -440,7 +440,7 @@ def test_active_sweep_compiles_through_real_config_validation(
         code_commit="test-commit",
     )
 
-    assert sweep.n_trials == 24
+    assert sweep.n_trials == 50
     assert sweep.n_jobs == 3
     assert result.status == "COMPLETE"
 
