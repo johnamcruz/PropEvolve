@@ -968,10 +968,15 @@ def _run_compiled_campaign(
     if config_validator is None:
         from .config import load_experiment_config
 
-        load_experiment_config(config_path)
+        validated_config = load_experiment_config(config_path)
     else:
-        config_validator(config_path)
-    expected_plan_identity = _plan_identity(config)
+        validation_result = config_validator(config_path)
+        validated_config = (
+            validation_result
+            if isinstance(validation_result, Mapping)
+            else config
+        )
+    expected_plan_identity = _plan_identity(validated_config)
     state = state_loader(config_path, run_id)
     if state is None or state.phase.value not in _TERMINAL_PHASES:
         if runner is None:

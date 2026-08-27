@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from ml_training_loop import Phase, RunState, StageReceipt
 import pytest
 
+from propevolve.config import load_experiment_config
 from propevolve.orchestration import _plan
 import propevolve.optuna_engine as optuna_engine
 from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
@@ -485,7 +486,18 @@ def test_active_sweep_compiles_through_real_config_validation(
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
 
     def runner(config_path: Path, *, run_id: str):
-        return _state(config_path, run_id, _metrics())
+        normalized = load_experiment_config(config_path)
+        return RunState(
+            run_id,
+            _plan(normalized).identity,
+            Phase.COMPLETE,
+            receipts=(StageReceipt(
+                STAGE,
+                1,
+                "complete",
+                {"metrics": _metrics()},
+            ),),
+        )
 
     result = run_optuna_sweep(
         ACTIVE_CONTRACT,
@@ -506,6 +518,55 @@ def test_active_sweep_compiles_through_real_config_validation(
     assert sweep.stages["screening"].balance_validation_episodes == 0
     assert sweep.stages["confirmation"].short_circuit is None
     assert sweep.stages["multi_seed"].short_circuit is None
+    assert result.status == "COMPLETE"
+
+
+def test_active_sweep_every_replay_mix_compiles_through_real_validation(
+    tmp_path: Path,
+) -> None:
+    sweep = load_optuna_sweep(ACTIVE_CONTRACT)
+    baseline = optuna_engine._baseline_parameters(sweep)
+    choices = sweep.search_space["replay_mix"]["choices"]
+
+    for choice in choices:
+        parameters = {**baseline, "replay_mix": choice["name"]}
+        config = optuna_engine._compile_campaign(
+            sweep,
+            parameters=parameters,
+            stage=sweep.stages["screening"],
+            run_root=tmp_path / str(choice["name"]),
+        )
+        path = tmp_path / f"{choice['name']}.json"
+        optuna_engine._write_exact(path, config)
+        load_experiment_config(path)
+
+
+def test_compiled_campaign_compares_normalized_runtime_plan_identity(
+    tmp_path: Path,
+) -> None:
+    def runner(config_path: Path, *, run_id: str):
+        normalized = load_experiment_config(config_path)
+        return RunState(
+            run_id,
+            _plan(normalized).identity,
+            Phase.COMPLETE,
+            receipts=(StageReceipt(
+                STAGE,
+                1,
+                "complete",
+                {"metrics": _metrics()},
+            ),),
+        )
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda config_path, run_id: None,
+        code_commit="test-commit",
+    )
+
     assert result.status == "COMPLETE"
 
 

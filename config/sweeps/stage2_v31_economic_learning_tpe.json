@@ -150,9 +150,9 @@
         {
           "name": "safety_leaning",
           "values": {
-            "training.terminal_sequence_fraction": 0.4375,
+            "training.terminal_sequence_fraction": 0.375,
             "training.safety_sequence_fraction": 0.375,
-            "training.entry_opportunity_sequence_fraction": 0.1875
+            "training.entry_opportunity_sequence_fraction": 0.25
           }
         }
       ]
