@@ -130,6 +130,26 @@ def test_balance_curriculum_projects_optional_outcome_contrast() -> None:
     assert validation_episodes == 200
 
 
+def test_zero_balance_training_can_disable_duplicate_balance_validation() -> None:
+    settings, validation_episodes = _balance_curriculum_from_config(
+        {
+            "schedule_seed": 37,
+            "start_pnls": [0.0],
+            "validation_episodes": 0,
+            "pass_replay": None,
+            "outcome_contrast_replay": {
+                "update_period": 8,
+                "max_examples": 8,
+            },
+        },
+        max_loss=3_000.0,
+    )
+
+    assert settings is not None
+    assert settings.start_pnls == (0.0,)
+    assert validation_episodes == 0
+
+
 def test_balance_curriculum_marks_deficit_learning_across_breakeven() -> None:
     flat_actions = (
         Action.WAIT,

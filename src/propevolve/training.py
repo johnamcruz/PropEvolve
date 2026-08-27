@@ -2706,7 +2706,7 @@ def _balance_curriculum_from_config(
         ),
     )
     validation_episodes = int(value["validation_episodes"])
-    if validation_episodes < 1:
+    if validation_episodes < 0:
         raise ValueError("balance curriculum validation budget is invalid")
     return settings, validation_episodes
 
