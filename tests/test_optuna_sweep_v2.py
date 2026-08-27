@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import threading
@@ -32,6 +33,33 @@ SCREENING_SHORT_CIRCUIT = {
         "minimum_voluntary_close_rate": 0.8,
     },
 }
+
+
+def test_exact_artifact_write_is_safe_for_concurrent_identical_writers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / ".optuna-trial.json"
+    payload = {"trial": 0, "episodes": 50}
+    barrier = threading.Barrier(3, timeout=5.0)
+    original_exists = Path.exists
+
+    def synchronized_exists(candidate: Path) -> bool:
+        if candidate == path:
+            barrier.wait()
+            return False
+        return original_exists(candidate)
+
+    monkeypatch.setattr(Path, "exists", synchronized_exists)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(optuna_engine._write_exact, path, payload)
+            for _ in range(3)
+        ]
+        for future in futures:
+            future.result()
+
+    assert json.loads(path.read_text()) == payload
 
 
 def _payload(

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from typing import Mapping, Sequence
 
 import optuna
@@ -52,9 +53,23 @@ def _write_exact(path: Path, payload: Mapping) -> None:
             raise ValueError(f"existing Optuna artifact drifted: {path}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(rendered)
-    temporary.replace(path)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(rendered)
+        temporary = Path(handle.name)
+    try:
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_text() != rendered:
+                raise ValueError(f"existing Optuna artifact drifted: {path}")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _default_state_loader(config_path: Path, run_id: str):
@@ -1158,10 +1173,14 @@ def run_optuna_sweep(
         for name, value in authority.items():
             study.set_user_attr(name, value)
     reconciled = _reconcile_interrupted_trials(study)
+    reserved_baseline: optuna.Trial | None = None
     if not study.trials:
         study.enqueue_trial(
             _baseline_parameters(sweep), user_attrs={"baseline_control": True}
         )
+        # Reserve the queued baseline before concurrent sampling. SQLite-backed
+        # Optuna workers must never race to claim the same WAITING control.
+        reserved_baseline = study.ask()
     load_state = state_loader or _default_state_loader
 
     def objective(trial: optuna.Trial) -> float:
@@ -1228,6 +1247,17 @@ def run_optuna_sweep(
         )
         return value
 
+    def finish_reserved_trial(trial: optuna.Trial) -> None:
+        try:
+            value = objective(trial)
+        except optuna.TrialPruned:
+            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+        except Exception:
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            raise
+        else:
+            study.tell(trial, value)
+
     terminal_states = {
         optuna.trial.TrialState.COMPLETE,
         optuna.trial.TrialState.PRUNED,
@@ -1238,6 +1268,24 @@ def run_optuna_sweep(
         if trial.state in terminal_states and trial.number not in reconciled
     )
     remaining = max(0, target_trials - len(effective_terminal))
+    if reserved_baseline is not None:
+        peer_trials = min(remaining - 1, max(0, sweep.n_jobs - 1))
+        if peer_trials:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                baseline_future = executor.submit(
+                    finish_reserved_trial, reserved_baseline
+                )
+                peer_future = executor.submit(
+                    study.optimize,
+                    objective,
+                    n_trials=peer_trials,
+                    n_jobs=peer_trials,
+                )
+                baseline_future.result()
+                peer_future.result()
+        else:
+            finish_reserved_trial(reserved_baseline)
+        remaining -= 1 + peer_trials
     if remaining:
         study.optimize(objective, n_trials=remaining, n_jobs=sweep.n_jobs)
     best = _best_feasible(study)
