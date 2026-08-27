@@ -342,6 +342,103 @@ def test_v2_runs_three_screening_campaigns_in_isolated_parallel_slots(
     assert peak_active == 3
 
 
+def test_v2_reports_one_economic_summary_when_trial_completes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics = _metrics(**{
+        "selection.pass_rate": 0.60,
+        "selection.blow_rate": 0.0,
+        "selection.near_blow_timeout_rate": 0.10,
+        "selection.average_win_r": 3.0,
+    })
+
+    run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=lambda config_path, *, run_id: _state(
+            config_path, run_id, metrics
+        ),
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    result_lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[optuna-result]")
+    ]
+    assert result_lines == [
+        "[optuna-result] trial=0 state=COMPLETE feasible=true "
+        "objective=82.0 pass_rate=60% blow_rate=0%"
+    ]
+
+
+def test_v2_reports_one_economic_summary_when_trial_is_pruned(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics = _metrics(**{
+        "selection.pass_rate": 0.02,
+        "selection.blow_rate": 0.20,
+        "training.short_circuited": 1.0,
+    })
+
+    run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=lambda config_path, *, run_id: _state(
+            config_path, run_id, metrics
+        ),
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    result_lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[optuna-result]")
+    ]
+    assert result_lines == [
+        "[optuna-result] trial=0 state=PRUNED feasible=false "
+        "objective=null pass_rate=2% blow_rate=20%"
+    ]
+
+
+def test_v2_reports_penalized_result_when_validation_short_circuits(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics = _metrics(**{
+        "selection.pass_rate": 0.0,
+        "selection.blow_rate": 1.0,
+        "selection.short_circuited": 1.0,
+    })
+
+    run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=lambda config_path, *, run_id: _state(
+            config_path, run_id, metrics
+        ),
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    result_lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[optuna-result]")
+    ]
+    assert result_lines == [
+        "[optuna-result] trial=0 state=COMPLETE feasible=false "
+        "objective=-1000000.0 pass_rate=0% blow_rate=100%"
+    ]
+
+
 def test_v2_default_worker_is_an_isolated_capped_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

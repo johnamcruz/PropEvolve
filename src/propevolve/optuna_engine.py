@@ -865,6 +865,24 @@ def _objective_value(
     return total
 
 
+def _print_trial_result(
+    *,
+    trial_number: int,
+    state: str,
+    feasible: bool,
+    objective: float | None,
+    metrics: Mapping[str, float],
+) -> None:
+    objective_text = "null" if objective is None else f"{objective:.1f}"
+    print(
+        f"[optuna-result] trial={trial_number} state={state} "
+        f"feasible={str(feasible).lower()} objective={objective_text} "
+        f"pass_rate={100.0 * metrics['selection.pass_rate']:g}% "
+        f"blow_rate={100.0 * metrics['selection.blow_rate']:g}%",
+        flush=True,
+    )
+
+
 def _required_metrics(sweep: OptunaSweep) -> frozenset[str]:
     return frozenset(
         [term.metric for term in sweep.objective_terms]
@@ -1227,9 +1245,23 @@ def run_optuna_sweep(
             trial.set_user_attr(metric, float(value))
         if float(metrics.get("training.short_circuited", 0.0)) == 1.0:
             trial.set_user_attr("constraint", [1.0] * (len(sweep.constraints) + 1))
+            _print_trial_result(
+                trial_number=trial.number,
+                state="PRUNED",
+                feasible=False,
+                objective=None,
+                metrics=metrics,
+            )
             raise optuna.TrialPruned("training short circuit rejected trial")
         if float(metrics.get("selection.short_circuited", 0.0)) == 1.0:
             trial.set_user_attr("constraint", [1.0] * (len(sweep.constraints) + 1))
+            _print_trial_result(
+                trial_number=trial.number,
+                state="COMPLETE",
+                feasible=False,
+                objective=-1_000_000.0,
+                metrics=metrics,
+            )
             return -1_000_000.0
         missing = sorted(_required_metrics(sweep) - set(metrics))
         if missing:
@@ -1240,15 +1272,12 @@ def run_optuna_sweep(
         ]
         trial.set_user_attr("constraint", constraints)
         value = _objective_value(metrics, sweep.objective_terms)
-        selected_metrics = {
-            metric: metrics[metric] for metric in sorted(_required_metrics(sweep))
-        }
-        print(
-            f"[optuna] trial={trial.number} COMPLETE phase={state.phase.value} "
-            f"objective={value:.6f} "
-            f"feasible={all(item <= 0.0 for item in constraints)} "
-            f"metrics={json.dumps(selected_metrics, sort_keys=True)}",
-            flush=True,
+        _print_trial_result(
+            trial_number=trial.number,
+            state="COMPLETE",
+            feasible=all(item <= 0.0 for item in constraints),
+            objective=value,
+            metrics=metrics,
         )
         return value
 
