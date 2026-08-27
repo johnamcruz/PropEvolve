@@ -463,19 +463,39 @@ def test_unsatisfied_boundary_cannot_rollback_the_whole_optimizer_step_e2e(
     assert all(margins_after[name] >= 0.25 - 1e-7 for name in satisfied)
 
 
-def test_repeated_short_pairs_learn_both_entry_and_wait_boundaries_e2e(
+@pytest.mark.parametrize(
+    ("side", "side_name", "contexts"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            "long",
+            (
+                (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+                (0.65, 0.58, 0.35, 0.25, 0.20, 0.50, 0.30),
+            ),
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            "short",
+            (
+                (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
+                (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30),
+            ),
+        ),
+    ),
+)
+def test_repeated_pairs_learn_entry_opposite_and_wait_boundaries_e2e(
+    side: Action,
+    side_name: str,
+    contexts: tuple[tuple[float, ...], ...],
 ) -> None:
-    """A tiny authenticated pair set must be learnable, not merely preserved."""
-    contexts = (
-        (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
-        (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30),
-    )
+    """Each authenticated side must be learnable, not merely preserved."""
     replay = _replay(seed=91)
     for index, context in enumerate(contexts):
         for economic_win, kind in ((True, "winner"), (False, "failure")):
             replay.add(_economic_episode(
-                episode_id=f"short-{kind}-{index}",
-                side=Action.ENTER_SHORT_1,
+                episode_id=f"{side_name}-{kind}-{index}",
+                side=side,
                 economic_win=economic_win,
                 context=context,
                 offset=float(index * 2 + int(not economic_win)),
@@ -489,10 +509,60 @@ def test_repeated_short_pairs_learn_both_entry_and_wait_boundaries_e2e(
     for _ in range(128):
         agent.train_batch(sequences)
 
+    agent.discard_teacher()
+    agent.assert_teacher_free()
     margins = _grouped_boundary_margins(agent, sequences)
-    assert margins["short_winner_vs_wait"] >= 0.25
-    assert margins["short_winner_vs_opposite"] >= 0.25
-    assert margins["short_wait_vs_failure"] >= 0.25
+    assert margins[f"{side_name}_winner_vs_wait"] >= 0.25
+    assert margins[f"{side_name}_winner_vs_opposite"] >= 0.25
+    assert margins[f"{side_name}_wait_vs_failure"] >= 0.25
+
+
+def test_directional_tie_replay_learns_wait_over_both_entries_e2e() -> None:
+    """Equal Long and Short evidence must become a learned WAIT boundary."""
+    tied_context = (0.90, 0.85, 0.90, 0.85, 0.10, 0.70, 0.20)
+    replay = _replay(seed=92)
+    for index, side in enumerate(
+        (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    ):
+        replay.add(_economic_episode(
+            episode_id=f"tied-failure-{index}",
+            side=side,
+            economic_win=False,
+            context=tied_context,
+            offset=float(index),
+        ))
+    sequences = replay.sample(2)
+    agent = _agent()
+    for group in agent.optimizer.param_groups:
+        group["lr"] = 0.003
+
+    for _ in range(256):
+        agent.train_batch(sequences)
+
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    for sequence in sequences:
+        hidden = None
+        anchor_values = None
+        for transition_index, transition in enumerate(sequence):
+            _, hidden, action_values = agent.select_action(
+                transition.observation,
+                hidden=hidden,
+                valid_actions=transition.valid_actions,
+                epsilon=0.0,
+                return_action_values=True,
+            )
+            if transition_index == agent.recurrent_burn_in:
+                anchor_values = action_values
+        assert anchor_values is not None
+        assert (
+            anchor_values[int(Action.WAIT)]
+            >= anchor_values[int(Action.ENTER_LONG_1)] + 0.25
+        )
+        assert (
+            anchor_values[int(Action.WAIT)]
+            >= anchor_values[int(Action.ENTER_SHORT_1)] + 0.25
+        )
 
 
 def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(

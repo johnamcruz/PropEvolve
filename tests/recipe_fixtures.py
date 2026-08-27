@@ -62,7 +62,28 @@ def paired_recurrent_aplus_recipe(training_episodes: int) -> Path:
 
 
 def retained_sweep_recipe() -> Path:
-    candidates = tuple(sorted(Path("config/sweeps").glob("*.json")))
+    candidates = tuple(
+        path
+        for path in sorted(Path("config/sweeps").glob("*.json"))
+        if json.loads(path.read_text()).get("schema")
+        == "propevolve_optuna_sweep_v1"
+    )
     if len(candidates) != 1:
-        raise AssertionError(f"expected one retained sweep recipe, got {candidates}")
+        raise AssertionError(
+            f"expected one retained V1 sweep recipe, got {candidates}"
+        )
+    return candidates[0]
+
+
+def active_sweep_recipe() -> Path:
+    candidates = tuple(
+        path
+        for path in sorted(Path("config/sweeps").glob("*.json"))
+        if json.loads(path.read_text()).get("schema")
+        == "propevolve_optuna_sweep_v2"
+    )
+    if len(candidates) != 1:
+        raise AssertionError(
+            f"expected one active V2 sweep recipe, got {candidates}"
+        )
     return candidates[0]

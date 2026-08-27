@@ -664,6 +664,32 @@ def run_optuna_sweep(
     )
 
 
+_load_legacy_optuna_sweep = load_optuna_sweep
+_run_legacy_optuna_sweep = run_optuna_sweep
+
+
+def load_optuna_sweep(path: str | Path):
+    """Load the active JSON-driven contract or a retained V1 contract."""
+    resolved = Path(path).resolve()
+    payload = json.loads(resolved.read_text())
+    if payload.get("schema") == "propevolve_optuna_sweep_v2":
+        from .optuna_engine import load_optuna_sweep as load_v2
+
+        return load_v2(resolved)
+    return _load_legacy_optuna_sweep(resolved)
+
+
+def run_optuna_sweep(path: str | Path, **kwargs):
+    """Run the active JSON-driven contract or a retained V1 contract."""
+    resolved = Path(path).resolve()
+    payload = json.loads(resolved.read_text())
+    if payload.get("schema") == "propevolve_optuna_sweep_v2":
+        from .optuna_engine import run_optuna_sweep as run_v2
+
+        return run_v2(resolved, **kwargs)
+    return _run_legacy_optuna_sweep(resolved, **kwargs)
+
+
 __all__ = [
     "OPTUNA_SWEEP_SCHEMA",
     "OptunaSweep",
