@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from propevolve.agent import RecurrentC51Agent
 from propevolve.balance_aware_regime_selectivity import (
@@ -510,3 +511,248 @@ def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
     assert diagnostic[
         "mean_economic_boundary_failed_short_min_margin_delta"
     ] >= -1e-7
+
+
+@pytest.mark.parametrize(
+    ("side", "context", "exit_reason", "authenticated_target", "expected"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            (0.90, 0.85, 0.10, 0.10, 0.10, 0.20, 0.70),
+            "initial_stop",
+            False,
+            Action.WAIT,
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            (0.10, 0.10, 0.90, 0.85, 0.10, 0.20, 0.70),
+            "initial_stop",
+            False,
+            Action.WAIT,
+        ),
+        (
+            Action.ENTER_LONG_1,
+            (0.90, 0.85, 0.10, 0.10, 0.10, 0.20, 0.70),
+            "voluntary_close",
+            False,
+            None,
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            (0.10, 0.10, 0.90, 0.85, 0.10, 0.20, 0.70),
+            "initial_stop",
+            True,
+            Action.ENTER_SHORT_1,
+        ),
+    ),
+)
+def test_executed_entry_economic_supervision_boundary_e2e(
+    side: Action,
+    context: tuple[float, ...],
+    exit_reason: str,
+    authenticated_target: bool,
+    expected: Action | None,
+) -> None:
+    """Fill only unlabeled initial-stop failures; preserve every other row."""
+    teacher_context = np.asarray(context, dtype=np.float32)
+    side_name = "long" if side == Action.ENTER_LONG_1 else "short"
+
+    class FailedEntryEnvironment:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def reset(self, *, options=None):
+            self.index = 0
+            return np.asarray((0.0, 0.10, 0.90), np.float32), {
+                "valid_actions": FLAT_ACTIONS,
+                "ticker": "CL",
+                "start": 0,
+                "end": 2,
+                "realized_pnl": -1_500.0,
+                "mll_headroom_fraction": 0.5,
+            }
+
+        def step(self, action):
+            self.index += 1
+            if self.index == 1:
+                assert action == side
+                return (
+                    np.asarray((0.1, 0.10, 0.90), np.float32),
+                    0.0,
+                    False,
+                    False,
+                    {
+                        "valid_actions": (Action.HOLD, Action.CLOSE),
+                        "ticker": "CL",
+                        "fill_index": 1,
+                        "outcome": None,
+                        "primary_side": side_name,
+                        "realized_pnl": -1_500.0,
+                        "equity_pnl": -1_500.0,
+                        "mll_headroom_fraction": 0.5,
+                    },
+                )
+            assert action in {Action.HOLD, Action.CLOSE}
+            return (
+                np.asarray((0.2, 0.10, 0.90), np.float32),
+                -1.0,
+                True,
+                False,
+                {
+                    "valid_actions": (),
+                    "ticker": "CL",
+                    "fill_index": 2,
+                    "outcome": "timeout",
+                    "primary_side": side_name,
+                    "trade_count": 1,
+                    "win_count": 0,
+                    "winning_r_sum": 0.0,
+                    "win_rate": 0.0,
+                    "avg_win_r": 0.0,
+                    "realized_pnl": -1_800.0,
+                    "equity_pnl": -1_800.0,
+                    "mll_headroom_fraction": 0.4,
+                },
+            )
+
+        def closed_trade_receipts(self):
+            return ({
+                "trade_index": 0,
+                "ticker": "CL",
+                "side": side_name,
+                "source_decision_index": 0,
+                "entry_index": 1,
+                "exit_index": 2,
+                "entry_timestamp": "2024-01-01T00:01",
+                "exit_timestamp": "2024-01-01T00:02",
+                "entry_realized_pnl": -1_500.0,
+                "entry_mll_floor_pnl": -3_000.0,
+                "entry_mll_headroom": 1_500.0,
+                "pnl": -300.0,
+                "realized_r": -1.0,
+                "mfe_r": 0.2,
+                "mae_r": 1.0,
+                "ratchet_activated": False,
+                "exit_reason": exit_reason,
+                "hold_bars": 1,
+            },)
+
+    replay = _replay(seed=606)
+    replay.add(_economic_episode(
+        episode_id=f"{side_name}-winner-seed",
+        side=side,
+        economic_win=True,
+        context=tuple(teacher_context),
+        offset=9.0,
+    ))
+    diagnostics: list[dict[str, object]] = []
+    agent = _agent()
+    original_select_action = agent.select_action
+
+    def select_action(
+        observation,
+        *,
+        hidden,
+        valid_actions,
+        epsilon,
+        return_action_values=False,
+    ):
+        selected, next_hidden, values = original_select_action(
+            observation,
+            hidden=hidden,
+            valid_actions=valid_actions,
+            epsilon=epsilon,
+            return_action_values=return_action_values,
+        )
+        if set(valid_actions) == set(FLAT_ACTIONS):
+            selected = side
+        return selected, next_hidden, values
+
+    agent.select_action = select_action
+    metadata = EntryTargetMetadata(
+        side=side_name,
+        event_anchor_rows=(0,),
+        candidate_decision_offset=0,
+        fill_offset=1,
+        continuation=True,
+        economic_win=True,
+        economic_good=True,
+        available=True,
+        censored=False,
+        unavailable_reason=None,
+    )
+    train_agent(
+        agent,
+        FailedEntryEnvironment(),
+        episodes=1,
+        minimum_environment_steps=2,
+        budget_mode="episodes",
+        replay=replay,
+        warmup_episodes=2,
+        updates_per_episode=1,
+        batch_sequences=2,
+        recurrent_horizon=6,
+        epsilon_start=0.0,
+        epsilon_end=0.0,
+        episode_tickers=("CL",),
+        ticker_seed=7,
+        teacher_lookup=(
+            lambda ticker, index: teacher_context.copy() if index == 0 else None
+        ),
+        teacher_channels=TEACHER_CHANNELS,
+        entry_action_lookup=(
+            lambda ticker, index: side
+            if authenticated_target and index == 0
+            else None
+        ),
+        entry_action_metadata_lookup=(
+            lambda ticker, index: metadata
+            if authenticated_target and index == 0
+            else None
+        ),
+        episode_diagnostic_callback=diagnostics.append,
+    )
+
+    payload = next(
+        episode
+        for episode in replay.state_dict()["episodes"]
+        if episode["episode_id"].startswith("historical-")
+    )
+    assert payload["actions"][0] == int(side)
+    assert payload["entry_action_targets"][0] == (
+        -1 if expected is None else int(expected)
+    )
+    if expected is None:
+        assert payload["paired_a_plus_sides"][0] == -1
+        assert payload["paired_a_plus_economic_wins"][0] == -1
+    else:
+        assert payload["paired_a_plus_sides"][0] == int(side)
+        assert payload["paired_a_plus_economic_wins"][0] == int(
+            expected == side
+        )
+        np.testing.assert_allclose(
+            payload["paired_a_plus_contexts"][0],
+            teacher_context,
+            rtol=0,
+            atol=0,
+        )
+    promoted = int(exit_reason == "initial_stop" and not authenticated_target)
+    assert diagnostics[0]["executed_failure_supervision_promoted_rows"] == promoted
+    assert diagnostics[0][
+        f"executed_failure_supervision_promoted_{side_name}_rows"
+    ] == promoted
+    if promoted:
+        anchors = [
+            sequence[2]
+            for sequence in replay.sample(2)
+            if sequence[2].paired_a_plus_pair_side == side
+        ]
+        assert len(anchors) == 2
+        assert {anchor.paired_a_plus_economic_win for anchor in anchors} == {
+            True,
+            False,
+        }
+        assert {anchor.entry_action_target for anchor in anchors} == {
+            side,
+            Action.WAIT,
+        }

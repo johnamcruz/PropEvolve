@@ -397,12 +397,12 @@ def _paired_a_plus_transition_evidence(
     """Bind one exact economic winner/failure to continuous teacher context."""
     if metadata is None or entry_action_target is None:
         return None, None, None
-    context_channels = (*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS)
-    if (
-        teacher_target is None
-        or teacher_channels is None
-        or tuple(teacher_channels[: len(context_channels)]) != context_channels
-    ):
+
+    context = _paired_a_plus_teacher_context(
+        teacher_target=teacher_target,
+        teacher_channels=teacher_channels,
+    )
+    if context is None:
         raise ValueError("paired recurrent A+ row lacks teacher context")
     side_action = {
         "long": Action.ENTER_LONG_1,
@@ -427,6 +427,22 @@ def _paired_a_plus_transition_evidence(
         or not (is_winner or is_failure)
     ):
         return None, None, None
+    return context, side_action, bool(is_winner)
+
+
+def _paired_a_plus_teacher_context(
+    *,
+    teacher_target: np.ndarray | None,
+    teacher_channels: Sequence[str] | None,
+) -> np.ndarray | None:
+    """Return one authenticated Expansion/Regime context when available."""
+    context_channels = (*EXPANSION_CHANNELS, *REGIME_TEACHER_CHANNELS)
+    if (
+        teacher_target is None
+        or teacher_channels is None
+        or tuple(teacher_channels[: len(context_channels)]) != context_channels
+    ):
+        return None
     context = np.asarray(teacher_target, dtype=np.float32).reshape(-1)[
         : len(context_channels)
     ]
@@ -437,7 +453,71 @@ def _paired_a_plus_transition_evidence(
         or (context > 1.0).any()
     ):
         raise ValueError("paired recurrent A+ context is invalid")
-    return context.copy(), side_action, bool(is_winner)
+    return context.copy()
+
+
+def _with_executed_initial_stop_failure_evidence(
+    transitions: Sequence[Transition],
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    teacher_channels: Sequence[str] | None,
+    visible_entry_context: Mapping[int, Mapping[str, object]],
+) -> tuple[tuple[Transition, ...], dict[str, int]]:
+    """Promote unlabeled executed initial-stop entries to exact WAIT evidence."""
+    promoted = {"long": 0, "short": 0}
+    by_decision = {
+        transition.source_decision_index: index
+        for index, transition in enumerate(transitions)
+        if transition.source_decision_index is not None
+    }
+    if len(by_decision) != sum(
+        transition.source_decision_index is not None
+        for transition in transitions
+    ):
+        raise ValueError("episode transition decision identity is not unique")
+    output = list(transitions)
+    for receipt in receipts:
+        if receipt.get("exit_reason") != "initial_stop":
+            continue
+        side_name = receipt.get("side")
+        side_action = {
+            "long": Action.ENTER_LONG_1,
+            "short": Action.ENTER_SHORT_1,
+        }.get(side_name)
+        source_decision_index = receipt.get("source_decision_index")
+        if (
+            side_action is None
+            or isinstance(source_decision_index, bool)
+            or not isinstance(source_decision_index, int)
+            or source_decision_index not in by_decision
+        ):
+            raise ValueError("closed trade failure identity is invalid")
+        transition_index = by_decision[source_decision_index]
+        transition = output[transition_index]
+        if Action(transition.action) != side_action:
+            raise ValueError("closed trade failure side drifted from entry action")
+        # Frozen Stage 1 targets remain authoritative. This seam only fills the
+        # previously invisible executed failures that caused the live defect.
+        if transition.entry_action_target is not None:
+            continue
+        entry_context = visible_entry_context.get(source_decision_index)
+        context = _paired_a_plus_teacher_context(
+            teacher_target=transition.teacher_target,
+            teacher_channels=teacher_channels,
+        )
+        headroom_fraction = None
+        if entry_context is not None:
+            headroom_fraction = float(entry_context["headroom_fraction"])
+        output[transition_index] = replace(
+            transition,
+            entry_action_target=Action.WAIT,
+            regime_selectivity_headroom_fraction=headroom_fraction,
+            paired_a_plus_context=context,
+            paired_a_plus_side=(side_action if context is not None else None),
+            paired_a_plus_economic_win=(False if context is not None else None),
+        )
+        promoted[str(side_name)] += 1
+    return tuple(output), promoted
 
 
 def _with_regime_wait_replay_priorities(
@@ -6419,12 +6499,29 @@ def train_agent(
         closed_trade_receipts = getattr(
             environment, "closed_trade_receipts", None
         )
+        closed_trade_receipt_rows = tuple(
+            () if closed_trade_receipts is None else closed_trade_receipts()
+        )
         regime_trade_economics = _regime_trade_economics(
-            () if closed_trade_receipts is None else closed_trade_receipts(),
+            closed_trade_receipt_rows,
             visible_regime_entry_context,
             episode_outcome=outcome,
         )
-        replay_transitions = tuple(transitions)
+        (
+            replay_transitions,
+            executed_failure_supervision_promoted,
+        ) = _with_executed_initial_stop_failure_evidence(
+            transitions,
+            closed_trade_receipt_rows,
+            teacher_channels=teacher_channels,
+            visible_entry_context=visible_regime_entry_context,
+        )
+        executed_failure_supervision_promoted_rows = sum(
+            executed_failure_supervision_promoted.values()
+        )
+        entry_action_target_counts[Action.WAIT] += (
+            executed_failure_supervision_promoted_rows
+        )
         recovery_value_target_generated = False
         recovery_value_target_added = False
         recovery_value_target_discriminative = False
@@ -7346,6 +7443,15 @@ def train_agent(
                 ),
                 "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,
+                "executed_failure_supervision_promoted_rows": (
+                    executed_failure_supervision_promoted_rows
+                ),
+                "executed_failure_supervision_promoted_long_rows": (
+                    executed_failure_supervision_promoted["long"]
+                ),
+                "executed_failure_supervision_promoted_short_rows": (
+                    executed_failure_supervision_promoted["short"]
+                ),
                 "primary_side": str(terminal_info.get("primary_side", "flat")),
                 "entry_epsilon": epsilon,
                 "management_epsilon": management_epsilon,
