@@ -161,8 +161,10 @@
   "stages": {
     "screening": {
       "name": "contrast_rehearsal_200ep",
-      "training_episodes": 100,
-      "validation_episodes": 100,
+      "training_episodes": 50,
+      "validation_episodes": 50,
+      "start_pnls": [0.0],
+      "balance_validation_episodes": 0,
       "short_circuit": {
         "minimum_completed_episodes": 50,
         "minimum_passes": 1,
@@ -180,12 +182,16 @@
       "name": "contrast_rehearsal_200ep",
       "training_episodes": 200,
       "validation_episodes": 200,
+      "start_pnls": [0.0],
+      "balance_validation_episodes": 0,
       "short_circuit": null
     },
     "multi_seed": {
       "name": "contrast_rehearsal_200ep",
       "training_episodes": 200,
       "validation_episodes": 200,
+      "start_pnls": [0.0],
+      "balance_validation_episodes": 0,
       "short_circuit": null
     }
   },
@@ -316,8 +322,6 @@
       "training.teacher_guidance_dropout_end",
       "training.teacher_autonomy_start_fraction",
       "training.entry_supervision_autonomy_start_fraction",
-      "balance_curriculum.start_pnls",
-      "balance_curriculum.validation_episodes",
       "balance_curriculum.pass_replay"
     ]
   }

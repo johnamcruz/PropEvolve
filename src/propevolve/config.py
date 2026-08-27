@@ -835,7 +835,7 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
         or not isinstance(curriculum["schedule_seed"], int)
         or isinstance(curriculum["validation_episodes"], bool)
         or not isinstance(curriculum["validation_episodes"], int)
-        or curriculum["validation_episodes"] < 1
+        or curriculum["validation_episodes"] < 0
         or not isinstance(curriculum["start_pnls"], list)
     ):
         raise ValueError("balance curriculum contract is invalid")

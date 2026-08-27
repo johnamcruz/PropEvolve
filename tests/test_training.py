@@ -51,6 +51,7 @@ from propevolve.training import (
     _regime_selectivity_replay_settings,
     _recovery_curriculum_from_config,
     _selection_evaluation_gates,
+    _run_followup_validation,
     _plain_contract_value,
     _paired_a_plus_transition_evidence,
     assert_temporal_role,
@@ -7352,6 +7353,34 @@ def test_evaluation_short_circuits_after_first_blow_when_zero_blow_is_required(
     output = capsys.readouterr().out
     assert "SHORT_CIRCUIT reason=zero_blow_gate" in output
     assert "COMPLETE episodes=1/200" in output
+
+
+def test_zero_blow_selection_rejection_skips_followup_balance_validation() -> None:
+    selection = TrainingResult(
+        episodes=1,
+        environment_steps=1,
+        passes=0,
+        blows=1,
+        timeouts=0,
+        trade_count=0,
+        win_count=0,
+        winning_r_sum=0.0,
+        worst_pnl=-3_000.0,
+        mean_terminal_pnl=-3_000.0,
+        mean_reward=-1.0,
+        mean_loss=0.0,
+        short_circuited=True,
+        short_circuit_reason="zero_blow_gate",
+    )
+    calls = 0
+
+    def balance_validation() -> TrainingResult:
+        nonlocal calls
+        calls += 1
+        return selection
+
+    assert _run_followup_validation(selection, balance_validation) is None
+    assert calls == 0
 
 
 def test_evaluation_short_circuits_a_universal_wait_policy(capsys) -> None:

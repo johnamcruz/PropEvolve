@@ -129,20 +129,26 @@ def _payload(
         "stages": {
             "screening": {
                 "name": STAGE,
-                "training_episodes": 100,
-                "validation_episodes": 100,
+                "training_episodes": 50,
+                "validation_episodes": 50,
+                "start_pnls": [0.0],
+                "balance_validation_episodes": 0,
                 "short_circuit": SCREENING_SHORT_CIRCUIT,
             },
             "confirmation": {
                 "name": STAGE,
                 "training_episodes": 200,
                 "validation_episodes": 200,
+                "start_pnls": [0.0],
+                "balance_validation_episodes": 0,
                 "short_circuit": None,
             },
             "multi_seed": {
                 "name": STAGE,
                 "training_episodes": 200,
                 "validation_episodes": 200,
+                "start_pnls": [0.0],
+                "balance_validation_episodes": 0,
                 "short_circuit": None,
             },
         },
@@ -265,7 +271,9 @@ def test_v2_contract_is_fully_json_driven(tmp_path: Path) -> None:
         "selection.average_win_r",
         "selection.near_blow_timeout_rate",
     ]
-    assert sweep.stages["screening"].training_episodes == 100
+    assert sweep.stages["screening"].training_episodes == 50
+    assert sweep.stages["screening"].start_pnls == (0.0,)
+    assert sweep.stages["screening"].balance_validation_episodes == 0
     assert sweep.stages["confirmation"].validation_episodes == 200
     assert sweep.promotion.seeds == (11, 22)
     assert "agent.learning_rate" in sweep.frozen_paths
@@ -281,8 +289,6 @@ def test_v2_runs_three_screening_campaigns_in_isolated_parallel_slots(
 
     def runner(config_path: Path, *, run_id: str):
         nonlocal active, peak_active
-        if run_id.endswith("trial-000"):
-            return _state(config_path, run_id, _metrics())
         with lock:
             active += 1
             peak_active = max(peak_active, active)
@@ -417,10 +423,16 @@ def test_v2_screening_applies_numeric_and_grouped_json_dimensions(
     assert len(configs) == 1
     config = configs[0]
     stage, = config["campaign"]["budget_stages"]
-    assert stage["training_episodes"] == 100
-    assert stage["validation_episodes"] == 100
+    assert stage["training_episodes"] == 50
+    assert stage["validation_episodes"] == 50
     assert stage["short_circuit_minimum_episodes"] == 50
     assert config["training"]["short_circuit"] == SCREENING_SHORT_CIRCUIT
+    assert config["balance_curriculum"]["start_pnls"] == [0.0]
+    assert config["balance_curriculum"]["validation_episodes"] == 0
+    assert all(
+        not item["metric"].startswith("balance_stress.")
+        for item in stage["selection_requirements"]
+    )
     assert config["training"]["terminal_sequence_fraction"] == 0.50
     assert config["training"]["safety_sequence_fraction"] == 0.25
     assert config["training"]["entry_opportunity_sequence_fraction"] == 0.25
@@ -460,6 +472,10 @@ def test_active_sweep_compiles_through_real_config_validation(
     assert sweep.n_trials == 50
     assert sweep.n_jobs == 3
     assert sweep.stages["screening"].short_circuit == SCREENING_SHORT_CIRCUIT
+    assert sweep.stages["screening"].training_episodes == 50
+    assert sweep.stages["screening"].validation_episodes == 50
+    assert sweep.stages["screening"].start_pnls == (0.0,)
+    assert sweep.stages["screening"].balance_validation_episodes == 0
     assert sweep.stages["confirmation"].short_circuit is None
     assert sweep.stages["multi_seed"].short_circuit is None
     assert result.status == "COMPLETE"
@@ -510,7 +526,7 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
     tmp_path: Path,
 ) -> None:
-    calls: list[tuple[str, int, int, int]] = []
+    calls: list[tuple[str, int, int, int, int]] = []
     short_circuits: list[dict | None] = []
 
     def runner(config_path: Path, *, run_id: str):
@@ -522,6 +538,7 @@ def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
             run_id,
             int(stage["training_episodes"]),
             int(stage["validation_episodes"]),
+            int(config["balance_curriculum"]["validation_episodes"]),
             seed,
         ))
         if "screen-trial-000" in run_id:
@@ -558,17 +575,59 @@ def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
     )
 
     assert len(calls) == 7
-    assert [item[1:3] for item in calls[:3]] == [(100, 100)] * 3
-    assert [item[1:3] for item in calls[3:5]] == [(200, 200)] * 2
-    assert [item[1:3] for item in calls[5:]] == [(200, 200)] * 2
+    assert [item[1:4] for item in calls[:3]] == [(50, 50, 0)] * 3
+    assert [item[1:4] for item in calls[3:5]] == [(200, 200, 0)] * 2
+    assert [item[1:4] for item in calls[5:]] == [(200, 200, 0)] * 2
     assert short_circuits[:3] == [SCREENING_SHORT_CIRCUIT] * 3
     assert short_circuits[3:] == [None] * 4
-    assert [item[3] for item in calls[5:]] == [11, 22]
+    assert [item[4] for item in calls[5:]] == [11, 22]
     payload = json.loads(result.result_path.read_text())
     assert payload["promoted_trial_numbers"] == [1, 2]
     assert payload["winner_trial_number"] == 1
     assert payload["winner_feasible_seeds"] == 2
     assert payload["promotion_status"] == "COMPLETE"
+
+
+def test_v2_runs_three_confirmation_campaigns_in_parallel(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(promotion_enabled=True, n_trials=3, n_jobs=3)
+    payload["promotion"]["top_k"] = 3
+    contract = tmp_path / "parallel-confirmation.json"
+    contract.write_text(json.dumps(payload))
+    barrier = threading.Barrier(3, timeout=5.0)
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+
+    def runner(config_path: Path, *, run_id: str):
+        nonlocal active, peak_active
+        if "-confirm-" in run_id:
+            with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            try:
+                barrier.wait()
+            finally:
+                with lock:
+                    active -= 1
+        return _state(config_path, run_id, _metrics(**{
+            "selection.pass_rate": 0.65,
+            "selection.near_blow_timeout_rate": 0.15,
+        }))
+
+    result = run_optuna_sweep(
+        contract,
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert result.status == "COMPLETE"
+    assert peak_active == 3
 
 
 def test_v2_multi_seed_promotion_stops_after_first_teacher_free_blow(

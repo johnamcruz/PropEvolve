@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -147,6 +148,8 @@ class SweepStage:
     name: str
     training_episodes: int
     validation_episodes: int
+    start_pnls: tuple[float, ...]
+    balance_validation_episodes: int
     short_circuit: dict | None
 
 
@@ -422,7 +425,12 @@ def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepSt
     if (
         not isinstance(raw, dict)
         or set(raw) != {
-            "name", "training_episodes", "validation_episodes", "short_circuit"
+            "name",
+            "training_episodes",
+            "validation_episodes",
+            "start_pnls",
+            "balance_validation_episodes",
+            "short_circuit",
         }
         or not isinstance(raw["name"], str)
         or not raw["name"]
@@ -430,6 +438,8 @@ def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepSt
         raise ValueError(f"Optuna {label} stage is invalid")
     training_episodes = raw["training_episodes"]
     validation_episodes = raw["validation_episodes"]
+    start_pnls = raw["start_pnls"]
+    balance_validation_episodes = raw["balance_validation_episodes"]
     if (
         isinstance(training_episodes, bool)
         or not isinstance(training_episodes, int)
@@ -437,6 +447,20 @@ def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepSt
         or isinstance(validation_episodes, bool)
         or not isinstance(validation_episodes, int)
         or validation_episodes < 1
+        or not isinstance(start_pnls, list)
+        or not start_pnls
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not -float(base_config["challenge"]["max_loss"])
+            < float(value) <= 0.0
+            for value in start_pnls
+        )
+        or len({float(value) for value in start_pnls}) != len(start_pnls)
+        or isinstance(balance_validation_episodes, bool)
+        or not isinstance(balance_validation_episodes, int)
+        or balance_validation_episodes < 0
     ):
         raise ValueError(f"Optuna {label} budget is invalid")
     stages = tuple(
@@ -472,6 +496,8 @@ def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepSt
         raw["name"],
         training_episodes,
         validation_episodes,
+        tuple(float(value) for value in start_pnls),
+        balance_validation_episodes,
         deepcopy(short_circuit),
     )
 
@@ -757,6 +783,21 @@ def _compile_campaign(
     selected_stage = deepcopy(matching_stages[0])
     selected_stage["training_episodes"] = stage.training_episodes
     selected_stage["validation_episodes"] = stage.validation_episodes
+    config["balance_curriculum"]["start_pnls"] = list(stage.start_pnls)
+    config["balance_curriculum"]["validation_episodes"] = (
+        stage.balance_validation_episodes
+    )
+    if stage.balance_validation_episodes == 0:
+        selected_stage["selection_requirements"] = [
+            requirement
+            for requirement in selected_stage["selection_requirements"]
+            if not str(requirement["metric"]).startswith("balance_stress.")
+        ]
+        config["campaign"]["selection_requirements"] = [
+            requirement
+            for requirement in config["campaign"]["selection_requirements"]
+            if not str(requirement["metric"]).startswith("balance_stress.")
+        ]
     config["training"]["short_circuit"] = deepcopy(stage.short_circuit)
     if stage.short_circuit is None:
         selected_stage.pop("short_circuit_minimum_episodes", None)
@@ -956,8 +997,7 @@ def _run_promotion(
             "winner_feasible_seeds": 0,
             "multi_seed": [],
         }
-    confirmations: list[dict[str, object]] = []
-    for trial in promoted:
+    def run_confirmation(trial: optuna.trial.FrozenTrial) -> dict[str, object]:
         parameters = dict(trial.params)
         run_root = artifacts / "confirmation" / f"trial-{trial.number:03d}"
         config = _compile_campaign(
@@ -977,13 +1017,18 @@ def _run_promotion(
             state_loader=state_loader,
             config_validator=config_validator,
         )
-        confirmations.append({
+        return {
             "trial_number": trial.number,
             "objective": _objective_value(metrics, sweep.objective_terms),
             "feasible": _is_feasible(metrics, sweep.promotion.acceptance),
             "metrics": metrics,
             "parameters": parameters,
-        })
+        }
+
+    with ThreadPoolExecutor(
+        max_workers=min(sweep.n_jobs, len(promoted)),
+    ) as executor:
+        confirmations = list(executor.map(run_confirmation, promoted))
     finalists = tuple(sorted(
         (item for item in confirmations if item["feasible"]),
         key=lambda item: float(item["objective"]),
@@ -1193,12 +1238,6 @@ def run_optuna_sweep(
         if trial.state in terminal_states and trial.number not in reconciled
     )
     remaining = max(0, target_trials - len(effective_terminal))
-    # Establish the exact frozen baseline before TPE dispatches concurrent
-    # samples. This preserves the matched control while subsequent trials use
-    # the declared isolated worker count.
-    if remaining and not effective_terminal:
-        study.optimize(objective, n_trials=1, n_jobs=1)
-        remaining -= 1
     if remaining:
         study.optimize(objective, n_trials=remaining, n_jobs=sweep.n_jobs)
     best = _best_feasible(study)

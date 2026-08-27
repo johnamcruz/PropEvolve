@@ -2987,6 +2987,16 @@ def _outcome_metric_values(result: TrainingResult) -> dict[str, float]:
     return metrics
 
 
+def _run_followup_validation(
+    selection: TrainingResult,
+    evaluator: Callable[[], TrainingResult],
+) -> TrainingResult | None:
+    """Do not spend more evaluation budget after a fail-closed selection."""
+    if selection.short_circuited:
+        return None
+    return evaluator()
+
+
 @dataclass(frozen=True)
 class TrainingProgress:
     """Cumulative state captured only after a complete training episode."""
@@ -4077,7 +4087,7 @@ class HistoricalCandidateRunner:
                 ),
                 normal_policy=recovery_value_policy,
             )
-            if recovery_stress_episodes:
+            if recovery_stress_episodes and not validation.short_circuited:
                 assert recovery_curriculum is not None
                 recovery_stress = evaluate_recovery_stress(
                     agent,
@@ -4088,24 +4098,37 @@ class HistoricalCandidateRunner:
                     episode_tickers=tuple(config["deployment_tickers"]),
                     normal_policy=recovery_value_policy,
                 )
-            if balance_validation_episodes:
+            if balance_validation_episodes and not validation.short_circuited:
                 assert balance_curriculum is not None
                 _preserve_partial_validation_diagnostics(
                     balance_validation_diagnostics_path
                 )
-                balance_validation = evaluate_agent(
-                    agent,
-                    validation_environment,
-                    episodes=balance_validation_episodes,
-                    recurrent_horizon=int(training_config["recurrent_horizon"]),
-                    near_blow_loss_threshold=near_blow_loss_threshold,
-                    greedy_diagnostic_interval_steps=int(
-                        training_config["greedy_diagnostic_interval_steps"]
+                balance_validation = _run_followup_validation(
+                    validation,
+                    lambda: evaluate_agent(
+                        agent,
+                        validation_environment,
+                        episodes=balance_validation_episodes,
+                        recurrent_horizon=int(
+                            training_config["recurrent_horizon"]
+                        ),
+                        near_blow_loss_threshold=near_blow_loss_threshold,
+                        stop_on_first_blow=bool(
+                            config["_validation_stop_on_blow"]
+                        ),
+                        no_trade_patience_episodes=int(
+                            training_config[
+                                "validation_no_trade_patience_episodes"
+                            ]
+                        ),
+                        greedy_diagnostic_interval_steps=int(
+                            training_config["greedy_diagnostic_interval_steps"]
+                        ),
+                        episode_diagnostic_callback=lambda payload: _append_jsonl(
+                            balance_validation_diagnostics_path, payload
+                        ),
+                        balance_curriculum=balance_curriculum,
                     ),
-                    episode_diagnostic_callback=lambda payload: _append_jsonl(
-                        balance_validation_diagnostics_path, payload
-                    ),
-                    balance_curriculum=balance_curriculum,
                 )
         config_bytes = Path(config["_path"]).read_bytes()
         frozen_contract = {
