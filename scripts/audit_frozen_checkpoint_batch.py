@@ -385,6 +385,57 @@ def actual_configured_update(checkpoint, seqs, before):
     }
 
 
+def configured_optimizer_overfit_probe(checkpoint, seqs, *, updates):
+    """Prove whether the production learner can acquire one frozen pair batch."""
+    if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
+        raise ValueError("optimizer overfit updates must be a nonnegative integer")
+    agent, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+
+    def margins():
+        values = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
+        return grouped_economic_margins(
+            values,
+            seqs,
+            recurrent_burn_in=agent.recurrent_burn_in,
+        )
+
+    before = margins()
+    first_all_boundaries_satisfied = 0 if all(
+        value >= agent.entry_action_margin for value in before.values()
+    ) else None
+    backtrack_updates = 0
+    rejected_updates = 0
+    for update in range(1, updates + 1):
+        agent.train_batch(seqs)
+        metrics = agent.last_train_metrics
+        backtrack_updates += int(metrics["economic_boundary_backtracks"] > 0)
+        rejected_updates += int(metrics["economic_boundary_backtracks"] >= 12)
+        current = margins()
+        if (
+            first_all_boundaries_satisfied is None
+            and all(
+                value >= agent.entry_action_margin
+                for value in current.values()
+            )
+        ):
+            first_all_boundaries_satisfied = update
+    after = margins()
+    return {
+        "updates": updates,
+        "target_margin": agent.entry_action_margin,
+        "margins_before": before,
+        "margins_after": after,
+        "first_all_boundaries_satisfied_update": (
+            first_all_boundaries_satisfied
+        ),
+        "all_boundaries_satisfied": all(
+            value >= agent.entry_action_margin for value in after.values()
+        ),
+        "backtrack_updates": backtrack_updates,
+        "rejected_updates": rejected_updates,
+    }
+
+
 def parity(a, seqs):
     q, causal, resets = qtrace(a, seqs)
     with torch.no_grad():
@@ -436,6 +487,7 @@ def main():
         default=0.5 ** (1.0 / (30 * 480)),
     )
     ap.add_argument("--challenge-return-weight", type=float, default=0.05)
+    ap.add_argument("--optimizer-overfit-updates", type=int, default=0)
     args = ap.parse_args()
     if (
         not np.isfinite(args.near_blow_pnl)
@@ -445,6 +497,7 @@ def main():
         or not 0.0 < args.challenge_return_discount <= 1.0
         or not np.isfinite(args.challenge_return_weight)
         or args.challenge_return_weight < 0.0
+        or args.optimizer_overfit_updates < 0
     ):
         ap.error(
             "--near-blow-pnl must be negative and --pair-count must be at least two"
@@ -718,6 +771,11 @@ def main():
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
     configured_update = actual_configured_update(checkpoint, seqs, before)
+    optimizer_overfit_probe = configured_optimizer_overfit_probe(
+        checkpoint,
+        seqs,
+        updates=args.optimizer_overfit_updates,
+    )
     challenge_bonuses = []
     for row_index, pair in enumerate(pair_report):
         winner = pair["anchors"][0]
@@ -785,6 +843,7 @@ def main():
         "chop_wait_rows": wrows,
         "greedy_action_changes_one_sgd_step_at_configured_lr": changes,
         "actual_configured_optimizer_update": configured_update,
+        "configured_optimizer_overfit_probe": optimizer_overfit_probe,
         "recurrent_parity": par,
         "probe_greedy_before": dict(
             Counter(Action(int(x)).name for x in before.argmax(-1))

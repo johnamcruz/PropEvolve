@@ -57,3 +57,4 @@ def test_frozen_batch_audit_cli_is_path_driven() -> None:
     assert "--pair-count" in result.stdout
     assert "--challenge-return-discount" in result.stdout
     assert "--challenge-return-weight" in result.stdout
+    assert "--optimizer-overfit-updates" in result.stdout

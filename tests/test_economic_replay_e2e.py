@@ -383,6 +383,38 @@ def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
         ), {"before": before, "after": after}
 
 
+def test_repeated_short_pairs_learn_both_entry_and_wait_boundaries_e2e(
+) -> None:
+    """A tiny authenticated pair set must be learnable, not merely preserved."""
+    contexts = (
+        (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
+        (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30),
+    )
+    replay = _replay(seed=91)
+    for index, context in enumerate(contexts):
+        for economic_win, kind in ((True, "winner"), (False, "failure")):
+            replay.add(_economic_episode(
+                episode_id=f"short-{kind}-{index}",
+                side=Action.ENTER_SHORT_1,
+                economic_win=economic_win,
+                context=context,
+                offset=float(index * 2 + int(not economic_win)),
+            ))
+    sequences = replay.sample(4)
+    agent = _agent()
+    agent.regime_selectivity_paired_a_plus_winner_loss_weight = 2.0
+    for group in agent.optimizer.param_groups:
+        group["lr"] = 0.003
+
+    for _ in range(128):
+        agent.train_batch(sequences)
+
+    margins = _grouped_boundary_margins(agent, sequences)
+    assert margins["short_winner_vs_wait"] >= 0.25
+    assert margins["short_winner_vs_opposite"] >= 0.25
+    assert margins["short_wait_vs_failure"] >= 0.25
+
+
 def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
 ) -> None:
     """Prove the campaign training seam retains every economic-flow receipt."""

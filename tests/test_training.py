@@ -436,7 +436,14 @@ def test_balance_curriculum_pass_replay_is_sparse_and_promotes_new_passes() -> N
     } == {"ES", "NQ"}
 
 
-def test_balance_outcome_contrast_is_sparse_and_additive_to_training() -> None:
+@pytest.mark.parametrize(
+    ("update_period", "expected_pairs"),
+    ((2, 1), (1, 2)),
+)
+def test_balance_outcome_contrast_is_sparse_and_additive_to_training(
+    update_period: int,
+    expected_pairs: int,
+) -> None:
     flat_actions = (
         Action.WAIT,
         Action.ENTER_LONG_1,
@@ -605,30 +612,34 @@ def test_balance_outcome_contrast_is_sparse_and_additive_to_training() -> None:
             start_pnls=(-1_500.0,),
             mll_floor_pnl=-3_000.0,
             outcome_contrast=BalanceOutcomeContrastSettings(
-                update_period=2,
+                update_period=update_period,
                 max_examples=8,
             ),
         ),
         episode_diagnostic_callback=diagnostics.append,
     )
 
-    assert agent.batch_sizes == [1, 3]
-    assert agent.outcome_pairs == [False, True]
-    assert diagnostics[0]["balance_outcome_contrast_pairs"] == 1
+    assert agent.batch_sizes == (
+        [1, 3] if update_period == 2 else [3, 3]
+    )
+    assert agent.outcome_pairs == (
+        [False, True] if update_period == 2 else [True, True]
+    )
+    assert diagnostics[0]["balance_outcome_contrast_pairs"] == expected_pairs
     assert diagnostics[0]["challenge_return_self_imitation"] == {
-        "rows": 2,
-        "bonus_sum": pytest.approx(0.3),
+        "rows": 2 * expected_pairs,
+        "bonus_sum": pytest.approx(0.3 * expected_pairs),
         "bonus_mean": pytest.approx(0.15),
         "added_clip_rows": 0,
         "actions": {
             "WAIT": {
-                "rows": 1,
-                "bonus_sum": pytest.approx(0.1),
+                "rows": expected_pairs,
+                "bonus_sum": pytest.approx(0.1 * expected_pairs),
                 "bonus_mean": pytest.approx(0.1),
             },
             "ENTER_LONG_1": {
-                "rows": 1,
-                "bonus_sum": pytest.approx(0.2),
+                "rows": expected_pairs,
+                "bonus_sum": pytest.approx(0.2 * expected_pairs),
                 "bonus_mean": pytest.approx(0.2),
             },
             "ENTER_SHORT_1": {
