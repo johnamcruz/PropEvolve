@@ -283,15 +283,17 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
     assert before.keys() == after.keys()
     assert all(after[key] >= before[key] - 1e-7 for key in before)
     assert any(after[key] > before[key] for key in before)
-    assert agent.last_train_metrics["economic_boundary_count"] == 6.0
+    # Six paired A+ boundaries and six exact Long/Short/WAIT boundaries must
+    # coexist.  Paired replay must never disable exact failure supervision.
+    assert agent.last_train_metrics["economic_boundary_count"] == 12.0
     assert (
         agent.last_train_metrics["economic_boundary_active_constraint_count"]
-        <= 6.0
+        == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
 
 
-def test_four_economic_pairs_update_six_grouped_boundaries_without_stalling(
+def test_four_economic_pairs_update_all_optimizer_boundaries_without_stalling(
 ) -> None:
     """More pair examples must strengthen learning, not reject the update."""
     contexts = (
@@ -323,15 +325,62 @@ def test_four_economic_pairs_update_six_grouped_boundaries_without_stalling(
     agent.train_batch(paired_sequences)
 
     after = _grouped_boundary_margins(agent, paired_sequences)
-    assert agent.last_train_metrics["economic_boundary_count"] == 6.0
+    assert agent.last_train_metrics["economic_boundary_count"] == 12.0
     assert (
         agent.last_train_metrics["economic_boundary_active_constraint_count"]
-        <= 6.0
+        == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
     assert before.keys() == after.keys()
     assert all(after[name] >= before[name] - 1e-7 for name in before)
     assert any(after[name] > before[name] for name in before)
+
+
+def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
+) -> None:
+    """Reproduce r5: one satisfied side must not disappear from protection."""
+    contexts = (
+        (Action.ENTER_LONG_1, (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)),
+        (Action.ENTER_SHORT_1, (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)),
+        (Action.ENTER_LONG_1, (0.62, 0.51, 0.42, 0.39, 0.15, 0.55, 0.30)),
+        (Action.ENTER_SHORT_1, (0.35, 0.25, 0.65, 0.58, 0.20, 0.50, 0.30)),
+    )
+    replay = _replay(seed=91)
+    for index, (side, context) in enumerate(contexts):
+        replay.add(_economic_episode(
+            episode_id=f"winner-{index}",
+            side=side,
+            economic_win=True,
+            context=context,
+            offset=float(index * 2),
+        ))
+        replay.add(_economic_episode(
+            episode_id=f"failure-{index}",
+            side=side,
+            economic_win=False,
+            context=context,
+            offset=float(index * 2 + 1),
+        ))
+    sequences = replay.sample(8)
+    agent = _agent()
+
+    for _ in range(3):
+        before = _grouped_boundary_margins(agent, sequences)
+        agent.train_batch(sequences)
+        after = _grouped_boundary_margins(agent, sequences)
+
+        assert agent.last_train_metrics["economic_boundary_count"] == 12.0
+        assert (
+            agent.last_train_metrics[
+                "economic_boundary_active_constraint_count"
+            ]
+            == 12.0
+        )
+        assert agent.last_train_metrics["economic_boundary_backtracks"] < 12.0
+        assert all(
+            after[name] >= min(before[name], 0.25) - 1e-7
+            for name in before
+        ), {"before": before, "after": after}
 
 
 def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
@@ -490,10 +539,10 @@ def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
     assert diagnostic[
         "mean_regime_selectivity_paired_a_plus_short_pair_count"
     ] == 1.0
-    assert diagnostic["mean_economic_boundary_count"] == 6.0
+    assert diagnostic["mean_economic_boundary_count"] == 12.0
     assert diagnostic[
         "mean_economic_boundary_active_constraint_count"
-    ] <= 6.0
+    ] == 12.0
     assert diagnostic["mean_economic_boundary_backtracks"] == 0.0
     assert diagnostic["mean_economic_boundary_final_min_margin_delta"] >= -1e-7
     assert diagnostic[

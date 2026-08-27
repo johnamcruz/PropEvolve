@@ -3735,10 +3735,6 @@ class RecurrentC51Agent:
                 protect_exact_boundaries = (
                     self.auxiliary_gradient_conflict_mode
                     == "pcgrad_preserve_economic_boundaries_v3"
-                    and not any(
-                        name.startswith("paired_")
-                        for name in active_economic_boundary_names
-                    )
                 )
                 for boundary_name, (
                     preferred_action,
@@ -4033,13 +4029,7 @@ class RecurrentC51Agent:
             if preserve_economic_boundaries:
                 protected_boundary_losses = tuple(
                     gradient_economic_boundary_losses[name]
-                    for name, margin_before in zip(
-                        active_economic_boundary_names,
-                        economic_boundary_margin_before,
-                        strict=True,
-                    )
-                    if float(margin_before.detach())
-                    < self.entry_action_margin
+                    for name in active_economic_boundary_names
                 )
                 economic_boundary_gradients = tuple(
                     materialized_gradients(

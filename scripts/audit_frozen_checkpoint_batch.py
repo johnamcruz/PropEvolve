@@ -354,6 +354,18 @@ def actual_configured_update(checkpoint, seqs, before):
         "economic_boundary_final_min_required_headroom": float(
             metrics["economic_boundary_final_min_required_headroom"]
         ),
+        "economic_boundary_long_winner_min_margin_delta": float(
+            metrics["economic_boundary_long_winner_min_margin_delta"]
+        ),
+        "economic_boundary_short_winner_min_margin_delta": float(
+            metrics["economic_boundary_short_winner_min_margin_delta"]
+        ),
+        "economic_boundary_failed_long_min_margin_delta": float(
+            metrics["economic_boundary_failed_long_min_margin_delta"]
+        ),
+        "economic_boundary_failed_short_min_margin_delta": float(
+            metrics["economic_boundary_failed_short_min_margin_delta"]
+        ),
         "grouped_margins_before": margins_before,
         "grouped_margins_after": margins_after,
         "grouped_margin_deltas": {

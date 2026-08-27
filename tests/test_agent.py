@@ -105,6 +105,37 @@ def test_conflict_aware_gradient_blend_protects_both_economic_boundaries_from_pr
     torch.testing.assert_close(combined, torch.tensor([1.0, 1.0]))
 
 
+def test_conflict_aware_gradient_blend_protects_all_six_action_boundaries(
+) -> None:
+    """The optimizer core must preserve Long, Short, and WAIT independently."""
+    boundaries = tuple(
+        (
+            torch.nn.functional.one_hot(
+                torch.tensor(index), num_classes=6
+            ).to(torch.float32),
+        )
+        for index in range(6)
+    )
+    result = conflict_aware_gradient_blend(
+        primary_gradients=(torch.full((6,), -3.0),),
+        safety_gradients=(
+            torch.tensor((1.0, 0.0, 1.0, 0.0, 1.0, 0.0)),
+        ),
+        opportunity_gradients=(
+            torch.tensor((0.0, 1.0, 0.0, 1.0, 0.0, 1.0)),
+        ),
+        economic_boundary_gradients=boundaries,
+        preserve_opportunity=True,
+        preserve_economic_boundaries=True,
+    )
+
+    combined = result.combined_gradients[0]
+    assert all(
+        float(torch.dot(combined, boundary[0])) >= 0.0
+        for boundary in boundaries
+    )
+
+
 def test_conflict_aware_gradient_blend_keeps_symmetric_v1_compatibility(
 ) -> None:
     result = conflict_aware_gradient_blend(
