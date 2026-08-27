@@ -20,6 +20,18 @@ BASE_CONFIG = (
     ACTIVE_CONTRACT.parent / _ACTIVE_PAYLOAD["base_config"]
 ).resolve()
 STAGE = str(_ACTIVE_PAYLOAD["stages"]["screening"]["name"])
+SCREENING_SHORT_CIRCUIT = {
+    "minimum_completed_episodes": 50,
+    "minimum_passes": 1,
+    "maximum_blow_rate": 0.30,
+    "collapse": {
+        "window_episodes": 5,
+        "minimum_prior_passes": 2,
+        "maximum_recent_passes": 0,
+        "maximum_average_hold_bars": 4,
+        "minimum_voluntary_close_rate": 0.8,
+    },
+}
 
 
 def _payload(
@@ -119,16 +131,19 @@ def _payload(
                 "name": STAGE,
                 "training_episodes": 100,
                 "validation_episodes": 100,
+                "short_circuit": SCREENING_SHORT_CIRCUIT,
             },
             "confirmation": {
                 "name": STAGE,
                 "training_episodes": 200,
                 "validation_episodes": 200,
+                "short_circuit": None,
             },
             "multi_seed": {
                 "name": STAGE,
                 "training_episodes": 200,
                 "validation_episodes": 200,
+                "short_circuit": None,
             },
         },
         "promotion": {
@@ -404,6 +419,8 @@ def test_v2_screening_applies_numeric_and_grouped_json_dimensions(
     stage, = config["campaign"]["budget_stages"]
     assert stage["training_episodes"] == 100
     assert stage["validation_episodes"] == 100
+    assert stage["short_circuit_minimum_episodes"] == 50
+    assert config["training"]["short_circuit"] == SCREENING_SHORT_CIRCUIT
     assert config["training"]["terminal_sequence_fraction"] == 0.50
     assert config["training"]["safety_sequence_fraction"] == 0.25
     assert config["training"]["entry_opportunity_sequence_fraction"] == 0.25
@@ -442,6 +459,9 @@ def test_active_sweep_compiles_through_real_config_validation(
 
     assert sweep.n_trials == 50
     assert sweep.n_jobs == 3
+    assert sweep.stages["screening"].short_circuit == SCREENING_SHORT_CIRCUIT
+    assert sweep.stages["confirmation"].short_circuit is None
+    assert sweep.stages["multi_seed"].short_circuit is None
     assert result.status == "COMPLETE"
 
 
@@ -491,11 +511,13 @@ def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, int, int, int]] = []
+    short_circuits: list[dict | None] = []
 
     def runner(config_path: Path, *, run_id: str):
         config = json.loads(config_path.read_text())
         stage, = config["campaign"]["budget_stages"]
         seed = int(config["training"]["seed"])
+        short_circuits.append(config["training"]["short_circuit"])
         calls.append((
             run_id,
             int(stage["training_episodes"]),
@@ -539,9 +561,54 @@ def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
     assert [item[1:3] for item in calls[:3]] == [(100, 100)] * 3
     assert [item[1:3] for item in calls[3:5]] == [(200, 200)] * 2
     assert [item[1:3] for item in calls[5:]] == [(200, 200)] * 2
+    assert short_circuits[:3] == [SCREENING_SHORT_CIRCUIT] * 3
+    assert short_circuits[3:] == [None] * 4
     assert [item[3] for item in calls[5:]] == [11, 22]
     payload = json.loads(result.result_path.read_text())
     assert payload["promoted_trial_numbers"] == [1, 2]
     assert payload["winner_trial_number"] == 1
     assert payload["winner_feasible_seeds"] == 2
     assert payload["promotion_status"] == "COMPLETE"
+
+
+def test_v2_multi_seed_promotion_stops_after_first_teacher_free_blow(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        calls.append(run_id)
+        if "multiseed" in run_id:
+            metrics = _metrics(**{
+                "selection.pass_rate": 0.0,
+                "selection.blow_rate": 1.0,
+                "selection.short_circuited": 1.0,
+            })
+        else:
+            metrics = _metrics(**{
+                "selection.pass_rate": 0.65,
+                "selection.near_blow_timeout_rate": 0.15,
+            })
+        return _state(config_path, run_id, metrics)
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, promotion_enabled=True, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert calls == [
+        f"stage2_learning_contract_tpe_test-screen-trial-000",
+        f"stage2_learning_contract_tpe_test-confirm-trial-000",
+        f"stage2_learning_contract_tpe_test-multiseed-trial-000-seed-11",
+    ]
+    assert result.status == "FAILED_GATE"
+    payload = json.loads(result.result_path.read_text())
+    candidate, = payload["multi_seed"]
+    assert candidate["short_circuit_reason"] == "zero_blow_gate"
+    assert candidate["evaluated_seeds"] == 1
+    assert candidate["requested_seeds"] == 2

@@ -147,6 +147,7 @@ class SweepStage:
     name: str
     training_episodes: int
     validation_episodes: int
+    short_circuit: dict | None
 
 
 @dataclass(frozen=True)
@@ -420,7 +421,9 @@ def _search_space_contract(
 def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepStage:
     if (
         not isinstance(raw, dict)
-        or set(raw) != {"name", "training_episodes", "validation_episodes"}
+        or set(raw) != {
+            "name", "training_episodes", "validation_episodes", "short_circuit"
+        }
         or not isinstance(raw["name"], str)
         or not raw["name"]
     ):
@@ -443,7 +446,34 @@ def _stage_contract(raw: object, *, base_config: Mapping, label: str) -> SweepSt
     )
     if len(stages) != 1:
         raise ValueError(f"Optuna {label} stage must resolve exactly once")
-    return SweepStage(raw["name"], training_episodes, validation_episodes)
+    short_circuit = raw["short_circuit"]
+    if short_circuit is not None:
+        if (
+            not isinstance(short_circuit, dict)
+            or not {
+                "minimum_completed_episodes",
+                "minimum_passes",
+                "maximum_blow_rate",
+            } <= set(short_circuit)
+            or isinstance(short_circuit["minimum_completed_episodes"], bool)
+            or not isinstance(short_circuit["minimum_completed_episodes"], int)
+            or not 1
+            <= short_circuit["minimum_completed_episodes"]
+            <= training_episodes
+            or isinstance(short_circuit["minimum_passes"], bool)
+            or not isinstance(short_circuit["minimum_passes"], int)
+            or short_circuit["minimum_passes"] < 0
+            or isinstance(short_circuit["maximum_blow_rate"], bool)
+            or not isinstance(short_circuit["maximum_blow_rate"], (int, float))
+            or not 0.0 <= float(short_circuit["maximum_blow_rate"]) <= 1.0
+        ):
+            raise ValueError(f"Optuna {label} short circuit is invalid")
+    return SweepStage(
+        raw["name"],
+        training_episodes,
+        validation_episodes,
+        deepcopy(short_circuit),
+    )
 
 
 def load_optuna_sweep(path: str | Path) -> OptunaSweep:
@@ -727,6 +757,13 @@ def _compile_campaign(
     selected_stage = deepcopy(matching_stages[0])
     selected_stage["training_episodes"] = stage.training_episodes
     selected_stage["validation_episodes"] = stage.validation_episodes
+    config["training"]["short_circuit"] = deepcopy(stage.short_circuit)
+    if stage.short_circuit is None:
+        selected_stage.pop("short_circuit_minimum_episodes", None)
+    else:
+        selected_stage["short_circuit_minimum_episodes"] = int(
+            stage.short_circuit["minimum_completed_episodes"]
+        )
     config["output"] = str(run_root)
     config["campaign"]["state_root"] = str(run_root / "ml-loop-state")
     config["campaign"]["budget_stages"] = [selected_stage]
@@ -957,6 +994,7 @@ def _run_promotion(
     for finalist in finalists:
         trial_number = int(finalist["trial_number"])
         seed_results: list[dict[str, object]] = []
+        short_circuit_reason: str | None = None
         for seed in sweep.promotion.seeds:
             run_root = (
                 artifacts / "multi-seed" / f"trial-{trial_number:03d}"
@@ -988,6 +1026,9 @@ def _run_promotion(
                 "feasible": _is_feasible(metrics, sweep.promotion.acceptance),
                 "metrics": metrics,
             })
+            if float(metrics.get("selection.blow_rate", 0.0)) > 0.0:
+                short_circuit_reason = "zero_blow_gate"
+                break
         feasible_count = sum(bool(item["feasible"]) for item in seed_results)
         mean_objective = sum(
             float(item["objective"]) for item in seed_results
@@ -998,6 +1039,9 @@ def _run_promotion(
             "feasible_seeds": feasible_count,
             "required_feasible_seeds": sweep.promotion.required_feasible_seeds,
             "mean_objective": mean_objective,
+            "short_circuit_reason": short_circuit_reason,
+            "evaluated_seeds": len(seed_results),
+            "requested_seeds": len(sweep.promotion.seeds),
             "seeds": seed_results,
         }
         multi_seed.append(candidate)
