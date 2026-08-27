@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -73,6 +74,12 @@ def _default_runner(
     stderr_path: Path,
 ):
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    worker_environment = os.environ.copy()
+    worker_environment.update({
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+    })
     with stdout_path.open("a") as stdout, stderr_path.open("a") as stderr:
         process = subprocess.run(
             [
@@ -88,6 +95,7 @@ def _default_runner(
             ],
             stdout=stdout,
             stderr=stderr,
+            env=worker_environment,
             check=False,
         )
     state = _default_state_loader(config_path, run_id)
@@ -455,8 +463,11 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         "sampler", "seed", "n_trials", "n_jobs", "n_startup_trials",
     }:
         raise ValueError("Optuna study contract is invalid")
-    if study["sampler"] != "tpe" or int(study["n_jobs"]) != 1:
-        raise ValueError("PropEvolve requires constrained TPE with one MPS job")
+    n_jobs = int(study["n_jobs"])
+    if study["sampler"] != "tpe" or not 1 <= n_jobs <= 3:
+        raise ValueError(
+            "PropEvolve requires constrained TPE with one to three isolated jobs"
+        )
     n_trials = int(study["n_trials"])
     n_startup = int(study["n_startup_trials"])
     if n_trials < 1 or not 1 <= n_startup <= n_trials:
@@ -568,7 +579,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         sampler="tpe",
         seed=int(study["seed"]),
         n_trials=n_trials,
-        n_jobs=1,
+        n_jobs=n_jobs,
         n_startup_trials=n_startup,
         objective_terms=objective_terms,
         constraints=constraints,
@@ -1015,7 +1026,7 @@ def run_optuna_sweep(
     config_validator=None,
     code_commit: str | None = None,
 ) -> OptunaSweepResult:
-    """Run/resume screening and configured confirmation through one MPS slot."""
+    """Run/resume screening with bounded isolated trial subprocesses."""
     sweep = load_optuna_sweep(path)
     repository_root = _workspace_root(sweep)
     artifacts = Path(artifact_root) if artifact_root is not None else (
@@ -1138,8 +1149,14 @@ def run_optuna_sweep(
         if trial.state in terminal_states and trial.number not in reconciled
     )
     remaining = max(0, target_trials - len(effective_terminal))
+    # Establish the exact frozen baseline before TPE dispatches concurrent
+    # samples. This preserves the matched control while subsequent trials use
+    # the declared isolated worker count.
+    if remaining and not effective_terminal:
+        study.optimize(objective, n_trials=1, n_jobs=1)
+        remaining -= 1
     if remaining:
-        study.optimize(objective, n_trials=remaining, n_jobs=1)
+        study.optimize(objective, n_trials=remaining, n_jobs=sweep.n_jobs)
     best = _best_feasible(study)
     effective_trials = [trial for trial in study.trials if trial.number not in reconciled]
     states = [trial.state for trial in effective_trials]

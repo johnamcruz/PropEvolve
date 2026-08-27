@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 from ml_training_loop import Phase, RunState, StageReceipt
 import pytest
 
 from propevolve.orchestration import _plan
+import propevolve.optuna_engine as optuna_engine
 from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
 from tests.recipe_fixtures import active_sweep_recipe
 
@@ -19,7 +22,12 @@ BASE_CONFIG = (
 STAGE = str(_ACTIVE_PAYLOAD["stages"]["screening"]["name"])
 
 
-def _payload(*, promotion_enabled: bool = False, n_trials: int = 3) -> dict:
+def _payload(
+    *,
+    promotion_enabled: bool = False,
+    n_trials: int = 3,
+    n_jobs: int = 1,
+) -> dict:
     return {
         "schema": "propevolve_optuna_sweep_v2",
         "name": "stage2_learning_contract_tpe_test",
@@ -29,7 +37,7 @@ def _payload(*, promotion_enabled: bool = False, n_trials: int = 3) -> dict:
             "sampler": "tpe",
             "seed": 314159,
             "n_trials": n_trials,
-            "n_jobs": 1,
+            "n_jobs": n_jobs,
             "n_startup_trials": min(2, n_trials),
         },
         "objective": {
@@ -248,6 +256,95 @@ def test_v2_contract_is_fully_json_driven(tmp_path: Path) -> None:
     assert "agent.learning_rate" in sweep.frozen_paths
 
 
+def test_v2_runs_three_screening_campaigns_in_isolated_parallel_slots(
+    tmp_path: Path,
+) -> None:
+    barrier = threading.Barrier(3, timeout=5.0)
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+
+    def runner(config_path: Path, *, run_id: str):
+        nonlocal active, peak_active
+        if run_id.endswith("trial-000"):
+            return _state(config_path, run_id, _metrics())
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        try:
+            barrier.wait()
+            return _state(config_path, run_id, _metrics())
+        finally:
+            with lock:
+                active -= 1
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, n_trials=4, n_jobs=3),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda config_path, run_id: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert result.status == "COMPLETE"
+    assert peak_active == 3
+
+
+def test_v2_default_worker_is_an_isolated_capped_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    expected_state = object()
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(optuna_engine.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        optuna_engine,
+        "_default_state_loader",
+        lambda config_path, run_id: expected_state,
+    )
+    config_path = tmp_path / "trial.json"
+    config_path.write_text("{}")
+
+    actual_state = optuna_engine._default_runner(
+        config_path,
+        run_id="isolated-trial-001",
+        stdout_path=tmp_path / "trial.stdout.log",
+        stderr_path=tmp_path / "trial.stderr.log",
+    )
+
+    assert actual_state is expected_state
+    assert captured["command"][1:7] == [
+        "-u",
+        "-m",
+        "propevolve.cli",
+        "evolve",
+        "--config",
+        str(config_path),
+    ]
+    assert captured["command"][-2:] == ["--run-id", "isolated-trial-001"]
+    environment = captured["environment"]
+    assert environment["OMP_NUM_THREADS"] == "1"
+    assert environment["MKL_NUM_THREADS"] == "1"
+    assert environment["VECLIB_MAXIMUM_THREADS"] == "1"
+
+
+@pytest.mark.parametrize("n_jobs", (0, 4))
+def test_v2_rejects_parallelism_outside_the_bounded_mac_contract(
+    tmp_path: Path,
+    n_jobs: int,
+) -> None:
+    with pytest.raises(ValueError, match="one to three isolated jobs"):
+        load_optuna_sweep(_contract(tmp_path, n_jobs=n_jobs))
+
+
 def test_v2_rejects_any_search_assignment_under_a_frozen_path(
     tmp_path: Path,
 ) -> None:
@@ -344,6 +441,7 @@ def test_active_sweep_compiles_through_real_config_validation(
     )
 
     assert sweep.n_trials == 24
+    assert sweep.n_jobs == 3
     assert result.status == "COMPLETE"
 
 
