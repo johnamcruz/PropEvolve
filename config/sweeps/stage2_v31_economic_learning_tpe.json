@@ -74,6 +74,15 @@
     }
   },
   "search_space": {
+    "entry_supervision.loss_weight": {
+      "type": "categorical",
+      "choices": [
+        0.3,
+        0.45,
+        0.6,
+        0.9
+      ]
+    },
     "agent.challenge_return_self_imitation_weight": {
       "type": "float",
       "low": 0.0,
@@ -245,6 +254,7 @@
     "allowed_search_prefixes": [
       "agent.",
       "challenge.",
+      "entry_supervision.",
       "regime_selectivity.",
       "training.",
       "balance_curriculum."
@@ -263,7 +273,19 @@
       "point_values",
       "round_trip_fees",
       "observation",
-      "entry_supervision",
+      "entry_supervision.schema",
+      "entry_supervision.training_only",
+      "entry_supervision.decision_count",
+      "entry_supervision.fill_offsets",
+      "entry_supervision.execution",
+      "entry_supervision.risk_dollars",
+      "entry_supervision.launch",
+      "entry_supervision.continuation",
+      "entry_supervision.target_r",
+      "entry_supervision.stop_r",
+      "entry_supervision.horizon_bars",
+      "entry_supervision.collision",
+      "entry_supervision.action_class_balance",
       "agent.hidden_dim",
       "agent.atoms",
       "agent.value_min",

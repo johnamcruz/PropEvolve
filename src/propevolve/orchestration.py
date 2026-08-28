@@ -95,6 +95,9 @@ _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS = (
     "sealed_confirmation",
     "entry_supervision",
 )
+_EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS = (
+    "entry_supervision.loss_weight",
+)
 _EXTERNAL_PARENT_ECONOMIC_FIELDS = (
     "profit_target",
     "max_loss",
@@ -231,11 +234,26 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
             left, sort_keys=True, separators=(",", ":")
         ) == json.dumps(right, sort_keys=True, separators=(",", ":"))
 
+    def causal_recipe_value(recipe: Mapping, path: str) -> object:
+        value = recipe[path]
+        if path == "entry_supervision":
+            return {
+                key: item
+                for key, item in value.items()
+                if f"{path}.{key}"
+                not in _EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS
+            }
+        return value
+
     for path in _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS:
         parent_present = path in parent_recipe
         child_present = path in config
         if parent_present != child_present or (
-            parent_present and not same_json(parent_recipe[path], config[path])
+            parent_present
+            and not same_json(
+                causal_recipe_value(parent_recipe, path),
+                causal_recipe_value(config, path),
+            )
         ):
             raise ValueError(
                 f"external parent causal recipe drifted at {path}"

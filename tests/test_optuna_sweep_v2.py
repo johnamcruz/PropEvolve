@@ -509,6 +509,36 @@ def test_v2_rejects_any_search_assignment_under_a_frozen_path(
         load_optuna_sweep(path)
 
 
+def test_v2_rejects_entry_label_search_even_when_training_weight_is_allowed(
+    tmp_path: Path,
+) -> None:
+    payload = _ACTIVE_PAYLOAD.copy()
+    payload["base_config"] = str(BASE_CONFIG)
+    payload["search_space"] = {
+        **payload["search_space"],
+        "entry_supervision.target_r": {
+            "type": "categorical",
+            "choices": [2.0, 3.0],
+        },
+    }
+    payload["frozen"] = {
+        **payload["frozen"],
+        "paths": [
+            path
+            for path in payload["frozen"]["paths"]
+            if path != "entry_supervision.target_r"
+        ],
+    }
+    path = tmp_path / "invalid-entry-label-search.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="Optuna search space changes external parent contract",
+    ):
+        load_optuna_sweep(path)
+
+
 def test_v2_rejects_search_space_without_exact_baseline_control(
     tmp_path: Path,
 ) -> None:
@@ -675,7 +705,19 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         # window and next-bar execution contract.
         "teachers",
         "observation",
-        "entry_supervision",
+        "entry_supervision.schema",
+        "entry_supervision.training_only",
+        "entry_supervision.decision_count",
+        "entry_supervision.fill_offsets",
+        "entry_supervision.execution",
+        "entry_supervision.risk_dollars",
+        "entry_supervision.launch",
+        "entry_supervision.continuation",
+        "entry_supervision.target_r",
+        "entry_supervision.stop_r",
+        "entry_supervision.horizon_bars",
+        "entry_supervision.collision",
+        "entry_supervision.action_class_balance",
         "regime_selectivity.expansion_center_receipt",
         "regime_selectivity.expansion_center_receipt_sha256",
         "regime_selectivity.expansion_long_center",
@@ -707,6 +749,40 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
 
     assert _ACTIVE_PAYLOAD["frozen"]["teacher_free_selection"] is True
     assert required_frozen_paths <= set(sweep.frozen_paths)
+    assert "entry_supervision.loss_weight" not in sweep.frozen_paths
+
+
+def test_active_sweep_searches_exact_entry_supervision_strengths(
+    tmp_path: Path,
+) -> None:
+    sweep = load_optuna_sweep(ACTIVE_CONTRACT)
+    specification = sweep.search_space["entry_supervision.loss_weight"]
+
+    assert specification == {
+        "type": "categorical",
+        "choices": [0.30, 0.45, 0.60, 0.90],
+    }
+    assert optuna_engine._baseline_parameters(sweep)[
+        "entry_supervision.loss_weight"
+    ] == 0.30
+
+    baseline = optuna_engine._baseline_parameters(sweep)
+    for value in specification["choices"]:
+        parameters = {
+            **baseline,
+            "entry_supervision.loss_weight": value,
+        }
+        config = optuna_engine._compile_campaign(
+            sweep,
+            parameters=parameters,
+            stage=sweep.stages["screening"],
+            run_root=tmp_path / str(value),
+        )
+        path = tmp_path / f"entry-supervision-{value}.json"
+        optuna_engine._write_exact(path, config)
+        normalized = load_experiment_config(path)
+
+        assert normalized["entry_supervision"]["loss_weight"] == value
 
 
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(

@@ -310,6 +310,7 @@ def _validate_search_assignment(
     from .orchestration import (
         _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS,
         _EXTERNAL_PARENT_ECONOMIC_FIELDS,
+        _EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS,
     )
 
     _get_path(base_config, path)
@@ -318,8 +319,13 @@ def _validate_search_assignment(
     if not any(path.startswith(prefix) for prefix in allowed_prefixes):
         raise ValueError(f"Optuna search assignment is outside allowed paths: {path}")
     root, _, leaf = path.partition(".")
-    if root in _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS or (
-        root == "challenge" and leaf in _EXTERNAL_PARENT_ECONOMIC_FIELDS
+    changes_parent_contract = (
+        root in _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS
+        or (root == "challenge" and leaf in _EXTERNAL_PARENT_ECONOMIC_FIELDS)
+    )
+    if (
+        changes_parent_contract
+        and path not in _EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS
     ):
         raise ValueError(
             f"Optuna search space changes external parent contract: {path}"

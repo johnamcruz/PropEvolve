@@ -455,6 +455,7 @@ def test_v21_matches_frozen_parent_causal_recipe_identity(
     parent_recipe["sealed_confirmation"]["minimum_expectancy_r"] = 0.0
     parent_recipe["entry_supervision"]["target_r"] = 2.0
     parent_recipe["entry_supervision"]["stop_r"] = 1.0
+    child_recipe["entry_supervision"]["loss_weight"] = 0.6
     candidate_path = tmp_path / "candidate"
     candidate_path.mkdir()
     (candidate_path / "recipe.json").write_text(json.dumps(parent_recipe))
@@ -470,6 +471,16 @@ def test_v21_matches_frozen_parent_causal_recipe_identity(
         SimpleNamespace(path=candidate_path),
         child_recipe,
     )
+
+    child_recipe["entry_supervision"]["target_r"] = 3.0
+    with pytest.raises(
+        ValueError,
+        match="external parent causal recipe drifted at entry_supervision",
+    ):
+        _assert_parent_causal_contract(
+            SimpleNamespace(path=candidate_path),
+            child_recipe,
+        )
 
 
 def test_fresh_campaign_warm_starts_first_stage_from_external_stage1_candidate(
