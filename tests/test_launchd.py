@@ -27,6 +27,29 @@ def test_launch_evolve_cli_passes_the_runtime_config_path(monkeypatch) -> None:
     assert calls == ["runtime-selected.json"]
 
 
+def test_launch_optuna_cli_passes_the_sweep_config_path(monkeypatch) -> None:
+    calls = []
+
+    def fake_launch(config_path):
+        calls.append(config_path)
+        return SimpleNamespace(
+            run_id="economic-search-r1",
+            label="com.johnmcruz.propevolve.optuna.economic-search-r1",
+            plist_path=Path("/tmp/economic-search-r1.plist"),
+            stdout_path=Path("/tmp/economic-search-r1.stdout.log"),
+            stderr_path=Path("/tmp/economic-search-r1.stderr.log"),
+        )
+
+    monkeypatch.setattr(
+        propevolve.launchd,
+        "launch_optuna_sweep_config",
+        fake_launch,
+    )
+
+    assert main(["launch-optuna-sweep", "--config", "search.json"]) == 0
+    assert calls == ["search.json"]
+
+
 def test_launch_evolution_config_generates_plist_from_passed_config(
     tmp_path: Path,
     monkeypatch,
@@ -116,3 +139,59 @@ def test_launch_evolution_config_skips_stale_plist_when_state_tree_is_absent(
 
     assert result.run_id == "recovery-r2"
     assert stale.read_bytes() == b"stale"
+
+
+def test_launch_optuna_sweep_generates_plist_from_passed_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_path = tmp_path / "config/sweeps/economic-search.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}")
+    base_path = tmp_path / "config/base.json"
+    base_path.parent.mkdir(exist_ok=True)
+    base_path.write_text("{}")
+    sweep = SimpleNamespace(
+        path=config_path,
+        name="economic_search",
+        base_config_path=base_path,
+        base_config={"workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "propevolve.optuna_engine.load_optuna_sweep",
+        lambda path: sweep,
+    )
+    calls = []
+
+    result = propevolve.launchd.launch_optuna_sweep_config(
+        config_path,
+        launch_agents_root=tmp_path / "LaunchAgents",
+        log_root=tmp_path / "Logs",
+        python_executable=tmp_path / ".venv/bin/python",
+        user_id=501,
+        launchctl=lambda command: calls.append(command),
+    )
+
+    assert result.run_id == "economic-search-r1"
+    assert calls == [[
+        "launchctl",
+        "bootstrap",
+        "gui/501",
+        str(result.plist_path),
+    ]]
+    payload = plistlib.loads(result.plist_path.read_bytes())
+    assert payload["ProgramArguments"] == [
+        str(tmp_path / ".venv/bin/python"),
+        "-u",
+        "-m",
+        "propevolve.cli",
+        "optuna-sweep",
+        "--config",
+        str(config_path),
+    ]
+    assert payload["WorkingDirectory"] == str(tmp_path)
+    assert payload["EnvironmentVariables"]["PYTHONPATH"] == str(
+        tmp_path / "src"
+    )
+    assert payload["RunAtLoad"] is True
+    assert payload["KeepAlive"] is False

@@ -78,6 +78,11 @@ def _parser() -> argparse.ArgumentParser:
         help="run or resume a constrained Optuna TPE study",
     )
     optuna_sweep.add_argument("--config", required=True)
+    launch_optuna = subparsers.add_parser(
+        "launch-optuna-sweep",
+        help="generate and bootstrap a one-shot Optuna launchd job",
+    )
+    launch_optuna.add_argument("--config", required=True)
     optuna_trial = subparsers.add_parser(
         "optuna-trial",
         help="run one direct training and teacher-free validation trial",
@@ -332,6 +337,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "result": str(result.result_path),
         }, sort_keys=True))
         return 0 if result.status == "COMPLETE" else 2
+    if args.command == "launch-optuna-sweep":
+        from .launchd import launch_optuna_sweep_config
+
+        launch = launch_optuna_sweep_config(args.config)
+        print(json.dumps({
+            "label": launch.label,
+            "run_id": launch.run_id,
+            "plist": str(launch.plist_path),
+            "stdout": str(launch.stdout_path),
+            "stderr": str(launch.stderr_path),
+        }, sort_keys=True))
+        return 0
     if args.command == "optuna-trial":
         from .optuna_trial import run_optuna_trial
 
