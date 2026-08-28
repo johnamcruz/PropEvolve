@@ -78,6 +78,12 @@ def _parser() -> argparse.ArgumentParser:
         help="run or resume a constrained Optuna TPE study",
     )
     optuna_sweep.add_argument("--config", required=True)
+    optuna_trial = subparsers.add_parser(
+        "optuna-trial",
+        help="run one direct training and teacher-free validation trial",
+    )
+    optuna_trial.add_argument("--config", required=True)
+    optuna_trial.add_argument("--result", required=True)
     status = subparsers.add_parser("evolve-status", help="show durable campaign state")
     status.add_argument("--config", required=True)
     status.add_argument("--run-id", required=True)
@@ -326,6 +332,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "result": str(result.result_path),
         }, sort_keys=True))
         return 0 if result.status == "COMPLETE" else 2
+    if args.command == "optuna-trial":
+        from .optuna_trial import run_optuna_trial
+
+        payload = run_optuna_trial(args.config, result_path=args.result)
+        print(json.dumps({
+            "candidate_id": payload["candidate_id"],
+            "evaluation_id": payload["evaluation_id"],
+            "evaluation_status": payload["evaluation_status"],
+            "result": str(Path(args.result).resolve()),
+        }, sort_keys=True))
+        return 0
     if args.command == "launch-evolve":
         from .launchd import launch_evolution_config
 

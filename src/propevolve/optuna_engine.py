@@ -1,8 +1,7 @@
-"""JSON-driven constrained Optuna selection over PropEvolve campaigns."""
+"""JSON-driven Optuna selection over direct PropEvolve training trials."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -10,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,7 +21,6 @@ import optuna
 OPTUNA_SWEEP_SCHEMA = "propevolve_optuna_sweep_v2"
 RESULT_SCHEMA = "propevolve_optuna_sweep_result_v2"
 _CONSTRAINT_OPERATORS = frozenset({"==", ">=", ">", "<="})
-_TERMINAL_PHASES = frozenset({"COMPLETE", "FAILED_GATE", "STOPPED", "BLOCKED"})
 
 
 def _set_path(payload: dict, dotted_path: str, value: object) -> None:
@@ -72,20 +71,26 @@ def _write_exact(path: Path, payload: Mapping) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _default_state_loader(config_path: Path, run_id: str):
-    from ml_training_loop.stores import JsonRunStore
+def _load_trial_result(config_path: Path, result_path: Path) -> dict | None:
+    if not result_path.is_file():
+        return None
+    from .optuna_trial import OPTUNA_TRIAL_RESULT_SCHEMA
 
-    from .config import load_experiment_config
+    payload = json.loads(result_path.read_text())
+    if (
+        payload.get("schema") != OPTUNA_TRIAL_RESULT_SCHEMA
+        or payload.get("config_sha256") != _sha256(config_path.read_bytes())
+        or not isinstance(payload.get("metrics"), Mapping)
+    ):
+        raise ValueError("Optuna trial result identity drifted")
+    return payload
 
-    config = load_experiment_config(config_path)
-    state_root = Path(config["_root"]) / str(config["campaign"]["state_root"])
-    return JsonRunStore(state_root).load(run_id)
 
-
-def _default_runner(
+def _default_trial_runner(
     config_path: Path,
     *,
     run_id: str,
+    result_path: Path,
     stdout_path: Path,
     stderr_path: Path,
 ):
@@ -103,28 +108,28 @@ def _default_runner(
                 "-u",
                 "-m",
                 "propevolve.cli",
-                "evolve",
+                "optuna-trial",
                 "--config",
                 str(config_path),
-                "--run-id",
-                run_id,
+                "--result",
+                str(result_path),
             ],
             stdout=stdout,
             stderr=stderr,
             env=worker_environment,
             check=False,
         )
-    state = _default_state_loader(config_path, run_id)
-    if state is None:
+    result = _load_trial_result(config_path, result_path)
+    if result is None:
         raise RuntimeError(
-            f"Optuna campaign exited {process.returncode} without campaign state"
+            f"Optuna trial exited {process.returncode} without a result"
         )
-    if process.returncode not in {0, 2}:
+    if process.returncode != 0:
         raise RuntimeError(
-            f"Optuna campaign {run_id} exited unexpectedly with "
+            f"Optuna trial {run_id} exited unexpectedly with "
             f"{process.returncode}"
         )
-    return state
+    return result
 
 
 def _cell_metrics(state, stage_name: str) -> dict[str, float]:
@@ -133,21 +138,32 @@ def _cell_metrics(state, stage_name: str) -> dict[str, float]:
     )
     if len(receipts) != 1:
         raise ValueError(
-            f"terminal Optuna campaign must have one {stage_name!r} receipt"
+            f"terminal injected Optuna state must have one {stage_name!r} receipt"
         )
     raw = receipts[0].outputs.get("metrics")
     if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("terminal Optuna campaign metrics are missing")
+        raise ValueError("terminal injected Optuna metrics are missing")
     metrics = {str(key): float(value) for key, value in raw.items()}
     if any(not math.isfinite(value) for value in metrics.values()):
-        raise ValueError("terminal Optuna campaign metrics must be finite")
+        raise ValueError("terminal injected Optuna metrics must be finite")
     return metrics
 
 
-def _plan_identity(config: Mapping) -> str:
-    from .orchestration import _plan
-
-    return _plan(config).identity
+def _trial_metrics(result: object, stage_name: str) -> tuple[str, dict[str, float]]:
+    if isinstance(result, Mapping):
+        raw = result.get("metrics")
+        status = str(result.get("evaluation_status", "PASS"))
+        if not isinstance(raw, Mapping) or not raw:
+            raise ValueError("terminal Optuna trial metrics are missing")
+        metrics = {str(key): float(value) for key, value in raw.items()}
+    else:
+        # Preserve the injected-runner seam used by inexpensive orchestration
+        # tests while the production path always uses a direct trial receipt.
+        status = str(getattr(getattr(result, "phase", None), "value", "PASS"))
+        metrics = _cell_metrics(result, stage_name)
+    if any(not math.isfinite(value) for value in metrics.values()):
+        raise ValueError("terminal Optuna trial metrics must be finite")
+    return status, metrics
 
 
 @dataclass(frozen=True)
@@ -192,6 +208,7 @@ class OptunaSweep:
     n_trials: int
     n_jobs: int
     n_startup_trials: int
+    screening_artifact_retention: str
     objective_terms: tuple[ObjectiveTerm, ...]
     constraints: dict[str, tuple[str, float]]
     search_space: dict[str, dict]
@@ -528,7 +545,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     payload = json.loads(path.read_text())
     if set(payload) != {
         "schema", "name", "base_config", "study_root", "study", "objective",
-        "search_space", "stages", "promotion", "frozen",
+        "search_space", "stages", "promotion", "frozen", "artifacts",
     } or payload["schema"] != OPTUNA_SWEEP_SCHEMA:
         raise ValueError("Optuna sweep contract is invalid")
     base_path = (path.parent / str(payload["base_config"])).resolve()
@@ -549,6 +566,14 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     n_startup = int(study["n_startup_trials"])
     if n_trials < 1 or not 1 <= n_startup <= n_trials:
         raise ValueError("Optuna trial budget is invalid")
+
+    artifacts = payload["artifacts"]
+    if (
+        not isinstance(artifacts, dict)
+        or set(artifacts) != {"screening_retention"}
+        or artifacts["screening_retention"] not in {"compact", "keep"}
+    ):
+        raise ValueError("Optuna artifact retention contract is invalid")
 
     frozen = payload["frozen"]
     if (
@@ -658,6 +683,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         n_trials=n_trials,
         n_jobs=n_jobs,
         n_startup_trials=n_startup,
+        screening_artifact_retention=str(artifacts["screening_retention"]),
         objective_terms=objective_terms,
         constraints=constraints,
         search_space=search_space,
@@ -777,7 +803,7 @@ def _workspace_root(sweep: OptunaSweep) -> Path:
     return configured.resolve(strict=True)
 
 
-def _compile_campaign(
+def _compile_trial_config(
     sweep: OptunaSweep,
     *,
     parameters: Mapping[str, object],
@@ -880,11 +906,14 @@ def _print_trial_result(
     metrics: Mapping[str, float],
 ) -> None:
     objective_text = "null" if objective is None else f"{objective:.1f}"
+    pass_rate = metrics.get("selection.pass_rate")
+    blow_rate = metrics.get("selection.blow_rate")
+    pass_rate_text = "n/a" if pass_rate is None else f"{100.0 * pass_rate:g}%"
+    blow_rate_text = "n/a" if blow_rate is None else f"{100.0 * blow_rate:g}%"
     print(
         f"[optuna-result] trial={trial_number} state={state} "
         f"feasible={str(feasible).lower()} objective={objective_text} "
-        f"pass_rate={100.0 * metrics['selection.pass_rate']:g}% "
-        f"blow_rate={100.0 * metrics['selection.blow_rate']:g}%",
+        f"pass_rate={pass_rate_text} blow_rate={blow_rate_text}",
         flush=True,
     )
 
@@ -903,7 +932,7 @@ def _constraint_vector(
 ) -> list[float]:
     missing = sorted(set(constraints) - set(metrics))
     if missing:
-        raise ValueError(f"Optuna campaign is missing constraint metrics: {missing}")
+        raise ValueError(f"Optuna trial is missing constraint metrics: {missing}")
     return [
         _constraint_value(float(metrics[metric]), operator, expected)
         for metric, (operator, expected) in constraints.items()
@@ -915,6 +944,18 @@ def _is_feasible(
     constraints: Mapping[str, tuple[str, float]],
 ) -> bool:
     return all(value <= 0.0 for value in _constraint_vector(metrics, constraints))
+
+
+def _prune_training_short_circuit(
+    trial: optuna.Trial,
+    metrics: Mapping[str, float],
+    *,
+    constraint_count: int,
+) -> None:
+    if float(metrics.get("training.short_circuited", 0.0)) != 1.0:
+        return
+    trial.set_user_attr("constraint", [1.0] * constraint_count)
+    raise optuna.TrialPruned("training short circuit rejected trial")
 
 
 def _best_feasible(study: optuna.Study) -> optuna.trial.FrozenTrial | None:
@@ -952,18 +993,85 @@ def _reconcile_interrupted_trials(study: optuna.Study) -> frozenset[int]:
         if trial.state is optuna.trial.TrialState.RUNNING
     )
     for trial in running:
-        campaign_trial = int(
-            trial.user_attrs.get("resume_campaign_trial", trial.number)
-        )
         study.tell(trial.number, state=optuna.trial.TrialState.FAIL)
         reconciled.add(trial.number)
         if trial.params:
+            retry_attrs = dict(trial.user_attrs)
+            retry_attrs["retry_of_trial"] = trial.number
+            retry_attrs.setdefault("artifact_trial_number", trial.number)
             study.enqueue_trial(
                 trial.params,
-                user_attrs={"resume_campaign_trial": campaign_trial},
+                user_attrs=retry_attrs,
             )
     study.set_user_attr("reconciled_interrupted_trials", sorted(reconciled))
     return frozenset(reconciled)
+
+
+def _compact_screening_trial(
+    *,
+    artifacts: Path,
+    trial: optuna.trial.FrozenTrial,
+) -> None:
+    raw_root = trial.user_attrs.get("trial_artifact_root")
+    if not isinstance(raw_root, str) or not raw_root:
+        return
+    trial_root = Path(raw_root)
+    screening_root = (artifacts / "screening").resolve()
+    try:
+        resolved = trial_root.resolve(strict=True)
+    except FileNotFoundError:
+        return
+    artifact_number = int(
+        trial.user_attrs.get("artifact_trial_number", trial.number)
+    )
+    if (
+        resolved.parent != screening_root
+        or resolved.name != f"trial-{artifact_number:03d}"
+    ):
+        raise ValueError("Optuna cleanup target escaped the screening root")
+
+    evidence_root = artifacts / "screening-evidence" / f"trial-{trial.number:03d}"
+    preserved: list[str] = []
+    removed_bytes = 0
+    removed_files = 0
+    for path in resolved.rglob("*"):
+        if path.is_symlink():
+            continue
+        if path.is_file():
+            removed_bytes += path.stat().st_size
+            removed_files += 1
+            if path.suffix in {".json", ".jsonl"}:
+                relative = path.relative_to(resolved)
+                destination = evidence_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
+                preserved.append(str(relative))
+    shutil.rmtree(resolved)
+    receipt = {
+        "schema": "propevolve_optuna_trial_cleanup_v1",
+        "trial_number": trial.number,
+        "trial_state": trial.state.name,
+        "source_root": str(resolved),
+        "removed_bytes": removed_bytes,
+        "removed_files": removed_files,
+        "preserved_evidence": sorted(preserved),
+    }
+    _write_exact(
+        artifacts / "cleanup" / f"trial-{trial.number:03d}.json",
+        receipt,
+    )
+
+
+def _trial_is_rejected(trial: optuna.trial.FrozenTrial) -> bool:
+    if trial.state in {
+        optuna.trial.TrialState.PRUNED,
+        optuna.trial.TrialState.FAIL,
+    }:
+        return True
+    return (
+        trial.state is optuna.trial.TrialState.COMPLETE
+        and any(value > 0.0 for value in _constraints_func(trial))
+    )
 
 
 def _clean_code_commit(repository_root: Path) -> str:
@@ -977,7 +1085,7 @@ def _clean_code_commit(repository_root: Path) -> str:
     ).strip()
 
 
-def _run_compiled_campaign(
+def _run_compiled_trial(
     *,
     config: dict,
     config_path: Path,
@@ -987,7 +1095,7 @@ def _run_compiled_campaign(
     runner,
     state_loader,
     config_validator,
-) -> tuple[object, dict[str, float]]:
+) -> tuple[str, dict[str, float]]:
     _write_exact(config_path, config)
     if config_validator is None:
         from .config import load_experiment_config
@@ -1000,25 +1108,21 @@ def _run_compiled_campaign(
             if isinstance(validation_result, Mapping)
             else config
         )
-    expected_plan_identity = _plan_identity(validated_config)
-    state = state_loader(config_path, run_id)
-    if state is None or state.phase.value not in _TERMINAL_PHASES:
-        if runner is None:
-            state = _default_runner(
-                config_path,
-                run_id=run_id,
-                stdout_path=artifact_root / "logs" / f"{run_id}.stdout.log",
-                stderr_path=artifact_root / "logs" / f"{run_id}.stderr.log",
-            )
-        else:
-            state = runner(config_path, run_id=run_id)
-    if state is None or state.phase.value not in _TERMINAL_PHASES:
-        raise RuntimeError(f"Optuna campaign is not terminal: {run_id}")
-    if state.plan_identity != expected_plan_identity:
-        raise ValueError(f"Optuna campaign plan identity drifted: {run_id}")
-    if state.phase.value == "BLOCKED":
-        raise RuntimeError(f"Optuna campaign blocked: {run_id}")
-    return state, _cell_metrics(state, stage_name)
+    result_path = Path(str(validated_config["output"])) / "optuna-trial-result.json"
+    existing = _load_trial_result(config_path, result_path)
+    if existing is not None:
+        result = existing
+    elif runner is None:
+        result = _default_trial_runner(
+            config_path,
+            run_id=run_id,
+            result_path=result_path,
+            stdout_path=artifact_root / "logs" / f"{run_id}.stdout.log",
+            stderr_path=artifact_root / "logs" / f"{run_id}.stderr.log",
+        )
+    else:
+        result = runner(config_path, run_id=run_id)
+    return _trial_metrics(result, stage_name)
 
 
 def _run_promotion(
@@ -1041,65 +1145,178 @@ def _run_promotion(
             "winner_feasible_seeds": 0,
             "multi_seed": [],
         }
-    def run_confirmation(trial: optuna.trial.FrozenTrial) -> dict[str, object]:
-        parameters = dict(trial.params)
-        run_root = artifacts / "confirmation" / f"trial-{trial.number:03d}"
-        config = _compile_campaign(
+
+    def optimize_fixed_study(
+        fixed_study: optuna.Study,
+        *,
+        target_trials: int,
+        objective,
+    ) -> tuple[optuna.trial.FrozenTrial, ...]:
+        reconciled = _reconcile_interrupted_trials(fixed_study)
+        terminal = {
+            optuna.trial.TrialState.COMPLETE,
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.FAIL,
+        }
+        completed = sum(
+            trial.state in terminal and trial.number not in reconciled
+            for trial in fixed_study.trials
+        )
+        remaining = max(0, target_trials - completed)
+        if remaining:
+            fixed_study.optimize(
+                objective,
+                n_trials=remaining,
+                n_jobs=min(sweep.n_jobs, remaining),
+                show_progress_bar=False,
+            )
+        return tuple(
+            trial for trial in fixed_study.trials
+            if trial.number not in reconciled and trial.state in terminal
+        )
+
+    confirmation_study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(
+            seed=sweep.seed,
+            constraints_func=_constraints_func,
+        ),
+        study_name=f"{sweep.name}-confirmation",
+        storage=f"sqlite:///{artifacts / 'confirmation.study.db'}",
+        load_if_exists=True,
+    )
+    promoted_numbers = [trial.number for trial in promoted]
+    expected_sources = confirmation_study.user_attrs.get(
+        "screening_trial_numbers"
+    )
+    if expected_sources is None:
+        confirmation_study.set_user_attr(
+            "screening_trial_numbers", promoted_numbers
+        )
+        for source in promoted:
+            confirmation_study.enqueue_trial(
+                source.params,
+                user_attrs={"screening_trial_number": source.number},
+            )
+    elif list(expected_sources) != promoted_numbers:
+        raise ValueError("Optuna confirmation candidates drifted")
+
+    def confirmation_objective(trial: optuna.Trial) -> float:
+        parameters = _sample(trial, sweep)
+        source_number = int(trial.user_attrs["screening_trial_number"])
+        run_root = artifacts / "confirmation" / f"trial-{source_number:03d}"
+        config = _compile_trial_config(
             sweep,
             parameters=parameters,
             stage=sweep.stages["confirmation"],
             run_root=run_root,
         )
-        run_id = f"{sweep.name}-confirm-trial-{trial.number:03d}"
-        _, metrics = _run_compiled_campaign(
-            config=config,
-            config_path=configs / f".optuna-{run_id}.json",
-            run_id=run_id,
-            stage_name=sweep.stages["confirmation"].name,
-            artifact_root=artifacts,
-            runner=runner,
-            state_loader=state_loader,
-            config_validator=config_validator,
+        run_id = f"{sweep.name}-confirm-trial-{source_number:03d}"
+        try:
+            _, metrics = _run_compiled_trial(
+                config=config,
+                config_path=configs / f".optuna-{run_id}.json",
+                run_id=run_id,
+                stage_name=sweep.stages["confirmation"].name,
+                artifact_root=artifacts,
+                runner=runner,
+                state_loader=state_loader,
+                config_validator=config_validator,
+            )
+        except Exception:
+            trial.set_user_attr("stopped_study_on_executor_error", True)
+            trial.study.stop()
+            raise
+        for metric, value in metrics.items():
+            trial.set_user_attr(metric, float(value))
+        _prune_training_short_circuit(
+            trial,
+            metrics,
+            constraint_count=len(sweep.promotion.acceptance),
         )
-        return {
-            "trial_number": trial.number,
-            "objective": _objective_value(metrics, sweep.objective_terms),
-            "feasible": _is_feasible(metrics, sweep.promotion.acceptance),
-            "metrics": metrics,
-            "parameters": parameters,
-        }
+        constraints = _constraint_vector(
+            metrics, sweep.promotion.acceptance
+        )
+        trial.set_user_attr("constraint", constraints)
+        return _objective_value(metrics, sweep.objective_terms)
 
-    with ThreadPoolExecutor(
-        max_workers=min(sweep.n_jobs, len(promoted)),
-    ) as executor:
-        confirmations = list(executor.map(run_confirmation, promoted))
+    confirmation_trials = optimize_fixed_study(
+        confirmation_study,
+        target_trials=len(promoted),
+        objective=confirmation_objective,
+    )
+    confirmations = []
+    for trial in confirmation_trials:
+        if trial.state is not optuna.trial.TrialState.COMPLETE:
+            continue
+        metrics = {
+            metric: float(trial.user_attrs[metric])
+            for metric in _required_metrics(sweep)
+            if metric in trial.user_attrs
+        }
+        confirmations.append({
+            "trial_number": int(trial.user_attrs["screening_trial_number"]),
+            "objective": float(trial.value),
+            "feasible": all(
+                value <= 0.0 for value in _constraints_func(trial)
+            ),
+            "metrics": metrics,
+            "parameters": dict(trial.params),
+        })
     finalists = tuple(sorted(
         (item for item in confirmations if item["feasible"]),
         key=lambda item: float(item["objective"]),
         reverse=True,
     )[:sweep.promotion.finalist_top_k])
-    multi_seed: list[dict[str, object]] = []
-    winner: dict[str, object] | None = None
-    for finalist in finalists:
-        trial_number = int(finalist["trial_number"])
-        seed_results: list[dict[str, object]] = []
-        short_circuit_reason: str | None = None
-        for seed in sweep.promotion.seeds:
-            run_root = (
-                artifacts / "multi-seed" / f"trial-{trial_number:03d}"
-                / f"seed-{seed}"
+
+    multiseed_study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(
+            seed=sweep.seed + 1,
+            constraints_func=_constraints_func,
+        ),
+        study_name=f"{sweep.name}-multi-seed",
+        storage=f"sqlite:///{artifacts / 'multi-seed.study.db'}",
+        load_if_exists=True,
+    )
+    desired_runs = [
+        (int(finalist["trial_number"]), int(seed), finalist["parameters"])
+        for finalist in finalists
+        for seed in sweep.promotion.seeds
+    ]
+    expected_runs = [[source, seed] for source, seed, _ in desired_runs]
+    existing_runs = multiseed_study.user_attrs.get("requested_runs")
+    if existing_runs is None:
+        multiseed_study.set_user_attr("requested_runs", expected_runs)
+        for source, seed, parameters in desired_runs:
+            multiseed_study.enqueue_trial(
+                parameters,
+                user_attrs={
+                    "screening_trial_number": source,
+                    "seed": seed,
+                },
             )
-            config = _compile_campaign(
-                sweep,
-                parameters=finalist["parameters"],
-                stage=sweep.stages["multi_seed"],
-                run_root=run_root,
-                seed=seed,
-            )
-            run_id = (
-                f"{sweep.name}-multiseed-trial-{trial_number:03d}-seed-{seed}"
-            )
-            _, metrics = _run_compiled_campaign(
+    elif list(existing_runs) != expected_runs:
+        raise ValueError("Optuna multi-seed candidates drifted")
+
+    def multiseed_objective(trial: optuna.Trial) -> float:
+        parameters = _sample(trial, sweep)
+        source_number = int(trial.user_attrs["screening_trial_number"])
+        seed = int(trial.user_attrs["seed"])
+        run_root = (
+            artifacts / "multi-seed" / f"trial-{source_number:03d}"
+            / f"seed-{seed}"
+        )
+        config = _compile_trial_config(
+            sweep,
+            parameters=parameters,
+            stage=sweep.stages["multi_seed"],
+            run_root=run_root,
+            seed=seed,
+        )
+        run_id = f"{sweep.name}-multiseed-trial-{source_number:03d}-seed-{seed}"
+        try:
+            _, metrics = _run_compiled_trial(
                 config=config,
                 config_path=configs / f".optuna-{run_id}.json",
                 run_id=run_id,
@@ -1109,19 +1326,65 @@ def _run_promotion(
                 state_loader=state_loader,
                 config_validator=config_validator,
             )
+        except Exception:
+            trial.set_user_attr("stopped_study_on_executor_error", True)
+            trial.study.stop()
+            raise
+        for metric, value in metrics.items():
+            trial.set_user_attr(metric, float(value))
+        _prune_training_short_circuit(
+            trial,
+            metrics,
+            constraint_count=len(sweep.promotion.acceptance),
+        )
+        constraints = _constraint_vector(
+            metrics, sweep.promotion.acceptance
+        )
+        trial.set_user_attr("constraint", constraints)
+        if float(metrics.get("selection.blow_rate", 0.0)) > 0.0:
+            trial.set_user_attr("stopped_study_on_blow", True)
+            trial.study.stop()
+        return _objective_value(metrics, sweep.objective_terms)
+
+    multiseed_trials = optimize_fixed_study(
+        multiseed_study,
+        target_trials=len(desired_runs),
+        objective=multiseed_objective,
+    )
+    multi_seed: list[dict[str, object]] = []
+    winner: dict[str, object] | None = None
+    for finalist in finalists:
+        trial_number = int(finalist["trial_number"])
+        seed_results: list[dict[str, object]] = []
+        short_circuit_reason: str | None = None
+        for trial in multiseed_trials:
+            if (
+                trial.state is not optuna.trial.TrialState.COMPLETE
+                or int(trial.user_attrs["screening_trial_number"])
+                != trial_number
+            ):
+                continue
+            metrics = {
+                metric: float(trial.user_attrs[metric])
+                for metric in _required_metrics(sweep)
+                if metric in trial.user_attrs
+            }
             seed_results.append({
-                "seed": seed,
-                "objective": _objective_value(metrics, sweep.objective_terms),
-                "feasible": _is_feasible(metrics, sweep.promotion.acceptance),
+                "seed": int(trial.user_attrs["seed"]),
+                "objective": float(trial.value),
+                "feasible": all(
+                    value <= 0.0 for value in _constraints_func(trial)
+                ),
                 "metrics": metrics,
             })
             if float(metrics.get("selection.blow_rate", 0.0)) > 0.0:
                 short_circuit_reason = "zero_blow_gate"
-                break
         feasible_count = sum(bool(item["feasible"]) for item in seed_results)
-        mean_objective = sum(
-            float(item["objective"]) for item in seed_results
-        ) / len(seed_results)
+        mean_objective = (
+            sum(float(item["objective"]) for item in seed_results)
+            / len(seed_results)
+            if seed_results else float("-inf")
+        )
         candidate = {
             "trial_number": trial_number,
             "parameters": finalist["parameters"],
@@ -1140,7 +1403,7 @@ def _run_promotion(
             winner = candidate
     return {
         "promotion_status": "COMPLETE" if winner is not None else "FAILED_GATE",
-        "promoted_trial_numbers": [trial.number for trial in promoted],
+        "promoted_trial_numbers": promoted_numbers,
         "confirmation": confirmations,
         "winner_trial_number": None if winner is None else int(winner["trial_number"]),
         "winner_feasible_seeds": 0 if winner is None else int(winner["feasible_seeds"]),
@@ -1202,55 +1465,55 @@ def run_optuna_sweep(
         for name, value in authority.items():
             study.set_user_attr(name, value)
     reconciled = _reconcile_interrupted_trials(study)
-    reserved_baseline: optuna.Trial | None = None
     if not study.trials:
         study.enqueue_trial(
             _baseline_parameters(sweep), user_attrs={"baseline_control": True}
         )
-        # Reserve the queued baseline before concurrent sampling. SQLite-backed
-        # Optuna workers must never race to claim the same WAITING control.
-        reserved_baseline = study.ask()
-    load_state = state_loader or _default_state_loader
-
     def objective(trial: optuna.Trial) -> float:
-        campaign_trial = int(
-            trial.user_attrs.get("resume_campaign_trial", trial.number)
+        artifact_trial = int(
+            trial.user_attrs.get("artifact_trial_number", trial.number)
         )
         parameters = _sample(trial, sweep)
-        trial_root = artifacts / "screening" / f"trial-{campaign_trial:03d}"
-        config = _compile_campaign(
+        trial_root = artifacts / "screening" / f"trial-{artifact_trial:03d}"
+        config = _compile_trial_config(
             sweep,
             parameters=parameters,
             stage=sweep.stages["screening"],
             run_root=trial_root,
         )
         config_path = configs / (
-            f".optuna-{sweep.name}-screen-trial-{campaign_trial:03d}.json"
+            f".optuna-{sweep.name}-screen-trial-{artifact_trial:03d}.json"
         )
-        run_id = f"{sweep.name}-screen-trial-{campaign_trial:03d}"
+        run_id = f"{sweep.name}-screen-trial-{artifact_trial:03d}"
         print(
             f"[optuna] trial={trial.number}/{target_trials - 1} START "
-            f"campaign_trial={campaign_trial} "
+            f"artifact_trial={artifact_trial} "
             f"params={json.dumps(parameters, sort_keys=True)}",
             flush=True,
         )
-        state, metrics = _run_compiled_campaign(
-            config=config,
-            config_path=config_path,
-            run_id=run_id,
-            stage_name=sweep.stages["screening"].name,
-            artifact_root=artifacts,
-            runner=runner,
-            state_loader=load_state,
-            config_validator=config_validator,
-        )
         trial.set_user_attr("parameters", parameters)
         trial.set_user_attr("config_path", str(config_path))
-        trial.set_user_attr("campaign_phase", state.phase.value)
+        trial.set_user_attr("trial_artifact_root", str(trial_root))
+        trial.set_user_attr("artifact_trial_number", artifact_trial)
+        try:
+            trial_status, metrics = _run_compiled_trial(
+                config=config,
+                config_path=config_path,
+                run_id=run_id,
+                stage_name=sweep.stages["screening"].name,
+                artifact_root=artifacts,
+                runner=runner,
+                state_loader=state_loader,
+                config_validator=config_validator,
+            )
+        except Exception:
+            trial.set_user_attr("stopped_study_on_executor_error", True)
+            trial.study.stop()
+            raise
+        trial.set_user_attr("evaluation_status", trial_status)
         for metric, value in metrics.items():
             trial.set_user_attr(metric, float(value))
         if float(metrics.get("training.short_circuited", 0.0)) == 1.0:
-            trial.set_user_attr("constraint", [1.0] * (len(sweep.constraints) + 1))
             _print_trial_result(
                 trial_number=trial.number,
                 state="PRUNED",
@@ -1258,9 +1521,13 @@ def run_optuna_sweep(
                 objective=None,
                 metrics=metrics,
             )
-            raise optuna.TrialPruned("training short circuit rejected trial")
+            _prune_training_short_circuit(
+                trial,
+                metrics,
+                constraint_count=len(sweep.constraints),
+            )
         if float(metrics.get("selection.short_circuited", 0.0)) == 1.0:
-            trial.set_user_attr("constraint", [1.0] * (len(sweep.constraints) + 1))
+            trial.set_user_attr("constraint", [1.0] * len(sweep.constraints))
             _print_trial_result(
                 trial_number=trial.number,
                 state="COMPLETE",
@@ -1271,11 +1538,8 @@ def run_optuna_sweep(
             return -1_000_000.0
         missing = sorted(_required_metrics(sweep) - set(metrics))
         if missing:
-            raise ValueError(f"Optuna campaign is missing objective metrics: {missing}")
-        constraints = [
-            0.0 if state.phase.value == "COMPLETE" else 1.0,
-            *_constraint_vector(metrics, sweep.constraints),
-        ]
+            raise ValueError(f"Optuna trial is missing objective metrics: {missing}")
+        constraints = _constraint_vector(metrics, sweep.constraints)
         trial.set_user_attr("constraint", constraints)
         value = _objective_value(metrics, sweep.objective_terms)
         _print_trial_result(
@@ -1287,16 +1551,18 @@ def run_optuna_sweep(
         )
         return value
 
-    def finish_reserved_trial(trial: optuna.Trial) -> None:
-        try:
-            value = objective(trial)
-        except optuna.TrialPruned:
-            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-        except Exception:
-            study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            raise
-        else:
-            study.tell(trial, value)
+    def compact_recorded_trial(trial: optuna.trial.FrozenTrial) -> None:
+        if (
+            sweep.screening_artifact_retention == "compact"
+            and _trial_is_rejected(trial)
+        ):
+            _compact_screening_trial(artifacts=artifacts, trial=trial)
+
+    def compact_terminal_trial(
+        _study: optuna.Study,
+        trial: optuna.trial.FrozenTrial,
+    ) -> None:
+        compact_recorded_trial(trial)
 
     terminal_states = {
         optuna.trial.TrialState.COMPLETE,
@@ -1308,26 +1574,13 @@ def run_optuna_sweep(
         if trial.state in terminal_states and trial.number not in reconciled
     )
     remaining = max(0, target_trials - len(effective_terminal))
-    if reserved_baseline is not None:
-        peer_trials = min(remaining - 1, max(0, sweep.n_jobs - 1))
-        if peer_trials:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                baseline_future = executor.submit(
-                    finish_reserved_trial, reserved_baseline
-                )
-                peer_future = executor.submit(
-                    study.optimize,
-                    objective,
-                    n_trials=peer_trials,
-                    n_jobs=peer_trials,
-                )
-                baseline_future.result()
-                peer_future.result()
-        else:
-            finish_reserved_trial(reserved_baseline)
-        remaining -= 1 + peer_trials
     if remaining:
-        study.optimize(objective, n_trials=remaining, n_jobs=sweep.n_jobs)
+        study.optimize(
+            objective,
+            n_trials=remaining,
+            n_jobs=sweep.n_jobs,
+            callbacks=[compact_terminal_trial],
+        )
     best = _best_feasible(study)
     effective_trials = [trial for trial in study.trials if trial.number not in reconciled]
     states = [trial.state for trial in effective_trials]
@@ -1352,7 +1605,7 @@ def run_optuna_sweep(
             artifacts=artifacts,
             configs=configs,
             runner=runner,
-            state_loader=load_state,
+            state_loader=state_loader,
             config_validator=config_validator,
         )
     status = screening_status

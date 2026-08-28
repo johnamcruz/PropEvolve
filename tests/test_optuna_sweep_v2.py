@@ -81,6 +81,7 @@ def _payload(
             "n_jobs": n_jobs,
             "n_startup_trials": min(2, n_trials),
         },
+        "artifacts": {"screening_retention": "compact"},
         "objective": {
             "terms": [
                 {"metric": "selection.pass_rate", "weight": 100.0},
@@ -308,7 +309,7 @@ def test_v2_contract_is_fully_json_driven(tmp_path: Path) -> None:
     assert "agent.learning_rate" in sweep.frozen_paths
 
 
-def test_v2_runs_three_screening_campaigns_in_isolated_parallel_slots(
+def test_v2_runs_three_screening_trials_in_isolated_parallel_slots(
     tmp_path: Path,
 ) -> None:
     barrier = threading.Barrier(3, timeout=5.0)
@@ -340,6 +341,118 @@ def test_v2_runs_three_screening_campaigns_in_isolated_parallel_slots(
 
     assert result.status == "COMPLETE"
     assert peak_active == 3
+
+
+def test_v2_uses_optuna_to_refill_worker_after_each_terminal_trial(
+    tmp_path: Path,
+) -> None:
+    initial_barrier = threading.Barrier(3, timeout=5.0)
+    release_slow_trials = threading.Event()
+    refill_started = threading.Event()
+    lock = threading.Lock()
+    starts = 0
+
+    def runner(config_path: Path, *, run_id: str):
+        nonlocal starts
+        with lock:
+            ordinal = starts
+            starts += 1
+        if ordinal < 3:
+            initial_barrier.wait()
+            if ordinal == 0:
+                return {
+                    "evaluation_status": "PASS",
+                    "metrics": _metrics(),
+                }
+            assert release_slow_trials.wait(timeout=5.0), (
+                "Optuna did not refill a freed worker slot"
+            )
+        else:
+            refill_started.set()
+            release_slow_trials.set()
+        return {
+            "evaluation_status": "PASS",
+            "metrics": _metrics(),
+        }
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, n_trials=5, n_jobs=3),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert result.status == "COMPLETE"
+    assert starts == 5
+    assert refill_started.is_set()
+    assert result.completed_trials == 5
+    assert result.failed_trials == 0
+
+
+def test_v2_resumes_interrupted_trial_with_same_params_and_artifact_identity(
+    tmp_path: Path,
+) -> None:
+    contract = _contract(tmp_path, n_trials=2, n_jobs=1)
+    sweep = load_optuna_sweep(contract)
+    study_root = tmp_path / "study"
+    study_root.mkdir()
+    study = optuna_engine.optuna.create_study(
+        direction="maximize",
+        sampler=optuna_engine.optuna.samplers.TPESampler(
+            seed=sweep.seed,
+            constraints_func=optuna_engine._constraints_func,
+        ),
+        study_name=sweep.name,
+        storage=f"sqlite:///{study_root / 'study.db'}",
+    )
+    authority = {
+        "base_config_sha256": sweep.base_config_sha256,
+        "code_commit": "test-commit",
+        "sweep_config_sha256": optuna_engine._sha256(contract.read_bytes()),
+        "target_trials": 2,
+    }
+    for name, value in authority.items():
+        study.set_user_attr(name, value)
+    baseline = optuna_engine._baseline_parameters(sweep)
+    study.enqueue_trial(baseline, user_attrs={"baseline_control": True})
+    interrupted = study.ask()
+    sampled = optuna_engine._sample(interrupted, sweep)
+    interrupted.set_user_attr("artifact_trial_number", interrupted.number)
+
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        observed.append((run_id, json.loads(config_path.read_text())))
+        return {"evaluation_status": "PASS", "metrics": _metrics()}
+
+    result = run_optuna_sweep(
+        contract,
+        artifact_root=study_root,
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    resumed = optuna_engine.optuna.load_study(
+        study_name=sweep.name,
+        storage=f"sqlite:///{result.study_path}",
+    )
+    assert result.interrupted_trials == 1
+    assert result.completed_trials == 2
+    assert result.failed_trials == 0
+    assert len(observed) == 2
+    assert observed[0][0].endswith("screen-trial-000")
+    retry = next(
+        trial for trial in resumed.trials
+        if trial.user_attrs.get("retry_of_trial") == interrupted.number
+    )
+    assert retry.params == sampled
+    assert retry.state is optuna_engine.optuna.trial.TrialState.COMPLETE
 
 
 def test_v2_reports_one_economic_summary_when_trial_completes(
@@ -407,6 +520,89 @@ def test_v2_reports_one_economic_summary_when_trial_is_pruned(
     ]
 
 
+def test_v2_prunes_before_validation_without_fabricating_selection_metrics(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=lambda _config_path, *, run_id: {
+            "evaluation_status": "FAIL",
+            "metrics": {"training.short_circuited": 1.0},
+        },
+        state_loader=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("Optuna must not load campaign state")
+        ),
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert result.pruned_trials == 1
+    assert result.failed_trials == 0
+    result_lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[optuna-result]")
+    ]
+    assert result_lines == [
+        "[optuna-result] trial=0 state=PRUNED feasible=false "
+        "objective=null pass_rate=n/a blow_rate=n/a"
+    ]
+
+
+def test_v2_compacts_rejected_trial_only_after_terminal_study_record(
+    tmp_path: Path,
+) -> None:
+    study_root = tmp_path / "study"
+
+    def runner(config_path: Path, *, run_id: str):
+        config = json.loads(config_path.read_text())
+        trial_root = Path(config["output"])
+        (trial_root / "training-replay").mkdir(parents=True)
+        (trial_root / "training-replay" / "episode.pkl").write_bytes(
+            b"disposable-replay"
+        )
+        (trial_root / "training-diagnostic-summary.json").write_text(
+            json.dumps({"run_id": run_id, "status": "short_circuited"})
+        )
+        return {
+            "evaluation_status": "FAIL",
+            "metrics": {"training.short_circuited": 1.0},
+        }
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, n_trials=1),
+        artifact_root=study_root,
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert result.pruned_trials == 1
+    assert not (study_root / "screening" / "trial-000").exists()
+    assert (
+        study_root
+        / "screening-evidence"
+        / "trial-000"
+        / "training-diagnostic-summary.json"
+    ).is_file()
+    receipt = json.loads(
+        (study_root / "cleanup" / "trial-000.json").read_text()
+    )
+    assert receipt["trial_state"] == "PRUNED"
+    assert receipt["removed_bytes"] > 0
+    study = optuna_engine.optuna.load_study(
+        study_name="stage2_learning_contract_tpe_test",
+        storage=f"sqlite:///{result.study_path}",
+    )
+    trial, = study.trials
+    assert trial.state is optuna_engine.optuna.trial.TrialState.PRUNED
+    assert trial.user_attrs["training.short_circuited"] == 1.0
+
+
 def test_v2_reports_penalized_result_when_validation_short_circuits(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -439,44 +635,79 @@ def test_v2_reports_penalized_result_when_validation_short_circuits(
     ]
 
 
+def test_v2_stops_study_after_systemic_trial_executor_failure(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def broken_runner(_config_path: Path, *, run_id: str):
+        calls.append(run_id)
+        raise RuntimeError("systemic trial executor failure")
+
+    with pytest.raises(RuntimeError, match="systemic trial executor failure"):
+        run_optuna_sweep(
+            _contract(tmp_path, n_trials=5, n_jobs=1),
+            artifact_root=tmp_path / "study",
+            config_root=tmp_path / "configs",
+            runner=broken_runner,
+            state_loader=lambda *_args: None,
+            config_validator=lambda path: None,
+            code_commit="test-commit",
+        )
+
+    assert calls == ["stage2_learning_contract_tpe_test-screen-trial-000"]
+    study = optuna_engine.optuna.load_study(
+        study_name="stage2_learning_contract_tpe_test",
+        storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
+    )
+    trial, = study.trials
+    assert trial.state is optuna_engine.optuna.trial.TrialState.FAIL
+    assert trial.user_attrs["stopped_study_on_executor_error"] is True
+
+
 def test_v2_default_worker_is_an_isolated_capped_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    expected_state = object()
-
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["environment"] = kwargs["env"]
+        result_path = Path(command[-1])
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({
+            "schema": "propevolve_optuna_trial_result_v1",
+            "config_sha256": optuna_engine._sha256(
+                config_path.read_bytes()
+            ),
+            "evaluation_status": "FAIL",
+            "metrics": _metrics(),
+        }))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(optuna_engine.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        optuna_engine,
-        "_default_state_loader",
-        lambda config_path, run_id: expected_state,
-    )
     config_path = tmp_path / "trial.json"
     config_path.write_text("{}")
+    result_path = tmp_path / "trial-result.json"
 
-    actual_state = optuna_engine._default_runner(
+    actual_result = optuna_engine._default_trial_runner(
         config_path,
         run_id="isolated-trial-001",
+        result_path=result_path,
         stdout_path=tmp_path / "trial.stdout.log",
         stderr_path=tmp_path / "trial.stderr.log",
     )
 
-    assert actual_state is expected_state
+    assert actual_result["evaluation_status"] == "FAIL"
     assert captured["command"][1:7] == [
         "-u",
         "-m",
         "propevolve.cli",
-        "evolve",
+        "optuna-trial",
         "--config",
         str(config_path),
     ]
-    assert captured["command"][-2:] == ["--run-id", "isolated-trial-001"]
+    assert captured["command"][-2:] == ["--result", str(result_path)]
     environment = captured["environment"]
     assert environment["OMP_NUM_THREADS"] == "1"
     assert environment["MKL_NUM_THREADS"] == "1"
@@ -657,7 +888,7 @@ def test_active_sweep_every_replay_mix_compiles_through_real_validation(
 
     for choice in choices:
         parameters = {**baseline, "replay_mix": choice["name"]}
-        config = optuna_engine._compile_campaign(
+        config = optuna_engine._compile_trial_config(
             sweep,
             parameters=parameters,
             stage=sweep.stages["screening"],
@@ -668,33 +899,38 @@ def test_active_sweep_every_replay_mix_compiles_through_real_validation(
         load_experiment_config(path)
 
 
-def test_compiled_campaign_compares_normalized_runtime_plan_identity(
+def test_direct_trial_economics_are_scored_without_campaign_phase(
     tmp_path: Path,
 ) -> None:
     def runner(config_path: Path, *, run_id: str):
-        normalized = load_experiment_config(config_path)
-        return RunState(
-            run_id,
-            _plan(normalized).identity,
-            Phase.COMPLETE,
-            receipts=(StageReceipt(
-                STAGE,
-                1,
-                "complete",
-                {"metrics": _metrics()},
-            ),),
-        )
+        load_experiment_config(config_path)
+        return {
+            "evaluation_status": "FAIL",
+            "metrics": _metrics(**{"selection.pass_rate": 0.60}),
+        }
+
+    def reject_campaign_state(*_args, **_kwargs):
+        raise AssertionError("direct Optuna selection must not load campaign state")
 
     result = run_optuna_sweep(
         _contract(tmp_path, n_trials=1),
         artifact_root=tmp_path / "study",
         config_root=tmp_path / "configs",
         runner=runner,
-        state_loader=lambda config_path, run_id: None,
+        state_loader=reject_campaign_state,
         code_commit="test-commit",
     )
 
     assert result.status == "COMPLETE"
+    study = optuna_engine.optuna.load_study(
+        study_name="stage2_learning_contract_tpe_test",
+        storage=f"sqlite:///{result.study_path}",
+    )
+    trial, = study.trials
+    assert trial.state is optuna_engine.optuna.trial.TrialState.COMPLETE
+    assert trial.user_attrs["evaluation_status"] == "FAIL"
+    assert "campaign_phase" not in trial.user_attrs
+    assert trial.user_attrs["selection.pass_rate"] == pytest.approx(0.60)
 
 
 def test_active_sweep_freezes_verified_learning_mechanics() -> None:
@@ -772,7 +1008,7 @@ def test_active_sweep_searches_exact_entry_supervision_strengths(
             **baseline,
             "entry_supervision.loss_weight": value,
         }
-        config = optuna_engine._compile_campaign(
+        config = optuna_engine._compile_trial_config(
             sweep,
             parameters=parameters,
             stage=sweep.stages["screening"],
@@ -850,7 +1086,7 @@ def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
     assert payload["promotion_status"] == "COMPLETE"
 
 
-def test_v2_runs_three_confirmation_campaigns_in_parallel(
+def test_v2_runs_three_confirmation_trials_in_parallel(
     tmp_path: Path,
 ) -> None:
     payload = _payload(promotion_enabled=True, n_trials=3, n_jobs=3)
@@ -933,3 +1169,44 @@ def test_v2_multi_seed_promotion_stops_after_first_teacher_free_blow(
     assert candidate["short_circuit_reason"] == "zero_blow_gate"
     assert candidate["evaluated_seeds"] == 1
     assert candidate["requested_seeds"] == 2
+
+
+def test_v2_confirmation_prunes_training_short_circuit_without_validation(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        calls.append(run_id)
+        if "-confirm-" in run_id:
+            return {
+                "evaluation_status": "FAIL",
+                "metrics": {"training.short_circuited": 1.0},
+            }
+        return _state(config_path, run_id, _metrics(**{
+            "selection.pass_rate": 0.65,
+            "selection.near_blow_timeout_rate": 0.15,
+        }))
+
+    result = run_optuna_sweep(
+        _contract(tmp_path, promotion_enabled=True, n_trials=1),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=runner,
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert calls == [
+        "stage2_learning_contract_tpe_test-screen-trial-000",
+        "stage2_learning_contract_tpe_test-confirm-trial-000",
+    ]
+    assert result.status == "FAILED_GATE"
+    confirmation = optuna_engine.optuna.load_study(
+        study_name="stage2_learning_contract_tpe_test-confirmation",
+        storage=f"sqlite:///{tmp_path / 'study' / 'confirmation.study.db'}",
+    )
+    trial, = confirmation.trials
+    assert trial.state is optuna_engine.optuna.trial.TrialState.PRUNED
+    assert trial.user_attrs["training.short_circuited"] == 1.0

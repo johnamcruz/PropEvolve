@@ -3097,6 +3097,7 @@ class HistoricalCandidateRunner:
         *,
         parent_candidate_ids: tuple[str, ...],
         hypothesis: str,
+        collect_all_evidence: bool = False,
     ):
         config = materialize_effective_config(config)
         configure_runtime_environment(config["runtime"])
@@ -4530,19 +4531,22 @@ class HistoricalCandidateRunner:
                         )
                     ),
                 ),
-            ),
-            EvaluationStage(
-                "selection",
-                selection_metrics,
-                gates=_selection_evaluation_gates(
-                    require_both_entry_sides=(
-                        regime_selectivity_spec is not None
-                        and regime_selectivity_spec.get("side_balance")
-                        is not None
-                    )
-                ),
-            ),
+            )
         ]
+        if validation is not None:
+            stages.append(
+                EvaluationStage(
+                    "selection",
+                    selection_metrics,
+                    gates=_selection_evaluation_gates(
+                        require_both_entry_sides=(
+                            regime_selectivity_spec is not None
+                            and regime_selectivity_spec.get("side_balance")
+                            is not None
+                        )
+                    ),
+                )
+            )
         if recovery_stress is not None:
             stages.append(EvaluationStage(
                 "recovery_stress",
@@ -4567,6 +4571,7 @@ class HistoricalCandidateRunner:
                 "decision_rule": "selection pass rate must exceed blow rate",
             },
             tuple(stages),
+            continue_after_failure=collect_all_evidence,
         )
         return candidate, cascade.evaluate(candidate.candidate_id)
 

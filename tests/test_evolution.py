@@ -140,7 +140,7 @@ def test_archive_keeps_distinct_elites_for_multiple_objectives(tmp_path: Path) -
     }
 
 
-def test_evaluator_cascade_stops_before_expensive_stage_on_gate_failure(
+def test_campaign_evaluator_default_stops_after_training_gate_failure(
     tmp_path: Path,
 ) -> None:
     archive = CandidateArchive(tmp_path / "archive")
@@ -169,6 +169,46 @@ def test_evaluator_cascade_stops_before_expensive_stage_on_gate_failure(
     assert receipt.status == "FAIL"
     assert expensive_calls == 0
     assert [stage["name"] for stage in receipt.stages] == ["smoke"]
+
+
+def test_evaluator_cascade_can_collect_selection_after_training_failure(
+    tmp_path: Path,
+) -> None:
+    archive = CandidateArchive(tmp_path / "archive")
+    candidate = _candidate(archive, tmp_path, "screening-candidate")
+
+    cascade = EvaluatorCascade(
+        archive,
+        {"name": "optuna-screening-evidence-v1"},
+        (
+            EvaluationStage(
+                "training",
+                lambda _candidate: {"learnable": 0.0},
+                gates=(EvaluationGate("learnable", ">", 0.0),),
+            ),
+            EvaluationStage(
+                "selection",
+                lambda _candidate: {
+                    "pass_rate": 0.14,
+                    "blow_rate": 0.0,
+                },
+            ),
+        ),
+        continue_after_failure=True,
+    )
+
+    receipt = cascade.evaluate(candidate.candidate_id)
+
+    assert receipt.status == "FAIL"
+    assert receipt.metrics == {
+        "training.learnable": 0.0,
+        "selection.pass_rate": 0.14,
+        "selection.blow_rate": 0.0,
+    }
+    assert [
+        (stage["name"], stage["status"])
+        for stage in receipt.stages
+    ] == [("training", "FAIL"), ("selection", "PASS")]
 
 
 def test_reasoning_packet_is_authenticated_and_contains_prior_evidence(

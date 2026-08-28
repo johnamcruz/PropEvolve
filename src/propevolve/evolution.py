@@ -500,12 +500,15 @@ class EvaluatorCascade:
         archive: CandidateArchive,
         evaluator_contract: Mapping,
         stages: Sequence[EvaluationStage],
+        *,
+        continue_after_failure: bool = False,
     ) -> None:
         if not stages:
             raise ValueError("an evaluator cascade requires at least one stage")
         self.archive = archive
         self.evaluator_contract = dict(evaluator_contract)
         self.stages = tuple(stages)
+        self.continue_after_failure = bool(continue_after_failure)
 
     def evaluate(self, candidate_id: str) -> EvaluationReceipt:
         candidate = self.archive.load_candidate(candidate_id)
@@ -524,7 +527,8 @@ class EvaluatorCascade:
                 all_metrics[f"{stage.name}.{key}"] = value
             if not passed:
                 status = "FAIL"
-                break
+                if not self.continue_after_failure:
+                    break
         return self.archive.record_evaluation(
             candidate_id,
             evaluator_contract=self.evaluator_contract,

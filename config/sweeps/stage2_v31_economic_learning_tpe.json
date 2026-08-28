@@ -10,6 +10,9 @@
     "n_jobs": 3,
     "n_startup_trials": 8
   },
+  "artifacts": {
+    "screening_retention": "compact"
+  },
   "objective": {
     "terms": [
       {
