@@ -1254,6 +1254,10 @@ def test_empty_revision_allowlist_requires_explicitly_nonrevisable_campaign(
         (lambda value: value.update({"target_r": 0.0}), "economics"),
         (lambda value: value.update({"collision": "target_first"}), "contract"),
         (lambda value: value.update({"loss_weight": 0.0}), "economics"),
+        (
+            lambda value: value.update({"opportunity_loss_multiplier": 0.0}),
+            "economics",
+        ),
     ),
 )
 def test_entry_supervision_contract_fails_closed(
@@ -1300,6 +1304,31 @@ def test_entry_supervision_accepts_alternate_relational_recipe(
 
     assert config["entry_supervision"]["fill_offsets"] == (1, 3, 5)
     assert config["entry_supervision"]["target_r"] == 3.0
+
+
+def test_entry_supervision_opportunity_multiplier_defaults_and_is_configured(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["entry_supervision"].pop("opportunity_loss_multiplier", None)
+    default_path = tmp_path / "default-opportunity-multiplier.json"
+    default_path.write_text(json.dumps(payload))
+
+    default_config = load_experiment_config(default_path)
+
+    assert default_config["entry_supervision"][
+        "opportunity_loss_multiplier"
+    ] == 1.0
+
+    payload["entry_supervision"]["opportunity_loss_multiplier"] = 3.0
+    configured_path = tmp_path / "configured-opportunity-multiplier.json"
+    configured_path.write_text(json.dumps(payload))
+
+    configured = load_experiment_config(configured_path)
+
+    assert configured["entry_supervision"][
+        "opportunity_loss_multiplier"
+    ] == 3.0
 
 
 def test_recovery_curriculum_accepts_challenge_relative_start(

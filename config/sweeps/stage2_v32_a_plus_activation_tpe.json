@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v31_economic_learning_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v31_contrast_rehearsal_200ep.json",
-  "study_root": "runs/stage2_v31_economic_learning_tpe",
+  "name": "stage2_v32_a_plus_activation_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v32_a_plus_activation_200ep.json",
+  "study_root": "runs/stage2_v32_a_plus_activation_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -77,77 +77,41 @@
     }
   },
   "search_space": {
-    "entry_supervision.loss_weight": {
+    "entry_supervision.opportunity_loss_multiplier": {
       "type": "categorical",
       "choices": [
-        0.3,
-        0.45,
-        0.6,
-        0.9
+        1.0,
+        1.5,
+        2.0,
+        3.0
       ]
     },
-    "agent.challenge_return_self_imitation_weight": {
-      "type": "float",
-      "low": 0.0,
-      "high": 0.15,
-      "step": 0.025
-    },
-    "challenge.large_win_bonus_coefficient": {
-      "type": "float",
-      "low": 0.05,
-      "high": 0.3,
-      "step": 0.025
-    },
-    "challenge.mll_proximity_penalty_coefficient": {
-      "type": "float",
-      "low": 0.0,
-      "high": 0.0003,
-      "step": 0.00005
-    },
-    "challenge.lead_giveback_penalty_coefficient": {
-      "type": "float",
-      "low": 0.0,
-      "high": 0.0003,
-      "step": 0.00005
-    },
-    "regime_selectivity.loss_weight": {
-      "type": "float",
-      "low": 0.1,
-      "high": 0.8,
-      "log": true
-    },
-    "regime_selectivity.persistent_chop_negative_emphasis": {
-      "type": "float",
-      "low": 0.75,
-      "high": 3.0,
-      "step": 0.25
+    "agent.entry_action_margin": {
+      "type": "categorical",
+      "choices": [
+        0.25,
+        0.4,
+        0.6
+      ]
     },
     "regime_selectivity.paired_a_plus_winner_loss_weight": {
-      "type": "float",
-      "low": 1.0,
-      "high": 4.0,
-      "step": 0.5
-    },
-    "balance_curriculum.outcome_contrast_replay.update_period": {
-      "type": "int",
-      "low": 1,
-      "high": 8,
-      "step": 1
-    },
-    "balance_curriculum.outcome_contrast_replay.max_examples": {
-      "type": "int",
-      "low": 4,
-      "high": 16,
-      "step": 4
+      "type": "categorical",
+      "choices": [
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        4.0
+      ]
     },
     "replay_mix": {
       "type": "categorical_mapping",
       "choices": [
         {
-          "name": "v31_control",
+          "name": "trial22_safe_control",
           "values": {
-            "training.terminal_sequence_fraction": 0.5,
-            "training.safety_sequence_fraction": 0.25,
+            "training.terminal_sequence_fraction": 0.375,
+            "training.safety_sequence_fraction": 0.375,
             "training.entry_opportunity_sequence_fraction": 0.25
           }
         },
@@ -157,14 +121,6 @@
             "training.terminal_sequence_fraction": 0.4375,
             "training.safety_sequence_fraction": 0.1875,
             "training.entry_opportunity_sequence_fraction": 0.375
-          }
-        },
-        {
-          "name": "safety_leaning",
-          "values": {
-            "training.terminal_sequence_fraction": 0.375,
-            "training.safety_sequence_fraction": 0.375,
-            "training.entry_opportunity_sequence_fraction": 0.25
           }
         }
       ]
@@ -289,6 +245,7 @@
       "entry_supervision.horizon_bars",
       "entry_supervision.collision",
       "entry_supervision.action_class_balance",
+      "entry_supervision.loss_weight",
       "agent.hidden_dim",
       "agent.atoms",
       "agent.value_min",
@@ -302,7 +259,7 @@
       "agent.target_update_mode",
       "agent.target_soft_tau",
       "agent.policy_retention_loss_weight",
-      "agent.entry_action_margin",
+      "agent.challenge_return_self_imitation_weight",
       "agent.auxiliary_gradient_conflict_mode",
       "agent.exclude_economic_winners_from_chop_wait",
       "challenge.profit_target",
@@ -313,6 +270,9 @@
       "challenge.minimum_mll_headroom",
       "challenge.trailing_mll_lock",
       "challenge.per_trade_risk_dollars",
+      "challenge.large_win_bonus_coefficient",
+      "challenge.mll_proximity_penalty_coefficient",
+      "challenge.lead_giveback_penalty_coefficient",
       "challenge.ratchet_activation_r",
       "challenge.ratchet_giveback_r",
       "challenge.ratchet_lock_floor_r",
@@ -331,6 +291,8 @@
       "regime_selectivity.failed_confluence_margin",
       "regime_selectivity.paired_a_plus_margin",
       "regime_selectivity.side_balance",
+      "regime_selectivity.loss_weight",
+      "regime_selectivity.persistent_chop_negative_emphasis",
       "training.sequence_length",
       "training.recurrent_horizon",
       "training.batch_sequences",
@@ -347,6 +309,8 @@
       "training.teacher_guidance_dropout_end",
       "training.teacher_autonomy_start_fraction",
       "training.entry_supervision_autonomy_start_fraction",
+      "balance_curriculum.outcome_contrast_replay.update_period",
+      "balance_curriculum.outcome_contrast_replay.max_examples",
       "balance_curriculum.pass_replay"
     ]
   }

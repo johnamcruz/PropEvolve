@@ -1125,6 +1125,7 @@ class RecurrentC51Agent:
         teacher_entry_search_teacher_temperature: float = 1.0,
         teacher_entry_search_q_temperature: float = 1.0,
         entry_action_loss_weight: float = 0.0,
+        entry_action_opportunity_loss_multiplier: float = 1.0,
         entry_action_class_weights: Sequence[float] = (1.0, 1.0, 1.0),
         entry_action_loss_reduction: str = "population_weighted_mean_v1",
         entry_action_margin: float = 0.0,
@@ -1175,6 +1176,9 @@ class RecurrentC51Agent:
             or teacher_loss_weight < 0
             or teacher_entry_search_loss_weight < 0
             or entry_action_loss_weight < 0
+            or isinstance(entry_action_opportunity_loss_multiplier, bool)
+            or not np.isfinite(entry_action_opportunity_loss_multiplier)
+            or entry_action_opportunity_loss_multiplier < 1.0
             or isinstance(entry_action_margin, bool)
             or not np.isfinite(entry_action_margin)
             or entry_action_margin < 0
@@ -1406,6 +1410,9 @@ class RecurrentC51Agent:
             teacher_entry_search_q_temperature
         )
         self.entry_action_loss_weight = float(entry_action_loss_weight)
+        self.entry_action_opportunity_loss_multiplier = float(
+            entry_action_opportunity_loss_multiplier
+        )
         self.entry_action_class_weights = entry_action_class_weights
         self.entry_action_loss_reduction = str(entry_action_loss_reduction)
         self.entry_action_margin = float(entry_action_margin)
@@ -3689,15 +3696,23 @@ class RecurrentC51Agent:
                         (selected_targets == class_index)
                         & (selected_predictions == class_index)
                     ).sum()
-                weighted_entry_action_loss = (
-                    entry_action_weight_scale
-                    * self.entry_action_loss_weight
-                    * (entry_action_loss + entry_action_margin_loss)
+                entry_action_class_loss_multipliers = torch.tensor(
+                    (
+                        1.0,
+                        self.entry_action_opportunity_loss_multiplier,
+                        self.entry_action_opportunity_loss_multiplier,
+                    ),
+                    dtype=entry_action_class_loss_contributions.dtype,
+                    device=self.device,
                 )
                 weighted_entry_action_class_losses = (
                     entry_action_weight_scale
                     * self.entry_action_loss_weight
                     * entry_action_class_loss_contributions
+                    * entry_action_class_loss_multipliers
+                )
+                weighted_entry_action_loss = (
+                    weighted_entry_action_class_losses.sum()
                 )
                 loss = loss + weighted_entry_action_loss
                 gradient_safety_loss = (
@@ -3764,6 +3779,11 @@ class RecurrentC51Agent:
                         gradient_economic_boundary_losses[boundary_name]
                         + entry_action_weight_scale
                         * self.entry_action_loss_weight
+                        * (
+                            self.entry_action_opportunity_loss_multiplier
+                            if preferred_action != Action.WAIT
+                            else 1.0
+                        )
                         * (
                             boundary_losses
                             * boundary_row_weights
@@ -5145,6 +5165,7 @@ class RecurrentC51Agent:
         self.challenge_return_self_imitation_weight = 0.0
         self.challenge_return_discount = 1.0
         self.entry_action_loss_weight = 0.0
+        self.entry_action_opportunity_loss_multiplier = 1.0
         self.teacher_loss_weight = 0.0
         self.teacher_entry_search_loss_weight = 0.0
         self.teacher_entry_search_objective = "raw_probability"
@@ -5209,6 +5230,7 @@ class RecurrentC51Agent:
             or self.teacher_loss_weight != 0.0
             or self.teacher_entry_search_loss_weight != 0.0
             or self.entry_action_loss_weight != 0.0
+            or self.entry_action_opportunity_loss_multiplier != 1.0
             or self.auxiliary_gradient_conflict_mode != "none"
             or self.exclude_economic_winners_from_chop_wait
             or self.challenge_return_self_imitation_weight != 0.0
@@ -5303,6 +5325,9 @@ class RecurrentC51Agent:
                     self.teacher_entry_search_q_temperature
                 ),
                 "entry_action_loss_weight": self.entry_action_loss_weight,
+                "entry_action_opportunity_loss_multiplier": (
+                    self.entry_action_opportunity_loss_multiplier
+                ),
                 "entry_action_class_weights": self.entry_action_class_weights,
                 "entry_action_loss_reduction": self.entry_action_loss_reduction,
                 "entry_action_margin": self.entry_action_margin,
@@ -5447,6 +5472,7 @@ class RecurrentC51Agent:
         config.setdefault("teacher_entry_search_teacher_temperature", 1.0)
         config.setdefault("teacher_entry_search_q_temperature", 1.0)
         config.setdefault("entry_action_loss_weight", 0.0)
+        config.setdefault("entry_action_opportunity_loss_multiplier", 1.0)
         config.setdefault("entry_action_class_weights", (1.0, 1.0, 1.0))
         config.setdefault(
             "entry_action_loss_reduction", "population_weighted_mean_v1"

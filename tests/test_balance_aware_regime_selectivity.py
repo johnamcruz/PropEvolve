@@ -1221,6 +1221,7 @@ def _agent(
     n_step_return: int = 1,
     recurrent_burn_in: int = 0,
     entry_action_weight: float = 0.0,
+    entry_action_opportunity_multiplier: float = 1.0,
     entry_action_margin: float = 0.0,
     entry_action_loss_reduction: str = "population_weighted_mean_v1",
     side_balance: str | None = None,
@@ -1267,6 +1268,9 @@ def _agent(
         teacher_loss_weight=1e-6,
         teacher_entry_search_centers=expansion_centers,
         entry_action_loss_weight=entry_action_weight,
+        entry_action_opportunity_loss_multiplier=(
+            entry_action_opportunity_multiplier
+        ),
         entry_action_margin=entry_action_margin,
         entry_action_loss_reduction=entry_action_loss_reduction,
         regime_selectivity_loss_weight=selectivity_weight,
@@ -1284,6 +1288,79 @@ def _agent(
         challenge_return_discount=challenge_return_discount,
         **optional_settings,
     )
+
+
+def test_opportunity_multiplier_strengthens_only_authenticated_entry_targets(
+) -> None:
+    ready = _teacher_row(
+        long_attempt=0.90,
+        long_clean=0.90,
+        short_attempt=0.10,
+        short_clean=0.10,
+        chop=0.05,
+        neutral=0.45,
+        trend=0.50,
+    )
+    batch = (
+        _sequence(
+            (1.0, 0.0, 0.0),
+            ready,
+            headroom=1.0,
+            target=Action.ENTER_LONG_1,
+        ),
+        _sequence(
+            (-1.0, 0.0, 0.0),
+            ready,
+            headroom=1.0,
+            target=Action.ENTER_SHORT_1,
+        ),
+        _sequence(
+            (0.0, 1.0, 0.0),
+            ready,
+            headroom=1.0,
+            target=Action.WAIT,
+        ),
+    )
+
+    control = _agent(
+        seed=607,
+        selectivity_weight=0.0,
+        entry_action_weight=1.0,
+        entry_action_margin=0.25,
+        entry_action_opportunity_multiplier=1.0,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+    )
+    boosted = _agent(
+        seed=607,
+        selectivity_weight=0.0,
+        entry_action_weight=1.0,
+        entry_action_margin=0.25,
+        entry_action_opportunity_multiplier=3.0,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+    )
+
+    control.train_batch(batch, teacher_weight_scale=0.0)
+    boosted.train_batch(batch, teacher_weight_scale=0.0)
+
+    assert boosted.last_train_metrics[
+        "gradient_conflict_opportunity_norm"
+    ] == pytest.approx(
+        3.0 * control.last_train_metrics["gradient_conflict_opportunity_norm"],
+        rel=1e-5,
+    )
+    assert boosted.last_train_metrics[
+        "gradient_conflict_safety_norm"
+    ] == pytest.approx(
+        control.last_train_metrics["gradient_conflict_safety_norm"],
+        rel=1e-6,
+    )
+    boosted.discard_teacher()
+    assert boosted.entry_action_opportunity_loss_multiplier == 1.0
+    boosted.assert_teacher_free()
 
 
 def _sequence(

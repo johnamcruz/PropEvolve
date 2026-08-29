@@ -53,6 +53,23 @@ def _build_targets(market: MarketSeries | None = None):
     )
 
 
+def test_opportunity_multiplier_does_not_change_label_identity() -> None:
+    baseline = _build_targets()
+    specification = _entry_spec()
+    specification["opportunity_loss_multiplier"] = 3.0
+    boosted = build_entry_action_targets(
+        {"NQ": _market()},
+        specification,
+        point_values={"NQ": 148.0},
+        round_trip_fees={"NQ": 4.0},
+        training_end_exclusive="2025-01-01",
+    )
+
+    assert boosted.manifest["identity_sha256"] == baseline.manifest[
+        "identity_sha256"
+    ]
+
+
 def _market(
     *,
     rows: int = 160,

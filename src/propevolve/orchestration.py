@@ -97,6 +97,7 @@ _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS = (
 )
 _EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS = (
     "entry_supervision.loss_weight",
+    "entry_supervision.opportunity_loss_multiplier",
 )
 _EXTERNAL_PARENT_ECONOMIC_FIELDS = (
     "profit_target",

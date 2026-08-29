@@ -476,12 +476,16 @@ def _validated_contract(
     if not isinstance(spec, Mapping):
         raise TypeError("entry supervision spec must be a mapping")
     keys = set(spec)
-    label_keys = keys - {"action_class_balance"}
-    if label_keys != _SPEC_KEYS or keys - _SPEC_KEYS - {"action_class_balance"}:
+    training_keys = {
+        "action_class_balance",
+        "opportunity_loss_multiplier",
+    }
+    label_keys = keys - training_keys
+    if label_keys != _SPEC_KEYS or keys - _SPEC_KEYS - training_keys:
         raise ValueError(
             "entry supervision spec keys drifted: "
             f"missing={sorted(_SPEC_KEYS - label_keys)} "
-            f"extra={sorted(keys - _SPEC_KEYS - {'action_class_balance'})}"
+            f"extra={sorted(keys - _SPEC_KEYS - training_keys)}"
         )
     balance = spec.get("action_class_balance")
     if balance is not None and (
@@ -491,6 +495,16 @@ def _validated_contract(
         or tuple(balance.get("action_order", ())) != ENTRY_ACTION_ORDER
     ):
         raise ValueError("entry supervision class balance contract drifted")
+    opportunity_multiplier = spec.get("opportunity_loss_multiplier", 1.0)
+    if (
+        isinstance(opportunity_multiplier, bool)
+        or not isinstance(opportunity_multiplier, Real)
+        or not math.isfinite(float(opportunity_multiplier))
+        or float(opportunity_multiplier) < 1.0
+    ):
+        raise ValueError(
+            "entry supervision opportunity multiplier must be finite and at least one"
+        )
     if any(spec[name] != expected for name, expected in _INVARIANT_SPEC.items()):
         raise ValueError("entry supervision causal contract drifted")
     decision_count = spec["decision_count"]

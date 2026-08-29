@@ -138,10 +138,10 @@ def _payload(
                 "type": "categorical_mapping",
                 "choices": [
                     {
-                        "name": "v31_control",
+                        "name": "active_control",
                         "values": {
-                            "training.terminal_sequence_fraction": 0.50,
-                            "training.safety_sequence_fraction": 0.25,
+                            "training.terminal_sequence_fraction": 0.375,
+                            "training.safety_sequence_fraction": 0.375,
                             "training.entry_opportunity_sequence_fraction": 0.25,
                         },
                     },
@@ -820,8 +820,8 @@ def test_v2_screening_applies_numeric_and_grouped_json_dimensions(
         not item["metric"].startswith("balance_stress.")
         for item in stage["selection_requirements"]
     )
-    assert config["training"]["terminal_sequence_fraction"] == 0.50
-    assert config["training"]["safety_sequence_fraction"] == 0.25
+    assert config["training"]["terminal_sequence_fraction"] == 0.375
+    assert config["training"]["safety_sequence_fraction"] == 0.375
     assert config["training"]["entry_opportunity_sequence_fraction"] == 0.25
     base = json.loads(BASE_CONFIG.read_text())
     assert config["teachers"] == base["teachers"]
@@ -954,6 +954,7 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "entry_supervision.horizon_bars",
         "entry_supervision.collision",
         "entry_supervision.action_class_balance",
+        "entry_supervision.loss_weight",
         "regime_selectivity.expansion_center_receipt",
         "regime_selectivity.expansion_center_receipt_sha256",
         "regime_selectivity.expansion_long_center",
@@ -968,6 +969,7 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "agent.n_step_return",
         "agent.recurrent_burn_in",
         "agent.auxiliary_gradient_conflict_mode",
+        "agent.challenge_return_self_imitation_weight",
         "regime_selectivity.semantics",
         "regime_selectivity.side_balance",
         "training.sequence_length",
@@ -980,33 +982,85 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "challenge.minimum_mll_headroom",
         "challenge.trailing_mll_lock",
         "challenge.per_trade_risk_dollars",
+        "challenge.large_win_bonus_coefficient",
+        "challenge.mll_proximity_penalty_coefficient",
+        "challenge.lead_giveback_penalty_coefficient",
+        "regime_selectivity.loss_weight",
+        "regime_selectivity.persistent_chop_negative_emphasis",
+        "balance_curriculum.outcome_contrast_replay.update_period",
+        "balance_curriculum.outcome_contrast_replay.max_examples",
         "sealed_confirmation",
     }
 
     assert _ACTIVE_PAYLOAD["frozen"]["teacher_free_selection"] is True
     assert required_frozen_paths <= set(sweep.frozen_paths)
-    assert "entry_supervision.loss_weight" not in sweep.frozen_paths
+    assert "entry_supervision.opportunity_loss_multiplier" not in (
+        sweep.frozen_paths
+    )
+    assert "agent.entry_action_margin" not in sweep.frozen_paths
 
 
-def test_active_sweep_searches_exact_entry_supervision_strengths(
+def test_active_sweep_inherits_trial22_safe_control() -> None:
+    sweep = load_optuna_sweep(ACTIVE_CONTRACT)
+    base = sweep.base_config
+
+    assert base["entry_supervision"]["loss_weight"] == 0.90
+    assert base["agent"]["challenge_return_self_imitation_weight"] == 0.025
+    assert base["challenge"]["large_win_bonus_coefficient"] == 0.125
+    assert base["challenge"]["mll_proximity_penalty_coefficient"] == 0.00030
+    assert base["challenge"]["lead_giveback_penalty_coefficient"] == 0.00010
+    assert base["regime_selectivity"]["loss_weight"] == pytest.approx(
+        0.3604153677515533
+    )
+    assert base["regime_selectivity"][
+        "persistent_chop_negative_emphasis"
+    ] == 2.25
+    assert base["balance_curriculum"]["outcome_contrast_replay"] == {
+        "update_period": 5,
+        "max_examples": 8,
+    }
+
+
+def test_active_sweep_searches_exact_a_plus_activation_strengths(
     tmp_path: Path,
 ) -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
-    specification = sweep.search_space["entry_supervision.loss_weight"]
+    multiplier_specification = sweep.search_space[
+        "entry_supervision.opportunity_loss_multiplier"
+    ]
 
-    assert specification == {
-        "type": "categorical",
-        "choices": [0.30, 0.45, 0.60, 0.90],
+    assert set(sweep.search_space) == {
+        "entry_supervision.opportunity_loss_multiplier",
+        "agent.entry_action_margin",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
+        "replay_mix",
     }
-    assert optuna_engine._baseline_parameters(sweep)[
-        "entry_supervision.loss_weight"
-    ] == 0.30
-
+    assert multiplier_specification == {
+        "type": "categorical",
+        "choices": [1.0, 1.5, 2.0, 3.0],
+    }
+    assert sweep.search_space["agent.entry_action_margin"] == {
+        "type": "categorical",
+        "choices": [0.25, 0.40, 0.60],
+    }
+    assert sweep.search_space[
+        "regime_selectivity.paired_a_plus_winner_loss_weight"
+    ] == {
+        "type": "categorical",
+        "choices": [1.5, 2.0, 2.5, 3.0, 4.0],
+    }
     baseline = optuna_engine._baseline_parameters(sweep)
-    for value in specification["choices"]:
+    assert baseline == {
+        "entry_supervision.opportunity_loss_multiplier": 1.0,
+        "agent.entry_action_margin": 0.25,
+        "regime_selectivity.paired_a_plus_winner_loss_weight": 1.5,
+        "replay_mix": "trial22_safe_control",
+    }
+
+    for value in multiplier_specification["choices"]:
         parameters = {
             **baseline,
-            "entry_supervision.loss_weight": value,
+            "entry_supervision.opportunity_loss_multiplier": value,
         }
         config = optuna_engine._compile_trial_config(
             sweep,
@@ -1014,11 +1068,13 @@ def test_active_sweep_searches_exact_entry_supervision_strengths(
             stage=sweep.stages["screening"],
             run_root=tmp_path / str(value),
         )
-        path = tmp_path / f"entry-supervision-{value}.json"
+        path = tmp_path / f"opportunity-multiplier-{value}.json"
         optuna_engine._write_exact(path, config)
         normalized = load_experiment_config(path)
 
-        assert normalized["entry_supervision"]["loss_weight"] == value
+        assert normalized["entry_supervision"][
+            "opportunity_loss_multiplier"
+        ] == value
 
 
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(

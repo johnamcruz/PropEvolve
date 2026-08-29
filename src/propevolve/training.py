@@ -214,6 +214,9 @@ def _assert_recovery_entry_balance(
         "entry_action_loss_reduction", "population_weighted_mean_v1"
     ))
     expected_margin = float(agent_settings.get("entry_action_margin", 0.0))
+    expected_opportunity_multiplier = float(agent_settings.get(
+        "entry_action_opportunity_loss_multiplier", 1.0
+    ))
     expected_gradient_conflict_mode = str(
         agent_settings.get("auxiliary_gradient_conflict_mode", "none")
     )
@@ -226,6 +229,12 @@ def _assert_recovery_entry_balance(
         )
         != expected_reduction
         or getattr(agent, "entry_action_margin", 0.0) != expected_margin
+        or getattr(
+            agent,
+            "entry_action_opportunity_loss_multiplier",
+            1.0,
+        )
+        != expected_opportunity_multiplier
         or getattr(agent, "auxiliary_gradient_conflict_mode", "none")
         != expected_gradient_conflict_mode
     ):
@@ -3254,6 +3263,9 @@ class HistoricalCandidateRunner:
         if entry_supervision_spec is not None:
             agent_settings["entry_action_loss_weight"] = float(
                 entry_supervision_spec["loss_weight"]
+            )
+            agent_settings["entry_action_opportunity_loss_multiplier"] = float(
+                entry_supervision_spec["opportunity_loss_multiplier"]
             )
         if entry_action_balance_receipt is not None:
             agent_settings["entry_action_class_weights"] = (

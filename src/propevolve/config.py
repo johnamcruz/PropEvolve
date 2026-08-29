@@ -523,6 +523,7 @@ def _validate_entry_supervision(
         "horizon_bars",
         "collision",
         "loss_weight",
+        "opportunity_loss_multiplier",
         "action_class_balance",
     }
     phase_fields = {"favorable_r", "adverse_r", "horizon_bars"}
@@ -587,6 +588,7 @@ def _validate_entry_supervision(
             "stop_r",
             "horizon_bars",
             "loss_weight",
+            "opportunity_loss_multiplier",
         )
     }
     if (
@@ -601,6 +603,7 @@ def _validate_entry_supervision(
         or not isinstance(numeric["horizon_bars"], int)
         or int(numeric["horizon_bars"]) < 1
         or float(numeric["loss_weight"]) <= 0.0
+        or float(numeric["opportunity_loss_multiplier"]) < 1.0
     ):
         raise ValueError("entry supervision economics are invalid")
     training = payload.get("training")
