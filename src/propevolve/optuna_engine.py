@@ -241,6 +241,15 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _study_storage(path: Path) -> optuna.storages.JournalStorage:
+    """Use Optuna's file-locked journal for concurrent local workers."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return optuna.storages.JournalStorage(
+        optuna.storages.journal.JournalFileBackend(str(path))
+    )
+
+
 def _constraint_contract(
     raw: object,
     *,
@@ -1182,7 +1191,9 @@ def _run_promotion(
             constraints_func=_constraints_func,
         ),
         study_name=f"{sweep.name}-confirmation",
-        storage=f"sqlite:///{artifacts / 'confirmation.study.db'}",
+        storage=_study_storage(
+            artifacts / "confirmation.study.journal.log"
+        ),
         load_if_exists=True,
     )
     promoted_numbers = [trial.number for trial in promoted]
@@ -1276,7 +1287,9 @@ def _run_promotion(
             constraints_func=_constraints_func,
         ),
         study_name=f"{sweep.name}-multi-seed",
-        storage=f"sqlite:///{artifacts / 'multi-seed.study.db'}",
+        storage=_study_storage(
+            artifacts / "multi-seed.study.journal.log"
+        ),
         load_if_exists=True,
     )
     desired_runs = [
@@ -1436,7 +1449,7 @@ def run_optuna_sweep(
     target_trials = sweep.n_trials if n_trials is None else int(n_trials)
     if target_trials < 1:
         raise ValueError("Optuna target trial count must be positive")
-    storage_path = artifacts / "study.db"
+    storage_path = artifacts / "study.journal.log"
     sweep_sha256 = _sha256(sweep.path.read_bytes())
     active_code_commit = code_commit or _clean_code_commit(repository_root)
     sampler = optuna.samplers.TPESampler(
@@ -1448,7 +1461,7 @@ def run_optuna_sweep(
         direction="maximize",
         sampler=sampler,
         study_name=sweep.name,
-        storage=f"sqlite:///{storage_path}",
+        storage=_study_storage(storage_path),
         load_if_exists=True,
     )
     authority = {

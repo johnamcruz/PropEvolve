@@ -316,12 +316,14 @@ def test_v2_runs_three_screening_trials_in_isolated_parallel_slots(
     lock = threading.Lock()
     active = 0
     peak_active = 0
+    run_ids: list[str] = []
 
     def runner(config_path: Path, *, run_id: str):
         nonlocal active, peak_active
         with lock:
             active += 1
             peak_active = max(peak_active, active)
+            run_ids.append(run_id)
         try:
             barrier.wait()
             return _state(config_path, run_id, _metrics())
@@ -341,6 +343,43 @@ def test_v2_runs_three_screening_trials_in_isolated_parallel_slots(
 
     assert result.status == "COMPLETE"
     assert peak_active == 3
+    assert len(run_ids) == len(set(run_ids)) == 4
+
+
+def test_v2_parallel_screening_uses_lock_safe_journal_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_storage: list[object] = []
+    create_study = optuna_engine.optuna.create_study
+
+    def recording_create_study(*args, **kwargs):
+        observed_storage.append(kwargs.get("storage"))
+        return create_study(*args, **kwargs)
+
+    monkeypatch.setattr(
+        optuna_engine.optuna,
+        "create_study",
+        recording_create_study,
+    )
+    run_optuna_sweep(
+        _contract(tmp_path, n_trials=1, n_jobs=3),
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        runner=lambda config_path, *, run_id: _state(
+            config_path,
+            run_id,
+            _metrics(),
+        ),
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    assert isinstance(
+        observed_storage[0],
+        optuna_engine.optuna.storages.JournalStorage,
+    )
 
 
 def test_v2_uses_optuna_to_refill_worker_after_each_terminal_trial(
@@ -406,7 +445,9 @@ def test_v2_resumes_interrupted_trial_with_same_params_and_artifact_identity(
             constraints_func=optuna_engine._constraints_func,
         ),
         study_name=sweep.name,
-        storage=f"sqlite:///{study_root / 'study.db'}",
+        storage=optuna_engine._study_storage(
+            study_root / "study.journal.log"
+        ),
     )
     authority = {
         "base_config_sha256": sweep.base_config_sha256,
@@ -440,7 +481,7 @@ def test_v2_resumes_interrupted_trial_with_same_params_and_artifact_identity(
 
     resumed = optuna_engine.optuna.load_study(
         study_name=sweep.name,
-        storage=f"sqlite:///{result.study_path}",
+        storage=optuna_engine._study_storage(result.study_path),
     )
     assert result.interrupted_trials == 1
     assert result.completed_trials == 2
@@ -596,7 +637,7 @@ def test_v2_compacts_rejected_trial_only_after_terminal_study_record(
     assert receipt["removed_bytes"] > 0
     study = optuna_engine.optuna.load_study(
         study_name="stage2_learning_contract_tpe_test",
-        storage=f"sqlite:///{result.study_path}",
+        storage=optuna_engine._study_storage(result.study_path),
     )
     trial, = study.trials
     assert trial.state is optuna_engine.optuna.trial.TrialState.PRUNED
@@ -658,7 +699,9 @@ def test_v2_stops_study_after_systemic_trial_executor_failure(
     assert calls == ["stage2_learning_contract_tpe_test-screen-trial-000"]
     study = optuna_engine.optuna.load_study(
         study_name="stage2_learning_contract_tpe_test",
-        storage=f"sqlite:///{tmp_path / 'study' / 'study.db'}",
+        storage=optuna_engine._study_storage(
+            tmp_path / "study" / "study.journal.log"
+        ),
     )
     trial, = study.trials
     assert trial.state is optuna_engine.optuna.trial.TrialState.FAIL
@@ -924,7 +967,7 @@ def test_direct_trial_economics_are_scored_without_campaign_phase(
     assert result.status == "COMPLETE"
     study = optuna_engine.optuna.load_study(
         study_name="stage2_learning_contract_tpe_test",
-        storage=f"sqlite:///{result.study_path}",
+        storage=optuna_engine._study_storage(result.study_path),
     )
     trial, = study.trials
     assert trial.state is optuna_engine.optuna.trial.TrialState.COMPLETE
@@ -1261,7 +1304,9 @@ def test_v2_confirmation_prunes_training_short_circuit_without_validation(
     assert result.status == "FAILED_GATE"
     confirmation = optuna_engine.optuna.load_study(
         study_name="stage2_learning_contract_tpe_test-confirmation",
-        storage=f"sqlite:///{tmp_path / 'study' / 'confirmation.study.db'}",
+        storage=optuna_engine._study_storage(
+            tmp_path / "study" / "confirmation.study.journal.log"
+        ),
     )
     trial, = confirmation.trials
     assert trial.state is optuna_engine.optuna.trial.TrialState.PRUNED
