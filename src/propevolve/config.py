@@ -1555,6 +1555,31 @@ def load_experiment_config(path: str | Path) -> dict:
         + float(training["regime_wait_sequence_fraction"]) > 1
     ):
         raise ValueError("training replay sequence fractions are invalid")
+    paired_a_plus_population_weighting = training[
+        "paired_a_plus_population_weighting"
+    ]
+    if paired_a_plus_population_weighting not in {
+        "population_proportional_v1",
+        "equal_pair_mass_v1",
+    }:
+        raise ValueError("paired A+ population weighting is invalid")
+    regime_selectivity = payload.get("regime_selectivity")
+    side_balance = (
+        None
+        if not isinstance(regime_selectivity, dict)
+        else regime_selectivity.get("side_balance")
+    )
+    if (
+        paired_a_plus_population_weighting == "equal_pair_mass_v1"
+        and (
+            not isinstance(side_balance, dict)
+            or side_balance.get("schema")
+            != "paired_recurrent_long_short_v1"
+        )
+    ):
+        raise ValueError(
+            "equal paired A+ mass requires paired recurrent replay"
+        )
     regime_wait_update_period = training["regime_wait_sequence_update_period"]
     if (
         isinstance(regime_wait_update_period, bool)

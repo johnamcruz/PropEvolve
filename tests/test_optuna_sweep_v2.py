@@ -267,6 +267,8 @@ def _metrics(**overrides: float) -> dict[str, float]:
         "training.sampled_entry_action_short_rows": 100.0,
         "training.regime_selectivity_paired_a_plus_long_pair_mass": 50.0,
         "training.regime_selectivity_paired_a_plus_short_pair_mass": 50.0,
+        "training.final_regime_probe_transition_positive_long_response": 0.1,
+        "training.final_regime_probe_transition_positive_short_response": 0.1,
     }
     metrics.update(overrides)
     return metrics
@@ -863,9 +865,9 @@ def test_v2_screening_applies_numeric_and_grouped_json_dimensions(
         not item["metric"].startswith("balance_stress.")
         for item in stage["selection_requirements"]
     )
-    assert config["training"]["terminal_sequence_fraction"] == 0.375
-    assert config["training"]["safety_sequence_fraction"] == 0.375
-    assert config["training"]["entry_opportunity_sequence_fraction"] == 0.25
+    assert config["training"]["terminal_sequence_fraction"] == 0.4375
+    assert config["training"]["safety_sequence_fraction"] == 0.1875
+    assert config["training"]["entry_opportunity_sequence_fraction"] == 0.375
     base = json.loads(BASE_CONFIG.read_text())
     assert config["teachers"] == base["teachers"]
     assert config["entry_supervision"] == base["entry_supervision"]
@@ -928,18 +930,29 @@ def test_active_sweep_every_replay_mix_compiles_through_real_validation(
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     baseline = optuna_engine._baseline_parameters(sweep)
     choices = sweep.search_space["replay_mix"]["choices"]
+    population_weightings = sweep.search_space[
+        "training.paired_a_plus_population_weighting"
+    ]["choices"]
 
     for choice in choices:
-        parameters = {**baseline, "replay_mix": choice["name"]}
-        config = optuna_engine._compile_trial_config(
-            sweep,
-            parameters=parameters,
-            stage=sweep.stages["screening"],
-            run_root=tmp_path / str(choice["name"]),
-        )
-        path = tmp_path / f"{choice['name']}.json"
-        optuna_engine._write_exact(path, config)
-        load_experiment_config(path)
+        for population_weighting in population_weightings:
+            parameters = {
+                **baseline,
+                "replay_mix": choice["name"],
+                "training.paired_a_plus_population_weighting": (
+                    population_weighting
+                ),
+            }
+            label = f"{choice['name']}-{population_weighting}"
+            config = optuna_engine._compile_trial_config(
+                sweep,
+                parameters=parameters,
+                stage=sweep.stages["screening"],
+                run_root=tmp_path / label,
+            )
+            path = tmp_path / f"{label}.json"
+            optuna_engine._write_exact(path, config)
+            load_experiment_config(path)
 
 
 def test_direct_trial_economics_are_scored_without_campaign_phase(
@@ -1043,7 +1056,7 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
     assert "agent.entry_action_margin" not in sweep.frozen_paths
 
 
-def test_active_sweep_inherits_trial22_safe_control() -> None:
+def test_active_sweep_inherits_trial15_empirical_control() -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     base = sweep.base_config
 
@@ -1062,6 +1075,14 @@ def test_active_sweep_inherits_trial22_safe_control() -> None:
         "update_period": 5,
         "max_examples": 8,
     }
+    assert base["entry_supervision"]["opportunity_loss_multiplier"] == 1.5
+    assert base["agent"]["entry_action_margin"] == 0.4
+    assert base["regime_selectivity"][
+        "paired_a_plus_winner_loss_weight"
+    ] == 2.5
+    assert base["training"]["paired_a_plus_population_weighting"] == (
+        "population_proportional_v1"
+    )
 
 
 def test_active_sweep_searches_exact_a_plus_activation_strengths(
@@ -1076,11 +1097,12 @@ def test_active_sweep_searches_exact_a_plus_activation_strengths(
         "entry_supervision.opportunity_loss_multiplier",
         "agent.entry_action_margin",
         "regime_selectivity.paired_a_plus_winner_loss_weight",
+        "training.paired_a_plus_population_weighting",
         "replay_mix",
     }
     assert multiplier_specification == {
         "type": "categorical",
-        "choices": [1.0, 1.5, 2.0, 3.0],
+        "choices": [1.0, 1.25, 1.5],
     }
     assert sweep.search_space["agent.entry_action_margin"] == {
         "type": "categorical",
@@ -1090,14 +1112,26 @@ def test_active_sweep_searches_exact_a_plus_activation_strengths(
         "regime_selectivity.paired_a_plus_winner_loss_weight"
     ] == {
         "type": "categorical",
-        "choices": [1.5, 2.0, 2.5, 3.0, 4.0],
+        "choices": [1.5, 2.0, 2.5, 3.0],
+    }
+    assert sweep.search_space[
+        "training.paired_a_plus_population_weighting"
+    ] == {
+        "type": "categorical",
+        "choices": [
+            "population_proportional_v1",
+            "equal_pair_mass_v1",
+        ],
     }
     baseline = optuna_engine._baseline_parameters(sweep)
     assert baseline == {
-        "entry_supervision.opportunity_loss_multiplier": 1.0,
-        "agent.entry_action_margin": 0.25,
-        "regime_selectivity.paired_a_plus_winner_loss_weight": 1.5,
-        "replay_mix": "trial22_safe_control",
+        "entry_supervision.opportunity_loss_multiplier": 1.5,
+        "agent.entry_action_margin": 0.4,
+        "regime_selectivity.paired_a_plus_winner_loss_weight": 2.5,
+        "training.paired_a_plus_population_weighting": (
+            "population_proportional_v1"
+        ),
+        "replay_mix": "opportunity_leaning",
     }
 
     for value in multiplier_specification["choices"]:

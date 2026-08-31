@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v32_a_plus_activation_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v32_a_plus_activation_200ep.json",
-  "study_root": "runs/stage2_v32_a_plus_activation_tpe",
+  "name": "stage2_v33_a_plus_pair_mass_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v33_a_plus_pair_mass_200ep.json",
+  "study_root": "runs/stage2_v33_a_plus_pair_mass_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -66,6 +66,14 @@
         "operator": ">",
         "value": 0.0
       },
+      "training.final_regime_probe_transition_positive_long_response": {
+        "operator": ">",
+        "value": 0.0
+      },
+      "training.final_regime_probe_transition_positive_short_response": {
+        "operator": ">",
+        "value": 0.0
+      },
       "selection.near_blow_timeout_rate": {
         "operator": "<=",
         "value": 0.5
@@ -81,9 +89,8 @@
       "type": "categorical",
       "choices": [
         1.0,
-        1.5,
-        2.0,
-        3.0
+        1.25,
+        1.5
       ]
     },
     "agent.entry_action_margin": {
@@ -100,19 +107,33 @@
         1.5,
         2.0,
         2.5,
-        3.0,
-        4.0
+        3.0
+      ]
+    },
+    "training.paired_a_plus_population_weighting": {
+      "type": "categorical",
+      "choices": [
+        "population_proportional_v1",
+        "equal_pair_mass_v1"
       ]
     },
     "replay_mix": {
       "type": "categorical_mapping",
       "choices": [
         {
-          "name": "trial22_safe_control",
+          "name": "safety_control",
           "values": {
             "training.terminal_sequence_fraction": 0.375,
             "training.safety_sequence_fraction": 0.375,
             "training.entry_opportunity_sequence_fraction": 0.25
+          }
+        },
+        {
+          "name": "midpoint",
+          "values": {
+            "training.terminal_sequence_fraction": 0.375,
+            "training.safety_sequence_fraction": 0.25,
+            "training.entry_opportunity_sequence_fraction": 0.375
           }
         },
         {
@@ -203,6 +224,14 @@
         "value": 0.0
       },
       "selection.short_entry_count": {
+        "operator": ">",
+        "value": 0.0
+      },
+      "training.final_regime_probe_transition_positive_long_response": {
+        "operator": ">",
+        "value": 0.0
+      },
+      "training.final_regime_probe_transition_positive_short_response": {
         "operator": ">",
         "value": 0.0
       }

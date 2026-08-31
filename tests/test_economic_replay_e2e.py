@@ -76,12 +76,19 @@ def _economic_episode(
     )
 
 
-def _replay(*, seed: int) -> BalancedSequenceReplay:
+def _replay(
+    *,
+    seed: int,
+    paired_a_plus_population_weighting: str = "population_proportional_v1",
+) -> BalancedSequenceReplay:
     return BalancedSequenceReplay(
         capacity_episodes=8,
         sequence_length=6,
         entry_opportunity_sequence_fraction=1.0,
         entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_population_weighting=(
+            paired_a_plus_population_weighting
+        ),
         recurrent_burn_in=2,
         n_step_return=2,
         seed=seed,
@@ -291,6 +298,68 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
         == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_equal_pair_mass_survives_replay_resume_and_real_optimizer_update(
+) -> None:
+    replay = _replay(
+        seed=604,
+        paired_a_plus_population_weighting="equal_pair_mass_v1",
+    )
+    contexts = {
+        Action.ENTER_LONG_1: (
+            0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20,
+        ),
+        Action.ENTER_SHORT_1: (
+            0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20,
+        ),
+    }
+    offset = 0.0
+    for side, context in contexts.items():
+        replay.add(_economic_episode(
+            episode_id=f"{side.name}-winner",
+            side=side,
+            economic_win=True,
+            context=context,
+            offset=offset,
+        ))
+        offset += 1.0
+        for failure_index in range(3):
+            replay.add(_economic_episode(
+                episode_id=f"{side.name}-failure-{failure_index}",
+                side=side,
+                economic_win=False,
+                context=context,
+                offset=offset,
+            ))
+            offset += 1.0
+
+    restored = _replay(
+        seed=999,
+        paired_a_plus_population_weighting="equal_pair_mass_v1",
+    )
+    restored.load_state_dict(replay.state_dict())
+    paired_sequences = restored.sample(4)
+    anchors = [sequence[2] for sequence in paired_sequences]
+    assert {anchor.paired_a_plus_pair_side for anchor in anchors} == {
+        Action.ENTER_LONG_1,
+        Action.ENTER_SHORT_1,
+    }
+    assert all(
+        anchor.paired_a_plus_population_weight == pytest.approx(1.0)
+        for anchor in anchors
+    )
+
+    agent = _agent()
+    before = _grouped_boundary_margins(agent, paired_sequences)
+    agent.train_batch(paired_sequences)
+    after = _grouped_boundary_margins(agent, paired_sequences)
+
+    assert before.keys() == after.keys()
+    assert after["long_winner_vs_wait"] > before["long_winner_vs_wait"]
+    assert after["short_winner_vs_wait"] > before["short_winner_vs_wait"]
+    assert after["long_wait_vs_failure"] > 0.0
+    assert after["short_wait_vs_failure"] > 0.0
 
 
 def test_four_economic_pairs_update_all_optimizer_boundaries_without_stalling(

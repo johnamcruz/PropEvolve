@@ -330,7 +330,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 13
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -934,6 +934,7 @@ def test_replay_schema_11_without_terminal_pnl_remains_loadable() -> None:
     ))
     legacy = replay.state_dict()
     legacy["schema_version"] = 11
+    legacy["contract"].pop("paired_a_plus_population_weighting")
     for episode in legacy["episodes"]:
         episode.pop("terminal_pnl")
     restored = BalancedSequenceReplay(
@@ -1161,6 +1162,50 @@ def test_paired_replay_population_correction_handles_one_available_side(
         True: pytest.approx(0.5),
         False: pytest.approx(1.5),
     }
+
+
+def test_paired_replay_equal_pair_mass_does_not_dilute_scarce_winners(
+) -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_population_weighting="equal_pair_mass_v1",
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=49,
+    )
+    examples = (
+        ("winner", True, 0),
+        ("failure-1", False, 100),
+        ("failure-2", False, 200),
+        ("failure-3", False, 300),
+    )
+    for episode_id, economic_win, offset in examples:
+        replay.add(_paired_a_plus_episode(
+            episode_id=episode_id,
+            ticker="NQ",
+            target=(Action.ENTER_LONG_1 if economic_win else Action.WAIT),
+            side=Action.ENTER_LONG_1,
+            economic_win=economic_win,
+            context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+            offset=offset,
+        ))
+
+    anchors = [sequence[2] for sequence in replay.sample(2)]
+
+    assert {
+        anchor.paired_a_plus_economic_win:
+        anchor.paired_a_plus_population_weight
+        for anchor in anchors
+    } == {
+        True: pytest.approx(1.0),
+        False: pytest.approx(1.0),
+    }
+    assert replay.state_dict()["contract"][
+        "paired_a_plus_population_weighting"
+    ] == "equal_pair_mass_v1"
 
 
 def test_paired_replay_preserves_winner_and_failure_from_pass_timeout_and_blow(
@@ -1535,7 +1580,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 13
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1580,6 +1625,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     legacy = replay.state_dict()
     legacy["schema_version"] = 7
+    legacy["contract"].pop("paired_a_plus_population_weighting")
     legacy["contract"].pop("regime_wait_sequence_fraction")
     legacy["contract"].pop("regime_wait_sequence_update_period")
     legacy.pop("sample_calls")
@@ -2526,7 +2572,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 12
+    assert state["schema_version"] == 13
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

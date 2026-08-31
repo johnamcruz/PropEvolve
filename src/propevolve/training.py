@@ -382,17 +382,22 @@ def _regime_selectivity_agent_settings(
 
 def _regime_selectivity_replay_settings(
     specification: Mapping[str, object] | None,
+    *,
+    paired_a_plus_population_weighting: str,
 ) -> dict[str, object]:
     """Project the frozen side sampler identity onto replay construction."""
-    if specification is None:
-        return {}
-    side_balance = specification.get("side_balance")
+    side_balance = (
+        None if specification is None else specification.get("side_balance")
+    )
     return {
         "entry_opportunity_side_balance": (
             "none"
             if side_balance is None
             else str(side_balance["schema"])
-        )
+        ),
+        "paired_a_plus_population_weighting": (
+            paired_a_plus_population_weighting
+        ),
     }
 
 
@@ -3495,7 +3500,12 @@ class HistoricalCandidateRunner:
             regime_wait_sequence_update_period=int(
                 training_config["regime_wait_sequence_update_period"]
             ),
-            **_regime_selectivity_replay_settings(regime_selectivity_spec),
+            **_regime_selectivity_replay_settings(
+                regime_selectivity_spec,
+                paired_a_plus_population_weighting=str(
+                    training_config["paired_a_plus_population_weighting"]
+                ),
+            ),
             recurrent_burn_in=int(agent.recurrent_burn_in),
             n_step_return=int(agent.n_step_return),
             seed=seed,
@@ -3575,7 +3585,12 @@ class HistoricalCandidateRunner:
                     training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
-                    regime_selectivity_spec
+                    regime_selectivity_spec,
+                    paired_a_plus_population_weighting=str(
+                        training_config[
+                            "paired_a_plus_population_weighting"
+                        ]
+                    ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
                 n_step_return=int(agent.n_step_return),
@@ -3632,7 +3647,12 @@ class HistoricalCandidateRunner:
                     training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
-                    regime_selectivity_spec
+                    regime_selectivity_spec,
+                    paired_a_plus_population_weighting=str(
+                        training_config[
+                            "paired_a_plus_population_weighting"
+                        ]
+                    ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
                 n_step_return=int(agent.n_step_return),
@@ -3690,7 +3710,12 @@ class HistoricalCandidateRunner:
                     training_config["regime_wait_sequence_update_period"]
                 ),
                 **_regime_selectivity_replay_settings(
-                    regime_selectivity_spec
+                    regime_selectivity_spec,
+                    paired_a_plus_population_weighting=str(
+                        training_config[
+                            "paired_a_plus_population_weighting"
+                        ]
+                    ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
                 n_step_return=int(agent.n_step_return),

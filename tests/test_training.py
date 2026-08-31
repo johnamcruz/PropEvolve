@@ -1146,7 +1146,10 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
             "schema": "equal_long_short_v1",
             "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
         },
-    }) == {"entry_opportunity_side_balance": "equal_long_short_v1"}
+    }, paired_a_plus_population_weighting="equal_pair_mass_v1") == {
+        "entry_opportunity_side_balance": "equal_long_short_v1",
+        "paired_a_plus_population_weighting": "equal_pair_mass_v1",
+    }
 
 
 @pytest.mark.parametrize(

@@ -803,6 +803,24 @@ def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
     assert config["regime_selectivity"]["semantics"] == (
         PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
     )
+    assert config["training"]["paired_a_plus_population_weighting"] == (
+        "population_proportional_v1"
+    )
+    payload["training"]["paired_a_plus_population_weighting"] = (
+        "equal_pair_mass_v1"
+    )
+    path.write_text(json.dumps(payload))
+    config = load_experiment_config(path)
+    assert config["training"]["paired_a_plus_population_weighting"] == (
+        "equal_pair_mass_v1"
+    )
+    payload["training"]["paired_a_plus_population_weighting"] = "invalid"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=r"paired A\+ population weighting"):
+        load_experiment_config(path)
+    payload["training"]["paired_a_plus_population_weighting"] = (
+        "equal_pair_mass_v1"
+    )
     payload["regime_selectivity"]["side_balance"]["schema"] = (
         "equal_long_short_v1"
     )

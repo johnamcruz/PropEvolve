@@ -726,6 +726,9 @@ class BalancedSequenceReplay:
         regime_wait_sequence_fraction: float = 0.0,
         regime_wait_sequence_update_period: int = 0,
         entry_opportunity_side_balance: str = "none",
+        paired_a_plus_population_weighting: str = (
+            "population_proportional_v1"
+        ),
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
         seed: int,
@@ -789,7 +792,25 @@ class BalancedSequenceReplay:
             "paired_recurrent_long_short_v1",
         }:
             raise ValueError("replay entry opportunity side balance is invalid")
+        if paired_a_plus_population_weighting not in {
+            "population_proportional_v1",
+            "equal_pair_mass_v1",
+        }:
+            raise ValueError(
+                "replay paired A+ population weighting is invalid"
+            )
+        if (
+            paired_a_plus_population_weighting == "equal_pair_mass_v1"
+            and entry_opportunity_side_balance
+            != "paired_recurrent_long_short_v1"
+        ):
+            raise ValueError(
+                "equal paired A+ mass requires paired recurrent replay"
+            )
         self.entry_opportunity_side_balance = entry_opportunity_side_balance
+        self.paired_a_plus_population_weighting = (
+            paired_a_plus_population_weighting
+        )
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -797,6 +818,23 @@ class BalancedSequenceReplay:
 
     def __len__(self) -> int:
         return len(self._episodes)
+
+    def _paired_a_plus_population_weights(
+        self,
+        *,
+        winner_count: int,
+        failure_count: int,
+    ) -> tuple[float, float]:
+        """Return the configured absolute winner/failure pair mass."""
+        if winner_count < 1 or failure_count < 1:
+            raise ValueError("paired A+ populations must be nonempty")
+        if self.paired_a_plus_population_weighting == "equal_pair_mass_v1":
+            return 1.0, 1.0
+        population_count = winner_count + failure_count
+        return (
+            2.0 * winner_count / population_count,
+            2.0 * failure_count / population_count,
+        )
 
     @property
     def transition_count(self) -> int:
@@ -906,7 +944,7 @@ class BalancedSequenceReplay:
     def checkpoint_metadata(self) -> dict[str, object]:
         """Return the small replay contract and exact sampler state."""
         return {
-            "schema_version": 12,
+            "schema_version": 13,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -924,6 +962,9 @@ class BalancedSequenceReplay:
                 ),
                 "entry_opportunity_side_balance": (
                     self.entry_opportunity_side_balance
+                ),
+                "paired_a_plus_population_weighting": (
+                    self.paired_a_plus_population_weighting
                 ),
             },
             "random_state": self._random.getstate(),
@@ -999,7 +1040,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11, 12}:
+        if schema_version not in {7, 8, 9, 10, 11, 12, 13}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1019,7 +1060,17 @@ class BalancedSequenceReplay:
             "entry_opportunity_side_balance": (
                 self.entry_opportunity_side_balance
             ),
+            "paired_a_plus_population_weighting": (
+                self.paired_a_plus_population_weighting
+            ),
         }
+        if schema_version <= 12:
+            if (
+                self.paired_a_plus_population_weighting
+                != "population_proportional_v1"
+            ):
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("paired_a_plus_population_weighting")
         if schema_version in {7, 8}:
             if self.regime_wait_sequence_update_period != 0:
                 raise ValueError("replay checkpoint contract drifted")
@@ -1729,12 +1780,12 @@ class BalancedSequenceReplay:
                 # otherwise valid winner/failure pairs.
                 pair_id = pair_offset
                 pair_start = entry_start + pair_offset * 2
-                population_count = len(winners[side]) + len(failures[side])
-                winner_population_weight = (
-                    2.0 * len(winners[side]) / population_count
-                )
-                failure_population_weight = (
-                    2.0 * len(failures[side]) / population_count
+                (
+                    winner_population_weight,
+                    failure_population_weight,
+                ) = self._paired_a_plus_population_weights(
+                    winner_count=len(winners[side]),
+                    failure_count=len(failures[side]),
                 )
                 paired_entry_anchors[pair_start] = (
                     winner_episode,
@@ -2165,9 +2216,12 @@ class BalancedSequenceReplay:
             )
             _, _, _, failure_episode, failure_index = failure
             pair_id = pair_id_start + offset
-            population_count = len(winners[side]) + len(failures[side])
-            winner_weight = 2.0 * len(winners[side]) / population_count
-            failure_weight = 2.0 * len(failures[side]) / population_count
+            winner_weight, failure_weight = (
+                self._paired_a_plus_population_weights(
+                    winner_count=len(winners[side]),
+                    failure_count=len(failures[side]),
+                )
+            )
             for episode, anchor_index, population_weight, economic_winner in (
                 (winner_episode, winner_index, winner_weight, True),
                 (failure_episode, failure_index, failure_weight, False),
@@ -2375,9 +2429,12 @@ class BalancedSequenceReplay:
             )
             _, _, _, failure_episode, failure_index = failure
             pair_id = pair_id_start + offset
-            population_count = len(retained[side]) + len(givebacks[side])
-            winner_weight = 2.0 * len(retained[side]) / population_count
-            failure_weight = 2.0 * len(givebacks[side]) / population_count
+            winner_weight, failure_weight = (
+                self._paired_a_plus_population_weights(
+                    winner_count=len(retained[side]),
+                    failure_count=len(givebacks[side]),
+                )
+            )
             for episode, anchor_index, population_weight in (
                 (winner_episode, winner_index, winner_weight),
                 (failure_episode, failure_index, failure_weight),
