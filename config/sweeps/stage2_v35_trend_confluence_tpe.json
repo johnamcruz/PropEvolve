@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v34_expansion_lifecycle_transfer_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v34_expansion_lifecycle_transfer_200ep.json",
-  "study_root": "runs/stage2_v34_expansion_lifecycle_transfer_tpe",
+  "name": "stage2_v35_trend_confluence_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v35_trend_confluence_200ep.json",
+  "study_root": "runs/stage2_v35_trend_confluence_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -85,6 +85,13 @@
     }
   },
   "search_space": {
+    "trend_start_confluence.enabled": {
+      "type": "categorical",
+      "choices": [
+        false,
+        true
+      ]
+    },
     "entry_supervision.opportunity_loss_multiplier": {
       "type": "categorical",
       "choices": [
@@ -245,7 +252,8 @@
       "entry_supervision.",
       "regime_selectivity.",
       "training.",
-      "balance_curriculum."
+      "balance_curriculum.",
+      "trend_start_confluence."
     ],
     "paths": [
       "assets",
@@ -256,6 +264,14 @@
       "sealed_confirmation",
       "tickers",
       "training_only_tickers",
+      "trend_start_confluence.schema",
+      "trend_start_confluence.training_only",
+      "trend_start_confluence.target_source",
+      "trend_start_confluence.score_formula",
+      "trend_start_confluence.semantics",
+      "trend_start_confluence.loss_weight",
+      "trend_start_confluence.margin",
+      "trend_start_confluence.confirmation_lookback_bars",
       "deployment_tickers",
       "timeframe_minutes",
       "point_values",

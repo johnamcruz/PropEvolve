@@ -380,6 +380,30 @@ def _regime_selectivity_agent_settings(
     return settings
 
 
+def _trend_start_confluence_agent_settings(
+    specification: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if specification is None:
+        return {}
+    return {
+        "trend_start_confluence_loss_weight": (
+            float(specification["loss_weight"])
+            if bool(specification["enabled"])
+            else 0.0
+        ),
+        "trend_start_confluence_margin": (
+            float(specification["margin"])
+            if bool(specification["enabled"])
+            else 0.0
+        ),
+        "trend_start_confluence_confirmation_lookback_bars": (
+            int(specification["confirmation_lookback_bars"])
+            if bool(specification["enabled"])
+            else 0
+        ),
+    }
+
+
 def _regime_selectivity_replay_settings(
     specification: Mapping[str, object] | None,
     *,
@@ -3359,6 +3383,10 @@ class HistoricalCandidateRunner:
         )
         if teacher_targets is not None:
             agent_settings.update(agent_teacher_settings(teacher_specs))
+        trend_start_confluence_spec = config.get("trend_start_confluence")
+        agent_settings.update(_trend_start_confluence_agent_settings(
+            trend_start_confluence_spec
+        ))
         regime_selectivity_spec = config["regime_selectivity"]
         if regime_selectivity_spec is not None:
             from .teachers.expansion import verify_expansion_entry_center_receipt
@@ -3935,6 +3963,13 @@ class HistoricalCandidateRunner:
                     **_regime_selectivity_probe_settings(
                         regime_selectivity_spec
                     ),
+                    trend_start_confirmation_lookback_bars=(
+                        0
+                        if trend_start_confluence_spec is None
+                        else int(trend_start_confluence_spec[
+                            "confirmation_lookback_bars"
+                        ])
+                    ),
                     source_period=(
                         str(temporal["train_start"]),
                         str(temporal["train_end"]),
@@ -4230,6 +4265,13 @@ class HistoricalCandidateRunner:
                     q_temperature=float(regime_selectivity_spec["q_temperature"]),
                     **_regime_selectivity_probe_settings(
                         regime_selectivity_spec
+                    ),
+                    trend_start_confirmation_lookback_bars=(
+                        0
+                        if trend_start_confluence_spec is None
+                        else int(trend_start_confluence_spec[
+                            "confirmation_lookback_bars"
+                        ])
                     ),
                     source_period=(
                         str(temporal["train_start"]),
@@ -6975,6 +7017,15 @@ def train_agent(
                 "regime_selectivity_paired_a_plus_pair_mass",
                 "regime_selectivity_paired_a_plus_good_advantage_sum",
                 "regime_selectivity_paired_a_plus_bad_advantage_sum",
+                "trend_start_confluence_loss",
+                "trend_start_confluence_opportunity_loss",
+                "trend_start_confluence_safety_loss",
+                "trend_start_confluence_active_rows",
+                "trend_start_confluence_aligned_long_winner_rows",
+                "trend_start_confluence_aligned_short_winner_rows",
+                "trend_start_confluence_countertrend_long_failure_rows",
+                "trend_start_confluence_countertrend_short_failure_rows",
+                "trend_start_confluence_dominance_mass",
                 "paired_a_plus_violation_candidate_pairs",
                 "paired_a_plus_violation_selected_pairs",
                 "paired_a_plus_violation_long_selected_pairs",

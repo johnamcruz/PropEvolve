@@ -1043,6 +1043,14 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "challenge.lead_giveback_penalty_coefficient",
         "regime_selectivity.loss_weight",
         "regime_selectivity.persistent_chop_negative_emphasis",
+        "trend_start_confluence.schema",
+        "trend_start_confluence.training_only",
+        "trend_start_confluence.target_source",
+        "trend_start_confluence.score_formula",
+        "trend_start_confluence.semantics",
+        "trend_start_confluence.loss_weight",
+        "trend_start_confluence.margin",
+        "trend_start_confluence.confirmation_lookback_bars",
         "balance_curriculum.outcome_contrast_replay.update_period",
         "balance_curriculum.outcome_contrast_replay.max_examples",
         "sealed_confirmation",
@@ -1054,6 +1062,7 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         sweep.frozen_paths
     )
     assert "agent.entry_action_margin" not in sweep.frozen_paths
+    assert "trend_start_confluence.enabled" not in sweep.frozen_paths
 
 
 def test_active_sweep_inherits_trial15_empirical_control() -> None:
@@ -1083,9 +1092,17 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     assert base["training"]["paired_a_plus_population_weighting"] == (
         "population_proportional_v1"
     )
+    assert base["trend_start_confluence"]["enabled"] is False
+    assert base["trend_start_confluence"][
+        "confirmation_lookback_bars"
+    ] == 50
+    trend = next(
+        teacher for teacher in base["teachers"] if teacher["kind"] == "trend"
+    )
+    assert trend["loss_weight"] == 0.0
 
 
-def test_active_sweep_searches_exact_a_plus_activation_strengths(
+def test_active_sweep_searches_trend_control_and_a_plus_strengths(
     tmp_path: Path,
 ) -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
@@ -1094,11 +1111,16 @@ def test_active_sweep_searches_exact_a_plus_activation_strengths(
     ]
 
     assert set(sweep.search_space) == {
+        "trend_start_confluence.enabled",
         "entry_supervision.opportunity_loss_multiplier",
         "agent.entry_action_margin",
         "regime_selectivity.paired_a_plus_winner_loss_weight",
         "training.paired_a_plus_population_weighting",
         "replay_mix",
+    }
+    assert sweep.search_space["trend_start_confluence.enabled"] == {
+        "type": "categorical",
+        "choices": [False, True],
     }
     assert multiplier_specification == {
         "type": "categorical",
@@ -1125,6 +1147,7 @@ def test_active_sweep_searches_exact_a_plus_activation_strengths(
     }
     baseline = optuna_engine._baseline_parameters(sweep)
     assert baseline == {
+        "trend_start_confluence.enabled": False,
         "entry_supervision.opportunity_loss_multiplier": 1.5,
         "agent.entry_action_margin": 0.4,
         "regime_selectivity.paired_a_plus_winner_loss_weight": 2.5,
@@ -1152,6 +1175,29 @@ def test_active_sweep_searches_exact_a_plus_activation_strengths(
         assert normalized["entry_supervision"][
             "opportunity_loss_multiplier"
         ] == value
+
+    for enabled in (False, True):
+        parameters = {
+            **baseline,
+            "trend_start_confluence.enabled": enabled,
+        }
+        config = optuna_engine._compile_trial_config(
+            sweep,
+            parameters=parameters,
+            stage=sweep.stages["screening"],
+            run_root=tmp_path / f"trend-{enabled}",
+        )
+        path = tmp_path / f"trend-{enabled}.json"
+        optuna_engine._write_exact(path, config)
+        normalized = load_experiment_config(path)
+
+        assert normalized["trend_start_confluence"]["enabled"] is enabled
+        trend = next(
+            teacher
+            for teacher in normalized["teachers"]
+            if teacher["kind"] == "trend"
+        )
+        assert trend["loss_weight"] == 0.0
 
 
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(

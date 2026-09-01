@@ -896,6 +896,62 @@ def _validate_balance_curriculum(payload: dict, challenge: dict) -> None:
     curriculum["start_pnls"] = tuple(float(value) for value in start_pnls)
 
 
+def _validate_trend_start_confluence(payload: dict) -> None:
+    specification = payload.get("trend_start_confluence")
+    if specification is None:
+        return
+    from .trend_start_confluence import (
+        TREND_START_CONFLUENCE_SCHEMA,
+        TREND_START_CONFLUENCE_SEMANTICS,
+        TREND_START_SCORE_FORMULA,
+    )
+
+    required = {
+        "schema",
+        "training_only",
+        "target_source",
+        "score_formula",
+        "semantics",
+        "enabled",
+        "loss_weight",
+        "margin",
+        "confirmation_lookback_bars",
+    }
+    numeric = (specification.get("loss_weight"), specification.get("margin"))
+    teachers = tuple(payload.get("teachers") or ())
+    trend = next(
+        (teacher for teacher in teachers if teacher.get("kind") == "trend"),
+        None,
+    )
+    if (
+        not isinstance(specification, dict)
+        or set(specification) != required
+        or specification.get("schema") != TREND_START_CONFLUENCE_SCHEMA
+        or specification.get("training_only") is not True
+        or specification.get("target_source") != "post_launch_economic_pair"
+        or specification.get("score_formula") != TREND_START_SCORE_FORMULA
+        or specification.get("semantics") != TREND_START_CONFLUENCE_SEMANTICS
+        or type(specification.get("enabled")) is not bool
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in numeric
+        )
+        or any(not math.isfinite(float(value)) for value in numeric)
+        or float(specification["loss_weight"]) <= 0.0
+        or float(specification["margin"]) < 0.0
+        or isinstance(specification["confirmation_lookback_bars"], bool)
+        or not isinstance(specification["confirmation_lookback_bars"], int)
+        or int(specification["confirmation_lookback_bars"]) < 1
+    ):
+        raise ValueError("training-only Trend Start confluence is invalid")
+    if trend is None:
+        raise ValueError("Trend Start confluence requires the Trend teacher")
+    if float(trend["loss_weight"]) != 0.0:
+        raise ValueError(
+            "Trend Start confluence must not enable generic Trend imitation"
+        )
+
+
 def _validate_regime_selectivity(payload: dict, *, root: Path) -> None:
     """Authenticate the optional Stage 2A training-only selectivity contract."""
     specification = payload.get("regime_selectivity")
@@ -1797,7 +1853,14 @@ def load_experiment_config(path: str | Path) -> dict:
                 set(item) != required_fields
                 or kind not in expected_channels
                 or tuple(item.get("channels", ())) != expected_channels[kind]
-                or float(item.get("loss_weight", 0.0)) <= 0
+                or float(item.get("loss_weight", 0.0)) < 0
+                or (
+                    float(item.get("loss_weight", 0.0)) == 0
+                    and not (
+                        kind == "trend"
+                        and payload.get("trend_start_confluence") is not None
+                    )
+                )
                 or float(item.get("entry_search_loss_weight", 0.0)) < 0
                 or (kind != "expansion" and float(item["entry_search_loss_weight"]) != 0)
                 or not str(item.get("cache_root", "")).strip()
@@ -1856,6 +1919,7 @@ def load_experiment_config(path: str | Path) -> dict:
         ):
             raise ValueError("teacher autonomy start fraction is invalid")
         payload["teachers"] = tuple(teachers)
+    _validate_trend_start_confluence(payload)
     _validate_regime_selectivity(payload, root=root)
     temporal = payload.get("temporal") or {}
     ordered = [
@@ -2062,6 +2126,11 @@ def load_experiment_config(path: str | Path) -> dict:
             raise ValueError(
                 "Regime WAIT replay identity must be frozen for the campaign"
             )
+    if (
+        payload.get("trend_start_confluence") is not None
+        and "trend_start_confluence" not in frozen
+    ):
+        raise ValueError("Trend Start confluence must be frozen for the campaign")
     if payload.get("recovery_curriculum") is not None:
         if not all(path in frozen for path in RECOVERY_CURRICULUM_FROZEN_PATHS):
             raise ValueError(

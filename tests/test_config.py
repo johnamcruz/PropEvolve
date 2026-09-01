@@ -23,6 +23,8 @@ from propevolve.config import (
     load_experiment_config,
     materialize_effective_config,
 )
+from propevolve.teachers import agent_teacher_settings
+from propevolve.training import _trend_start_confluence_agent_settings
 from propevolve.balance_aware_regime_selectivity import (
     ACTION_ORDER as REGIME_SELECTIVITY_ACTION_ORDER,
     ALL_DOMINANT_CHOP_MARGIN_FORMULA,
@@ -1866,6 +1868,86 @@ def test_config_accepts_three_frozen_training_only_teachers(
     payload["teachers"][1]["channels"] = ["wrong"]
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="Regime teacher contract"):
+        load_experiment_config(path)
+
+
+def test_config_wires_training_only_trend_confluence_without_imitation(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["teachers"] = [
+        payload["teachers"][0],
+        {
+            "kind": "regime",
+            "cache_root": (
+                "cache/expansion_anchored_regime_teacher_9market_3min_pre2025_v1"
+            ),
+            "channels": [
+                "chop_no_trend_probability",
+                "chop_end_transition_probability",
+                "expansion_trend_probability",
+            ],
+            "loss_weight": 0.1,
+            "entry_search_loss_weight": 0.0,
+        },
+        {
+            "kind": "trend",
+            "cache_root": "cache/trend_teacher_9market_3min_pre2025_v1",
+            "channels": [
+                "long_launch_probability",
+                "short_launch_probability",
+                "long_conditional_quality",
+                "short_conditional_quality",
+            ],
+            "loss_weight": 0.0,
+            "entry_search_loss_weight": 0.0,
+        },
+    ]
+    payload["trend_start_confluence"] = {
+        "schema": "trend_start_confluence_v1",
+        "training_only": True,
+        "target_source": "post_launch_economic_pair",
+        "score_formula": (
+            "causal_recent_max_launch_probability_times_conditional_quality"
+        ),
+        "semantics": (
+            "economic_label_authority_causal_directional_confirmation_v1"
+        ),
+        "enabled": True,
+        "loss_weight": 1.0,
+        "margin": 0.25,
+        "confirmation_lookback_bars": 50,
+    }
+    payload["evolution"]["frozen_paths"].append("trend_start_confluence")
+    path = tmp_path / "trend-confluence.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert config["trend_start_confluence"]["enabled"] is True
+    trend = next(
+        teacher for teacher in config["teachers"] if teacher["kind"] == "trend"
+    )
+    assert trend["loss_weight"] == 0.0
+    agent_settings = agent_teacher_settings(config["teachers"])
+    agent_settings.update(_trend_start_confluence_agent_settings(
+        config["trend_start_confluence"]
+    ))
+    assert agent_settings["teacher_channels"] == 11
+    assert agent_settings["teacher_channel_loss_weights"][-4:] == (
+        0.0, 0.0, 0.0, 0.0,
+    )
+    assert agent_settings["trend_start_confluence_loss_weight"] == 1.0
+    assert agent_settings["trend_start_confluence_margin"] == 0.25
+    assert agent_settings[
+        "trend_start_confluence_confirmation_lookback_bars"
+    ] == 50
+
+    payload["teachers"] = [
+        teacher for teacher in payload["teachers"] if teacher["kind"] != "trend"
+    ]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="requires the Trend teacher"):
         load_experiment_config(path)
 
 

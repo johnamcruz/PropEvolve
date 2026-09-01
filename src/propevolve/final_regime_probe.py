@@ -26,6 +26,10 @@ from .replay import (
     FinalRegimeProbeSequence,
     final_regime_probe_row_identity,
 )
+from .trend_start_confluence import (
+    TREND_START_CHANNELS,
+    causal_trend_directional_scores,
+)
 
 
 SCHEMA = "propevolve_final_regime_probe_v1"
@@ -117,6 +121,7 @@ def evaluate_final_regime_probe(
         PERSISTENT_CHOP_NEGATIVE_WEIGHT_SEMANTICS
     ),
     regime_selectivity_expansion_centers: Sequence[float] = (0.5, 0.5),
+    trend_start_confirmation_lookback_bars: int = 0,
     source_period: tuple[str, str],
 ) -> FinalRegimeProbeReport:
     """Measure final-policy action behavior; use teachers only after scoring.
@@ -131,6 +136,10 @@ def evaluate_final_regime_probe(
         *REGIME_STATE_CHANNELS,
         *REGIME_TRANSITION_CHANNELS,
     )
+    trend_channels_present = tuple(
+        channel in channels for channel in TREND_START_CHANNELS
+    )
+    trend_probe_enabled = all(trend_channels_present)
     if (
         not samples
         or len(set(channels)) != len(channels)
@@ -141,6 +150,18 @@ def evaluate_final_regime_probe(
         or len(source_period) != 2
         or not all(isinstance(value, str) and value for value in source_period)
         or source_period[0] >= source_period[1]
+        or any(trend_channels_present) != trend_probe_enabled
+        or isinstance(trend_start_confirmation_lookback_bars, bool)
+        or not isinstance(trend_start_confirmation_lookback_bars, int)
+        or int(trend_start_confirmation_lookback_bars) < 0
+        or (
+            trend_probe_enabled
+            and int(trend_start_confirmation_lookback_bars) < 1
+        )
+        or (
+            not trend_probe_enabled
+            and int(trend_start_confirmation_lookback_bars) != 0
+        )
     ):
         raise ValueError("final Regime probe contract is invalid")
     burn_ins = {len(sample.sequence) for sample in samples}
@@ -156,6 +177,10 @@ def evaluate_final_regime_probe(
     anchor_positions = []
     target_actions = []
     teacher_rows = []
+    trend_directional_scores = []
+    economic_sides = []
+    economic_wins = []
+    economic_rows = []
     row_receipts = []
     policy_sequences = []
     for sample in samples:
@@ -186,6 +211,65 @@ def evaluate_final_regime_probe(
         anchor_positions.append(anchor_position)
         target_actions.append(int(sample.target_action))
         teacher_rows.append(teacher)
+        pair_evidence = (
+            anchor.paired_a_plus_side,
+            anchor.paired_a_plus_economic_win,
+        )
+        if any(value is None for value in pair_evidence) and not all(
+            value is None for value in pair_evidence
+        ):
+            raise ValueError("final Trend probe economic evidence is incomplete")
+        if all(value is not None for value in pair_evidence):
+            side = Action(anchor.paired_a_plus_side)
+            economic_win = bool(anchor.paired_a_plus_economic_win)
+            if (
+                side not in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                or (
+                    economic_win
+                    and sample.target_action != side
+                )
+                or (
+                    not economic_win
+                    and sample.target_action != Action.WAIT
+                )
+            ):
+                raise ValueError("final Trend probe economic evidence is invalid")
+            economic_sides.append(int(side))
+            economic_wins.append(economic_win)
+            economic_rows.append(True)
+        else:
+            economic_sides.append(-1)
+            economic_wins.append(False)
+            economic_rows.append(False)
+        if trend_probe_enabled:
+            trend_indices = tuple(
+                channels.index(channel) for channel in TREND_START_CHANNELS
+            )
+            trend_sequence = np.full(
+                (1, len(sequence), len(TREND_START_CHANNELS)),
+                np.nan,
+                dtype=np.float32,
+            )
+            for sequence_index, transition in enumerate(sequence):
+                if transition.teacher_target is None:
+                    continue
+                sequence_teacher = np.asarray(
+                    transition.teacher_target,
+                    dtype=np.float32,
+                ).reshape(-1)
+                if sequence_teacher.shape != (len(channels),):
+                    raise ValueError("final Trend probe teacher row is invalid")
+                trend_sequence[0, sequence_index] = sequence_teacher[
+                    list(trend_indices)
+                ]
+            trend_directional_scores.append(
+                causal_trend_directional_scores(
+                    torch.as_tensor(trend_sequence),
+                    confirmation_lookback_bars=(
+                        trend_start_confirmation_lookback_bars
+                    ),
+                )[0, anchor_position].numpy()
+            )
         row_receipts.append({
             "row_identity_sha256": sample.row_identity_sha256,
             "ticker": sample.ticker,
@@ -234,6 +318,15 @@ def evaluate_final_regime_probe(
             for channel in REGIME_TEACHER_CHANNELS
             if channel in channels
         }
+        if trend_probe_enabled:
+            receipt["trend_channels"] = {
+                channel: float(teachers[row_index, channels.index(channel)])
+                for channel in TREND_START_CHANNELS
+            }
+            receipt["trend_directional_scores"] = {
+                "long": float(trend_directional_scores[row_index][0]),
+                "short": float(trend_directional_scores[row_index][1]),
+            }
         headroom = samples[row_index].sequence[
             anchor_positions[row_index]
         ].regime_selectivity_headroom_fraction
@@ -258,6 +351,88 @@ def evaluate_final_regime_probe(
         metrics[f"final_regime_probe_{name}_recall"] = (
             float((predictions[rows] == int(action)).mean()) if count else 0.0
         )
+
+    if trend_probe_enabled:
+        trend_scores = np.asarray(trend_directional_scores, dtype=np.float64)
+        economic_sides_array = np.asarray(economic_sides, dtype=np.int64)
+        economic_wins_array = np.asarray(economic_wins, dtype=np.bool_)
+        economic_rows_array = np.asarray(economic_rows, dtype=np.bool_)
+        long_dominance = np.maximum(
+            trend_scores[:, 0] - trend_scores[:, 1], 0.0
+        )
+        short_dominance = np.maximum(
+            trend_scores[:, 1] - trend_scores[:, 0], 0.0
+        )
+        long_side = economic_sides_array == int(Action.ENTER_LONG_1)
+        short_side = economic_sides_array == int(Action.ENTER_SHORT_1)
+        aligned_long_winner = (
+            economic_rows_array & economic_wins_array & long_side
+            & (long_dominance > 0.0)
+        )
+        aligned_short_winner = (
+            economic_rows_array & economic_wins_array & short_side
+            & (short_dominance > 0.0)
+        )
+        countertrend_long_failure = (
+            economic_rows_array & ~economic_wins_array & long_side
+            & (short_dominance > 0.0)
+        )
+        countertrend_short_failure = (
+            economic_rows_array & ~economic_wins_array & short_side
+            & (long_dominance > 0.0)
+        )
+        masks_and_weights = {
+            "aligned_long_winner": (
+                aligned_long_winner,
+                aligned_long_winner.astype(np.float64) * long_dominance,
+            ),
+            "aligned_short_winner": (
+                aligned_short_winner,
+                aligned_short_winner.astype(np.float64) * short_dominance,
+            ),
+            "countertrend_long_failure": (
+                countertrend_long_failure,
+                countertrend_long_failure.astype(np.float64) * short_dominance,
+            ),
+            "countertrend_short_failure": (
+                countertrend_short_failure,
+                countertrend_short_failure.astype(np.float64) * long_dominance,
+            ),
+        }
+        for name, (mask, weights) in masks_and_weights.items():
+            metrics[f"final_trend_probe_{name}_rows"] = float(mask.sum())
+            metrics[f"final_trend_probe_{name}_dominance_mass"] = float(
+                weights.sum()
+            )
+        metrics[
+            "final_trend_probe_aligned_long_winner_side_minus_wait"
+        ] = _weighted_mean(flat_q[:, 1] - flat_q[:, 0], masks_and_weights[
+            "aligned_long_winner"
+        ][1])
+        metrics[
+            "final_trend_probe_aligned_short_winner_side_minus_wait"
+        ] = _weighted_mean(flat_q[:, 2] - flat_q[:, 0], masks_and_weights[
+            "aligned_short_winner"
+        ][1])
+        metrics[
+            "final_trend_probe_countertrend_long_failure_wait_minus_side"
+        ] = _weighted_mean(flat_q[:, 0] - flat_q[:, 1], masks_and_weights[
+            "countertrend_long_failure"
+        ][1])
+        metrics[
+            "final_trend_probe_countertrend_short_failure_wait_minus_side"
+        ] = _weighted_mean(flat_q[:, 0] - flat_q[:, 2], masks_and_weights[
+            "countertrend_short_failure"
+        ][1])
+        for row_index, receipt in enumerate(row_receipts):
+            receipt["trend_confluence_stratum"] = next(
+                (
+                    name
+                    for name, (mask, _) in masks_and_weights.items()
+                    if bool(mask[row_index])
+                ),
+                "inactive",
+            )
 
     names = {channel: channels.index(channel) for channel in required_channels}
     positive_rows = np.isin(
@@ -407,6 +582,9 @@ def evaluate_final_regime_probe(
         "regime_selectivity_semantics": compiler.semantics,
         "regime_selectivity_expansion_centers": list(
             compiler.expansion_centers
+        ),
+        "trend_start_confirmation_lookback_bars": int(
+            trend_start_confirmation_lookback_bars
         ),
         "rows": [
             {

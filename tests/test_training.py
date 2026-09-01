@@ -2233,6 +2233,15 @@ class Agent:
             "economic_boundary_short_winner_min_margin_delta": 0.04,
             "economic_boundary_failed_long_min_margin_delta": 0.05,
             "economic_boundary_failed_short_min_margin_delta": 0.06,
+            "trend_start_confluence_loss": 0.12,
+            "trend_start_confluence_opportunity_loss": 0.07,
+            "trend_start_confluence_safety_loss": 0.05,
+            "trend_start_confluence_active_rows": 8.0,
+            "trend_start_confluence_aligned_long_winner_rows": 2.0,
+            "trend_start_confluence_aligned_short_winner_rows": 2.0,
+            "trend_start_confluence_countertrend_long_failure_rows": 2.0,
+            "trend_start_confluence_countertrend_short_failure_rows": 2.0,
+            "trend_start_confluence_dominance_mass": 4.0,
         }
         return 0.5
 
@@ -3083,6 +3092,27 @@ def test_training_collects_episodes_then_updates_from_balanced_replay(capsys) ->
     assert diagnostics[-1][
         "mean_economic_boundary_failed_short_min_margin_delta"
     ] == 0.06
+    assert diagnostics[-1]["mean_trend_start_confluence_loss"] == 0.12
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_opportunity_loss"
+    ] == 0.07
+    assert diagnostics[-1]["mean_trend_start_confluence_safety_loss"] == 0.05
+    assert diagnostics[-1]["mean_trend_start_confluence_active_rows"] == 8.0
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_aligned_long_winner_rows"
+    ] == 2.0
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_aligned_short_winner_rows"
+    ] == 2.0
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_countertrend_long_failure_rows"
+    ] == 2.0
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_countertrend_short_failure_rows"
+    ] == 2.0
+    assert diagnostics[-1][
+        "mean_trend_start_confluence_dominance_mass"
+    ] == 4.0
     assert diagnostics[-1]["cumulative_pass_rate"] == 1.0
     assert diagnostics[-1]["cumulative_blow_rate"] == 0.0
     assert diagnostics[-1]["cumulative_average_balance"] == 6_000.0

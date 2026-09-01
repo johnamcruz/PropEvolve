@@ -73,6 +73,7 @@
     "teachers": [],
     "entry_supervision": null,
     "regime_selectivity": null,
+    "trend_start_confluence": null,
     "recovery_curriculum": null,
     "balance_curriculum": null,
     "observation": null,

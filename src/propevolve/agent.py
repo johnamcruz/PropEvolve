@@ -33,6 +33,11 @@ from .recovery import (
     recovery_action_margin as recovery_action_margin_loss_fn,
     recovery_value_kl,
 )
+from .trend_start_confluence import (
+    TREND_START_CHANNELS,
+    causal_trend_directional_scores,
+    trend_start_confluence_rank_loss,
+)
 
 
 _REGIME_SELECTIVITY_STRATA = (
@@ -1142,6 +1147,9 @@ class RecurrentC51Agent:
         regime_selectivity_side_balance: str = "none",
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
         regime_selectivity_persistent_chop_negative_emphasis: float = 0.0,
+        trend_start_confluence_loss_weight: float = 0.0,
+        trend_start_confluence_margin: float = 0.0,
+        trend_start_confluence_confirmation_lookback_bars: int = 0,
         policy_retention_loss_weight: float = 0.0,
         auxiliary_gradient_conflict_mode: str = "none",
         exclude_economic_winners_from_chop_wait: bool = False,
@@ -1310,6 +1318,20 @@ class RecurrentC51Agent:
                 regime_selectivity_persistent_chop_negative_emphasis
             )
             or regime_selectivity_persistent_chop_negative_emphasis < 0.0
+            or isinstance(trend_start_confluence_loss_weight, bool)
+            or not np.isfinite(trend_start_confluence_loss_weight)
+            or trend_start_confluence_loss_weight < 0.0
+            or isinstance(trend_start_confluence_margin, bool)
+            or not np.isfinite(trend_start_confluence_margin)
+            or trend_start_confluence_margin < 0.0
+            or isinstance(
+                trend_start_confluence_confirmation_lookback_bars, bool
+            )
+            or int(trend_start_confluence_confirmation_lookback_bars) < 0
+            or (
+                trend_start_confluence_loss_weight > 0.0
+                and int(trend_start_confluence_confirmation_lookback_bars) < 1
+            )
         ):
             raise ValueError("Regime selectivity semantics are invalid")
         if (
@@ -1455,6 +1477,21 @@ class RecurrentC51Agent:
         self.regime_selectivity_persistent_chop_negative_emphasis = float(
             regime_selectivity_persistent_chop_negative_emphasis
         )
+        self.trend_start_confluence_loss_weight = float(
+            trend_start_confluence_loss_weight
+        )
+        self.trend_start_confluence_margin = float(
+            trend_start_confluence_margin
+        )
+        self.trend_start_confluence_confirmation_lookback_bars = int(
+            trend_start_confluence_confirmation_lookback_bars
+        )
+        if self.trend_start_confluence_loss_weight and not set(
+            TREND_START_CHANNELS
+        ) <= set(self.teacher_channel_names):
+            raise ValueError(
+                "Trend Start confluence requires all Trend teacher channels"
+            )
         self.regime_selectivity = (
             BalanceAwareRegimeSelectivity(
                 channel_names=self.teacher_channel_names,
@@ -1520,6 +1557,19 @@ class RecurrentC51Agent:
             tuple(
                 self.teacher_channel_names.index(channel)
                 for channel in self.regime_teacher_channel_names
+            ),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.trend_teacher_channel_names = tuple(
+            channel
+            for channel in TREND_START_CHANNELS
+            if channel in self.teacher_channel_names
+        )
+        self._trend_teacher_channel_indices_tensor = torch.tensor(
+            tuple(
+                self.teacher_channel_names.index(channel)
+                for channel in self.trend_teacher_channel_names
             ),
             dtype=torch.long,
             device=self.device,
@@ -2197,6 +2247,15 @@ class RecurrentC51Agent:
         regime_selectivity_paired_a_plus_pair_mass = teacher_loss
         regime_selectivity_paired_a_plus_good_advantage_sum = teacher_loss
         regime_selectivity_paired_a_plus_bad_advantage_sum = teacher_loss
+        trend_start_confluence_loss = teacher_loss
+        trend_start_confluence_opportunity_loss = teacher_loss
+        trend_start_confluence_safety_loss = teacher_loss
+        trend_start_confluence_active_rows = teacher_loss
+        trend_start_confluence_aligned_long_winner_rows = teacher_loss
+        trend_start_confluence_aligned_short_winner_rows = teacher_loss
+        trend_start_confluence_countertrend_long_failure_rows = teacher_loss
+        trend_start_confluence_countertrend_short_failure_rows = teacher_loss
+        trend_start_confluence_dominance_mass = teacher_loss
         paired_a_plus_additive = {
             f"regime_selectivity_paired_a_plus_{side}_{regime}_{field}":
             torch.zeros((), dtype=torch.float32, device=self.device)
@@ -2251,6 +2310,10 @@ class RecurrentC51Agent:
             )
             or (
                 self.entry_action_loss_weight > 0.0
+                and entry_action_weight_scale > 0.0
+            )
+            or (
+                self.trend_start_confluence_loss_weight > 0.0
                 and entry_action_weight_scale > 0.0
             )
         )
@@ -2335,6 +2398,10 @@ class RecurrentC51Agent:
                 self.regime_selectivity is not None
                 and entry_action_weight_scale > 0.0
             )
+            or (
+                self.trend_start_confluence_loss_weight > 0.0
+                and entry_action_weight_scale > 0.0
+            )
         ):
             teacher_targets = np.full(
                 (*observations.shape[:2], self.teacher_channels),
@@ -2360,9 +2427,12 @@ class RecurrentC51Agent:
             teacher_rows_numpy = (
                 all_teacher_rows_numpy & teacher_imitation_visible
             )
-            teacher_targets_tensor = torch.as_tensor(
+            full_teacher_targets_tensor = torch.as_tensor(
                 teacher_targets, dtype=torch.float32, device=self.device
-            )[:, self.recurrent_burn_in:]
+            )
+            teacher_targets_tensor = full_teacher_targets_tensor[
+                :, self.recurrent_burn_in:
+            ]
             teacher_rows = torch.as_tensor(
                 teacher_rows_numpy[:, self.recurrent_burn_in:],
                 device=self.device,
@@ -2485,6 +2555,130 @@ class RecurrentC51Agent:
                         loss = loss + teacher_weight_scale * (
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
+                        )
+                if self.trend_start_confluence_loss_weight > 0.0:
+                    assert diagnostic_targets is not None
+                    economic_sides = np.full(
+                        observations.shape[:2], -1, dtype=np.int64
+                    )
+                    economic_wins = np.zeros(
+                        observations.shape[:2], dtype=np.bool_
+                    )
+                    economic_rows = np.zeros(
+                        observations.shape[:2], dtype=np.bool_
+                    )
+                    for batch_index, sequence in enumerate(sequences):
+                        for time_index, transition in enumerate(sequence):
+                            if transition.paired_a_plus_side is None:
+                                continue
+                            if transition.paired_a_plus_economic_win is None:
+                                raise ValueError(
+                                    "Trend Start economic pair evidence is incomplete"
+                                )
+                            economic_sides[batch_index, time_index] = int(
+                                Action(transition.paired_a_plus_side)
+                            )
+                            economic_wins[batch_index, time_index] = bool(
+                                transition.paired_a_plus_economic_win
+                            )
+                            economic_rows[batch_index, time_index] = True
+                    learning_slice = slice(
+                        self.recurrent_burn_in,
+                        self.recurrent_burn_in + training_steps,
+                    )
+                    economic_sides_tensor = torch.as_tensor(
+                        economic_sides[:, learning_slice],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                    economic_wins_tensor = torch.as_tensor(
+                        economic_wins[:, learning_slice],
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                    trend_rows = (
+                        torch.as_tensor(
+                            economic_rows[:, learning_slice],
+                            dtype=torch.bool,
+                            device=self.device,
+                        )
+                        & all_teacher_rows[:, :training_steps]
+                        & learnable_rows
+                        & diagnostic_flat_rows
+                    )
+                    if bool(trend_rows.any().item()):
+                        trend_targets = full_teacher_targets_tensor[
+                            :,
+                            :self.recurrent_burn_in + training_steps,
+                        ].index_select(
+                            -1, self._trend_teacher_channel_indices_tensor
+                        )
+                        trend_directional_scores = (
+                            causal_trend_directional_scores(
+                                trend_targets,
+                                confirmation_lookback_bars=(
+                                    self.trend_start_confluence_confirmation_lookback_bars
+                                ),
+                            )
+                        )[:, self.recurrent_burn_in:]
+                        q_values = (
+                            all_logits[:, :training_steps].float().softmax(-1)
+                            * self.support
+                        ).sum(-1).index_select(-1, self._flat_action_indices)
+                        trend_result = trend_start_confluence_rank_loss(
+                            q_values[trend_rows],
+                            action_targets=diagnostic_targets[trend_rows],
+                            economic_sides=economic_sides_tensor[trend_rows],
+                            economic_wins=economic_wins_tensor[trend_rows],
+                            directional_scores=(
+                                trend_directional_scores[trend_rows]
+                            ),
+                            margin=self.trend_start_confluence_margin,
+                        )
+                        trend_weight = (
+                            entry_action_weight_scale
+                            * self.trend_start_confluence_loss_weight
+                        )
+                        weighted_trend_opportunity = (
+                            trend_weight * trend_result.opportunity_loss
+                        )
+                        weighted_trend_safety = (
+                            trend_weight * trend_result.safety_loss
+                        )
+                        trend_start_confluence_loss = (
+                            weighted_trend_opportunity + weighted_trend_safety
+                        )
+                        trend_start_confluence_opportunity_loss = (
+                            trend_result.opportunity_loss
+                        )
+                        trend_start_confluence_safety_loss = (
+                            trend_result.safety_loss
+                        )
+                        trend_start_confluence_active_rows = (
+                            trend_result.active_rows
+                        )
+                        trend_start_confluence_aligned_long_winner_rows = (
+                            trend_result.aligned_long_winner_rows
+                        )
+                        trend_start_confluence_aligned_short_winner_rows = (
+                            trend_result.aligned_short_winner_rows
+                        )
+                        trend_start_confluence_countertrend_long_failure_rows = (
+                            trend_result.countertrend_long_failure_rows
+                        )
+                        trend_start_confluence_countertrend_short_failure_rows = (
+                            trend_result.countertrend_short_failure_rows
+                        )
+                        trend_start_confluence_dominance_mass = (
+                            trend_result.dominance_mass
+                        )
+                        loss = loss + trend_start_confluence_loss
+                        gradient_opportunity_loss = (
+                            gradient_opportunity_loss
+                            + weighted_trend_opportunity
+                        )
+                        gradient_safety_loss = (
+                            gradient_safety_loss + weighted_trend_safety
                         )
                 if self.regime_selectivity is not None:
                     assert diagnostic_targets is not None
@@ -4402,6 +4596,15 @@ class RecurrentC51Agent:
             regime_selectivity_paired_a_plus_pair_mass,
             regime_selectivity_paired_a_plus_good_advantage_sum,
             regime_selectivity_paired_a_plus_bad_advantage_sum,
+            trend_start_confluence_loss,
+            trend_start_confluence_opportunity_loss,
+            trend_start_confluence_safety_loss,
+            trend_start_confluence_active_rows,
+            trend_start_confluence_aligned_long_winner_rows,
+            trend_start_confluence_aligned_short_winner_rows,
+            trend_start_confluence_countertrend_long_failure_rows,
+            trend_start_confluence_countertrend_short_failure_rows,
+            trend_start_confluence_dominance_mass,
             entry_action_supervised_rows,
             *entry_action_target_counts.unbind(),
             *entry_action_prediction_counts.unbind(),
@@ -4478,6 +4681,15 @@ class RecurrentC51Agent:
             regime_selectivity_paired_a_plus_pair_mass_value,
             regime_selectivity_paired_a_plus_good_advantage_sum_value,
             regime_selectivity_paired_a_plus_bad_advantage_sum_value,
+            trend_start_confluence_loss_value,
+            trend_start_confluence_opportunity_loss_value,
+            trend_start_confluence_safety_loss_value,
+            trend_start_confluence_active_rows_value,
+            trend_start_confluence_aligned_long_winner_rows_value,
+            trend_start_confluence_aligned_short_winner_rows_value,
+            trend_start_confluence_countertrend_long_failure_rows_value,
+            trend_start_confluence_countertrend_short_failure_rows_value,
+            trend_start_confluence_dominance_mass_value,
             entry_action_supervised_rows_value,
             entry_target_wait_rows,
             entry_target_long_rows,
@@ -4954,6 +5166,31 @@ class RecurrentC51Agent:
             "regime_selectivity_paired_a_plus_bad_advantage_sum": (
                 regime_selectivity_paired_a_plus_bad_advantage_sum_value
             ),
+            "trend_start_confluence_loss": trend_start_confluence_loss_value,
+            "trend_start_confluence_opportunity_loss": (
+                trend_start_confluence_opportunity_loss_value
+            ),
+            "trend_start_confluence_safety_loss": (
+                trend_start_confluence_safety_loss_value
+            ),
+            "trend_start_confluence_active_rows": (
+                trend_start_confluence_active_rows_value
+            ),
+            "trend_start_confluence_aligned_long_winner_rows": (
+                trend_start_confluence_aligned_long_winner_rows_value
+            ),
+            "trend_start_confluence_aligned_short_winner_rows": (
+                trend_start_confluence_aligned_short_winner_rows_value
+            ),
+            "trend_start_confluence_countertrend_long_failure_rows": (
+                trend_start_confluence_countertrend_long_failure_rows_value
+            ),
+            "trend_start_confluence_countertrend_short_failure_rows": (
+                trend_start_confluence_countertrend_short_failure_rows_value
+            ),
+            "trend_start_confluence_dominance_mass": (
+                trend_start_confluence_dominance_mass_value
+            ),
             **paired_a_plus_metric_values,
             **regime_selectivity_metric_values,
             **regime_channel_metric_values,
@@ -5179,6 +5416,9 @@ class RecurrentC51Agent:
         self.regime_selectivity_semantics = STATIC_STATE_SEMANTICS
         self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
         self.regime_selectivity = None
+        self.trend_start_confluence_loss_weight = 0.0
+        self.trend_start_confluence_margin = 0.0
+        self.trend_start_confluence_confirmation_lookback_bars = 0
         self.last_train_metrics = {}
         self.teacher_channel_names = ()
         self.teacher_channel_loss_weights = ()
@@ -5189,6 +5429,12 @@ class RecurrentC51Agent:
         )
         self.regime_teacher_channel_names = ()
         self._regime_teacher_channel_indices_tensor = torch.empty(
+            0,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.trend_teacher_channel_names = ()
+        self._trend_teacher_channel_indices_tensor = torch.empty(
             0,
             dtype=torch.long,
             device=self.device,
@@ -5236,12 +5482,17 @@ class RecurrentC51Agent:
             or self.challenge_return_self_imitation_weight != 0.0
             or self.regime_selectivity_loss_weight != 0.0
             or self.regime_selectivity is not None
+            or self.trend_start_confluence_loss_weight != 0.0
+            or self.trend_start_confluence_margin != 0.0
+            or self.trend_start_confluence_confirmation_lookback_bars != 0
             or self.retention_anchor is not None
             or self.online.teacher_output is not None
             or self.target.teacher_output is not None
             or self._teacher_channel_loss_weights_tensor.numel() != 0
             or self.regime_teacher_channel_names
             or self._regime_teacher_channel_indices_tensor.numel() != 0
+            or self.trend_teacher_channel_names
+            or self._trend_teacher_channel_indices_tensor.numel() != 0
         ):
             raise ValueError(
                 "validation policy still contains training-only teacher state"
@@ -5370,6 +5621,15 @@ class RecurrentC51Agent:
                 "regime_selectivity_persistent_chop_negative_emphasis": (
                     self.regime_selectivity_persistent_chop_negative_emphasis
                 ),
+                "trend_start_confluence_loss_weight": (
+                    self.trend_start_confluence_loss_weight
+                ),
+                "trend_start_confluence_margin": (
+                    self.trend_start_confluence_margin
+                ),
+                "trend_start_confluence_confirmation_lookback_bars": (
+                    self.trend_start_confluence_confirmation_lookback_bars
+                ),
                 "policy_retention_loss_weight": self.policy_retention_loss_weight,
                 "auxiliary_gradient_conflict_mode": (
                     self.auxiliary_gradient_conflict_mode
@@ -5497,6 +5757,11 @@ class RecurrentC51Agent:
         )
         config.setdefault(
             "regime_selectivity_persistent_chop_negative_emphasis", 0.0
+        )
+        config.setdefault("trend_start_confluence_loss_weight", 0.0)
+        config.setdefault("trend_start_confluence_margin", 0.0)
+        config.setdefault(
+            "trend_start_confluence_confirmation_lookback_bars", 0
         )
         if (
             int(config["teacher_channels"]) == 0

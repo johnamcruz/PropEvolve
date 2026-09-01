@@ -26,7 +26,8 @@ class TeacherTargetSource:
             self.kind not in {"expansion", "regime", "trend"}
             or not self.channels
             or len(set(self.channels)) != len(self.channels)
-            or self.loss_weight <= 0
+            or self.loss_weight < 0
+            or (self.loss_weight == 0 and self.kind != "trend")
             or self.entry_search_loss_weight < 0
             or (self.kind != "expansion" and self.entry_search_loss_weight != 0)
         ):

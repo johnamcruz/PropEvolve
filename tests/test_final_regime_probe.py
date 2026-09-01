@@ -24,10 +24,12 @@ from propevolve.replay import (
 )
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
+from propevolve.teachers.trend import CHANNELS as TREND_CHANNELS
 from propevolve.training import _training_evaluation_gates
 
 
 CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+TREND_PROBE_CHANNELS = (*CHANNELS, *TREND_CHANNELS)
 FLAT_ACTIONS = (
     Action.WAIT,
     Action.ENTER_LONG_1,
@@ -71,6 +73,8 @@ def _transition(
     regime_context: float = 0.0,
     reset: bool = False,
     source_decision_index: int,
+    paired_side: Action | None = None,
+    economic_win: bool | None = None,
 ) -> Transition:
     observation = np.asarray((code, regime_context, 0.0), dtype=np.float32)
     return Transition(
@@ -89,6 +93,13 @@ def _transition(
             1.0 if target is not None else None
         ),
         training_valid=True,
+        paired_a_plus_context=(
+            None
+            if paired_side is None
+            else np.asarray((0.8, 0.7, 0.1, 0.1, 0.1, 0.7, 0.2), np.float32)
+        ),
+        paired_a_plus_side=paired_side,
+        paired_a_plus_economic_win=economic_win,
         source_decision_index=source_decision_index,
     )
 
@@ -101,12 +112,15 @@ def _episode(
     source_decision_index: int,
     *,
     regime_context: float = 0.0,
+    burn_in_teacher: np.ndarray | None = None,
+    paired_side: Action | None = None,
+    economic_win: bool | None = None,
 ) -> Episode:
     # The anchor is at index one, after one authentic recurrent burn-in row.
     first = _transition(
         -99.0,
         None,
-        teacher,
+        teacher if burn_in_teacher is None else burn_in_teacher,
         reset=True,
         source_decision_index=max(0, source_decision_index - 1),
     )
@@ -116,6 +130,8 @@ def _episode(
         teacher,
         regime_context=regime_context,
         source_decision_index=source_decision_index,
+        paired_side=paired_side,
+        economic_win=economic_win,
     )
     final_observation = np.asarray(
         (code + 0.25, regime_context, 0.0),
@@ -198,6 +214,78 @@ def _probe_replay() -> BalancedSequenceReplay:
     return replay
 
 
+def _trend_teacher(
+    base: np.ndarray,
+    values: tuple[float, float, float, float],
+) -> np.ndarray:
+    return np.concatenate((base, np.asarray(values, dtype=np.float32)))
+
+
+def _trend_probe_replay() -> BalancedSequenceReplay:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=128,
+        sequence_length=2,
+        recurrent_burn_in=1,
+        seed=53,
+    )
+    base = _teacher_row(
+        chop=0.05,
+        trend=0.9,
+        chop_persistence=0.95,
+        transition_readiness=0.95,
+    )
+    neutral = _trend_teacher(base, (0.5, 0.5, 0.5, 0.5))
+    long_trend = _trend_teacher(base, (0.9, 0.1, 0.8, 0.2))
+    short_trend = _trend_teacher(base, (0.1, 0.9, 0.2, 0.8))
+    source_index = 1_000
+    for index in range(32):
+        for name, code, target, burn_in, side, economic_win in (
+            (
+                "long-winner",
+                2.0,
+                Action.ENTER_LONG_1,
+                long_trend,
+                Action.ENTER_LONG_1,
+                True,
+            ),
+            (
+                "short-winner",
+                3.0,
+                Action.ENTER_SHORT_1,
+                short_trend,
+                Action.ENTER_SHORT_1,
+                True,
+            ),
+            (
+                "failed-long",
+                4.0,
+                Action.WAIT,
+                short_trend,
+                Action.ENTER_LONG_1,
+                False,
+            ) if index < 16 else (
+                "failed-short",
+                5.0,
+                Action.WAIT,
+                long_trend,
+                Action.ENTER_SHORT_1,
+                False,
+            ),
+        ):
+            replay.add(_episode(
+                f"trend-{name}-{index}",
+                code,
+                target,
+                neutral,
+                source_index,
+                burn_in_teacher=burn_in,
+                paired_side=side,
+                economic_win=economic_win,
+            ))
+            source_index += 1
+    return replay
+
+
 class ScriptedFinalPolicy:
     def __init__(self, values_by_code: dict[int, tuple[float, float, float]]) -> None:
         self.values_by_code = values_by_code
@@ -220,6 +308,47 @@ class ScriptedFinalPolicy:
             action_rows.append(sequence_actions)
             value_rows.append(sequence_values)
         return np.asarray(action_rows), np.asarray(value_rows)
+
+
+def test_final_probe_reports_teacher_free_trend_confluence_rankings() -> None:
+    replay = _trend_probe_replay()
+    policy = ScriptedFinalPolicy({
+        2: (0.0, 0.6, 0.0),
+        3: (0.0, 0.0, 0.6),
+        4: (0.6, 0.0, 0.0),
+        5: (0.6, 0.0, 0.0),
+    })
+
+    report = evaluate_final_regime_probe(
+        policy,
+        replay.final_regime_probe_sequences(samples_per_action=32),
+        teacher_channel_names=TREND_PROBE_CHANNELS,
+        q_temperature=1.0,
+        trend_start_confirmation_lookback_bars=2,
+        source_period=("2021-01-01", "2025-01-01"),
+    )
+
+    assert policy.calls == 1
+    assert report.metrics["final_trend_probe_aligned_long_winner_rows"] == 32.0
+    assert report.metrics["final_trend_probe_aligned_short_winner_rows"] == 32.0
+    assert report.metrics[
+        "final_trend_probe_countertrend_long_failure_rows"
+    ] == 16.0
+    assert report.metrics[
+        "final_trend_probe_countertrend_short_failure_rows"
+    ] == 16.0
+    assert report.metrics[
+        "final_trend_probe_aligned_long_winner_side_minus_wait"
+    ] == pytest.approx(0.6)
+    assert report.metrics[
+        "final_trend_probe_aligned_short_winner_side_minus_wait"
+    ] == pytest.approx(0.6)
+    assert report.metrics[
+        "final_trend_probe_countertrend_long_failure_wait_minus_side"
+    ] == pytest.approx(0.6)
+    assert report.metrics[
+        "final_trend_probe_countertrend_short_failure_wait_minus_side"
+    ] == pytest.approx(0.6)
 
 
 def _evaluate(policy: ScriptedFinalPolicy, replay: BalancedSequenceReplay):

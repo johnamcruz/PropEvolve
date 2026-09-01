@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -13,6 +15,7 @@ from propevolve.environment import ChallengeStartState
 from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
+from propevolve.teachers.trend import CHANNELS as TREND_CHANNELS
 from propevolve.training import (
     BalanceCurriculumSettings,
     evaluate_agent,
@@ -22,6 +25,7 @@ from propevolve.training import _prioritize_paired_a_plus_violations
 
 
 TEACHER_CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
+TREND_CONFLUENCE_CHANNELS = (*TEACHER_CHANNELS, *TREND_CHANNELS)
 FLAT_ACTIONS = (
     Action.WAIT,
     Action.ENTER_LONG_1,
@@ -157,6 +161,82 @@ def _agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
             "pcgrad_preserve_economic_boundaries_v3"
         ),
         exclude_economic_winners_from_chop_wait=True,
+    )
+
+
+def _trend_confluence_agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
+    return RecurrentC51Agent(
+        3,
+        hidden_dim=24,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=0.02,
+        weight_decay=0.0,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        n_step_return=2,
+        recurrent_burn_in=recurrent_burn_in,
+        device="cpu",
+        seed=611,
+        teacher_channels=len(TREND_CONFLUENCE_CHANNELS),
+        teacher_channel_names=TREND_CONFLUENCE_CHANNELS,
+        teacher_loss_weight=1e-6,
+        teacher_channel_loss_weights=(
+            *((1e-6 / len(TEACHER_CHANNELS),) * len(TEACHER_CHANNELS)),
+            *((0.0,) * len(TREND_CHANNELS)),
+        ),
+        entry_action_loss_weight=1.0,
+        entry_action_margin=0.25,
+        regime_selectivity_loss_weight=1.0,
+        regime_selectivity_expansion_centers=(0.10, 0.10),
+        regime_selectivity_chop_wait_margin=0.25,
+        regime_selectivity_failed_confluence_margin=0.25,
+        regime_selectivity_paired_a_plus_margin=0.25,
+        regime_selectivity_side_balance="paired_recurrent_long_short_v1",
+        regime_selectivity_semantics=(
+            PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS
+        ),
+        regime_selectivity_persistent_chop_negative_emphasis=2.0,
+        trend_start_confluence_loss_weight=3.0,
+        trend_start_confluence_margin=0.25,
+        trend_start_confluence_confirmation_lookback_bars=3,
+        auxiliary_gradient_conflict_mode=(
+            "pcgrad_preserve_economic_boundaries_v3"
+        ),
+        exclude_economic_winners_from_chop_wait=True,
+    )
+
+
+def _with_trend_targets(
+    episode: Episode,
+    targets: tuple[float, float, float, float],
+    *,
+    anchor_targets: tuple[float, float, float, float] | None = None,
+) -> Episode:
+    return replace(
+        episode,
+        transitions=tuple(
+            replace(
+                transition,
+                teacher_target=(
+                    None
+                    if transition.teacher_target is None
+                    else np.concatenate((
+                        transition.teacher_target,
+                        np.asarray(
+                            anchor_targets
+                            if transition.entry_action_target is not None
+                            and anchor_targets is not None
+                            else targets,
+                            dtype=np.float32,
+                        ),
+                    ))
+                ),
+            )
+            for transition in episode.transitions
+        ),
     )
 
 
@@ -324,6 +404,132 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
         == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
+    tmp_path,
+) -> None:
+    replay = _replay(seed=612)
+    contexts = {
+        Action.ENTER_LONG_1: (
+            0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20,
+        ),
+        Action.ENTER_SHORT_1: (
+            0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20,
+        ),
+    }
+    aligned = {
+        Action.ENTER_LONG_1: (0.9, 0.1, 0.8, 0.2),
+        Action.ENTER_SHORT_1: (0.1, 0.9, 0.2, 0.8),
+    }
+    countertrend = {
+        Action.ENTER_LONG_1: aligned[Action.ENTER_SHORT_1],
+        Action.ENTER_SHORT_1: aligned[Action.ENTER_LONG_1],
+    }
+    offset = 0.0
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        for economic_win, trend in (
+            (True, aligned[side]),
+            (False, countertrend[side]),
+        ):
+            replay.add(_with_trend_targets(
+                _economic_episode(
+                    episode_id=(
+                        f"trend-{side.name}-"
+                        f"{'winner' if economic_win else 'failure'}"
+                    ),
+                    side=side,
+                    economic_win=economic_win,
+                    context=contexts[side],
+                    expansion_history=tuple(
+                        contexts[side][:4] for _ in range(6)
+                    ),
+                    offset=offset,
+                ),
+                trend,
+                anchor_targets=(0.5, 0.5, 0.5, 0.5),
+            ))
+            offset += 1.0
+
+    paired_sequences = replay.sample(4)
+    for sequence in paired_sequences:
+        anchor = sequence[2]
+        assert anchor.teacher_target is not None
+        assert anchor.teacher_target.shape == (len(TREND_CONFLUENCE_CHANNELS),)
+
+    agent = _trend_confluence_agent()
+    before = _grouped_boundary_margins(agent, paired_sequences)
+    for _ in range(128):
+        paired_sequences = replay.sample(4)
+        agent.train_batch(paired_sequences)
+    metrics = agent.last_train_metrics
+    # Only the four authenticated economic anchors receive Trend pressure.
+    # Other replay bars carry the same Trend targets to reconstruct recurrent
+    # history, but Trend alone must never create an entry label.
+    assert metrics["trend_start_confluence_active_rows"] == 4.0
+    assert metrics["trend_start_confluence_aligned_long_winner_rows"] > 0
+    assert metrics["trend_start_confluence_aligned_short_winner_rows"] > 0
+    assert metrics["trend_start_confluence_countertrend_long_failure_rows"] > 0
+    assert metrics["trend_start_confluence_countertrend_short_failure_rows"] > 0
+
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    policy_path = agent.save(tmp_path / "trend-free-policy.pt", manifest={})
+    agent, _ = RecurrentC51Agent.load(policy_path, device="cpu")
+    agent.assert_teacher_free()
+    after = _grouped_boundary_margins(agent, paired_sequences)
+    for side in ("long", "short"):
+        assert after[f"{side}_winner_vs_wait"] > before[
+            f"{side}_winner_vs_wait"
+        ]
+        assert after[f"{side}_winner_vs_wait"] >= 0.25
+        assert after[f"{side}_winner_vs_opposite"] >= 0.25
+        assert after[f"{side}_wait_vs_failure"] >= 0.25
+
+    class TeacherFreeTrendValidation:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def teacher_lookup(self, ticker: str, decision_index: int):
+            raise AssertionError("teacher-free validation accessed Trend")
+
+        def reset(self):
+            self.index = 0
+            return paired_sequences[0][0].observation.copy(), {
+                "ticker": "NQ",
+                "valid_actions": FLAT_ACTIONS,
+                "realized_pnl": 0.0,
+            }
+
+        def step(self, action):
+            self.index += 1
+            terminated = self.index == len(paired_sequences[0])
+            next_index = min(self.index, len(paired_sequences[0]) - 1)
+            return (
+                paired_sequences[0][next_index].observation.copy(),
+                0.0,
+                terminated,
+                False,
+                {
+                    "ticker": "NQ",
+                    "valid_actions": () if terminated else FLAT_ACTIONS,
+                    "outcome": "timeout" if terminated else None,
+                    "primary_side": "flat",
+                    "trade_count": 0,
+                    "win_count": 0,
+                    "winning_r_sum": 0.0,
+                    "equity_pnl": 0.0,
+                    "realized_pnl": 0.0,
+                },
+            )
+
+    result = evaluate_agent(
+        agent,
+        TeacherFreeTrendValidation(),
+        episodes=1,
+        recurrent_horizon=6,
+    )
+    assert result.timeouts == 1
 
 
 def test_lifecycle_violation_replay_transfers_both_sides_teacher_free() -> None:
