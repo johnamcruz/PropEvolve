@@ -384,6 +384,7 @@ def _regime_selectivity_replay_settings(
     specification: Mapping[str, object] | None,
     *,
     paired_a_plus_population_weighting: str,
+    paired_a_plus_context_matching: str,
 ) -> dict[str, object]:
     """Project the frozen side sampler identity onto replay construction."""
     side_balance = (
@@ -398,7 +399,129 @@ def _regime_selectivity_replay_settings(
         "paired_a_plus_population_weighting": (
             paired_a_plus_population_weighting
         ),
+        "paired_a_plus_context_matching": paired_a_plus_context_matching,
     }
+
+
+def _prioritize_paired_a_plus_violations(
+    agent: RecurrentC51Agent,
+    candidates: Sequence[Sequence[Transition]],
+    *,
+    pairs_per_side: int,
+) -> tuple[tuple[tuple[Transition, ...], ...], dict[str, float]]:
+    """Select the worst current winner/failure Q-boundary violations."""
+    if isinstance(pairs_per_side, bool) or pairs_per_side < 1:
+        raise ValueError("paired A+ violation pair count is invalid")
+    if not candidates:
+        return (), {
+            "candidate_pairs": 0.0,
+            "selected_pairs": 0.0,
+            "long_selected_pairs": 0.0,
+            "short_selected_pairs": 0.0,
+            "long_max_violation": 0.0,
+            "short_max_violation": 0.0,
+        }
+    _, q_values = agent.greedy_sequence_action_values(candidates)
+    anchor_index = int(agent.recurrent_burn_in)
+    groups: dict[
+        tuple[int, Action], list[tuple[int, Sequence[Transition]]]
+    ] = {}
+    for sequence_index, sequence in enumerate(candidates):
+        if not 0 <= anchor_index < len(sequence):
+            raise ValueError("paired A+ violation anchor is unavailable")
+        anchor = sequence[anchor_index]
+        if (
+            anchor.paired_a_plus_pair_id is None
+            or anchor.paired_a_plus_pair_side not in {
+                Action.ENTER_LONG_1,
+                Action.ENTER_SHORT_1,
+            }
+            or anchor.paired_a_plus_economic_win is None
+        ):
+            raise ValueError("paired A+ violation evidence is invalid")
+        key = (
+            int(anchor.paired_a_plus_pair_id),
+            Action(anchor.paired_a_plus_pair_side),
+        )
+        groups.setdefault(key, []).append((sequence_index, sequence))
+
+    ranked: dict[
+        Action, list[tuple[float, int, tuple[tuple[Transition, ...], ...]]]
+    ] = {
+        Action.ENTER_LONG_1: [],
+        Action.ENTER_SHORT_1: [],
+    }
+    for (pair_id, side), rows in groups.items():
+        if len(rows) != 2:
+            raise ValueError("paired A+ violation evidence is incomplete")
+        winner_rows = [
+            row for row in rows
+            if bool(row[1][anchor_index].paired_a_plus_economic_win)
+        ]
+        failure_rows = [
+            row for row in rows
+            if not bool(row[1][anchor_index].paired_a_plus_economic_win)
+        ]
+        if len(winner_rows) != 1 or len(failure_rows) != 1:
+            raise ValueError("paired A+ violation outcome identity is invalid")
+        winner_index, _ = winner_rows[0]
+        failure_index, _ = failure_rows[0]
+        winner_q = q_values[winner_index, anchor_index]
+        failure_q = q_values[failure_index, anchor_index]
+        opposite = (
+            Action.ENTER_SHORT_1
+            if side == Action.ENTER_LONG_1
+            else Action.ENTER_LONG_1
+        )
+        flat_indices = (int(Action.WAIT), int(side), int(opposite))
+        if (
+            not np.isfinite(winner_q[list(flat_indices)]).all()
+            or not np.isfinite(failure_q[list(flat_indices)]).all()
+        ):
+            raise ValueError("paired A+ violation Q values are invalid")
+        good_advantage = float(
+            winner_q[int(side)]
+            - max(winner_q[int(Action.WAIT)], winner_q[int(opposite)])
+        )
+        bad_advantage = float(
+            failure_q[int(side)] - failure_q[int(Action.WAIT)]
+        )
+        action_margin = float(agent.entry_action_margin)
+        pair_margin = float(agent.regime_selectivity_paired_a_plus_margin)
+        violation = (
+            max(0.0, action_margin - good_advantage)
+            + max(0.0, action_margin + bad_advantage)
+            + max(0.0, pair_margin + bad_advantage - good_advantage)
+        )
+        ranked[side].append((
+            violation,
+            pair_id,
+            tuple(tuple(sequence) for _, sequence in rows),
+        ))
+
+    selected: list[tuple[Transition, ...]] = []
+    diagnostic: dict[str, float] = {
+        "candidate_pairs": float(len(groups)),
+        "selected_pairs": 0.0,
+        "long_selected_pairs": 0.0,
+        "short_selected_pairs": 0.0,
+        "long_max_violation": 0.0,
+        "short_max_violation": 0.0,
+    }
+    for side, name in (
+        (Action.ENTER_LONG_1, "long"),
+        (Action.ENTER_SHORT_1, "short"),
+    ):
+        side_ranked = sorted(ranked[side], key=lambda row: (-row[0], row[1]))
+        kept = side_ranked[:pairs_per_side]
+        diagnostic[f"{name}_selected_pairs"] = float(len(kept))
+        diagnostic[f"{name}_max_violation"] = (
+            float(side_ranked[0][0]) if side_ranked else 0.0
+        )
+        for _, _, pair_sequences in kept:
+            selected.extend(pair_sequences)
+    diagnostic["selected_pairs"] = float(len(selected) // 2)
+    return tuple(selected), diagnostic
 
 
 def _paired_a_plus_transition_evidence(
@@ -3505,6 +3628,9 @@ class HistoricalCandidateRunner:
                 paired_a_plus_population_weighting=str(
                     training_config["paired_a_plus_population_weighting"]
                 ),
+                paired_a_plus_context_matching=str(
+                    training_config["paired_a_plus_context_matching"]
+                ),
             ),
             recurrent_burn_in=int(agent.recurrent_burn_in),
             n_step_return=int(agent.n_step_return),
@@ -3591,6 +3717,9 @@ class HistoricalCandidateRunner:
                             "paired_a_plus_population_weighting"
                         ]
                     ),
+                    paired_a_plus_context_matching=str(
+                        training_config["paired_a_plus_context_matching"]
+                    ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
                 n_step_return=int(agent.n_step_return),
@@ -3652,6 +3781,9 @@ class HistoricalCandidateRunner:
                         training_config[
                             "paired_a_plus_population_weighting"
                         ]
+                    ),
+                    paired_a_plus_context_matching=str(
+                        training_config["paired_a_plus_context_matching"]
                     ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
@@ -3715,6 +3847,9 @@ class HistoricalCandidateRunner:
                         training_config[
                             "paired_a_plus_population_weighting"
                         ]
+                    ),
+                    paired_a_plus_context_matching=str(
+                        training_config["paired_a_plus_context_matching"]
                     ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
@@ -3883,6 +4018,19 @@ class HistoricalCandidateRunner:
             batch_sequences=int(training_config["batch_sequences"]),
             prefetch_batches=int(training_config["prefetch_batches"]),
             recurrent_horizon=int(training_config["recurrent_horizon"]),
+            paired_a_plus_violation_replay_update_period=int(
+                training_config[
+                    "paired_a_plus_violation_replay_update_period"
+                ]
+            ),
+            paired_a_plus_violation_candidate_pairs_per_side=int(
+                training_config[
+                    "paired_a_plus_violation_candidate_pairs_per_side"
+                ]
+            ),
+            paired_a_plus_violation_pairs_per_side=int(
+                training_config["paired_a_plus_violation_pairs_per_side"]
+            ),
             greedy_diagnostic_interval_steps=int(
                 training_config["greedy_diagnostic_interval_steps"]
             ),
@@ -5796,6 +5944,9 @@ def train_agent(
     updates_per_episode: int,
     batch_sequences: int,
     recurrent_horizon: int,
+    paired_a_plus_violation_replay_update_period: int = 0,
+    paired_a_plus_violation_candidate_pairs_per_side: int = 0,
+    paired_a_plus_violation_pairs_per_side: int = 0,
     greedy_diagnostic_interval_steps: int = 256,
     epsilon_start: float,
     epsilon_end: float,
@@ -5849,6 +6000,25 @@ def train_agent(
         raise ValueError("episode ceiling and minimum environment steps must be positive")
     if budget_mode not in {"environment_steps", "episodes"}:
         raise ValueError("training budget mode is invalid")
+    violation_replay_contract = (
+        paired_a_plus_violation_replay_update_period,
+        paired_a_plus_violation_candidate_pairs_per_side,
+        paired_a_plus_violation_pairs_per_side,
+    )
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in violation_replay_contract
+    ):
+        raise ValueError("paired A+ violation replay contract is invalid")
+    if paired_a_plus_violation_replay_update_period == 0:
+        if any(violation_replay_contract[1:]):
+            raise ValueError("disabled paired A+ violation replay has values")
+    elif not (
+        1
+        <= paired_a_plus_violation_pairs_per_side
+        <= paired_a_plus_violation_candidate_pairs_per_side
+    ):
+        raise ValueError("paired A+ violation replay pair count is invalid")
     if (
         replay.recurrent_burn_in != int(getattr(agent, "recurrent_burn_in", 0))
         or replay.n_step_return != int(getattr(agent, "n_step_return", 1))
@@ -6805,6 +6975,12 @@ def train_agent(
                 "regime_selectivity_paired_a_plus_pair_mass",
                 "regime_selectivity_paired_a_plus_good_advantage_sum",
                 "regime_selectivity_paired_a_plus_bad_advantage_sum",
+                "paired_a_plus_violation_candidate_pairs",
+                "paired_a_plus_violation_selected_pairs",
+                "paired_a_plus_violation_long_selected_pairs",
+                "paired_a_plus_violation_short_selected_pairs",
+                "paired_a_plus_violation_long_max_violation",
+                "paired_a_plus_violation_short_max_violation",
                 "regime_selectivity_dead_wait_minus_"
                 "transition_positive_model_wait",
                 "recovery_value_loss",
@@ -6901,6 +7077,15 @@ def train_agent(
         recovery_success_replay_sequences = 0
         healthy_pass_replay_sequences = 0
         post_recovery_contrast_pairs = 0
+        violation_update_period = int(
+            paired_a_plus_violation_replay_update_period
+        )
+        violation_candidate_pairs_per_side = int(
+            paired_a_plus_violation_candidate_pairs_per_side
+        )
+        violation_pairs_per_side = int(
+            paired_a_plus_violation_pairs_per_side
+        )
         if len(replay) >= warmup_episodes:
             def train_replay_batch(
                 batch: Sequence[Sequence[Transition]],
@@ -6911,6 +7096,33 @@ def train_agent(
                 nonlocal recovery_success_replay_sequences
                 nonlocal healthy_pass_replay_sequences
                 nonlocal post_recovery_contrast_pairs
+                if (
+                    violation_update_period > 0
+                    and (update_index + 1) % violation_update_period == 0
+                ):
+                    existing_pair_ids = [
+                        int(transition.paired_a_plus_pair_id)
+                        for sequence in batch
+                        for transition in sequence
+                        if transition.paired_a_plus_pair_id is not None
+                    ]
+                    candidates = replay.sample_paired_a_plus_candidate_pairs(
+                        violation_candidate_pairs_per_side,
+                        pair_id_start=max(existing_pair_ids, default=-1) + 1,
+                    )
+                    selected, violation_diagnostic = (
+                        _prioritize_paired_a_plus_violations(
+                            agent,
+                            candidates,
+                            pairs_per_side=violation_pairs_per_side,
+                        )
+                    )
+                    if selected:
+                        batch = tuple(batch) + selected
+                    for key, value in violation_diagnostic.items():
+                        learner_diagnostics[
+                            f"paired_a_plus_violation_{key}"
+                        ].append(float(value))
                 if (
                     balance_curriculum is not None
                     and balance_pass_replay is not None

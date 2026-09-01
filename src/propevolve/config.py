@@ -1563,6 +1563,41 @@ def load_experiment_config(path: str | Path) -> dict:
         "equal_pair_mass_v1",
     }:
         raise ValueError("paired A+ population weighting is invalid")
+    paired_a_plus_context_matching = training[
+        "paired_a_plus_context_matching"
+    ]
+    if paired_a_plus_context_matching not in {
+        "static_expansion_regime_v1",
+        "regime_control_expansion_lifecycle_v1",
+    }:
+        raise ValueError("paired A+ context matching is invalid")
+    violation_update_period = training[
+        "paired_a_plus_violation_replay_update_period"
+    ]
+    violation_candidate_pairs = training[
+        "paired_a_plus_violation_candidate_pairs_per_side"
+    ]
+    violation_pairs = training[
+        "paired_a_plus_violation_pairs_per_side"
+    ]
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (
+                violation_update_period,
+                violation_candidate_pairs,
+                violation_pairs,
+            )
+        )
+        or violation_update_period == 0
+        and (violation_candidate_pairs != 0 or violation_pairs != 0)
+        or violation_update_period > 0
+        and not 1 <= violation_pairs <= violation_candidate_pairs
+        or violation_update_period > 0
+        and paired_a_plus_context_matching
+        != "regime_control_expansion_lifecycle_v1"
+    ):
+        raise ValueError("paired A+ violation replay is invalid")
     regime_selectivity = payload.get("regime_selectivity")
     side_balance = (
         None

@@ -330,7 +330,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 13
+    assert state["schema_version"] == 14
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -568,6 +568,8 @@ def _paired_a_plus_episode(
     learner_evidence: bool = True,
     outcome: str | None = None,
     terminal_pnl: float | None = None,
+    expansion_history: tuple[tuple[float, float, float, float], ...] | None = None,
+    anchor_index: int = 5,
 ) -> Episode:
     flat_actions = (
         Action.WAIT,
@@ -583,20 +585,35 @@ def _paired_a_plus_episode(
             terminated=index == 11,
             valid_actions=flat_actions,
             next_valid_actions=() if index == 11 else flat_actions,
-            entry_action_target=target if index == 5 else None,
+            entry_action_target=target if index == anchor_index else None,
             teacher_target=(
-                np.asarray(context, dtype=np.float32)
-                if index == 5 and learner_evidence
+                np.asarray(
+                    (
+                        *expansion_history[index],
+                        *context[4:],
+                    )
+                    if expansion_history is not None and index <= anchor_index
+                    else context,
+                    dtype=np.float32,
+                )
+                if learner_evidence
+                and (
+                    index == anchor_index
+                    or expansion_history is not None and index <= anchor_index
+                )
                 else None
             ),
             regime_selectivity_headroom_fraction=(
-                1.0 if index == 5 and learner_evidence else None
+                1.0 if index == anchor_index and learner_evidence else None
             ),
             paired_a_plus_context=(
-                np.asarray(context, dtype=np.float32) if index == 5 else None
+                np.asarray(context, dtype=np.float32)
+                if index == anchor_index else None
             ),
-            paired_a_plus_side=side if index == 5 else None,
-            paired_a_plus_economic_win=economic_win if index == 5 else None,
+            paired_a_plus_side=side if index == anchor_index else None,
+            paired_a_plus_economic_win=(
+                economic_win if index == anchor_index else None
+            ),
             source_decision_index=offset + index,
         )
         for index in range(12)
@@ -610,6 +627,189 @@ def _paired_a_plus_episode(
         transitions=transitions,
         terminal_pnl=terminal_pnl,
     )
+
+
+def test_lifecycle_pairing_controls_regime_and_preserves_expansion_edge() -> None:
+    """Same-Regime pairs must differ through causal Expansion lifecycle."""
+    current = (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)
+    rising = (
+        (0.20, 0.18, 0.12, 0.10),
+        (0.28, 0.24, 0.11, 0.10),
+        (0.40, 0.35, 0.11, 0.10),
+        (0.55, 0.49, 0.10, 0.10),
+        (0.72, 0.66, 0.10, 0.10),
+        current[:4],
+    )
+    stalled = (
+        (0.88, 0.84, 0.10, 0.10),
+        (0.91, 0.86, 0.10, 0.10),
+        (0.90, 0.85, 0.10, 0.10),
+        (0.89, 0.84, 0.10, 0.10),
+        (0.90, 0.85, 0.10, 0.10),
+        current[:4],
+    )
+    wrong_regime = (*current[:4], 0.90, 0.05, 0.05)
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching=(
+            "regime_control_expansion_lifecycle_v1"
+        ),
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=91,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-rising-winner",
+        ticker="NQ",
+        target=Action.ENTER_LONG_1,
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=current,
+        expansion_history=rising,
+        offset=0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-stalled-failure",
+        ticker="ES",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=current,
+        expansion_history=stalled,
+        offset=100,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-wrong-regime-failure",
+        ticker="CL",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=wrong_regime,
+        expansion_history=stalled,
+        offset=200,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id="long-early-unmatchable-failure",
+        ticker="YM",
+        target=Action.WAIT,
+        side=Action.ENTER_LONG_1,
+        economic_win=False,
+        context=current,
+        expansion_history=stalled,
+        anchor_index=3,
+        offset=300,
+    ))
+
+    sequences = replay.sample(2)
+    anchors = [sequence[replay.recurrent_burn_in] for sequence in sequences]
+    assert {anchor.paired_a_plus_economic_win for anchor in anchors} == {
+        True,
+        False,
+    }
+    failure = next(
+        anchor for anchor in anchors if not anchor.paired_a_plus_economic_win
+    )
+    assert failure.source_decision_index == 105
+
+    restored = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching=(
+            "regime_control_expansion_lifecycle_v1"
+        ),
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    restored.load_state_dict(replay.state_dict())
+    assert restored.paired_a_plus_context_matching == (
+        "regime_control_expansion_lifecycle_v1"
+    )
+
+
+def test_violation_candidate_pairs_are_bounded_and_side_balanced() -> None:
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching=(
+            "regime_control_expansion_lifecycle_v1"
+        ),
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=92,
+    )
+    histories = {
+        Action.ENTER_LONG_1: tuple(
+            (0.20 + 0.14 * index, 0.18 + 0.13 * index, 0.10, 0.10)
+            for index in range(6)
+        ),
+        Action.ENTER_SHORT_1: tuple(
+            (0.10, 0.10, 0.20 + 0.14 * index, 0.18 + 0.13 * index)
+            for index in range(6)
+        ),
+    }
+    for side, offset in (
+        (Action.ENTER_LONG_1, 0),
+        (Action.ENTER_SHORT_1, 200),
+    ):
+        context = (
+            (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20)
+            if side == Action.ENTER_LONG_1
+            else (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20)
+        )
+        replay.add(_paired_a_plus_episode(
+            episode_id=f"{side.name}-winner",
+            ticker="NQ",
+            target=side,
+            side=side,
+            economic_win=True,
+            context=context,
+            expansion_history=histories[side],
+            offset=offset,
+        ))
+        replay.add(_paired_a_plus_episode(
+            episode_id=f"{side.name}-failure",
+            ticker="ES",
+            target=Action.WAIT,
+            side=side,
+            economic_win=False,
+            context=context,
+            expansion_history=tuple((context[:4]) for _ in range(6)),
+            offset=offset + 100,
+        ))
+
+    sequences = replay.sample_paired_a_plus_candidate_pairs(
+        2,
+        pair_id_start=40,
+    )
+
+    anchors = [sequence[replay.recurrent_burn_in] for sequence in sequences]
+    assert len(sequences) == 8
+    assert {anchor.paired_a_plus_pair_id for anchor in anchors} == {
+        40,
+        41,
+        42,
+        43,
+    }
+    assert {
+        anchor.paired_a_plus_pair_side for anchor in anchors
+    } == {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+    for pair_id in range(40, 44):
+        pair = [
+            anchor for anchor in anchors
+            if anchor.paired_a_plus_pair_id == pair_id
+        ]
+        assert len(pair) == 2
+        assert {anchor.paired_a_plus_economic_win for anchor in pair} == {
+            True,
+            False,
+        }
 
 
 def test_balance_pass_replay_anchors_economic_winners_and_balances_sides(
@@ -935,6 +1135,7 @@ def test_replay_schema_11_without_terminal_pnl_remains_loadable() -> None:
     legacy = replay.state_dict()
     legacy["schema_version"] = 11
     legacy["contract"].pop("paired_a_plus_population_weighting")
+    legacy["contract"].pop("paired_a_plus_context_matching")
     for episode in legacy["episodes"]:
         episode.pop("terminal_pnl")
     restored = BalancedSequenceReplay(
@@ -1580,7 +1781,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 13
+    assert state["schema_version"] == 14
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1625,6 +1826,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     legacy = replay.state_dict()
     legacy["schema_version"] = 7
+    legacy["contract"].pop("paired_a_plus_context_matching")
     legacy["contract"].pop("paired_a_plus_population_weighting")
     legacy["contract"].pop("regime_wait_sequence_fraction")
     legacy["contract"].pop("regime_wait_sequence_update_period")
@@ -2572,7 +2774,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 13
+    assert state["schema_version"] == 14
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

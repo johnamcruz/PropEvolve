@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v33_a_plus_pair_mass_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v33_a_plus_pair_mass_200ep.json",
-  "study_root": "runs/stage2_v33_a_plus_pair_mass_tpe",
+  "name": "stage2_v34_expansion_lifecycle_transfer_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v34_expansion_lifecycle_transfer_200ep.json",
+  "study_root": "runs/stage2_v34_expansion_lifecycle_transfer_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -338,6 +338,10 @@
       "training.teacher_guidance_dropout_end",
       "training.teacher_autonomy_start_fraction",
       "training.entry_supervision_autonomy_start_fraction",
+      "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_violation_replay_update_period",
+      "training.paired_a_plus_violation_candidate_pairs_per_side",
+      "training.paired_a_plus_violation_pairs_per_side",
       "balance_curriculum.outcome_contrast_replay.update_period",
       "balance_curriculum.outcome_contrast_replay.max_examples",
       "balance_curriculum.pass_replay"

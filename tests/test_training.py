@@ -87,6 +87,83 @@ def _recovery_curriculum_settings() -> RecoveryCurriculumSettings:
     )
 
 
+def test_violation_prioritization_keeps_worst_pair_per_side() -> None:
+    class FixedQAgent:
+        recurrent_burn_in = 0
+        entry_action_margin = 0.25
+        regime_selectivity_paired_a_plus_margin = 0.25
+
+        @staticmethod
+        def greedy_sequence_action_values(sequences):
+            values = np.asarray([
+                [transition.observation[:3] for transition in sequence]
+                for sequence in sequences
+            ], dtype=np.float32)
+            return values.argmax(axis=-1), values
+
+    flat = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+
+    def sequence(
+        *,
+        pair_id: int,
+        side: Action,
+        winner: bool,
+        q_values: tuple[float, float, float],
+    ) -> tuple[Transition, ...]:
+        return (Transition(
+            observation=np.asarray(q_values, dtype=np.float32),
+            action=side if winner else Action.WAIT,
+            reward=0.0,
+            next_observation=np.asarray(q_values, dtype=np.float32),
+            terminated=False,
+            valid_actions=flat,
+            next_valid_actions=flat,
+            entry_action_target=side if winner else Action.WAIT,
+            paired_a_plus_side=side,
+            paired_a_plus_economic_win=winner,
+            paired_a_plus_pair_id=pair_id,
+            paired_a_plus_pair_side=side,
+            paired_a_plus_population_weight=1.0,
+        ),)
+
+    candidates = (
+        sequence(pair_id=10, side=Action.ENTER_LONG_1, winner=True,
+                 q_values=(0.0, 0.10, -0.10)),
+        sequence(pair_id=10, side=Action.ENTER_LONG_1, winner=False,
+                 q_values=(0.0, 0.20, -0.10)),
+        sequence(pair_id=11, side=Action.ENTER_LONG_1, winner=True,
+                 q_values=(0.0, 0.50, -0.10)),
+        sequence(pair_id=11, side=Action.ENTER_LONG_1, winner=False,
+                 q_values=(0.50, 0.0, -0.10)),
+        sequence(pair_id=20, side=Action.ENTER_SHORT_1, winner=True,
+                 q_values=(0.0, -0.10, 0.05)),
+        sequence(pair_id=20, side=Action.ENTER_SHORT_1, winner=False,
+                 q_values=(0.0, -0.10, 0.25)),
+        sequence(pair_id=21, side=Action.ENTER_SHORT_1, winner=True,
+                 q_values=(0.0, -0.10, 0.45)),
+        sequence(pair_id=21, side=Action.ENTER_SHORT_1, winner=False,
+                 q_values=(0.45, -0.10, 0.0)),
+    )
+
+    selected, diagnostic = training_module._prioritize_paired_a_plus_violations(
+        FixedQAgent(),
+        candidates,
+        pairs_per_side=1,
+    )
+
+    assert {
+        sequence[0].paired_a_plus_pair_id for sequence in selected
+    } == {10, 20}
+    assert diagnostic == {
+        "candidate_pairs": 4.0,
+        "selected_pairs": 2.0,
+        "long_selected_pairs": 1.0,
+        "short_selected_pairs": 1.0,
+        "long_max_violation": pytest.approx(0.95),
+        "short_max_violation": pytest.approx(1.15),
+    }
+
+
 def test_single_policy_balance_curriculum_is_balanced_and_resume_stable() -> None:
     settings = BalanceCurriculumSettings(
         schedule_seed=37,
@@ -1146,9 +1223,17 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
             "schema": "equal_long_short_v1",
             "action_order": ["ENTER_LONG_1", "ENTER_SHORT_1"],
         },
-    }, paired_a_plus_population_weighting="equal_pair_mass_v1") == {
+    },
+        paired_a_plus_population_weighting="equal_pair_mass_v1",
+        paired_a_plus_context_matching=(
+            "regime_control_expansion_lifecycle_v1"
+        ),
+    ) == {
         "entry_opportunity_side_balance": "equal_long_short_v1",
         "paired_a_plus_population_weighting": "equal_pair_mass_v1",
+        "paired_a_plus_context_matching": (
+            "regime_control_expansion_lifecycle_v1"
+        ),
     }
 
 

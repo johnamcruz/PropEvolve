@@ -729,6 +729,7 @@ class BalancedSequenceReplay:
         paired_a_plus_population_weighting: str = (
             "population_proportional_v1"
         ),
+        paired_a_plus_context_matching: str = "static_expansion_regime_v1",
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
         seed: int,
@@ -799,6 +800,11 @@ class BalancedSequenceReplay:
             raise ValueError(
                 "replay paired A+ population weighting is invalid"
             )
+        if paired_a_plus_context_matching not in {
+            "static_expansion_regime_v1",
+            "regime_control_expansion_lifecycle_v1",
+        }:
+            raise ValueError("replay paired A+ context matching is invalid")
         if (
             paired_a_plus_population_weighting == "equal_pair_mass_v1"
             and entry_opportunity_side_balance
@@ -811,6 +817,7 @@ class BalancedSequenceReplay:
         self.paired_a_plus_population_weighting = (
             paired_a_plus_population_weighting
         )
+        self.paired_a_plus_context_matching = paired_a_plus_context_matching
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -944,7 +951,7 @@ class BalancedSequenceReplay:
     def checkpoint_metadata(self) -> dict[str, object]:
         """Return the small replay contract and exact sampler state."""
         return {
-            "schema_version": 13,
+            "schema_version": 14,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -965,6 +972,9 @@ class BalancedSequenceReplay:
                 ),
                 "paired_a_plus_population_weighting": (
                     self.paired_a_plus_population_weighting
+                ),
+                "paired_a_plus_context_matching": (
+                    self.paired_a_plus_context_matching
                 ),
             },
             "random_state": self._random.getstate(),
@@ -1040,7 +1050,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11, 12, 13}:
+        if schema_version not in {7, 8, 9, 10, 11, 12, 13, 14}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1063,7 +1073,14 @@ class BalancedSequenceReplay:
             "paired_a_plus_population_weighting": (
                 self.paired_a_plus_population_weighting
             ),
+            "paired_a_plus_context_matching": (
+                self.paired_a_plus_context_matching
+            ),
         }
+        if schema_version <= 13:
+            if self.paired_a_plus_context_matching != "static_expansion_regime_v1":
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("paired_a_plus_context_matching")
         if schema_version <= 12:
             if (
                 self.paired_a_plus_population_weighting
@@ -1742,10 +1759,14 @@ class BalancedSequenceReplay:
                     ),
                 ):
                     winners[side].extend(
-                        (stored, int(index)) for index in winner_indices
+                        (stored, int(index))
+                        for index in winner_indices
+                        if self._paired_anchor_is_matchable(stored, int(index))
                     )
                     failures[side].extend(
-                        (stored, int(index)) for index in failure_indices
+                        (stored, int(index))
+                        for index in failure_indices
+                        if self._paired_anchor_is_matchable(stored, int(index))
                     )
             available_sides = [
                 side
@@ -1762,8 +1783,9 @@ class BalancedSequenceReplay:
                 winner_episode, winner_index = self._random.choice(
                     winners[side]
                 )
-                winner_context = self._paired_context_for_side(
-                    winner_episode.paired_a_plus_contexts[winner_index],
+                winner_context = self._paired_match_context(
+                    winner_episode,
+                    winner_index,
                     side,
                 )
                 failure_episode, failure_index = min(
@@ -2105,6 +2127,96 @@ class BalancedSequenceReplay:
             ))
         return tuple(sequences)
 
+    def sample_paired_a_plus_candidate_pairs(
+        self,
+        count_per_side: int,
+        *,
+        pair_id_start: int = 0,
+    ) -> tuple[tuple[Transition, ...], ...]:
+        """Return bounded recurrent winner/failure candidates for Q ranking.
+
+        Candidate generation remains label-only and training-only.  The
+        learner may score these fixed recurrent traces and retain the most
+        violated pairs without exposing teacher data to policy observations.
+        """
+        if (
+            isinstance(count_per_side, bool)
+            or count_per_side < 1
+            or isinstance(pair_id_start, bool)
+            or pair_id_start < 0
+        ):
+            raise ValueError("paired A+ candidate request is invalid")
+        winners: dict[Action, list[tuple[_StoredEpisode, int]]] = defaultdict(list)
+        failures: dict[Action, list[tuple[_StoredEpisode, int]]] = defaultdict(list)
+        for episode in self._episodes.values():
+            for side, winner_indices, failure_indices in (
+                (
+                    Action.ENTER_LONG_1,
+                    episode.paired_a_plus_long_winner_anchor_indices,
+                    episode.paired_a_plus_long_failure_anchor_indices,
+                ),
+                (
+                    Action.ENTER_SHORT_1,
+                    episode.paired_a_plus_short_winner_anchor_indices,
+                    episode.paired_a_plus_short_failure_anchor_indices,
+                ),
+            ):
+                winners[side].extend(
+                    (episode, int(index))
+                    for index in winner_indices
+                    if self._paired_anchor_is_matchable(episode, int(index))
+                )
+                failures[side].extend(
+                    (episode, int(index))
+                    for index in failure_indices
+                    if self._paired_anchor_is_matchable(episode, int(index))
+                )
+        sequences: list[tuple[Transition, ...]] = []
+        pair_id = pair_id_start
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            if not winners[side] or not failures[side]:
+                continue
+            winner_weight, failure_weight = self._paired_a_plus_population_weights(
+                winner_count=len(winners[side]),
+                failure_count=len(failures[side]),
+            )
+            for offset in range(count_per_side):
+                winner_episode, winner_index = winners[side][
+                    -(offset % len(winners[side])) - 1
+                ]
+                winner_context = self._paired_match_context(
+                    winner_episode,
+                    winner_index,
+                    side,
+                )
+                failure_episode, failure_index = min(
+                    failures[side],
+                    key=lambda candidate: self._paired_failure_rank(
+                        candidate,
+                        side=side,
+                        winner_context=winner_context,
+                    ),
+                )
+                for episode, anchor_index, population_weight in (
+                    (winner_episode, winner_index, winner_weight),
+                    (failure_episode, failure_index, failure_weight),
+                ):
+                    sequence = list(episode.target_anchored_sequence(
+                        anchor_index=anchor_index,
+                        length=self.sequence_length,
+                        recurrent_burn_in=self.recurrent_burn_in,
+                        n_step_return=self.n_step_return,
+                    ))
+                    sequence[self.recurrent_burn_in] = replace(
+                        sequence[self.recurrent_burn_in],
+                        paired_a_plus_pair_id=pair_id,
+                        paired_a_plus_pair_side=side,
+                        paired_a_plus_population_weight=population_weight,
+                    )
+                    sequences.append(tuple(sequence))
+                pair_id += 1
+        return tuple(sequences)
+
     def sample_balance_outcome_contrast_pairs(
         self,
         count: int,
@@ -2170,6 +2282,10 @@ class BalancedSequenceReplay:
                 continue
             for side, indices in side_indices:
                 for anchor_index in indices:
+                    if not self._paired_anchor_is_matchable(
+                        episode, int(anchor_index)
+                    ):
+                        continue
                     destination[side].append((
                         episode.ended_at_ns,
                         score,
@@ -2203,8 +2319,8 @@ class BalancedSequenceReplay:
                 (sample_index // len(available_sides)) % len(winners[side])
             ]
             _, _, _, winner_episode, winner_index = winner
-            winner_context = self._paired_context_for_side(
-                winner_episode.paired_a_plus_contexts[winner_index], side
+            winner_context = self._paired_match_context(
+                winner_episode, winner_index, side
             )
             failure = min(
                 failures[side],
@@ -2351,6 +2467,9 @@ class BalancedSequenceReplay:
                         if (
                             int(anchor_index) <= retained_boundary
                             and bool(episode.recovery_active[int(anchor_index)])
+                            and self._paired_anchor_is_matchable(
+                                episode, int(anchor_index)
+                            )
                         ):
                             retained[side].append((
                                 episode.ended_at_ns,
@@ -2383,6 +2502,9 @@ class BalancedSequenceReplay:
                     if (
                         anchor_index >= relapse_index
                         and bool(episode.recovery_active[anchor_index])
+                        and self._paired_anchor_is_matchable(
+                            episode, anchor_index
+                        )
                     ):
                         givebacks[side].append((
                             episode.ended_at_ns,
@@ -2416,8 +2538,8 @@ class BalancedSequenceReplay:
                 ((start + offset) // len(available_sides)) % len(retained[side])
             ]
             _, _, _, winner_episode, winner_index = winner
-            winner_context = self._paired_context_for_side(
-                winner_episode.paired_a_plus_contexts[winner_index], side
+            winner_context = self._paired_match_context(
+                winner_episode, winner_index, side
             )
             failure = min(
                 givebacks[side],
@@ -2490,20 +2612,76 @@ class BalancedSequenceReplay:
             return context[[2, 3, 0, 1, 4, 5, 6]]
         raise ValueError("paired A+ side is invalid")
 
-    @classmethod
+    def _paired_match_context(
+        self,
+        episode: _StoredEpisode,
+        anchor_index: int,
+        side: Action,
+    ) -> tuple[np.ndarray, ...]:
+        point = self._paired_context_for_side(
+            episode.paired_a_plus_contexts[anchor_index], side
+        )
+        if self.paired_a_plus_context_matching == "static_expansion_regime_v1":
+            return (point,)
+        if anchor_index < 5 or episode.teacher_targets is None:
+            raise ValueError("paired A+ lifecycle context is unavailable")
+        history = np.asarray(
+            episode.teacher_targets[anchor_index - 5:anchor_index + 1, :4],
+            dtype=np.float32,
+        )
+        if history.shape != (6, 4) or not np.isfinite(history).all():
+            raise ValueError("paired A+ lifecycle context is invalid")
+        if side == Action.ENTER_SHORT_1:
+            history = history[:, [2, 3, 0, 1]]
+        lifecycle = np.concatenate((
+            history[-1],
+            history[-1] - history[-2],
+            history[-1] - history[0],
+        )).astype(np.float32, copy=False)
+        return point[4:7], lifecycle
+
+    def _paired_anchor_is_matchable(
+        self,
+        episode: _StoredEpisode,
+        anchor_index: int,
+    ) -> bool:
+        if self.paired_a_plus_context_matching == "static_expansion_regime_v1":
+            return True
+        if anchor_index < 5 or episode.teacher_targets is None:
+            return False
+        history = episode.teacher_targets[anchor_index - 5:anchor_index + 1, :4]
+        return history.shape == (6, 4) and bool(np.isfinite(history).all())
+
     def _paired_failure_rank(
-        cls,
+        self,
         candidate: tuple[_StoredEpisode, int],
         *,
         side: Action,
-        winner_context: np.ndarray,
-    ) -> tuple[float, str, int]:
+        winner_context: tuple[np.ndarray, ...],
+    ) -> tuple[float, ...] | tuple[float, str, int]:
         episode, anchor_index = candidate
-        failure_context = cls._paired_context_for_side(
-            episode.paired_a_plus_contexts[anchor_index], side
+        failure_context = self._paired_match_context(
+            episode, anchor_index, side
         )
-        distance = float(np.square(winner_context - failure_context).sum())
-        return distance, episode.episode_id, anchor_index
+        if self.paired_a_plus_context_matching == "static_expansion_regime_v1":
+            distance = float(np.square(winner_context[0] - failure_context[0]).sum())
+            return distance, episode.episode_id, anchor_index
+        regime_distance = float(
+            np.square(winner_context[0] - failure_context[0]).sum()
+        )
+        point_distance = float(
+            np.square(winner_context[1][:4] - failure_context[1][:4]).sum()
+        )
+        lifecycle_delta_distance = float(
+            np.square(winner_context[1][4:] - failure_context[1][4:]).sum()
+        )
+        return (
+            regime_distance,
+            point_distance,
+            -lifecycle_delta_distance,
+            episode.episode_id,
+            anchor_index,
+        )
 
 
 class _HashingWriter:

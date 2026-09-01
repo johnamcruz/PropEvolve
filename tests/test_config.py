@@ -806,6 +806,50 @@ def test_paired_recurrent_recipe_requires_its_explicit_replay_contract(
     assert config["training"]["paired_a_plus_population_weighting"] == (
         "population_proportional_v1"
     )
+    assert config["training"]["paired_a_plus_context_matching"] == (
+        "static_expansion_regime_v1"
+    )
+    assert config["training"][
+        "paired_a_plus_violation_replay_update_period"
+    ] == 0
+    assert config["training"][
+        "paired_a_plus_violation_candidate_pairs_per_side"
+    ] == 0
+    assert config["training"][
+        "paired_a_plus_violation_pairs_per_side"
+    ] == 0
+    payload["training"]["paired_a_plus_context_matching"] = (
+        "regime_control_expansion_lifecycle_v1"
+    )
+    payload["training"].update({
+        "paired_a_plus_violation_replay_update_period": 8,
+        "paired_a_plus_violation_candidate_pairs_per_side": 4,
+        "paired_a_plus_violation_pairs_per_side": 1,
+    })
+    path.write_text(json.dumps(payload))
+    config = load_experiment_config(path)
+    assert config["training"]["paired_a_plus_context_matching"] == (
+        "regime_control_expansion_lifecycle_v1"
+    )
+    assert config["training"][
+        "paired_a_plus_violation_replay_update_period"
+    ] == 8
+    payload["training"][
+        "paired_a_plus_violation_candidate_pairs_per_side"
+    ] = 0
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=r"paired A\+ violation replay"):
+        load_experiment_config(path)
+    payload["training"][
+        "paired_a_plus_violation_candidate_pairs_per_side"
+    ] = 4
+    payload["training"]["paired_a_plus_context_matching"] = "invalid"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=r"paired A\+ context matching"):
+        load_experiment_config(path)
+    payload["training"]["paired_a_plus_context_matching"] = (
+        "regime_control_expansion_lifecycle_v1"
+    )
     payload["training"]["paired_a_plus_population_weighting"] = (
         "equal_pair_mass_v1"
     )

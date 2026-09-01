@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from propevolve.agent import RecurrentC51Agent, exact_action_margin_losses
 from propevolve.decision import Action
 from propevolve.replay import BalancedSequenceReplay
+from propevolve.training import _prioritize_paired_a_plus_violations
 
 SIDES = (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
 SN = {SIDES[0]: "long", SIDES[1]: "short"}
@@ -55,29 +56,53 @@ def challenge_outcome_cohort(
     return "negative_timeout"
 
 
-def make_replay(contract, schema, payloads):
+def make_replay(
+    contract,
+    schema,
+    payloads,
+    *,
+    paired_a_plus_context_matching=None,
+):
+    effective_contract = dict(contract)
+    if paired_a_plus_context_matching is not None:
+        effective_contract["paired_a_plus_context_matching"] = (
+            paired_a_plus_context_matching
+        )
+        schema = 14
     r = BalancedSequenceReplay(
-        capacity_episodes=contract["capacity_episodes"],
-        capacity_transitions=contract["capacity_transitions"],
-        sequence_length=contract["sequence_length"],
-        terminal_sequence_fraction=contract["terminal_sequence_fraction"],
-        safety_sequence_fraction=contract["safety_sequence_fraction"],
-        entry_opportunity_sequence_fraction=contract[
+        capacity_episodes=effective_contract["capacity_episodes"],
+        capacity_transitions=effective_contract["capacity_transitions"],
+        sequence_length=effective_contract["sequence_length"],
+        terminal_sequence_fraction=effective_contract["terminal_sequence_fraction"],
+        safety_sequence_fraction=effective_contract["safety_sequence_fraction"],
+        entry_opportunity_sequence_fraction=effective_contract[
             "entry_opportunity_sequence_fraction"
         ],
-        regime_wait_sequence_fraction=contract["regime_wait_sequence_fraction"],
-        regime_wait_sequence_update_period=contract[
+        regime_wait_sequence_fraction=effective_contract[
+            "regime_wait_sequence_fraction"
+        ],
+        regime_wait_sequence_update_period=effective_contract[
             "regime_wait_sequence_update_period"
         ],
-        entry_opportunity_side_balance=contract["entry_opportunity_side_balance"],
-        recurrent_burn_in=contract["recurrent_burn_in"],
-        n_step_return=contract["n_step_return"],
+        entry_opportunity_side_balance=effective_contract[
+            "entry_opportunity_side_balance"
+        ],
+        paired_a_plus_population_weighting=effective_contract.get(
+            "paired_a_plus_population_weighting",
+            "population_proportional_v1",
+        ),
+        paired_a_plus_context_matching=effective_contract.get(
+            "paired_a_plus_context_matching",
+            "static_expansion_regime_v1",
+        ),
+        recurrent_burn_in=effective_contract["recurrent_burn_in"],
+        n_step_return=effective_contract["n_step_return"],
         seed=314159,
     )
     r.load_state_dict(
         {
             "schema_version": schema,
-            "contract": contract,
+            "contract": effective_contract,
             "random_state": random.Random(314159).getstate(),
             "sample_calls": 0,
             "episodes": payloads,
@@ -491,6 +516,18 @@ def main():
     )
     ap.add_argument("--challenge-return-weight", type=float, default=0.05)
     ap.add_argument("--optimizer-overfit-updates", type=int, default=0)
+    ap.add_argument(
+        "--paired-context-matching",
+        choices=(
+            "static_expansion_regime_v1",
+            "regime_control_expansion_lifecycle_v1",
+        ),
+    )
+    ap.add_argument(
+        "--violation-prioritized-pairs-per-side",
+        type=int,
+        default=0,
+    )
     args = ap.parse_args()
     if (
         not np.isfinite(args.near_blow_pnl)
@@ -501,6 +538,10 @@ def main():
         or not np.isfinite(args.challenge_return_weight)
         or args.challenge_return_weight < 0.0
         or args.optimizer_overfit_updates < 0
+        or args.violation_prioritized_pairs_per_side < 0
+        or args.violation_prioritized_pairs_per_side > 0
+        and args.paired_context_matching
+        != "regime_control_expansion_lifecycle_v1"
     ):
         ap.error(
             "--near-blow-pnl must be negative and --pair-count must be at least two"
@@ -665,7 +706,12 @@ def main():
     for eid in dict.fromkeys(selected):
         with (replay_root / index[eid]["path"]).open("rb") as f:
             payloads.append(pickle.load(f))
-    replay = make_replay(contract, desc["replay_schema_version"], payloads)
+    replay = make_replay(
+        contract,
+        desc["replay_schema_version"],
+        payloads,
+        paired_a_plus_context_matching=args.paired_context_matching,
+    )
     seqs = []
     pair_report = []
     for pid, side, w, f, d, nw, nf in specs:
@@ -707,6 +753,98 @@ def main():
                 "anchors": anchors,
             }
         )
+    violation_diagnostic = None
+    if args.violation_prioritized_pairs_per_side > 0:
+        candidate_sequences = replay.sample_paired_a_plus_candidate_pairs(
+            max(args.pair_count, args.violation_prioritized_pairs_per_side),
+        )
+        prioritized, violation_diagnostic = (
+            _prioritize_paired_a_plus_violations(
+                agent,
+                candidate_sequences,
+                pairs_per_side=args.violation_prioritized_pairs_per_side,
+            )
+        )
+        seqs = list(prioritized)
+        def source_payload(anchor):
+            for payload in payloads:
+                source_indices = np.asarray(payload["source_decision_indices"])
+                side_rows = np.asarray(payload["paired_a_plus_sides"])
+                win_rows = np.asarray(payload["paired_a_plus_economic_wins"])
+                for source_index in np.flatnonzero(
+                    (source_indices == anchor.source_decision_index)
+                    & (side_rows == int(anchor.paired_a_plus_pair_side))
+                    & (
+                        win_rows
+                        == int(bool(anchor.paired_a_plus_economic_win))
+                    )
+                ):
+                    if np.array_equal(
+                        payload["observations"][source_index],
+                        anchor.observation,
+                    ):
+                        return payload, int(source_index)
+            raise ValueError("prioritized pair source is unavailable")
+
+        pair_report = []
+        for pair_offset in range(0, len(seqs), 2):
+            pair_sequences = seqs[pair_offset:pair_offset + 2]
+            pair_anchors = [
+                sequence[contract["recurrent_burn_in"]]
+                for sequence in pair_sequences
+            ]
+            winner_anchor = next(
+                anchor
+                for anchor in pair_anchors
+                if anchor.paired_a_plus_economic_win
+            )
+            failure_anchor = next(
+                anchor
+                for anchor in pair_anchors
+                if not anchor.paired_a_plus_economic_win
+            )
+            side = Action(winner_anchor.paired_a_plus_pair_side)
+            anchor_report = []
+            matched = []
+            for anchor in (winner_anchor, failure_anchor):
+                payload, source_index = source_payload(anchor)
+                episode = replay._episodes[payload["episode_id"]]
+                matched.append(replay._paired_match_context(
+                    episode,
+                    source_index,
+                    side,
+                ))
+                anchor_report.append({
+                    "episode": payload["episode_id"],
+                    "source_index": source_index,
+                    "economic_win": bool(anchor.paired_a_plus_economic_win),
+                    "exact_target": Action(anchor.entry_action_target).name,
+                    "population_weight": float(
+                        anchor.paired_a_plus_population_weight
+                    ),
+                    "challenge_return_to_go": float(
+                        discounted_returns_to_go(
+                            np.asarray(payload["rewards"], dtype=np.float64),
+                            discount=args.challenge_return_discount,
+                        )[source_index]
+                    ),
+                })
+            regime_distance = float(np.square(matched[0][0] - matched[1][0]).sum())
+            lifecycle = (
+                matched[0][1] if len(matched[0]) > 1 else matched[0][0]
+            )
+            failure_lifecycle = (
+                matched[1][1] if len(matched[1]) > 1 else matched[1][0]
+            )
+            pair_report.append({
+                "pair_id": int(winner_anchor.paired_a_plus_pair_id),
+                "side": SN[side],
+                "context_squared_distance": float(
+                    np.square(lifecycle - failure_lifecycle).sum()
+                ),
+                "regime_squared_distance": regime_distance,
+                "anchors": anchor_report,
+            })
     seqs = tuple(seqs)
     before = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
     boundary_margins_before = []
@@ -798,6 +936,16 @@ def main():
         "audit_contract": {
             "near_blow_pnl": args.near_blow_pnl,
             "pair_count": args.pair_count,
+            "paired_context_matching": (
+                args.paired_context_matching
+                or contract.get(
+                    "paired_a_plus_context_matching",
+                    "static_expansion_regime_v1",
+                )
+            ),
+            "violation_prioritized_pairs_per_side": (
+                args.violation_prioritized_pairs_per_side
+            ),
         },
         "replay_authentication": {
             "verified_shards": authenticated,
@@ -841,6 +989,7 @@ def main():
         "audited_pairs": pair_report,
         "economic_boundary_margins_before": boundary_margins_before,
         "audited_pair_mass": dict(Counter(x["side"] for x in pair_report)),
+        "violation_prioritization": violation_diagnostic,
         "gradient_components": norms,
         "gradient_cosine": cos,
         "chop_wait_rows": wrows,

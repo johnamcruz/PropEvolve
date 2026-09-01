@@ -14,6 +14,7 @@ from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
 from propevolve.training import BalanceCurriculumSettings, train_agent
+from propevolve.training import _prioritize_paired_a_plus_violations
 
 
 TEACHER_CHANNELS = (*EXPANSION_CHANNELS, *REGIME_CHANNELS)
@@ -31,18 +32,33 @@ def _economic_episode(
     economic_win: bool,
     context: tuple[float, ...],
     offset: float,
+    expansion_history: tuple[tuple[float, float, float, float], ...] | None = None,
 ) -> Episode:
     target = side if economic_win else Action.WAIT
     outcome = "pass" if economic_win else "timeout"
     transitions = []
     for index in range(12):
         anchor = index == 5
+        expansion = (
+            expansion_history[index]
+            if expansion_history is not None and index <= 5
+            else context[:4]
+        )
         observation = np.asarray(
-            (offset + index / 100.0, context[0], context[2]),
+            (offset + index / 100.0, expansion[0], expansion[2]),
             dtype=np.float32,
         )
+        next_expansion = (
+            expansion_history[index + 1]
+            if expansion_history is not None and index < 5
+            else context[:4]
+        )
         next_observation = np.asarray(
-            (offset + (index + 1) / 100.0, context[0], context[2]),
+            (
+                offset + (index + 1) / 100.0,
+                next_expansion[0],
+                next_expansion[2],
+            ),
             dtype=np.float32,
         )
         transitions.append(Transition(
@@ -54,7 +70,9 @@ def _economic_episode(
             valid_actions=FLAT_ACTIONS,
             next_valid_actions=() if index == 11 else FLAT_ACTIONS,
             teacher_target=(
-                np.asarray(context, dtype=np.float32) if anchor else None
+                np.asarray((*expansion, *context[4:]), dtype=np.float32)
+                if anchor or expansion_history is not None and index <= 5
+                else None
             ),
             entry_action_target=target if anchor else None,
             regime_selectivity_headroom_fraction=1.0 if anchor else None,
@@ -80,22 +98,26 @@ def _replay(
     *,
     seed: int,
     paired_a_plus_population_weighting: str = "population_proportional_v1",
+    paired_a_plus_context_matching: str = "static_expansion_regime_v1",
+    sequence_length: int = 6,
+    recurrent_burn_in: int = 2,
 ) -> BalancedSequenceReplay:
     return BalancedSequenceReplay(
         capacity_episodes=8,
-        sequence_length=6,
+        sequence_length=sequence_length,
         entry_opportunity_sequence_fraction=1.0,
         entry_opportunity_side_balance="paired_recurrent_long_short_v1",
         paired_a_plus_population_weighting=(
             paired_a_plus_population_weighting
         ),
-        recurrent_burn_in=2,
+        paired_a_plus_context_matching=paired_a_plus_context_matching,
+        recurrent_burn_in=recurrent_burn_in,
         n_step_return=2,
         seed=seed,
     )
 
 
-def _agent() -> RecurrentC51Agent:
+def _agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
     return RecurrentC51Agent(
         3,
         hidden_dim=24,
@@ -108,7 +130,7 @@ def _agent() -> RecurrentC51Agent:
         gradient_clip=10.0,
         target_sync_updates=250,
         n_step_return=2,
-        recurrent_burn_in=2,
+        recurrent_burn_in=recurrent_burn_in,
         device="cpu",
         seed=601,
         teacher_channels=len(TEACHER_CHANNELS),
@@ -154,7 +176,7 @@ def _boundary_margins(
             if transition_index == agent.recurrent_burn_in:
                 anchor_action_values = action_values
         assert anchor_action_values is not None
-        anchor = sequence[2]
+        anchor = sequence[agent.recurrent_burn_in]
         assert anchor.paired_a_plus_pair_id is not None
         assert anchor.paired_a_plus_pair_side is not None
         side = anchor.paired_a_plus_pair_side
@@ -298,6 +320,88 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
         == 12.0
     )
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
+
+
+def test_lifecycle_violation_replay_transfers_both_sides_teacher_free() -> None:
+    """The V34 path must learn lifecycle winners without weakening failures."""
+    replay = _replay(
+        seed=610,
+        paired_a_plus_context_matching=(
+            "regime_control_expansion_lifecycle_v1"
+        ),
+        sequence_length=9,
+        recurrent_burn_in=5,
+    )
+    contexts = {
+        Action.ENTER_LONG_1: (
+            0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20,
+        ),
+        Action.ENTER_SHORT_1: (
+            0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20,
+        ),
+    }
+    rising = {
+        Action.ENTER_LONG_1: tuple(
+            (0.20 + 0.14 * index, 0.18 + 0.13 * index, 0.10, 0.10)
+            for index in range(6)
+        ),
+        Action.ENTER_SHORT_1: tuple(
+            (0.10, 0.10, 0.20 + 0.14 * index, 0.18 + 0.13 * index)
+            for index in range(6)
+        ),
+    }
+    for side, offset in (
+        (Action.ENTER_LONG_1, 0.0),
+        (Action.ENTER_SHORT_1, 2.0),
+    ):
+        context = contexts[side]
+        replay.add(_economic_episode(
+            episode_id=f"{side.name}-lifecycle-winner",
+            side=side,
+            economic_win=True,
+            context=context,
+            expansion_history=rising[side],
+            offset=offset,
+        ))
+        replay.add(_economic_episode(
+            episode_id=f"{side.name}-lifecycle-failure",
+            side=side,
+            economic_win=False,
+            context=context,
+            expansion_history=tuple(context[:4] for _ in range(6)),
+            offset=offset,
+        ))
+
+    candidates = replay.sample_paired_a_plus_candidate_pairs(1)
+    agent = _agent(recurrent_burn_in=5)
+    agent.regime_selectivity_paired_a_plus_winner_loss_weight = 3.0
+    for group in agent.optimizer.param_groups:
+        group["lr"] = 0.01
+    before = _grouped_boundary_margins(agent, candidates)
+    for _ in range(256):
+        candidates = replay.sample_paired_a_plus_candidate_pairs(1)
+        selected, diagnostic = _prioritize_paired_a_plus_violations(
+            agent,
+            candidates,
+            pairs_per_side=1,
+        )
+        assert diagnostic["long_selected_pairs"] == 1.0
+        assert diagnostic["short_selected_pairs"] == 1.0
+        agent.train_batch(selected)
+
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    after = _grouped_boundary_margins(agent, candidates)
+    for side in ("long", "short"):
+        assert after[f"{side}_winner_vs_wait"] > before[
+            f"{side}_winner_vs_wait"
+        ]
+        assert after[f"{side}_winner_vs_wait"] >= 0.25, {
+            "before": before,
+            "after": after,
+        }
+        assert after[f"{side}_winner_vs_opposite"] >= 0.25
+        assert after[f"{side}_wait_vs_failure"] >= 0.25
 
 
 def test_equal_pair_mass_survives_replay_resume_and_real_optimizer_update(
