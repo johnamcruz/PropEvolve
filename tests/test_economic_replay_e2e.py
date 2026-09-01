@@ -13,7 +13,11 @@ from propevolve.environment import ChallengeStartState
 from propevolve.replay import BalancedSequenceReplay, Episode, Transition
 from propevolve.teachers.expansion import CHANNELS as EXPANSION_CHANNELS
 from propevolve.teachers.regime import CHANNELS as REGIME_CHANNELS
-from propevolve.training import BalanceCurriculumSettings, train_agent
+from propevolve.training import (
+    BalanceCurriculumSettings,
+    evaluate_agent,
+    train_agent,
+)
 from propevolve.training import _prioritize_paired_a_plus_violations
 
 
@@ -402,6 +406,76 @@ def test_lifecycle_violation_replay_transfers_both_sides_teacher_free() -> None:
         }
         assert after[f"{side}_winner_vs_opposite"] >= 0.25
         assert after[f"{side}_wait_vs_failure"] >= 0.25
+
+    winner_sequences = tuple(
+        sequence
+        for sequence in candidates
+        if sequence[agent.recurrent_burn_in].paired_a_plus_economic_win
+    )
+    assert tuple(
+        sequence[agent.recurrent_burn_in].paired_a_plus_pair_side
+        for sequence in winner_sequences
+    ) == (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+
+    class TeacherFreeLifecycleValidation:
+        def __init__(self) -> None:
+            self.episode_index = -1
+            self.step_index = 0
+            self.actions: list[list[Action]] = []
+
+        def teacher_lookup(self, ticker: str, decision_index: int):
+            raise AssertionError("teacher-free validation accessed a teacher")
+
+        def reset(self):
+            self.episode_index += 1
+            self.step_index = 0
+            self.actions.append([])
+            sequence = winner_sequences[self.episode_index]
+            return sequence[0].observation.copy(), {
+                "ticker": "NQ",
+                "valid_actions": FLAT_ACTIONS,
+                "realized_pnl": 0.0,
+            }
+
+        def step(self, action):
+            sequence = winner_sequences[self.episode_index]
+            self.actions[self.episode_index].append(Action(action))
+            self.step_index += 1
+            terminated = self.step_index == len(sequence)
+            next_index = min(self.step_index, len(sequence) - 1)
+            return (
+                sequence[next_index].observation.copy(),
+                0.0,
+                terminated,
+                False,
+                {
+                    "ticker": "NQ",
+                    "valid_actions": () if terminated else FLAT_ACTIONS,
+                    "outcome": "timeout" if terminated else None,
+                    "primary_side": "flat",
+                    "trade_count": 0,
+                    "win_count": 0,
+                    "winning_r_sum": 0.0,
+                    "equity_pnl": 0.0,
+                    "realized_pnl": 0.0,
+                },
+            )
+
+    validation = TeacherFreeLifecycleValidation()
+    result = evaluate_agent(
+        agent,
+        validation,
+        episodes=2,
+        recurrent_horizon=9,
+    )
+
+    assert result.timeouts == 2
+    assert validation.actions[0][agent.recurrent_burn_in] == (
+        Action.ENTER_LONG_1
+    )
+    assert validation.actions[1][agent.recurrent_burn_in] == (
+        Action.ENTER_SHORT_1
+    )
 
 
 def test_equal_pair_mass_survives_replay_resume_and_real_optimizer_update(
