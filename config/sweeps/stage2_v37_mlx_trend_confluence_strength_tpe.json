@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v36_trend_confluence_strength_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v36_trend_confluence_strength_200ep.json",
-  "study_root": "runs/stage2_v36_trend_confluence_strength_tpe",
+  "name": "stage2_v37_mlx_trend_confluence_strength_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v37_mlx_trend_confluence_strength_200ep.json",
+  "study_root": "runs/stage2_v37_mlx_trend_confluence_strength_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,

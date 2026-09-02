@@ -923,6 +923,11 @@ def test_active_sweep_compiles_through_real_config_validation(
 
     def runner(config_path: Path, *, run_id: str):
         normalized = load_experiment_config(config_path)
+        assert normalized["runtime"]["learner_backend"] == "mlx"
+        assert normalized["agent"]["device"] == "mps"
+        assert normalized["runtime"]["mixed_precision"] == "off"
+        assert normalized["runtime"]["compile_model"] is False
+        assert normalized["training"]["prefetch_batches"] == 1
         return RunState(
             run_id,
             _plan(normalized).identity,
@@ -947,6 +952,8 @@ def test_active_sweep_compiles_through_real_config_validation(
 
     assert sweep.n_trials == 50
     assert sweep.n_jobs == 3
+    assert sweep.base_config["runtime"]["learner_backend"] == "mlx"
+    assert sweep.base_config["training"]["prefetch_batches"] == 1
     assert sweep.stages["screening"].short_circuit == SCREENING_SHORT_CIRCUIT
     assert sweep.stages["screening"].training_episodes == 50
     assert sweep.stages["screening"].validation_episodes == 50
