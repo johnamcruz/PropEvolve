@@ -532,6 +532,82 @@ def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
     assert result.timeouts == 1
 
 
+def test_trend_learner_reuses_legacy_expansion_regime_replay_without_trend_pressure(
+) -> None:
+    legacy_replay = _replay(seed=613)
+    contexts = {
+        Action.ENTER_LONG_1: (
+            0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20,
+        ),
+        Action.ENTER_SHORT_1: (
+            0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20,
+        ),
+    }
+    offset = 0.0
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        for economic_win in (True, False):
+            legacy_replay.add(_economic_episode(
+                episode_id=(
+                    f"legacy-{side.name}-"
+                    f"{'winner' if economic_win else 'failure'}"
+                ),
+                side=side,
+                economic_win=economic_win,
+                context=contexts[side],
+                offset=offset,
+            ))
+            offset += 1.0
+
+    restored_replay = _replay(seed=614)
+    restored_replay.load_state_dict(legacy_replay.state_dict())
+    sequences = restored_replay.sample(4)
+    assert {
+        np.asarray(transition.teacher_target).size
+        for sequence in sequences
+        for transition in sequence
+        if transition.teacher_target is not None
+    } == {len(TEACHER_CHANNELS)}
+
+    agent = _trend_confluence_agent()
+    agent.train_batch(sequences)
+
+    metrics = agent.last_train_metrics
+    assert metrics["regime_selectivity_paired_a_plus_pair_count"] == 2.0
+    assert metrics["regime_selectivity_paired_a_plus_long_pair_count"] == 1.0
+    assert metrics["regime_selectivity_paired_a_plus_short_pair_count"] == 1.0
+    assert metrics["trend_start_confluence_active_rows"] == 0.0
+
+
+def test_trend_learner_rejects_unknown_legacy_teacher_width() -> None:
+    episode = _economic_episode(
+        episode_id="invalid-legacy-width",
+        side=Action.ENTER_LONG_1,
+        economic_win=True,
+        context=(0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        offset=0.0,
+    )
+    episode = replace(
+        episode,
+        transitions=tuple(
+            replace(
+                transition,
+                teacher_target=(
+                    None
+                    if transition.teacher_target is None
+                    else np.concatenate((
+                        transition.teacher_target,
+                        np.asarray((0.5,), dtype=np.float32),
+                    ))
+                ),
+            )
+            for transition in episode.transitions
+        ),
+    )
+
+    with pytest.raises(ValueError, match="teacher target width drifted"):
+        _trend_confluence_agent().train_batch((episode.transitions[2:8],))
+
+
 def test_lifecycle_violation_replay_transfers_both_sides_teacher_free() -> None:
     """The V34 path must learn lifecycle winners without weakening failures."""
     replay = _replay(

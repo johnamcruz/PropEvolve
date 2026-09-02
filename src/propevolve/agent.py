@@ -15,6 +15,7 @@ from torch import nn
 from .balance_aware_regime_selectivity import (
     ALL_DOMINANT_CHOP_MARGIN_SEMANTICS,
     BalanceAwareRegimeSelectivity,
+    EXPANSION_CHANNELS,
     EXPANSION_REGIME_CONFLUENCE_SEMANTICS,
     PAIRED_A_PLUS_CONTRASTIVE_SEMANTICS,
     PAIRED_RECURRENT_A_PLUS_CONTRASTIVE_SEMANTICS,
@@ -2411,19 +2412,63 @@ class RecurrentC51Agent:
             teacher_imitation_visible = np.zeros(
                 observations.shape[:2], dtype=np.bool_
             )
+            legacy_teacher_channel_names = (
+                *EXPANSION_CHANNELS,
+                *REGIME_TEACHER_CHANNELS,
+            )
+            legacy_teacher_compatible = (
+                self.teacher_channel_names
+                == (*legacy_teacher_channel_names, *TREND_START_CHANNELS)
+                and not any(
+                    self.teacher_channel_loss_weights[index]
+                    for index in self._trend_teacher_channel_indices_tensor.tolist()
+                )
+            )
             for batch_index, sequence in enumerate(sequences):
                 for time_index, transition in enumerate(sequence):
                     if transition.teacher_target is not None:
                         target = np.asarray(
                             transition.teacher_target, dtype=np.float32
                         ).reshape(-1)
-                        if target.shape != (self.teacher_channels,):
+                        if target.shape == (self.teacher_channels,):
+                            teacher_targets[batch_index, time_index] = target
+                        elif (
+                            legacy_teacher_compatible
+                            and target.shape == (
+                                len(legacy_teacher_channel_names),
+                            )
+                        ):
+                            teacher_targets[
+                                batch_index,
+                                time_index,
+                                :len(legacy_teacher_channel_names),
+                            ] = target
+                        else:
                             raise ValueError("teacher target width drifted")
-                        teacher_targets[batch_index, time_index] = target
                         teacher_imitation_visible[batch_index, time_index] = bool(
                             transition.teacher_imitation_visible
                         )
-            all_teacher_rows_numpy = np.isfinite(teacher_targets).all(axis=-1)
+            base_teacher_channel_count = (
+                len(legacy_teacher_channel_names)
+                if legacy_teacher_compatible
+                else self.teacher_channels
+            )
+            all_teacher_rows_numpy = np.isfinite(
+                teacher_targets[..., :base_teacher_channel_count]
+            ).all(axis=-1)
+            trend_teacher_rows_numpy = (
+                np.isfinite(
+                    teacher_targets[
+                        ...,
+                        tuple(
+                            self.teacher_channel_names.index(channel)
+                            for channel in TREND_START_CHANNELS
+                        ),
+                    ]
+                ).all(axis=-1)
+                if self.trend_teacher_channel_names
+                else np.zeros(observations.shape[:2], dtype=np.bool_)
+            )
             teacher_rows_numpy = (
                 all_teacher_rows_numpy & teacher_imitation_visible
             )
@@ -2441,20 +2486,28 @@ class RecurrentC51Agent:
                 all_teacher_rows_numpy[:, self.recurrent_burn_in:],
                 device=self.device,
             ) & auxiliary_valid
+            trend_teacher_rows = torch.as_tensor(
+                trend_teacher_rows_numpy[:, self.recurrent_burn_in:],
+                device=self.device,
+            ) & auxiliary_valid
             if bool(all_teacher_rows.any().item()):
                 if bool(teacher_rows.any().item()):
                     assert self.online.teacher_output is not None
                     with self._autocast():
                         teacher_logits = self.online.teacher_output(recurrent)
-                    teacher_losses = nn.functional.binary_cross_entropy_with_logits(
-                        teacher_logits.float()[teacher_rows],
-                        teacher_targets_tensor[teacher_rows],
-                        reduction="none",
-                    )
                     teacher_probabilities = (
                         teacher_logits.float()[teacher_rows].sigmoid()
                     )
                     teacher_probability_targets = teacher_targets_tensor[teacher_rows]
+                    teacher_probability_targets = torch.nan_to_num(
+                        teacher_probability_targets,
+                        nan=0.0,
+                    )
+                    teacher_losses = nn.functional.binary_cross_entropy_with_logits(
+                        teacher_logits.float()[teacher_rows],
+                        teacher_probability_targets,
+                        reduction="none",
+                    )
                     if regime_channel_names:
                         regime_targets = teacher_probability_targets.index_select(
                             -1, self._regime_teacher_channel_indices_tensor
@@ -2602,7 +2655,7 @@ class RecurrentC51Agent:
                             dtype=torch.bool,
                             device=self.device,
                         )
-                        & all_teacher_rows[:, :training_steps]
+                        & trend_teacher_rows[:, :training_steps]
                         & learnable_rows
                         & diagnostic_flat_rows
                     )
