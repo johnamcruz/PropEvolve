@@ -1442,7 +1442,7 @@ def run_optuna_sweep(
         repository_root / sweep.study_root
     )
     configs = Path(config_root) if config_root is not None else (
-        sweep.base_config_path.parent
+        artifacts / "configs"
     )
     artifacts.mkdir(parents=True, exist_ok=True)
     configs.mkdir(parents=True, exist_ok=True)

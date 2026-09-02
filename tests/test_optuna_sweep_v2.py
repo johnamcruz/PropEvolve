@@ -385,6 +385,38 @@ def test_v2_parallel_screening_uses_lock_safe_journal_storage(
     )
 
 
+def test_v2_default_generated_configs_share_the_study_lifecycle(
+    tmp_path: Path,
+) -> None:
+    """A fresh study must not collide with configs from an older study."""
+    base_payload = json.loads(BASE_CONFIG.read_text())
+    base_payload["workspace_root"] = str(BASE_CONFIG.parent.parent)
+    base_path = tmp_path / "base.json"
+    base_path.write_text(json.dumps(base_payload))
+    sweep_payload = _payload(n_trials=1, n_jobs=1)
+    sweep_payload["base_config"] = base_path.name
+    sweep_path = tmp_path / "sweep.json"
+    sweep_path.write_text(json.dumps(sweep_payload))
+    artifact_root = tmp_path / "study"
+    observed_configs: list[Path] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        observed_configs.append(config_path)
+        return {"evaluation_status": "PASS", "metrics": _metrics()}
+
+    result = run_optuna_sweep(
+        sweep_path,
+        artifact_root=artifact_root,
+        runner=runner,
+        state_loader=lambda *_args: None,
+        code_commit="test-commit",
+    )
+
+    assert result.status == "COMPLETE"
+    assert len(observed_configs) == 1
+    assert observed_configs[0].parent == artifact_root / "configs"
+
+
 def test_v2_uses_optuna_to_refill_worker_after_each_terminal_trial(
     tmp_path: Path,
 ) -> None:
