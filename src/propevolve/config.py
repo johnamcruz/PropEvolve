@@ -917,7 +917,21 @@ def _validate_trend_start_confluence(payload: dict) -> None:
         "margin",
         "confirmation_lookback_bars",
     }
-    numeric = (specification.get("loss_weight"), specification.get("margin"))
+    optional = {
+        "opportunity_loss_weight",
+        "safety_loss_weight",
+    }
+    shared_weight = specification.get("loss_weight")
+    opportunity_weight = specification.get(
+        "opportunity_loss_weight", 1.0
+    )
+    safety_weight = specification.get("safety_loss_weight", 1.0)
+    numeric = (
+        shared_weight,
+        opportunity_weight,
+        safety_weight,
+        specification.get("margin"),
+    )
     teachers = tuple(payload.get("teachers") or ())
     trend = next(
         (teacher for teacher in teachers if teacher.get("kind") == "trend"),
@@ -925,7 +939,8 @@ def _validate_trend_start_confluence(payload: dict) -> None:
     )
     if (
         not isinstance(specification, dict)
-        or set(specification) != required
+        or not required <= set(specification)
+        or bool(set(specification) - required - optional)
         or specification.get("schema") != TREND_START_CONFLUENCE_SCHEMA
         or specification.get("training_only") is not True
         or specification.get("target_source") != "post_launch_economic_pair"
@@ -938,6 +953,13 @@ def _validate_trend_start_confluence(payload: dict) -> None:
         )
         or any(not math.isfinite(float(value)) for value in numeric)
         or float(specification["loss_weight"]) <= 0.0
+        or float(opportunity_weight) < 0.0
+        or float(safety_weight) < 0.0
+        or (
+            bool(specification["enabled"])
+            and float(opportunity_weight) == 0.0
+            and float(safety_weight) == 0.0
+        )
         or float(specification["margin"]) < 0.0
         or isinstance(specification["confirmation_lookback_bars"], bool)
         or not isinstance(specification["confirmation_lookback_bars"], int)

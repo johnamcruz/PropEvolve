@@ -164,7 +164,12 @@ def _agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
     )
 
 
-def _trend_confluence_agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
+def _trend_confluence_agent(
+    *,
+    recurrent_burn_in: int = 2,
+    opportunity_loss_weight: float | None = None,
+    safety_loss_weight: float | None = None,
+) -> RecurrentC51Agent:
     return RecurrentC51Agent(
         3,
         hidden_dim=24,
@@ -200,6 +205,10 @@ def _trend_confluence_agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
         ),
         regime_selectivity_persistent_chop_negative_emphasis=2.0,
         trend_start_confluence_loss_weight=3.0,
+        trend_start_confluence_opportunity_loss_weight=(
+            opportunity_loss_weight
+        ),
+        trend_start_confluence_safety_loss_weight=safety_loss_weight,
         trend_start_confluence_margin=0.25,
         trend_start_confluence_confirmation_lookback_bars=3,
         auxiliary_gradient_conflict_mode=(
@@ -207,6 +216,45 @@ def _trend_confluence_agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
         ),
         exclude_economic_winners_from_chop_wait=True,
     )
+
+
+def test_trend_confluence_weights_independently_scale_production_losses() -> None:
+    common = dict(
+        observation_dim=3,
+        hidden_dim=8,
+        atoms=11,
+        value_min=-3.0,
+        value_max=3.0,
+        gamma=0.997,
+        learning_rate=0.01,
+        weight_decay=0.0,
+        gradient_clip=10.0,
+        target_sync_updates=250,
+        device="cpu",
+        seed=613,
+        teacher_channels=len(TREND_CONFLUENCE_CHANNELS),
+        teacher_channel_names=TREND_CONFLUENCE_CHANNELS,
+        teacher_loss_weight=1e-6,
+        trend_start_confluence_loss_weight=1.0,
+        trend_start_confluence_margin=0.25,
+        trend_start_confluence_confirmation_lookback_bars=3,
+    )
+
+    opportunity_only = RecurrentC51Agent(
+        **common,
+        trend_start_confluence_opportunity_loss_weight=2.0,
+        trend_start_confluence_safety_loss_weight=0.0,
+    )
+    safety_only = RecurrentC51Agent(
+        **common,
+        trend_start_confluence_opportunity_loss_weight=0.0,
+        trend_start_confluence_safety_loss_weight=3.0,
+    )
+
+    assert opportunity_only.trend_start_confluence_opportunity_loss_weight == 2.0
+    assert opportunity_only.trend_start_confluence_safety_loss_weight == 0.0
+    assert safety_only.trend_start_confluence_opportunity_loss_weight == 0.0
+    assert safety_only.trend_start_confluence_safety_loss_weight == 3.0
 
 
 def _with_trend_targets(
@@ -457,7 +505,10 @@ def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
         assert anchor.teacher_target is not None
         assert anchor.teacher_target.shape == (len(TREND_CONFLUENCE_CHANNELS),)
 
-    agent = _trend_confluence_agent()
+    agent = _trend_confluence_agent(
+        opportunity_loss_weight=0.5,
+        safety_loss_weight=1.5,
+    )
     before = _grouped_boundary_margins(agent, paired_sequences)
     for _ in range(128):
         paired_sequences = replay.sample(4)
@@ -471,6 +522,13 @@ def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
     assert metrics["trend_start_confluence_aligned_short_winner_rows"] > 0
     assert metrics["trend_start_confluence_countertrend_long_failure_rows"] > 0
     assert metrics["trend_start_confluence_countertrend_short_failure_rows"] > 0
+    assert metrics["trend_start_confluence_loss"] == pytest.approx(
+        3.0
+        * (
+            0.5 * metrics["trend_start_confluence_opportunity_loss"]
+            + 1.5 * metrics["trend_start_confluence_safety_loss"]
+        )
+    )
 
     agent.discard_teacher()
     agent.assert_teacher_free()

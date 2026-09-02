@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v35_trend_confluence_tpe",
-  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v35_trend_confluence_200ep.json",
-  "study_root": "runs/stage2_v35_trend_confluence_tpe",
+  "name": "stage2_v36_trend_confluence_strength_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v36_trend_confluence_strength_200ep.json",
+  "study_root": "runs/stage2_v36_trend_confluence_strength_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -17,26 +17,26 @@
     "terms": [
       {
         "metric": "selection.pass_rate",
-        "weight": 100.0
+        "weight": 100
       },
       {
         "metric": "selection.average_win_r",
-        "weight": 8.0,
-        "cap": 8.0
+        "weight": 8,
+        "cap": 8
       },
       {
         "metric": "selection.near_blow_timeout_rate",
-        "weight": -20.0
+        "weight": -20
       }
     ],
     "constraints": {
       "selection.blow_rate": {
         "operator": "==",
-        "value": 0.0
+        "value": 0
       },
       "selection.expectancy_r": {
         "operator": ">=",
-        "value": 0.0
+        "value": 0
       },
       "selection.two_r_mfe_capture_ratio": {
         "operator": ">=",
@@ -44,35 +44,35 @@
       },
       "selection.long_entry_count": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "selection.short_entry_count": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.sampled_entry_action_long_rows": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.sampled_entry_action_short_rows": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.regime_selectivity_paired_a_plus_long_pair_mass": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.regime_selectivity_paired_a_plus_short_pair_mass": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.final_regime_probe_transition_positive_long_response": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.final_regime_probe_transition_positive_short_response": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "selection.near_blow_timeout_rate": {
         "operator": "<=",
@@ -80,77 +80,51 @@
       },
       "selection.short_circuited": {
         "operator": "==",
-        "value": 0.0
+        "value": 0
       }
     }
   },
   "search_space": {
-    "trend_start_confluence.enabled": {
-      "type": "categorical",
-      "choices": [
-        false,
-        true
-      ]
-    },
-    "entry_supervision.opportunity_loss_multiplier": {
-      "type": "categorical",
-      "choices": [
-        1.0,
-        1.25,
-        1.5
-      ]
-    },
-    "agent.entry_action_margin": {
+    "trend_start_confluence.loss_weight": {
       "type": "categorical",
       "choices": [
         0.25,
-        0.4,
-        0.6
+        0.5,
+        0.75,
+        1
       ]
     },
-    "regime_selectivity.paired_a_plus_winner_loss_weight": {
+    "trend_start_confluence.opportunity_loss_weight": {
       "type": "categorical",
       "choices": [
-        1.5,
-        2.0,
-        2.5,
-        3.0
+        0.5,
+        1,
+        1.5
       ]
     },
-    "training.paired_a_plus_population_weighting": {
+    "trend_start_confluence.safety_loss_weight": {
       "type": "categorical",
       "choices": [
-        "population_proportional_v1",
-        "equal_pair_mass_v1"
+        0.5,
+        1,
+        1.5
       ]
     },
-    "replay_mix": {
-      "type": "categorical_mapping",
+    "trend_start_confluence.margin": {
+      "type": "categorical",
       "choices": [
-        {
-          "name": "safety_control",
-          "values": {
-            "training.terminal_sequence_fraction": 0.375,
-            "training.safety_sequence_fraction": 0.375,
-            "training.entry_opportunity_sequence_fraction": 0.25
-          }
-        },
-        {
-          "name": "midpoint",
-          "values": {
-            "training.terminal_sequence_fraction": 0.375,
-            "training.safety_sequence_fraction": 0.25,
-            "training.entry_opportunity_sequence_fraction": 0.375
-          }
-        },
-        {
-          "name": "opportunity_leaning",
-          "values": {
-            "training.terminal_sequence_fraction": 0.4375,
-            "training.safety_sequence_fraction": 0.1875,
-            "training.entry_opportunity_sequence_fraction": 0.375
-          }
-        }
+        0.1,
+        0.25,
+        0.4
+      ]
+    },
+    "trend_start_confluence.confirmation_lookback_bars": {
+      "type": "categorical",
+      "choices": [
+        5,
+        10,
+        20,
+        50
       ]
     }
   },
@@ -159,7 +133,9 @@
       "name": "contrast_rehearsal_200ep",
       "training_episodes": 50,
       "validation_episodes": 50,
-      "start_pnls": [0.0],
+      "start_pnls": [
+        0
+      ],
       "balance_validation_episodes": 0,
       "short_circuit": {
         "minimum_completed_episodes": 50,
@@ -178,7 +154,9 @@
       "name": "contrast_rehearsal_200ep",
       "training_episodes": 200,
       "validation_episodes": 200,
-      "start_pnls": [0.0],
+      "start_pnls": [
+        0
+      ],
       "balance_validation_episodes": 0,
       "short_circuit": null
     },
@@ -186,7 +164,9 @@
       "name": "contrast_rehearsal_200ep",
       "training_episodes": 200,
       "validation_episodes": 200,
-      "start_pnls": [0.0],
+      "start_pnls": [
+        0
+      ],
       "balance_validation_episodes": 0,
       "short_circuit": null
     }
@@ -195,7 +175,11 @@
     "enabled": true,
     "top_k": 4,
     "finalist_top_k": 1,
-    "seeds": [314159, 271828, 161803],
+    "seeds": [
+      314159,
+      271828,
+      161803
+    ],
     "seed_paths": [
       "training.seed",
       "balance_curriculum.schedule_seed"
@@ -208,7 +192,7 @@
       },
       "selection.blow_rate": {
         "operator": "==",
-        "value": 0.0
+        "value": 0
       },
       "selection.near_blow_timeout_rate": {
         "operator": "<=",
@@ -220,7 +204,7 @@
       },
       "selection.expectancy_r": {
         "operator": ">=",
-        "value": 0.0
+        "value": 0
       },
       "selection.two_r_mfe_capture_ratio": {
         "operator": ">=",
@@ -228,19 +212,19 @@
       },
       "selection.long_entry_count": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "selection.short_entry_count": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.final_regime_probe_transition_positive_long_response": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       },
       "training.final_regime_probe_transition_positive_short_response": {
         "operator": ">",
-        "value": 0.0
+        "value": 0
       }
     }
   },
@@ -269,9 +253,7 @@
       "trend_start_confluence.target_source",
       "trend_start_confluence.score_formula",
       "trend_start_confluence.semantics",
-      "trend_start_confluence.loss_weight",
-      "trend_start_confluence.margin",
-      "trend_start_confluence.confirmation_lookback_bars",
+      "trend_start_confluence.enabled",
       "deployment_tickers",
       "timeframe_minutes",
       "point_values",

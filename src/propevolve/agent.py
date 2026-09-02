@@ -1149,6 +1149,8 @@ class RecurrentC51Agent:
         regime_selectivity_semantics: str = STATIC_STATE_SEMANTICS,
         regime_selectivity_persistent_chop_negative_emphasis: float = 0.0,
         trend_start_confluence_loss_weight: float = 0.0,
+        trend_start_confluence_opportunity_loss_weight: float | None = None,
+        trend_start_confluence_safety_loss_weight: float | None = None,
         trend_start_confluence_margin: float = 0.0,
         trend_start_confluence_confirmation_lookback_bars: int = 0,
         policy_retention_loss_weight: float = 0.0,
@@ -1163,6 +1165,14 @@ class RecurrentC51Agent:
         mps_prefer_metal: bool = False,
         mps_fast_math: bool = False,
     ) -> None:
+        if trend_start_confluence_opportunity_loss_weight is None:
+            trend_start_confluence_opportunity_loss_weight = (
+                1.0 if trend_start_confluence_loss_weight > 0.0 else 0.0
+            )
+        if trend_start_confluence_safety_loss_weight is None:
+            trend_start_confluence_safety_loss_weight = (
+                1.0 if trend_start_confluence_loss_weight > 0.0 else 0.0
+            )
         if atoms < 2 or value_min >= value_max:
             raise ValueError("distributional support is invalid")
         if isinstance(n_step_return, bool) or int(n_step_return) < 1:
@@ -1322,6 +1332,16 @@ class RecurrentC51Agent:
             or isinstance(trend_start_confluence_loss_weight, bool)
             or not np.isfinite(trend_start_confluence_loss_weight)
             or trend_start_confluence_loss_weight < 0.0
+            or isinstance(
+                trend_start_confluence_opportunity_loss_weight, bool
+            )
+            or not np.isfinite(
+                trend_start_confluence_opportunity_loss_weight
+            )
+            or trend_start_confluence_opportunity_loss_weight < 0.0
+            or isinstance(trend_start_confluence_safety_loss_weight, bool)
+            or not np.isfinite(trend_start_confluence_safety_loss_weight)
+            or trend_start_confluence_safety_loss_weight < 0.0
             or isinstance(trend_start_confluence_margin, bool)
             or not np.isfinite(trend_start_confluence_margin)
             or trend_start_confluence_margin < 0.0
@@ -1331,6 +1351,10 @@ class RecurrentC51Agent:
             or int(trend_start_confluence_confirmation_lookback_bars) < 0
             or (
                 trend_start_confluence_loss_weight > 0.0
+                and (
+                    trend_start_confluence_opportunity_loss_weight > 0.0
+                    or trend_start_confluence_safety_loss_weight > 0.0
+                )
                 and int(trend_start_confluence_confirmation_lookback_bars) < 1
             )
         ):
@@ -1481,13 +1505,22 @@ class RecurrentC51Agent:
         self.trend_start_confluence_loss_weight = float(
             trend_start_confluence_loss_weight
         )
+        self.trend_start_confluence_opportunity_loss_weight = float(
+            trend_start_confluence_opportunity_loss_weight
+        )
+        self.trend_start_confluence_safety_loss_weight = float(
+            trend_start_confluence_safety_loss_weight
+        )
         self.trend_start_confluence_margin = float(
             trend_start_confluence_margin
         )
         self.trend_start_confluence_confirmation_lookback_bars = int(
             trend_start_confluence_confirmation_lookback_bars
         )
-        if self.trend_start_confluence_loss_weight and not set(
+        if self.trend_start_confluence_loss_weight > 0.0 and (
+            self.trend_start_confluence_opportunity_loss_weight
+            or self.trend_start_confluence_safety_loss_weight
+        ) and not set(
             TREND_START_CHANNELS
         ) <= set(self.teacher_channel_names):
             raise ValueError(
@@ -2315,6 +2348,10 @@ class RecurrentC51Agent:
             )
             or (
                 self.trend_start_confluence_loss_weight > 0.0
+                and (
+                    self.trend_start_confluence_opportunity_loss_weight > 0.0
+                    or self.trend_start_confluence_safety_loss_weight > 0.0
+                )
                 and entry_action_weight_scale > 0.0
             )
         )
@@ -2401,6 +2438,10 @@ class RecurrentC51Agent:
             )
             or (
                 self.trend_start_confluence_loss_weight > 0.0
+                and (
+                    self.trend_start_confluence_opportunity_loss_weight > 0.0
+                    or self.trend_start_confluence_safety_loss_weight > 0.0
+                )
                 and entry_action_weight_scale > 0.0
             )
         ):
@@ -2609,7 +2650,10 @@ class RecurrentC51Agent:
                             self.teacher_entry_search_loss_weight
                             * entry_search_loss
                         )
-                if self.trend_start_confluence_loss_weight > 0.0:
+                if self.trend_start_confluence_loss_weight > 0.0 and (
+                    self.trend_start_confluence_opportunity_loss_weight > 0.0
+                    or self.trend_start_confluence_safety_loss_weight > 0.0
+                ):
                     assert diagnostic_targets is not None
                     economic_sides = np.full(
                         observations.shape[:2], -1, dtype=np.int64
@@ -2688,15 +2732,17 @@ class RecurrentC51Agent:
                             ),
                             margin=self.trend_start_confluence_margin,
                         )
-                        trend_weight = (
+                        weighted_trend_opportunity = (
                             entry_action_weight_scale
                             * self.trend_start_confluence_loss_weight
-                        )
-                        weighted_trend_opportunity = (
-                            trend_weight * trend_result.opportunity_loss
+                            * self.trend_start_confluence_opportunity_loss_weight
+                            * trend_result.opportunity_loss
                         )
                         weighted_trend_safety = (
-                            trend_weight * trend_result.safety_loss
+                            entry_action_weight_scale
+                            * self.trend_start_confluence_loss_weight
+                            * self.trend_start_confluence_safety_loss_weight
+                            * trend_result.safety_loss
                         )
                         trend_start_confluence_loss = (
                             weighted_trend_opportunity + weighted_trend_safety
@@ -5470,6 +5516,8 @@ class RecurrentC51Agent:
         self.regime_selectivity_persistent_chop_negative_emphasis = 0.0
         self.regime_selectivity = None
         self.trend_start_confluence_loss_weight = 0.0
+        self.trend_start_confluence_opportunity_loss_weight = 0.0
+        self.trend_start_confluence_safety_loss_weight = 0.0
         self.trend_start_confluence_margin = 0.0
         self.trend_start_confluence_confirmation_lookback_bars = 0
         self.last_train_metrics = {}
@@ -5536,6 +5584,8 @@ class RecurrentC51Agent:
             or self.regime_selectivity_loss_weight != 0.0
             or self.regime_selectivity is not None
             or self.trend_start_confluence_loss_weight != 0.0
+            or self.trend_start_confluence_opportunity_loss_weight != 0.0
+            or self.trend_start_confluence_safety_loss_weight != 0.0
             or self.trend_start_confluence_margin != 0.0
             or self.trend_start_confluence_confirmation_lookback_bars != 0
             or self.retention_anchor is not None
@@ -5677,6 +5727,12 @@ class RecurrentC51Agent:
                 "trend_start_confluence_loss_weight": (
                     self.trend_start_confluence_loss_weight
                 ),
+                "trend_start_confluence_opportunity_loss_weight": (
+                    self.trend_start_confluence_opportunity_loss_weight
+                ),
+                "trend_start_confluence_safety_loss_weight": (
+                    self.trend_start_confluence_safety_loss_weight
+                ),
                 "trend_start_confluence_margin": (
                     self.trend_start_confluence_margin
                 ),
@@ -5812,6 +5868,22 @@ class RecurrentC51Agent:
             "regime_selectivity_persistent_chop_negative_emphasis", 0.0
         )
         config.setdefault("trend_start_confluence_loss_weight", 0.0)
+        config.setdefault(
+            "trend_start_confluence_opportunity_loss_weight",
+            (
+                1.0
+                if float(config["trend_start_confluence_loss_weight"]) > 0.0
+                else 0.0
+            ),
+        )
+        config.setdefault(
+            "trend_start_confluence_safety_loss_weight",
+            (
+                1.0
+                if float(config["trend_start_confluence_loss_weight"]) > 0.0
+                else 0.0
+            ),
+        )
         config.setdefault("trend_start_confluence_margin", 0.0)
         config.setdefault(
             "trend_start_confluence_confirmation_lookback_bars", 0

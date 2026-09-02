@@ -1915,6 +1915,8 @@ def test_config_wires_training_only_trend_confluence_without_imitation(
         ),
         "enabled": True,
         "loss_weight": 1.0,
+        "opportunity_loss_weight": 0.75,
+        "safety_loss_weight": 1.25,
         "margin": 0.25,
         "confirmation_lookback_bars": 50,
     }
@@ -1938,6 +1940,12 @@ def test_config_wires_training_only_trend_confluence_without_imitation(
         0.0, 0.0, 0.0, 0.0,
     )
     assert agent_settings["trend_start_confluence_loss_weight"] == 1.0
+    assert agent_settings[
+        "trend_start_confluence_opportunity_loss_weight"
+    ] == 0.75
+    assert agent_settings[
+        "trend_start_confluence_safety_loss_weight"
+    ] == 1.25
     assert agent_settings["trend_start_confluence_margin"] == 0.25
     assert agent_settings[
         "trend_start_confluence_confirmation_lookback_bars"
@@ -1949,6 +1957,56 @@ def test_config_wires_training_only_trend_confluence_without_imitation(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="requires the Trend teacher"):
         load_experiment_config(path)
+
+
+def test_legacy_trend_confluence_weight_scales_both_loss_groups_equally(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["teachers"] = [
+        *payload["teachers"],
+        {
+            "kind": "trend",
+            "cache_root": "cache/trend",
+            "channels": [
+                "long_launch_probability",
+                "short_launch_probability",
+                "long_conditional_quality",
+                "short_conditional_quality",
+            ],
+            "loss_weight": 0.0,
+            "entry_search_loss_weight": 0.0,
+        },
+    ]
+    payload["trend_start_confluence"] = {
+        "schema": "trend_start_confluence_v1",
+        "training_only": True,
+        "target_source": "post_launch_economic_pair",
+        "score_formula": (
+            "causal_recent_max_launch_probability_times_conditional_quality"
+        ),
+        "semantics": (
+            "economic_label_authority_causal_directional_confirmation_v1"
+        ),
+        "enabled": True,
+        "loss_weight": 0.6,
+        "margin": 0.25,
+        "confirmation_lookback_bars": 20,
+    }
+    payload["evolution"]["frozen_paths"].append("trend_start_confluence")
+    path = tmp_path / "legacy-trend-confluence.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+    settings = _trend_start_confluence_agent_settings(
+        config["trend_start_confluence"]
+    )
+
+    assert settings[
+        "trend_start_confluence_opportunity_loss_weight"
+    ] == 1.0
+    assert settings["trend_start_confluence_safety_loss_weight"] == 1.0
+    assert settings["trend_start_confluence_loss_weight"] == 0.6
 
 
 def test_trade_management_observation_contract_is_fail_closed(

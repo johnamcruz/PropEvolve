@@ -385,20 +385,28 @@ def _trend_start_confluence_agent_settings(
 ) -> dict[str, object]:
     if specification is None:
         return {}
+    enabled = bool(specification["enabled"])
+    shared_weight = float(specification["loss_weight"])
     return {
         "trend_start_confluence_loss_weight": (
-            float(specification["loss_weight"])
-            if bool(specification["enabled"])
+            shared_weight if enabled else 0.0
+        ),
+        "trend_start_confluence_opportunity_loss_weight": (
+            float(specification.get("opportunity_loss_weight", 1.0))
+            if enabled
+            else 0.0
+        ),
+        "trend_start_confluence_safety_loss_weight": (
+            float(specification.get("safety_loss_weight", 1.0))
+            if enabled
             else 0.0
         ),
         "trend_start_confluence_margin": (
-            float(specification["margin"])
-            if bool(specification["enabled"])
-            else 0.0
+            float(specification["margin"]) if enabled else 0.0
         ),
         "trend_start_confluence_confirmation_lookback_bars": (
             int(specification["confirmation_lookback_bars"])
-            if bool(specification["enabled"])
+            if enabled
             else 0
         ),
     }
