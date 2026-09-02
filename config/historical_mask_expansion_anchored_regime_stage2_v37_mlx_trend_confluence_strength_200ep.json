@@ -282,7 +282,7 @@
     "benchmark_max_relative_loss_drift": 0.05
   },
   "training": {
-    "prefetch_batches": 1,
+    "prefetch_batches": 0,
     "episodes": 200,
     "validation_episodes": 200,
     "validation_no_trade_patience_episodes": 5,

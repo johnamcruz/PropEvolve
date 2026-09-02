@@ -49,7 +49,7 @@ The existing PyTorch baseline is not running on a discrete-memory GPU. [`torch.m
 
 V37 freezes `n_jobs=3` ([sweep config](../../config/sweeps/stage2_v37_mlx_trend_confluence_strength_tpe.json#L1-L15)), and the engine runs isolated trial subprocesses. MLX supports [multi-process distributed execution](https://ml-explore.github.io/mlx/build/html/usage/distributed.html), but that is evidence that processes can cooperate—not that three unrelated training graphs on one GPU are faster. MLX offers no documented GPU partition for three independent trials. Each process has separate model, optimizer, lazy graph, and caches while all contend for the same GPU and physical memory pool.
 
-Consequently, `n_jobs=1` and `n_jobs=3` are separate benchmark conditions. A result that wins in isolation but swaps, thermally throttles, or loses aggregate throughput at three jobs is not compatible with the V37 sweep execution contract. V37 keeps the V36 economic search fixed and changes only the learner backend and replay prefetch setting.
+Consequently, `n_jobs=1` and `n_jobs=3` are separate benchmark conditions. A result that wins in isolation but swaps, thermally throttles, or loses aggregate throughput at three jobs is not compatible with the V37 sweep execution contract. V37 keeps the V36 economic and replay configuration fixed and changes only the learner backend.
 
 ## Port versus retain
 
