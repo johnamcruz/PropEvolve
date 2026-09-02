@@ -610,9 +610,11 @@ def test_runtime_performance_contract_is_explicit_and_fail_closed(
     config = load_experiment_config(path)
 
     assert config["runtime"]["mixed_precision"] == "fp16"
+    assert config["runtime"]["learner_backend"] == "pytorch"
     assert config["runtime"]["mps_prefer_metal"] is True
     assert config["training"]["prefetch_batches"] == 1
     assert set(agent_runtime_settings(config["runtime"])) == {
+        "learner_backend",
         "mixed_precision",
         "compile_model",
         "compile_backend",
@@ -630,6 +632,53 @@ def test_runtime_performance_contract_is_explicit_and_fail_closed(
     payload["training"]["prefetch_batches"] = 3
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="prefetch"):
+        load_experiment_config(path)
+
+
+def test_runtime_accepts_only_explicit_supported_learner_backends(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["runtime"]["learner_backend"] = "mlx"
+    path = tmp_path / "mlx-runtime.json"
+    path.write_text(json.dumps(payload))
+
+    config = load_experiment_config(path)
+
+    assert agent_runtime_settings(config["runtime"])["learner_backend"] == "mlx"
+
+    payload["runtime"]["learner_backend"] = "unknown"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="learner backend"):
+        load_experiment_config(path)
+
+
+def test_mlx_runtime_fails_closed_outside_eager_fp32_mps(
+    tmp_path: Path,
+) -> None:
+    payload = _generic_payload()
+    payload["runtime"]["learner_backend"] = "mlx"
+    payload["agent"]["device"] = "mps"
+    path = tmp_path / "mlx-runtime.json"
+    path.write_text(json.dumps(payload))
+
+    assert load_experiment_config(path)["runtime"]["learner_backend"] == "mlx"
+
+    payload["agent"]["device"] = "cpu"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="MLX learner backend"):
+        load_experiment_config(path)
+
+    payload["agent"]["device"] = "mps"
+    payload["runtime"]["mixed_precision"] = "fp16"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="MLX learner backend"):
+        load_experiment_config(path)
+
+    payload["runtime"]["mixed_precision"] = "off"
+    payload["runtime"]["compile_model"] = True
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="MLX learner backend"):
         load_experiment_config(path)
 
 
@@ -1811,6 +1860,7 @@ def test_legacy_schema_v1_recipe_keeps_eager_fp32_runtime(tmp_path: Path) -> Non
     config = load_experiment_config(path)
 
     assert config["runtime"] == {
+        "learner_backend": "pytorch",
         "mixed_precision": "off",
         "compile_model": False,
         "compile_backend": "inductor",

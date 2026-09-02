@@ -20,6 +20,7 @@ class RuntimeArm:
     mixed_precision: str
     mps_prefer_metal: bool
     compile_model: bool
+    learner_backend: str = "pytorch"
 
 
 def runtime_benchmark_arms() -> tuple[RuntimeArm, ...]:
@@ -29,6 +30,14 @@ def runtime_benchmark_arms() -> tuple[RuntimeArm, ...]:
         RuntimeArm("fp16_autocast", "fp16", False, False),
         RuntimeArm("fp16_metal_matmul", "fp16", True, False),
         RuntimeArm("fp16_compile", "fp16", False, True),
+    )
+
+
+def backend_benchmark_arms() -> tuple[RuntimeArm, ...]:
+    """Compare the one shared learner with only its tensor backend changed."""
+    return (
+        RuntimeArm("pytorch_mps", "off", False, False, "pytorch"),
+        RuntimeArm("mlx_mps", "off", False, False, "mlx"),
     )
 
 
@@ -80,6 +89,94 @@ def _synthetic_sequences(
     return tuple(sequences)
 
 
+def _authenticated_replay_sequences(
+    path: str | Path,
+    *,
+    batch_sequences: int,
+):
+    """Sample a production batch from a bounded causal replay artifact."""
+    import torch
+
+    from .replay import BalancedSequenceReplay
+
+    artifact = Path(path).resolve()
+    payload = torch.load(artifact, map_location="cpu", weights_only=False)
+    if payload.get("schema") != "propevolve_balance_pass_replay_v1":
+        raise ValueError("benchmark replay schema is invalid")
+    sources = payload.get("source_checkpoints")
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or any(
+            not isinstance(source, dict)
+            or not isinstance(source.get("causal_identity_sha256"), str)
+            or len(source["causal_identity_sha256"]) != 64
+            or not isinstance(source.get("resume_identity"), str)
+            or not source["resume_identity"]
+            for source in sources
+        )
+    ):
+        raise ValueError("benchmark replay source identity is invalid")
+    state = payload.get("replay_state")
+    if not isinstance(state, dict) or not isinstance(state.get("contract"), dict):
+        raise ValueError("benchmark replay state is invalid")
+    contract = state["contract"]
+    replay = BalancedSequenceReplay(
+        capacity_episodes=int(contract["capacity_episodes"]),
+        capacity_transitions=contract["capacity_transitions"],
+        sequence_length=int(contract["sequence_length"]),
+        recurrent_burn_in=int(contract["recurrent_burn_in"]),
+        n_step_return=int(contract["n_step_return"]),
+        terminal_sequence_fraction=float(contract["terminal_sequence_fraction"]),
+        safety_sequence_fraction=float(contract["safety_sequence_fraction"]),
+        entry_opportunity_sequence_fraction=float(
+            contract["entry_opportunity_sequence_fraction"]
+        ),
+        regime_wait_sequence_fraction=float(
+            contract["regime_wait_sequence_fraction"]
+        ),
+        regime_wait_sequence_update_period=int(
+            contract["regime_wait_sequence_update_period"]
+        ),
+        entry_opportunity_side_balance=str(
+            contract["entry_opportunity_side_balance"]
+        ),
+        paired_a_plus_population_weighting=str(
+            contract["paired_a_plus_population_weighting"]
+        ),
+        paired_a_plus_context_matching=str(
+            contract.get(
+                "paired_a_plus_context_matching",
+                "static_expansion_regime_v1",
+            )
+        ),
+        seed=0,
+    )
+    replay.load_state_dict(state)
+    sequences = replay.sample(batch_sequences)
+    if len(sequences) != batch_sequences:
+        raise ValueError("benchmark replay cannot provide the requested batch")
+    return sequences
+
+
+def _memory_metrics(agent) -> dict[str, int]:
+    import torch
+
+    metrics: dict[str, int] = {}
+    if agent.device.type == "mps":
+        metrics.update(
+            torch_active_memory_bytes=int(torch.mps.current_allocated_memory()),
+            torch_driver_memory_bytes=int(torch.mps.driver_allocated_memory()),
+        )
+    if agent.learner_backend == "mlx":
+        from .mlx_backend import mlx_memory_metrics
+
+        metrics.update(
+            {f"mlx_{key}": value for key, value in mlx_memory_metrics().items()}
+        )
+    return metrics
+
+
 def run_arm(
     config_path: str | Path,
     arm: RuntimeArm,
@@ -87,6 +184,7 @@ def run_arm(
     observation_dim: int,
     warmup_updates: int,
     measured_updates: int,
+    replay_artifact: str | Path | None = None,
 ) -> dict[str, object]:
     """Measure one arm in the current isolated process."""
     from .agent import RecurrentC51Agent
@@ -97,6 +195,7 @@ def run_arm(
     agent_settings = dict(config["agent"])
     runtime = dict(config["runtime"])
     runtime.update(
+        learner_backend=arm.learner_backend,
         mixed_precision=arm.mixed_precision,
         mps_prefer_metal=arm.mps_prefer_metal,
         compile_model=arm.compile_model,
@@ -111,13 +210,19 @@ def run_arm(
         seed=int(config["training"]["seed"]),
         **agent_settings,
     )
-    batch = _synthetic_sequences(
-        batch_sequences=int(config["training"]["batch_sequences"]),
-        sequence_length=int(config["training"]["sequence_length"]),
-        observation_dim=observation_dim,
-        teacher_channels=teacher_channels,
-        seed=int(config["training"]["seed"]),
-    )
+    if replay_artifact is None:
+        batch = _synthetic_sequences(
+            batch_sequences=int(config["training"]["batch_sequences"]),
+            sequence_length=int(config["training"]["sequence_length"]),
+            observation_dim=observation_dim,
+            teacher_channels=teacher_channels,
+            seed=int(config["training"]["seed"]),
+        )
+    else:
+        batch = _authenticated_replay_sequences(
+            replay_artifact,
+            batch_sequences=int(config["training"]["batch_sequences"]),
+        )
     for _ in range(warmup_updates):
         agent.train_batch(batch)
     _synchronize(agent.device.type)
@@ -138,7 +243,58 @@ def run_arm(
         "milliseconds_per_update": 1000.0 * elapsed / measured_updates,
         "updates_per_second": measured_updates / elapsed,
         "final_loss": losses[-1],
+        "memory": _memory_metrics(agent),
     }
+
+
+def _run_isolated_arms(
+    config_path: str | Path,
+    *,
+    arms: tuple[RuntimeArm, ...],
+    observation_dim: int,
+    warmup_updates: int,
+    measured_updates: int,
+    backend_comparison: bool,
+    replay_artifact: str | Path | None = None,
+) -> list[dict[str, object]]:
+    results = []
+    for arm in arms:
+        environment = dict(os.environ)
+        environment["PYTORCH_MPS_PREFER_METAL"] = (
+            "1" if arm.mps_prefer_metal else "0"
+        )
+        environment["PYTORCH_MPS_FAST_MATH"] = "0"
+        command = [
+            sys.executable,
+            "-m",
+            "propevolve.runtime_benchmark",
+            "--child",
+            "--config",
+            str(Path(config_path).resolve()),
+            "--arm",
+            arm.name,
+            "--observation-dim",
+            str(observation_dim),
+            "--warmup-updates",
+            str(warmup_updates),
+            "--measured-updates",
+            str(measured_updates),
+        ]
+        if backend_comparison:
+            command.append("--backend-comparison")
+        if replay_artifact is not None:
+            command.extend(
+                ["--replay-artifact", str(Path(replay_artifact).resolve())]
+            )
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        results.append(json.loads(completed.stdout))
+    return results
 
 
 def run_benchmark(
@@ -166,37 +322,14 @@ def run_benchmark(
             config.get("observation")
         )
         observation_dim = int(manifest["embedding_dim"]) + 12 + management.output_dim
-    results = []
-    for arm in runtime_benchmark_arms():
-        environment = dict(os.environ)
-        environment["PYTORCH_MPS_PREFER_METAL"] = (
-            "1" if arm.mps_prefer_metal else "0"
-        )
-        environment["PYTORCH_MPS_FAST_MATH"] = "0"
-        command = [
-            sys.executable,
-            "-m",
-            "propevolve.runtime_benchmark",
-            "--child",
-            "--config",
-            str(Path(config_path).resolve()),
-            "--arm",
-            arm.name,
-            "--observation-dim",
-            str(observation_dim),
-            "--warmup-updates",
-            str(warmup_updates),
-            "--measured-updates",
-            str(measured_updates),
-        ]
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=environment,
-        )
-        results.append(json.loads(completed.stdout))
+    results = _run_isolated_arms(
+        config_path,
+        arms=runtime_benchmark_arms(),
+        observation_dim=observation_dim,
+        warmup_updates=warmup_updates,
+        measured_updates=measured_updates,
+        backend_comparison=False,
+    )
     baseline = float(results[0]["milliseconds_per_update"])
     baseline_loss = float(results[0]["final_loss"])
     tolerance = float(
@@ -230,6 +363,55 @@ def run_benchmark(
     }
 
 
+def run_backend_benchmark(
+    config_path: str | Path,
+    *,
+    replay_artifact: str | Path,
+    observation_dim: int,
+    warmup_updates: int,
+    measured_updates: int,
+) -> dict[str, object]:
+    """Benchmark Torch and MLX on one authenticated production replay batch."""
+    from .config import load_experiment_config
+
+    replay_path = Path(replay_artifact).resolve()
+    results = _run_isolated_arms(
+        config_path,
+        arms=backend_benchmark_arms(),
+        observation_dim=observation_dim,
+        warmup_updates=warmup_updates,
+        measured_updates=measured_updates,
+        backend_comparison=True,
+        replay_artifact=replay_path,
+    )
+    baseline_time = float(results[0]["milliseconds_per_update"])
+    baseline_loss = float(results[0]["final_loss"])
+    tolerance = float(
+        load_experiment_config(config_path)["runtime"][
+            "benchmark_max_relative_loss_drift"
+        ]
+    )
+    for result in results:
+        loss_drift = abs(float(result["final_loss"]) - baseline_loss) / max(
+            abs(baseline_loss), 1e-8
+        )
+        result["speedup_vs_pytorch"] = (
+            baseline_time / float(result["milliseconds_per_update"])
+        )
+        result["relative_loss_drift_vs_pytorch"] = loss_drift
+        result["numerically_valid"] = loss_drift <= tolerance
+    return {
+        "schema": "propevolve_backend_benchmark_v1",
+        "config": str(Path(config_path).resolve()),
+        "replay_artifact": str(replay_path),
+        "observation_dim": observation_dim,
+        "warmup_updates": warmup_updates,
+        "measured_updates": measured_updates,
+        "maximum_relative_loss_drift": tolerance,
+        "results": results,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -239,6 +421,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output")
     parser.add_argument("--child", action="store_true")
     parser.add_argument("--arm")
+    parser.add_argument("--backend-comparison", action="store_true")
+    parser.add_argument("--replay-artifact")
     return parser
 
 
@@ -253,12 +437,30 @@ def main() -> int:
     if args.child:
         if args.observation_dim is None:
             raise ValueError("child runtime benchmark requires observation dimension")
-        arms = {arm.name: arm for arm in runtime_benchmark_arms()}
+        arm_source = (
+            backend_benchmark_arms()
+            if args.backend_comparison
+            else runtime_benchmark_arms()
+        )
+        arms = {arm.name: arm for arm in arm_source}
         if args.arm not in arms:
             raise ValueError("unknown runtime benchmark arm")
         payload = run_arm(
             args.config,
             arms[args.arm],
+            observation_dim=args.observation_dim,
+            warmup_updates=args.warmup_updates,
+            measured_updates=args.measured_updates,
+            replay_artifact=args.replay_artifact,
+        )
+    elif args.backend_comparison:
+        if args.observation_dim is None or args.replay_artifact is None:
+            raise ValueError(
+                "backend benchmark requires observation dimension and replay artifact"
+            )
+        payload = run_backend_benchmark(
+            args.config,
+            replay_artifact=args.replay_artifact,
             observation_dim=args.observation_dim,
             warmup_updates=args.warmup_updates,
             measured_updates=args.measured_updates,

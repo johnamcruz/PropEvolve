@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+import torch
 
 from propevolve.agent import RecurrentC51Agent
 from propevolve.balance_aware_regime_selectivity import (
@@ -169,6 +170,8 @@ def _trend_confluence_agent(
     recurrent_burn_in: int = 2,
     opportunity_loss_weight: float | None = None,
     safety_loss_weight: float | None = None,
+    device: str = "cpu",
+    learner_backend: str = "pytorch",
 ) -> RecurrentC51Agent:
     return RecurrentC51Agent(
         3,
@@ -183,7 +186,8 @@ def _trend_confluence_agent(
         target_sync_updates=250,
         n_step_return=2,
         recurrent_burn_in=recurrent_burn_in,
-        device="cpu",
+        device=device,
+        learner_backend=learner_backend,
         seed=611,
         teacher_channels=len(TREND_CONFLUENCE_CHANNELS),
         teacher_channel_names=TREND_CONFLUENCE_CHANNELS,
@@ -454,8 +458,24 @@ def test_pass_replay_round_trip_drives_balanced_contrastive_recurrent_update(
     assert agent.last_train_metrics["economic_boundary_backtracks"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("device", "learner_backend"),
+    (
+        ("cpu", "pytorch"),
+        pytest.param(
+            "mps",
+            "mlx",
+            marks=pytest.mark.skipif(
+                not torch.backends.mps.is_available(),
+                reason="MPS is unavailable on this test host",
+            ),
+        ),
+    ),
+)
 def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
     tmp_path,
+    device: str,
+    learner_backend: str,
 ) -> None:
     replay = _replay(seed=612)
     contexts = {
@@ -508,6 +528,8 @@ def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
     agent = _trend_confluence_agent(
         opportunity_loss_weight=0.5,
         safety_loss_weight=1.5,
+        device=device,
+        learner_backend=learner_backend,
     )
     before = _grouped_boundary_margins(agent, paired_sequences)
     for _ in range(128):
@@ -533,7 +555,7 @@ def test_trend_confluence_survives_replay_and_production_learner_teacher_free(
     agent.discard_teacher()
     agent.assert_teacher_free()
     policy_path = agent.save(tmp_path / "trend-free-policy.pt", manifest={})
-    agent, _ = RecurrentC51Agent.load(policy_path, device="cpu")
+    agent, _ = RecurrentC51Agent.load(policy_path, device=device)
     agent.assert_teacher_free()
     after = _grouped_boundary_margins(agent, paired_sequences)
     for side in ("long", "short"):

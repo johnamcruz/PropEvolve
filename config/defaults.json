@@ -2,6 +2,7 @@
   "schema": "propevolve_effective_defaults_v1",
   "values": {
     "runtime": {
+      "learner_backend": "pytorch",
       "mixed_precision": "off",
       "compile_model": false,
       "compile_backend": "inductor",

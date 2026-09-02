@@ -2526,3 +2526,113 @@ def test_mps_training_update_action_selection_and_checkpoint_resume(
     assert restored.n_step_return == 2
     assert restored.recurrent_burn_in == 1
     assert manifest == {"device": "mps"}
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="MPS is unavailable on this test host",
+)
+def test_optional_mlx_backend_uses_shared_agent_training_and_checkpoint_seam(
+    tmp_path: Path,
+) -> None:
+    observations = np.random.default_rng(29).normal(size=(5, 8)).astype(
+        np.float32
+    )
+    sequence = tuple(
+        Transition(
+            observation=observations[index],
+            action=Action.WAIT,
+            reward=0.2 if index < 3 else 1.0,
+            next_observation=observations[index + 1],
+            terminated=index == 3,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1),
+        )
+        for index in range(4)
+    )
+    torch_agent = _agent(
+        8,
+        hidden_dim=16,
+        atoms=21,
+        device="mps",
+        seed=29,
+        target_sync_updates=1,
+        n_step_return=2,
+        recurrent_burn_in=1,
+    )
+    mlx_agent = _agent(
+        8,
+        hidden_dim=16,
+        atoms=21,
+        device="mps",
+        seed=29,
+        target_sync_updates=1,
+        n_step_return=2,
+        recurrent_burn_in=1,
+        learner_backend="mlx",
+    )
+
+    expected_loss = torch_agent.train_batch((sequence, sequence))
+    actual_loss = mlx_agent.train_batch((sequence, sequence))
+    checkpoint = mlx_agent.save(tmp_path / "mlx-agent.pt", manifest={})
+    restored, _ = RecurrentC51Agent.load(checkpoint, device="mps")
+    restored.assert_teacher_free()
+
+    assert actual_loss == pytest.approx(expected_loss, abs=2e-5, rel=2e-4)
+    assert restored.learner_backend == "mlx"
+    assert restored.online.learner_backend == "mlx"
+    for name, expected in torch_agent.online.state_dict().items():
+        torch.testing.assert_close(
+            mlx_agent.online.state_dict()[name],
+            expected,
+            atol=2e-5,
+            rtol=1e-3,
+            msg=name,
+        )
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="MPS is unavailable on this test host",
+)
+def test_pytorch_checkpoint_warm_starts_into_shared_mlx_learner(
+    tmp_path: Path,
+) -> None:
+    parent = _agent(8, device="mps", seed=71)
+    checkpoint = parent.save(
+        tmp_path / "pytorch-parent.pt",
+        manifest={"candidate_id": "immutable-pytorch-parent"},
+    )
+
+    child, manifest = RecurrentC51Agent.warm_start(
+        checkpoint,
+        config={
+            "observation_dim": 8,
+            "hidden_dim": 8,
+            "atoms": 11,
+            "value_min": -3.0,
+            "value_max": 3.0,
+            "gamma": 0.997,
+            "learning_rate": 1e-4,
+            "weight_decay": 1e-5,
+            "gradient_clip": 10.0,
+            "target_sync_updates": 250,
+            "device": "mps",
+            "seed": 72,
+            "learner_backend": "mlx",
+        },
+    )
+
+    assert child.learner_backend == "mlx"
+    assert manifest == {"candidate_id": "immutable-pytorch-parent"}
+    for name, expected in parent.online.state_dict().items():
+        torch.testing.assert_close(child.online.state_dict()[name], expected)
+    observations = torch.zeros((2, 4, 8), device="mps")
+    expected_logits, _ = parent.online(observations)
+    actual_logits, _ = child.online(observations)
+    torch.testing.assert_close(
+        actual_logits,
+        expected_logits,
+        atol=2e-5,
+        rtol=2e-4,
+    )

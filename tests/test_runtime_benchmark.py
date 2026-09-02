@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from propevolve.runtime_benchmark import run_benchmark, runtime_benchmark_arms
+from propevolve.runtime_benchmark import (
+    backend_benchmark_arms,
+    run_backend_benchmark,
+    run_benchmark,
+    runtime_benchmark_arms,
+)
 from tests.recipe_fixtures import paired_aplus_recipe
 
 
@@ -25,6 +30,15 @@ def test_runtime_benchmark_uses_exact_frozen_four_arm_comparison() -> None:
     assert [arm.compile_model for arm in arms] == [
         False, False, False, True
     ]
+
+
+def test_backend_benchmark_compares_one_shared_pipeline_seam() -> None:
+    arms = backend_benchmark_arms()
+
+    assert [arm.name for arm in arms] == ["pytorch_mps", "mlx_mps"]
+    assert [arm.learner_backend for arm in arms] == ["pytorch", "mlx"]
+    assert all(arm.mixed_precision == "off" for arm in arms)
+    assert all(not arm.compile_model for arm in arms)
 
 
 def test_runtime_benchmark_orchestrates_four_isolated_arms_and_gates_results(
@@ -66,3 +80,57 @@ def test_runtime_benchmark_orchestrates_four_isolated_arms_and_gates_results(
     assert [result["eligible"] for result in report["results"]] == [
         True, True, True, False
     ]
+
+
+def test_backend_benchmark_uses_authenticated_replay_and_gates_parity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    replay_artifact = tmp_path / "authenticated-replay.pt"
+    replay_artifact.write_bytes(b"immutable replay evidence")
+    calls = []
+
+    def completed(command, **kwargs):
+        arm_name = command[command.index("--arm") + 1]
+        calls.append(
+            (
+                arm_name,
+                command[command.index("--replay-artifact") + 1],
+                "--backend-comparison" in command,
+            )
+        )
+        payload = {
+            "schema": "propevolve_runtime_benchmark_arm_v1",
+            "arm": {
+                "name": arm_name,
+                "compile_model": False,
+                "learner_backend": (
+                    "mlx" if arm_name == "mlx_mps" else "pytorch"
+                ),
+            },
+            "compile_status": "disabled",
+            "final_loss": 1.000001 if arm_name == "mlx_mps" else 1.0,
+            "milliseconds_per_update": (
+                8.0 if arm_name == "mlx_mps" else 10.0
+            ),
+        }
+        return SimpleNamespace(stdout=json.dumps(payload))
+
+    monkeypatch.setattr("subprocess.run", completed)
+
+    report = run_backend_benchmark(
+        paired_aplus_recipe(100),
+        replay_artifact=replay_artifact,
+        observation_dim=8,
+        warmup_updates=1,
+        measured_updates=2,
+    )
+
+    assert calls == [
+        ("pytorch_mps", str(replay_artifact.resolve()), True),
+        ("mlx_mps", str(replay_artifact.resolve()), True),
+    ]
+    assert report["schema"] == "propevolve_backend_benchmark_v1"
+    assert report["replay_artifact"] == str(replay_artifact.resolve())
+    assert report["results"][1]["speedup_vs_pytorch"] == 1.25
+    assert report["results"][1]["numerically_valid"] is True

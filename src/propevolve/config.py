@@ -184,6 +184,7 @@ def materialize_effective_config(
 
 
 AGENT_RUNTIME_FIELDS = (
+    "learner_backend",
     "mixed_precision",
     "compile_model",
     "compile_backend",
@@ -1538,6 +1539,16 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("agent policy retention loss weight must be nonnegative")
     runtime = payload["runtime"]
+    if runtime["learner_backend"] not in {"pytorch", "mlx"}:
+        raise ValueError("runtime learner backend must be pytorch or mlx")
+    if runtime["learner_backend"] == "mlx" and (
+        agent["device"] not in {"auto", "mps"}
+        or runtime["mixed_precision"] != "off"
+        or runtime["compile_model"] is not False
+    ):
+        raise ValueError(
+            "MLX learner backend requires eager fp32 on auto or mps"
+        )
     if runtime["mixed_precision"] not in {"off", "fp16"}:
         raise ValueError("runtime mixed precision must be off or fp16")
     if not isinstance(runtime["compile_model"], bool):

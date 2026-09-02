@@ -1051,6 +1051,7 @@ class RecurrentC51Network(nn.Module):
         atoms: int,
         hidden_dim: int,
         teacher_channels: int = 0,
+        learner_backend: str = "pytorch",
     ) -> None:
         super().__init__()
         self.observation_dim = int(observation_dim)
@@ -1058,6 +1059,7 @@ class RecurrentC51Network(nn.Module):
         self.atoms = int(atoms)
         self.hidden_dim = int(hidden_dim)
         self.teacher_channels = int(teacher_channels)
+        self.learner_backend = str(learner_backend)
         self.input = nn.Sequential(
             nn.LayerNorm(observation_dim),
             nn.Linear(observation_dim, hidden_dim),
@@ -1076,6 +1078,10 @@ class RecurrentC51Network(nn.Module):
         observations: torch.Tensor,
         hidden: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.learner_backend == "mlx":
+            from .mlx_backend import mlx_torch_recurrent_features
+
+            return mlx_torch_recurrent_features(self, observations, hidden)
         encoded = self.input(observations)
         recurrent_dtype = self.recurrent.weight_ih_l0.dtype
         if encoded.dtype != recurrent_dtype:
@@ -1158,6 +1164,7 @@ class RecurrentC51Agent:
         exclude_economic_winners_from_chop_wait: bool = False,
         challenge_return_self_imitation_weight: float = 0.0,
         challenge_return_discount: float = 1.0,
+        learner_backend: str = "pytorch",
         mixed_precision: str = "off",
         compile_model: bool = False,
         compile_backend: str = "inductor",
@@ -1408,6 +1415,17 @@ class RecurrentC51Agent:
         self.seed = int(seed)
         self._rng = np.random.default_rng(seed)
         self.device = resolve_device(device)
+        if learner_backend not in {"pytorch", "mlx"}:
+            raise ValueError("learner backend must be pytorch or mlx")
+        if learner_backend == "mlx" and self.device.type != "mps":
+            raise ValueError("the MLX learner backend requires the MPS device")
+        if learner_backend == "mlx" and (
+            mixed_precision != "off" or compile_model
+        ):
+            raise ValueError(
+                "the MLX learner backend requires eager fp32 execution"
+            )
+        self.learner_backend = str(learner_backend)
         if mixed_precision == "fp16" and self.device.type not in {"mps", "cuda"}:
             raise ValueError("fp16 mixed precision requires MPS or CUDA")
         self.mixed_precision = mixed_precision
@@ -1609,7 +1627,12 @@ class RecurrentC51Agent:
             device=self.device,
         )
         self.online = RecurrentC51Network(
-            observation_dim, len(Action), atoms, hidden_dim, self.teacher_channels
+            observation_dim,
+            len(Action),
+            atoms,
+            hidden_dim,
+            self.teacher_channels,
+            learner_backend=self.learner_backend,
         ).to(self.device)
         self.target = copy.deepcopy(self.online).to(self.device).eval()
         self.optimizer = torch.optim.AdamW(
@@ -5477,6 +5500,7 @@ class RecurrentC51Agent:
             len(Action),
             self.atoms,
             self.hidden_dim,
+            learner_backend=self.learner_backend,
         ).to(self.device)
         anchor.load_state_dict({
             key: value
@@ -5543,7 +5567,11 @@ class RecurrentC51Agent:
         if not self.teacher_channels:
             return
         online = RecurrentC51Network(
-            self.observation_dim, len(Action), self.atoms, self.hidden_dim
+            self.observation_dim,
+            len(Action),
+            self.atoms,
+            self.hidden_dim,
+            learner_backend=self.learner_backend,
         ).to(self.device)
         target = copy.deepcopy(online).to(self.device).eval()
         online.load_state_dict({
@@ -5750,6 +5778,7 @@ class RecurrentC51Agent:
                     self.challenge_return_self_imitation_weight
                 ),
                 "challenge_return_discount": self.challenge_return_discount,
+                "learner_backend": self.learner_backend,
                 "mixed_precision": self.mixed_precision,
                 "compile_model": self.compile_model,
                 "compile_backend": self.compile_backend,
@@ -5820,6 +5849,7 @@ class RecurrentC51Agent:
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")
         config = dict(payload["config"])
+        config.setdefault("learner_backend", "pytorch")
         config.setdefault("mixed_precision", "off")
         config.setdefault("compile_model", False)
         config.setdefault("compile_backend", "inductor")
