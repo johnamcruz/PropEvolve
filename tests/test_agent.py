@@ -9,6 +9,7 @@ import torch
 from propevolve.agent import (
     RecurrentC51Agent,
     RecurrentC51Network,
+    _causal_observation_batch,
     economic_boundary_required_margin,
     centered_entry_search_target,
     conflict_aware_gradient_blend,
@@ -366,6 +367,43 @@ def test_distributional_double_dqn_update_learns_from_recurrent_sequences() -> N
     assert np.isfinite(loss)
     assert loss > 0
     assert not torch.equal(before, agent.online.output.weight.detach())
+
+
+def test_recurrent_batch_stages_one_exact_causal_observation_buffer() -> None:
+    sequences = tuple(
+        tuple(
+            Transition(
+                observation=np.array(
+                    [10 * batch_index + time_index, -time_index],
+                    np.float32,
+                ),
+                action=Action.WAIT,
+                reward=0.0,
+                next_observation=np.array(
+                    [10 * batch_index + time_index + 1, -(time_index + 1)],
+                    np.float32,
+                ),
+                terminated=time_index == 2,
+                valid_actions=(Action.WAIT,),
+                next_valid_actions=(Action.WAIT,),
+            )
+            for time_index in range(3)
+        )
+        for batch_index in range(2)
+    )
+
+    causal = _causal_observation_batch(sequences)
+
+    expected = np.stack([
+        np.stack((sequence[0].observation, *(row.next_observation for row in sequence)))
+        for sequence in sequences
+    ])
+    np.testing.assert_array_equal(causal, expected)
+    assert causal.shape == (2, 4, 2)
+    assert causal.dtype == np.float32
+    assert causal.flags.c_contiguous
+    assert np.shares_memory(causal[:, :-1], causal)
+    assert np.shares_memory(causal[:, 1:], causal)
 
 
 @pytest.mark.parametrize("reward", [float("nan"), float("inf")])

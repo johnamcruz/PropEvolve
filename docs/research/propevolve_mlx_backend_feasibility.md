@@ -156,6 +156,47 @@ The benchmark report is local run evidence and is intentionally not a packaged
 training artifact. Multi-process sweep throughput remains a separate gate; no
 sweep was restarted by this work.
 
+## Replay-to-learner staging result
+
+The durable replay remains packed NumPy data. Replacing that storage with MLX
+arrays is not justified: MLX documents that NumPy-to-MLX conversion copies the
+data, and a matched production-shape microbenchmark found the NumPy-to-MLX-to-
+PyTorch path slower than direct NumPy-to-PyTorch MPS staging. Loading the full
+replay into MLX would also duplicate a large persistent artifact in memory and
+would change checkpoint and replay compatibility.
+
+The accepted optimization is narrower. The learner now constructs one
+contiguous causal observation batch with shape `(batch, sequence + 1,
+observation_dim)`, transfers it once, and exposes current and next observations
+as views. This replaces two NumPy stacks, two device transfers, and one device
+concatenation. At the authenticated V36 production shape, the staging-only
+benchmark improved from `11.80 ms` to `7.53 ms` (`1.57x`) and removed about
+`32 MB` of duplicate live device observation buffers per update. The complete
+MLX update improved from `545.83 ms` to `522.63 ms` with the same final loss
+(`4.10604572`); the matched PyTorch path also benefits.
+
+Replay sampling itself measured about `17.4 ms` per batch, roughly `3.3%` of
+the complete MLX update. It is therefore a secondary optimization target. Any
+future packed-batch sampler must preserve the exact sampled transition ledger,
+sequence boundaries, reset rows, burn-in, pair metadata, and replay population
+weights before it can replace the current sampler.
+
+The next MLX performance candidates, in evidence order, are:
+
+1. Profile the complete learner with Metal capture before changing graph
+   boundaries.
+2. Keep fixed batch and sequence shapes so compiled functions remain cached.
+3. Consider compiling a larger pure-MLX update only if the remaining
+   PyTorch/MLX synchronization is proven material; do not move C51, PCGrad, or
+   AdamW merely for architectural symmetry.
+4. Treat allocator cache limits as an operational control only if measured MLX
+   cache growth or memory pressure becomes material. Frequent unconditional
+   cache clearing is not a throughput optimization.
+
+References: [MLX NumPy and DLPack interoperability](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/numpy.rst),
+[MLX compilation](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/compile.rst),
+and [MLX memory management](https://github.com/ml-explore/mlx/blob/main/docs/src/python/memory_management.rst).
+
 ## Overall verdict
 
 MLX can accelerate the recurrent core without changing the V21/V36 learning

@@ -392,6 +392,42 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def _causal_observation_batch(
+    sequences: Sequence[Sequence[Transition]],
+) -> np.ndarray:
+    """Pack one contiguous causal observation buffer for a recurrent batch."""
+    if not sequences or not sequences[0]:
+        raise ValueError("training batch cannot be empty")
+    sequence_length = len(sequences[0])
+    first = np.asarray(sequences[0][0].observation, dtype=np.float32)
+    if first.ndim != 1 or first.size < 1:
+        raise ValueError("training observations are invalid")
+    observation_dim = int(first.size)
+    causal = np.empty(
+        (len(sequences), sequence_length + 1, observation_dim),
+        dtype=np.float32,
+    )
+    for batch_index, sequence in enumerate(sequences):
+        if len(sequence) != sequence_length:
+            raise ValueError("training sequences must have one positive length")
+        for time_index, transition in enumerate(sequence):
+            observation = np.asarray(
+                transition.observation, dtype=np.float32
+            ).reshape(-1)
+            next_observation = np.asarray(
+                transition.next_observation, dtype=np.float32
+            ).reshape(-1)
+            if (
+                observation.size != observation_dim
+                or next_observation.size != observation_dim
+            ):
+                raise ValueError("training observations are inconsistent")
+            if time_index == 0:
+                causal[batch_index, 0] = observation
+            causal[batch_index, time_index + 1] = next_observation
+    return causal
+
+
 def centered_entry_search_target(
     probabilities: torch.Tensor,
     *,
@@ -1910,16 +1946,12 @@ class RecurrentC51Agent:
         training_steps = (
             sequence_length - self.recurrent_burn_in - self.n_step_return + 1
         )
-        observations = torch.as_tensor(
-            np.stack([[item.observation for item in sequence] for sequence in sequences]),
+        causal_observations = torch.as_tensor(
+            _causal_observation_batch(sequences),
             dtype=torch.float32,
             device=self.device,
         )
-        next_observations = torch.as_tensor(
-            np.stack([[item.next_observation for item in sequence] for sequence in sequences]),
-            dtype=torch.float32,
-            device=self.device,
-        )
+        observations = causal_observations[:, :-1]
         all_actions = torch.as_tensor(
             [[int(item.action) for item in sequence] for sequence in sequences],
             dtype=torch.long,
@@ -2010,9 +2042,6 @@ class RecurrentC51Agent:
         # exactly the same recurrent history. Independently resetting the GRU
         # on the shifted next-observation sequence changes the state definition
         # and corrupts recurrent TD targets.
-        causal_observations = torch.cat(
-            (observations[:, :1], next_observations), dim=1
-        )
         causal_reset_rows = tuple(
             (current[0], *following)
             for current, following in zip(
