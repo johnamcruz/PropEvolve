@@ -483,6 +483,33 @@ def test_v21_matches_frozen_parent_causal_recipe_identity(
         )
 
 
+def test_parent_causal_contract_treats_equal_json_numbers_as_equal(
+    tmp_path: Path,
+) -> None:
+    """JSON 0 and 0.0 must not produce false frozen-parent drift."""
+    from propevolve.config import load_experiment_config
+
+    child_recipe = load_experiment_config(_PAIRED_RECURRENT_V21_CONFIG)
+    parent_recipe = json.loads(json.dumps(child_recipe))
+    parent_recipe["sealed_confirmation"]["maximum_blow_rate"] = 0.0
+    child_recipe["sealed_confirmation"]["maximum_blow_rate"] = 0
+    candidate_path = tmp_path / "candidate"
+    candidate_path.mkdir()
+    (candidate_path / "recipe.json").write_text(json.dumps(parent_recipe))
+    (candidate_path / "contract.json").write_text(json.dumps({
+        "training_tickers": list(child_recipe["tickers"]),
+        "deployment_tickers": list(child_recipe["deployment_tickers"]),
+        "training_only_tickers": list(child_recipe["training_only_tickers"]),
+        "temporal": dict(child_recipe["temporal"]),
+        "sealed_holdout_touched": False,
+    }))
+
+    _assert_parent_causal_contract(
+        SimpleNamespace(path=candidate_path),
+        child_recipe,
+    )
+
+
 def test_fresh_campaign_warm_starts_first_stage_from_external_stage1_candidate(
     tmp_path: Path,
 ) -> None:

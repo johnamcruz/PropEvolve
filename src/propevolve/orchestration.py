@@ -231,9 +231,20 @@ def _assert_parent_causal_contract(candidate, config: Mapping) -> None:
     # Teachers supervise training only; Stage 2 may replace them while the
     # deployed parent's causal observation and economic contracts stay fixed.
     def same_json(left: object, right: object) -> bool:
-        return json.dumps(
-            left, sort_keys=True, separators=(",", ":")
-        ) == json.dumps(right, sort_keys=True, separators=(",", ":"))
+        if isinstance(left, bool) or isinstance(right, bool):
+            return type(left) is type(right) and left == right
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left == right
+        if isinstance(left, Mapping) and isinstance(right, Mapping):
+            return set(left) == set(right) and all(
+                same_json(left[key], right[key]) for key in left
+            )
+        if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+            return len(left) == len(right) and all(
+                same_json(left_item, right_item)
+                for left_item, right_item in zip(left, right, strict=True)
+            )
+        return type(left) is type(right) and left == right
 
     def causal_recipe_value(recipe: Mapping, path: str) -> object:
         value = recipe[path]
