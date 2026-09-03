@@ -10,6 +10,46 @@ import torch
 pytest.importorskip("mlx.core")
 
 from propevolve.agent import RecurrentC51Agent  # noqa: E402
+from propevolve import mlx_backend  # noqa: E402
+
+
+def test_mlx_projects_the_complete_recurrent_input_sequence_once() -> None:
+    mx = mlx_backend._mlx_core()
+    encoded = mx.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=mx.float32)
+    weight = mx.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [-1.0, 1.0],
+            [2.0, 0.0],
+            [0.0, 2.0],
+        ],
+        dtype=mx.float32,
+    )
+    bias = mx.array([0.5, -0.5, 1.0, -1.0, 2.0, -2.0], dtype=mx.float32)
+
+    projected = mlx_backend._mlx_recurrent_input_projection(
+        encoded,
+        weight,
+        bias,
+    )
+    mx.eval(projected)
+
+    np.testing.assert_allclose(
+        np.asarray(projected),
+        np.array(
+            [
+                [
+                    [1.5, 1.5, 4.0, 0.0, 4.0, 2.0],
+                    [3.5, 3.5, 8.0, 0.0, 8.0, 6.0],
+                ]
+            ],
+            dtype=np.float32,
+        ),
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.skipif(

@@ -27,6 +27,12 @@ def _mlx_core():
     return mx
 
 
+def _mlx_recurrent_input_projection(encoded, weight, bias):
+    """Project every recurrent input timestep in one batched operation."""
+    mx = _mlx_core()
+    return mx.addmm(bias, encoded, weight.T)
+
+
 def _mlx_recurrent_primitive(
     observations,
     hidden,
@@ -49,18 +55,19 @@ def _mlx_recurrent_primitive(
     )
     encoded = encoded @ input_weight.T + input_bias
     encoded = encoded * mx.sigmoid(encoded)
+    input_projection = _mlx_recurrent_input_projection(
+        encoded,
+        recurrent_input_weight,
+        recurrent_input_bias,
+    )
     outputs = []
     current = hidden
     for index in range(encoded.shape[-2]):
-        input_projection = (
-            encoded[..., index, :] @ recurrent_input_weight.T
-            + recurrent_input_bias
-        )
         hidden_projection = (
             current @ recurrent_hidden_weight.T + recurrent_hidden_bias
         )
         input_reset, input_update, input_new = mx.split(
-            input_projection, 3, axis=-1
+            input_projection[..., index, :], 3, axis=-1
         )
         hidden_reset, hidden_update, hidden_new = mx.split(
             hidden_projection, 3, axis=-1
