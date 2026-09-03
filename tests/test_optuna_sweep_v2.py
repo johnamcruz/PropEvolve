@@ -1183,6 +1183,9 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     base = sweep.base_config
 
     assert base["challenge"]["minimum_mll_headroom"] == 500.0
+    assert "minimum_mll_headroom" not in base["evolution"].get(
+        "external_parent_economic_overrides", ()
+    )
     assert base["challenge"]["minimum_mll_headroom"] > base["challenge"][
         "per_trade_risk_dollars"
     ]

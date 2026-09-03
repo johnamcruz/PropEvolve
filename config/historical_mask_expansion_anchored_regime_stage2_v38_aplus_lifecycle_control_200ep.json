@@ -348,9 +348,6 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
-    "external_parent_economic_overrides": [
-      "minimum_mll_headroom"
-    ],
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
