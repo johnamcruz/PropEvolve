@@ -208,6 +208,8 @@ class OptunaSweep:
     n_trials: int
     n_jobs: int
     n_startup_trials: int
+    multivariate: bool
+    group: bool
     screening_artifact_retention: str
     objective_terms: tuple[ObjectiveTerm, ...]
     constraints: dict[str, tuple[str, float]]
@@ -216,6 +218,7 @@ class OptunaSweep:
     promotion: PromotionContract
     frozen_paths: tuple[str, ...]
     allowed_search_prefixes: tuple[str, ...]
+    external_parent_economic_search_paths: tuple[str, ...]
 
     @property
     def screening_stage(self) -> str:
@@ -332,6 +335,7 @@ def _validate_search_assignment(
     base_config: Mapping,
     frozen_paths: Sequence[str],
     allowed_prefixes: Sequence[str],
+    external_parent_economic_search_paths: Sequence[str],
 ) -> None:
     from .orchestration import (
         _EXTERNAL_PARENT_CAUSAL_RECIPE_PATHS,
@@ -352,6 +356,7 @@ def _validate_search_assignment(
     if (
         changes_parent_contract
         and path not in _EXTERNAL_PARENT_TRAINING_ONLY_RECIPE_PATHS
+        and path not in external_parent_economic_search_paths
     ):
         raise ValueError(
             f"Optuna search space changes external parent contract: {path}"
@@ -364,6 +369,7 @@ def _search_space_contract(
     base_config: Mapping,
     frozen_paths: Sequence[str],
     allowed_prefixes: Sequence[str],
+    external_parent_economic_search_paths: Sequence[str],
 ) -> dict[str, dict]:
     if not isinstance(raw, dict) or not raw:
         raise ValueError("Optuna search space must be nonempty")
@@ -408,6 +414,9 @@ def _search_space_contract(
                 base_config=base_config,
                 frozen_paths=frozen_paths,
                 allowed_prefixes=allowed_prefixes,
+                external_parent_economic_search_paths=(
+                    external_parent_economic_search_paths
+                ),
             )
             assignment_paths.add(name)
         elif kind == "categorical":
@@ -420,6 +429,9 @@ def _search_space_contract(
                 base_config=base_config,
                 frozen_paths=frozen_paths,
                 allowed_prefixes=allowed_prefixes,
+                external_parent_economic_search_paths=(
+                    external_parent_economic_search_paths
+                ),
             )
             assignment_paths.add(name)
         elif kind == "categorical_mapping":
@@ -455,6 +467,9 @@ def _search_space_contract(
                         base_config=base_config,
                         frozen_paths=frozen_paths,
                         allowed_prefixes=allowed_prefixes,
+                        external_parent_economic_search_paths=(
+                            external_parent_economic_search_paths
+                        ),
                     )
                     if path in assignment_paths:
                         raise ValueError(
@@ -465,6 +480,14 @@ def _search_space_contract(
         else:
             raise ValueError(f"Optuna search dimension is invalid: {name}")
         search_space[name] = deepcopy(specification)
+    missing_economic_paths = (
+        set(external_parent_economic_search_paths) - assignment_paths
+    )
+    if missing_economic_paths:
+        raise ValueError(
+            "Optuna external parent economic search path is not assigned: "
+            f"{sorted(missing_economic_paths)[0]}"
+        )
     return search_space
 
 
@@ -562,9 +585,15 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     base_config = json.loads(base_bytes)
 
     study = payload["study"]
-    if not isinstance(study, dict) or set(study) != {
+    required_study_fields = {
         "sampler", "seed", "n_trials", "n_jobs", "n_startup_trials",
-    }:
+    }
+    optional_study_fields = {"multivariate", "group"}
+    if (
+        not isinstance(study, dict)
+        or not required_study_fields <= set(study)
+        or not set(study) <= required_study_fields | optional_study_fields
+    ):
         raise ValueError("Optuna study contract is invalid")
     n_jobs = int(study["n_jobs"])
     if study["sampler"] != "tpe" or not 1 <= n_jobs <= 3:
@@ -573,6 +602,12 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         )
     n_trials = int(study["n_trials"])
     n_startup = int(study["n_startup_trials"])
+    multivariate = study.get("multivariate", False)
+    group = study.get("group", False)
+    if not isinstance(multivariate, bool) or not isinstance(group, bool):
+        raise ValueError("Optuna TPE mode is invalid")
+    if group and not multivariate:
+        raise ValueError("Optuna TPE group requires multivariate sampling")
     if n_trials < 1 or not 1 <= n_startup <= n_trials:
         raise ValueError("Optuna trial budget is invalid")
 
@@ -587,8 +622,12 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     frozen = payload["frozen"]
     if (
         not isinstance(frozen, dict)
-        or set(frozen) != {
+        or not {
             "teacher_free_selection", "paths", "allowed_search_prefixes"
+        } <= set(frozen)
+        or not set(frozen) <= {
+            "teacher_free_selection", "paths", "allowed_search_prefixes",
+            "external_parent_economic_search_paths",
         }
         or frozen["teacher_free_selection"] is not True
         or not isinstance(frozen["paths"], list)
@@ -599,6 +638,25 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         raise ValueError("Optuna frozen contract is invalid")
     frozen_paths = tuple(str(item) for item in frozen["paths"])
     allowed_prefixes = tuple(str(item) for item in frozen["allowed_search_prefixes"])
+    economic_search_raw = frozen.get(
+        "external_parent_economic_search_paths", []
+    )
+    if (
+        not isinstance(economic_search_raw, list)
+        or any(not isinstance(item, str) for item in economic_search_raw)
+    ):
+        raise ValueError("Optuna external parent economic paths are invalid")
+    economic_search_paths = tuple(str(item) for item in economic_search_raw)
+    from .orchestration import _EXTERNAL_PARENT_ECONOMIC_FIELDS
+
+    valid_economic_search_paths = {
+        f"challenge.{field}" for field in _EXTERNAL_PARENT_ECONOMIC_FIELDS
+    }
+    if (
+        len(set(economic_search_paths)) != len(economic_search_paths)
+        or not set(economic_search_paths) <= valid_economic_search_paths
+    ):
+        raise ValueError("Optuna external parent economic paths are invalid")
     if len(set(frozen_paths)) != len(frozen_paths) or any(
         not item for item in (*frozen_paths, *allowed_prefixes)
     ):
@@ -619,6 +677,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         base_config=base_config,
         frozen_paths=frozen_paths,
         allowed_prefixes=allowed_prefixes,
+        external_parent_economic_search_paths=economic_search_paths,
     )
 
     stages_raw = payload["stages"]
@@ -692,6 +751,8 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         n_trials=n_trials,
         n_jobs=n_jobs,
         n_startup_trials=n_startup,
+        multivariate=multivariate,
+        group=group,
         screening_artifact_retention=str(artifacts["screening_retention"]),
         objective_terms=objective_terms,
         constraints=constraints,
@@ -700,6 +761,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         promotion=promotion,
         frozen_paths=frozen_paths,
         allowed_search_prefixes=allowed_prefixes,
+        external_parent_economic_search_paths=economic_search_paths,
     )
     _baseline_parameters(sweep)
     return sweep
@@ -825,6 +887,26 @@ def _compile_trial_config(
         path: deepcopy(_get_path(config, path)) for path in sweep.frozen_paths
     }
     _apply_parameters(config, sweep, parameters)
+    base_economic_overrides = set(
+        sweep.base_config["evolution"].get(
+            "external_parent_economic_overrides", ()
+        )
+    )
+    economic_overrides = set(
+        config["evolution"].get("external_parent_economic_overrides", ())
+    )
+    for path in sweep.external_parent_economic_search_paths:
+        _, _, field = path.partition(".")
+        if _get_path(config, path) != _get_path(sweep.base_config, path):
+            economic_overrides.add(field)
+        elif field not in base_economic_overrides:
+            economic_overrides.discard(field)
+    if economic_overrides:
+        config["evolution"]["external_parent_economic_overrides"] = sorted(
+            economic_overrides
+        )
+    else:
+        config["evolution"].pop("external_parent_economic_overrides", None)
     # Generated configs may live under an artifact directory. Preserve the
     # base recipe's repository identity instead of reinterpreting its relative
     # workspace root from the generated config's parent directory.
@@ -1195,6 +1277,8 @@ def _run_promotion(
         sampler=optuna.samplers.TPESampler(
             seed=sweep.seed,
             constraints_func=_constraints_func,
+            multivariate=sweep.multivariate,
+            group=sweep.group,
         ),
         study_name=f"{sweep.name}-confirmation",
         storage=_study_storage(
@@ -1291,6 +1375,8 @@ def _run_promotion(
         sampler=optuna.samplers.TPESampler(
             seed=sweep.seed + 1,
             constraints_func=_constraints_func,
+            multivariate=sweep.multivariate,
+            group=sweep.group,
         ),
         study_name=f"{sweep.name}-multi-seed",
         storage=_study_storage(
@@ -1462,6 +1548,8 @@ def run_optuna_sweep(
         seed=sweep.seed,
         n_startup_trials=min(sweep.n_startup_trials, target_trials),
         constraints_func=_constraints_func,
+        multivariate=sweep.multivariate,
+        group=sweep.group,
     )
     study = optuna.create_study(
         direction="maximize",

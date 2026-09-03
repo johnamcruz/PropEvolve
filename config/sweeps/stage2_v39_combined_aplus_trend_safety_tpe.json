@@ -1,14 +1,16 @@
 {
   "schema": "propevolve_optuna_sweep_v2",
-  "name": "stage2_v38_aplus_lifecycle_control_tpe",
+  "name": "stage2_v39_combined_aplus_trend_safety_tpe",
   "base_config": "../historical_mask_expansion_anchored_regime_stage2_v38_aplus_lifecycle_control_200ep.json",
-  "study_root": "runs/stage2_v38_aplus_lifecycle_control_tpe",
+  "study_root": "runs/stage2_v39_combined_aplus_trend_safety_tpe",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
-    "n_trials": 50,
+    "n_trials": 100,
     "n_jobs": 3,
-    "n_startup_trials": 8
+    "n_startup_trials": 12,
+    "multivariate": true,
+    "group": true
   },
   "artifacts": {
     "screening_retention": "compact"
@@ -85,6 +87,32 @@
     }
   },
   "search_space": {
+    "entry_supervision.opportunity_loss_multiplier": {
+      "type": "categorical",
+      "choices": [
+        1,
+        1.25,
+        1.5,
+        2
+      ]
+    },
+    "agent.entry_action_margin": {
+      "type": "categorical",
+      "choices": [
+        0.25,
+        0.4,
+        0.6
+      ]
+    },
+    "regime_selectivity.paired_a_plus_winner_loss_weight": {
+      "type": "categorical",
+      "choices": [
+        1.5,
+        2,
+        2.5,
+        3
+      ]
+    },
     "trend_start_confluence.loss_weight": {
       "type": "categorical",
       "choices": [
@@ -125,6 +153,38 @@
         10,
         20,
         50
+      ]
+    },
+    "challenge.minimum_mll_headroom": {
+      "type": "categorical",
+      "choices": [
+        300,
+        400,
+        500
+      ]
+    },
+    "challenge.mll_proximity_penalty_coefficient": {
+      "type": "categorical",
+      "choices": [
+        0.0002,
+        0.0003,
+        0.00045
+      ]
+    },
+    "agent.challenge_return_self_imitation_weight": {
+      "type": "categorical",
+      "choices": [
+        0,
+        0.025,
+        0.05
+      ]
+    },
+    "challenge.lead_giveback_penalty_coefficient": {
+      "type": "categorical",
+      "choices": [
+        0.00005,
+        0.0001,
+        0.0002
       ]
     }
   },
@@ -230,6 +290,9 @@
   },
   "frozen": {
     "teacher_free_selection": true,
+    "external_parent_economic_search_paths": [
+      "challenge.minimum_mll_headroom"
+    ],
     "allowed_search_prefixes": [
       "agent.",
       "challenge.",
@@ -286,7 +349,6 @@
       "agent.target_update_mode",
       "agent.target_soft_tau",
       "agent.policy_retention_loss_weight",
-      "agent.challenge_return_self_imitation_weight",
       "agent.auxiliary_gradient_conflict_mode",
       "agent.exclude_economic_winners_from_chop_wait",
       "challenge.profit_target",
@@ -294,12 +356,9 @@
       "challenge.episode_days",
       "challenge.bars_per_day",
       "challenge.max_position_size",
-      "challenge.minimum_mll_headroom",
       "challenge.trailing_mll_lock",
       "challenge.per_trade_risk_dollars",
       "challenge.large_win_bonus_coefficient",
-      "challenge.mll_proximity_penalty_coefficient",
-      "challenge.lead_giveback_penalty_coefficient",
       "challenge.ratchet_activation_r",
       "challenge.ratchet_giveback_r",
       "challenge.ratchet_lock_floor_r",
@@ -320,7 +379,6 @@
       "regime_selectivity.side_balance",
       "regime_selectivity.loss_weight",
       "regime_selectivity.persistent_chop_negative_emphasis",
-      "regime_selectivity.paired_a_plus_winner_loss_weight",
       "training.sequence_length",
       "training.recurrent_horizon",
       "training.batch_sequences",

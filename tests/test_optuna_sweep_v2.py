@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import json
 from pathlib import Path
 import threading
@@ -19,6 +20,9 @@ from tests.recipe_fixtures import active_sweep_recipe
 
 ACTIVE_CONTRACT = active_sweep_recipe().resolve()
 _ACTIVE_PAYLOAD = json.loads(ACTIVE_CONTRACT.read_text())
+V39_CONTRACT = (
+    ACTIVE_CONTRACT.parent / "stage2_v39_combined_aplus_trend_safety_tpe.json"
+)
 BASE_CONFIG = (
     ACTIVE_CONTRACT.parent / _ACTIVE_PAYLOAD["base_config"]
 ).resolve()
@@ -81,6 +85,8 @@ def _payload(
             "n_trials": n_trials,
             "n_jobs": n_jobs,
             "n_startup_trials": min(2, n_trials),
+            "multivariate": True,
+            "group": True,
         },
         "artifacts": {"screening_retention": "compact"},
         "objective": {
@@ -213,6 +219,7 @@ def _payload(
         },
         "frozen": {
             "teacher_free_selection": True,
+            "external_parent_economic_search_paths": [],
             "allowed_search_prefixes": [
                 "agent.",
                 "challenge.",
@@ -311,6 +318,51 @@ def test_v2_contract_is_fully_json_driven(tmp_path: Path) -> None:
     assert sweep.stages["confirmation"].validation_episodes == 200
     assert sweep.promotion.seeds == (11, 22)
     assert "agent.learning_rate" in sweep.frozen_paths
+    assert sweep.multivariate is True
+    assert sweep.group is True
+
+
+def test_v2_rejects_grouped_tpe_without_multivariate_sampling(
+    tmp_path: Path,
+) -> None:
+    payload = _payload()
+    payload["study"]["multivariate"] = False
+    path = tmp_path / "invalid-grouped-tpe.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="group requires multivariate"):
+        load_optuna_sweep(path)
+
+
+def test_v2_compiles_declared_mll_reserve_as_external_economic_override(
+    tmp_path: Path,
+) -> None:
+    payload = deepcopy(_payload())
+    payload["search_space"]["challenge.minimum_mll_headroom"] = {
+        "type": "categorical",
+        "choices": [300.0, 400.0, 500.0],
+    }
+    payload["frozen"]["paths"].remove("challenge.minimum_mll_headroom")
+    payload["frozen"]["external_parent_economic_search_paths"] = [
+        "challenge.minimum_mll_headroom"
+    ]
+    path = tmp_path / "mll-reserve-sweep.json"
+    path.write_text(json.dumps(payload))
+
+    sweep = load_optuna_sweep(path)
+    parameters = optuna_engine._baseline_parameters(sweep)
+    parameters["challenge.minimum_mll_headroom"] = 300.0
+    compiled = optuna_engine._compile_trial_config(
+        sweep,
+        parameters=parameters,
+        stage=sweep.stages["screening"],
+        run_root=tmp_path / "trial",
+    )
+
+    assert compiled["challenge"]["minimum_mll_headroom"] == 300.0
+    assert compiled["evolution"]["external_parent_economic_overrides"] == [
+        "minimum_mll_headroom"
+    ]
 
 
 def test_v2_runs_three_screening_trials_in_isolated_parallel_slots(
@@ -1002,7 +1054,7 @@ def test_active_sweep_compiles_through_real_config_validation(
         code_commit="test-commit",
     )
 
-    assert sweep.n_trials == 50
+    assert sweep.n_trials == 100
     assert sweep.n_jobs == 3
     assert sweep.base_config["runtime"]["learner_backend"] == "mlx"
     assert sweep.base_config["training"]["prefetch_batches"] == 0
@@ -1014,6 +1066,40 @@ def test_active_sweep_compiles_through_real_config_validation(
     assert sweep.stages["confirmation"].short_circuit is None
     assert sweep.stages["multi_seed"].short_circuit is None
     assert result.status == "COMPLETE"
+
+
+def test_v39_three_trial_preflight_preserves_dynamic_mll_contract(
+    tmp_path: Path,
+) -> None:
+    compiled: list[tuple[float, tuple[str, ...]]] = []
+
+    def runner(config_path: Path, *, run_id: str):
+        del run_id
+        normalized = load_experiment_config(config_path)
+        compiled.append((
+            float(normalized["challenge"]["minimum_mll_headroom"]),
+            tuple(normalized["evolution"].get(
+                "external_parent_economic_overrides", ()
+            )),
+        ))
+        return {"evaluation_status": "PASS", "metrics": _metrics()}
+
+    result = run_optuna_sweep(
+        V39_CONTRACT,
+        artifact_root=tmp_path / "study",
+        config_root=tmp_path / "configs",
+        n_trials=3,
+        runner=runner,
+        state_loader=lambda *_args: None,
+        code_commit="test-commit",
+    )
+
+    assert result.status == "COMPLETE"
+    assert len(compiled) == 3
+    for headroom, overrides in compiled:
+        assert overrides == (
+            () if headroom == 500.0 else ("minimum_mll_headroom",)
+        )
 
 
 def test_active_sweep_every_search_value_compiles_through_real_validation(
@@ -1132,7 +1218,6 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "agent.n_step_return",
         "agent.recurrent_burn_in",
         "agent.auxiliary_gradient_conflict_mode",
-        "agent.challenge_return_self_imitation_weight",
         "regime_selectivity.semantics",
         "regime_selectivity.side_balance",
         "training.sequence_length",
@@ -1142,12 +1227,9 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
         "challenge.max_loss",
         "challenge.episode_days",
         "challenge.max_position_size",
-        "challenge.minimum_mll_headroom",
         "challenge.trailing_mll_lock",
         "challenge.per_trade_risk_dollars",
         "challenge.large_win_bonus_coefficient",
-        "challenge.mll_proximity_penalty_coefficient",
-        "challenge.lead_giveback_penalty_coefficient",
         "regime_selectivity.loss_weight",
         "regime_selectivity.persistent_chop_negative_emphasis",
         "trend_start_confluence.schema",
@@ -1163,10 +1245,8 @@ def test_active_sweep_freezes_verified_learning_mechanics() -> None:
 
     assert _ACTIVE_PAYLOAD["frozen"]["teacher_free_selection"] is True
     assert required_frozen_paths <= set(sweep.frozen_paths)
-    assert "entry_supervision.opportunity_loss_multiplier" not in (
-        sweep.search_space
-    )
-    assert "agent.entry_action_margin" not in sweep.search_space
+    assert "entry_supervision.opportunity_loss_multiplier" in sweep.search_space
+    assert "agent.entry_action_margin" in sweep.search_space
     assert "trend_start_confluence.enabled" in sweep.frozen_paths
     for path in (
         "trend_start_confluence.loss_weight",
@@ -1211,6 +1291,37 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
         "update_period": 5,
         "max_examples": 8,
     }
+
+
+def test_v39_combines_aplus_trend_and_safety_under_multivariate_tpe() -> None:
+    sweep = load_optuna_sweep(V39_CONTRACT)
+    base = sweep.base_config
+
+    assert sweep.n_trials == 100
+    assert sweep.n_jobs == 3
+    assert sweep.n_startup_trials == 12
+    assert sweep.multivariate is True
+    assert sweep.group is True
+    assert sweep.external_parent_economic_search_paths == (
+        "challenge.minimum_mll_headroom",
+    )
+    assert set(sweep.search_space) == {
+        "entry_supervision.opportunity_loss_multiplier",
+        "agent.entry_action_margin",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
+        "trend_start_confluence.loss_weight",
+        "trend_start_confluence.opportunity_loss_weight",
+        "trend_start_confluence.safety_loss_weight",
+        "trend_start_confluence.margin",
+        "trend_start_confluence.confirmation_lookback_bars",
+        "challenge.minimum_mll_headroom",
+        "challenge.mll_proximity_penalty_coefficient",
+        "agent.challenge_return_self_imitation_weight",
+        "challenge.lead_giveback_penalty_coefficient",
+    }
+    assert sweep.search_space["challenge.minimum_mll_headroom"][
+        "choices"
+    ] == [300, 400, 500]
     assert base["entry_supervision"]["opportunity_loss_multiplier"] == 1.5
     assert base["agent"]["entry_action_margin"] == 0.4
     assert base["regime_selectivity"][
@@ -1240,16 +1351,18 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     assert trend["loss_weight"] == 0.0
 
 
-def test_active_sweep_searches_only_trend_usage() -> None:
+def test_active_sweep_searches_combined_aplus_trend_and_safety() -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     assert sweep.base_config["trend_start_confluence"]["enabled"] is True
-    assert set(sweep.search_space) == {
-        "trend_start_confluence.loss_weight",
-        "trend_start_confluence.opportunity_loss_weight",
-        "trend_start_confluence.safety_loss_weight",
-        "trend_start_confluence.margin",
-        "trend_start_confluence.confirmation_lookback_bars",
-    }
+    assert {
+        "entry_supervision.opportunity_loss_multiplier",
+        "agent.entry_action_margin",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
+        "challenge.minimum_mll_headroom",
+        "challenge.mll_proximity_penalty_coefficient",
+        "agent.challenge_return_self_imitation_weight",
+        "challenge.lead_giveback_penalty_coefficient",
+    } <= set(sweep.search_space)
     assert sweep.search_space["trend_start_confluence.loss_weight"] == {
         "type": "categorical",
         "choices": [0.25, 0.5, 0.75, 1.0],
@@ -1278,9 +1391,18 @@ def test_active_sweep_searches_only_trend_usage() -> None:
         "training.paired_a_plus_violation_replay_update_period",
         "training.paired_a_plus_violation_candidate_pairs_per_side",
         "training.paired_a_plus_violation_pairs_per_side",
-        "regime_selectivity.paired_a_plus_winner_loss_weight",
     ):
         assert path in sweep.frozen_paths
+    for path in (
+        "entry_supervision.opportunity_loss_multiplier",
+        "agent.entry_action_margin",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
+        "challenge.minimum_mll_headroom",
+        "challenge.mll_proximity_penalty_coefficient",
+        "agent.challenge_return_self_imitation_weight",
+        "challenge.lead_giveback_penalty_coefficient",
+    ):
+        assert path not in sweep.frozen_paths
 
 
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(
