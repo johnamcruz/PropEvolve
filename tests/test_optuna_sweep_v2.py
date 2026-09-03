@@ -257,6 +257,7 @@ def _metrics(**overrides: float) -> dict[str, float]:
         "selection.pass_rate": 0.25,
         "selection.blow_rate": 0.0,
         "selection.near_blow_timeout_rate": 0.20,
+        "selection.pathwise_near_blow_rate": 0.20,
         "selection.average_win_r": 2.0,
         "selection.expectancy_r": 0.2,
         "selection.two_r_mfe_capture_ratio": 0.75,
@@ -1181,6 +1182,17 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     base = sweep.base_config
 
+    assert base["challenge"]["minimum_mll_headroom"] == 500.0
+    assert base["challenge"]["minimum_mll_headroom"] > base["challenge"][
+        "per_trade_risk_dollars"
+    ]
+    assert [term.metric for term in sweep.objective_terms][-1] == (
+        "selection.pathwise_near_blow_rate"
+    )
+    assert "selection.pathwise_near_blow_rate" in sweep.constraints
+    assert "selection.near_blow_timeout_rate" not in (
+        sweep.constraints
+    )
     assert base["entry_supervision"]["loss_weight"] == 0.90
     assert base["agent"]["challenge_return_self_imitation_weight"] == 0.025
     assert base["challenge"]["large_win_bonus_coefficient"] == 0.125

@@ -838,6 +838,38 @@ def test_reported_mll_headroom_fraction_is_bounded_after_large_profit() -> None:
     assert info["mll_headroom_fraction"] == 1.0
 
 
+def test_environment_reports_pathwise_minimum_mll_headroom_after_recovery() -> None:
+    prices = np.full(6, 100.0, dtype=np.float32)
+    market = MarketSeries(
+        ticker="NQ",
+        timestamps=(
+            np.datetime64("2024-01-02T23:00")
+            + np.arange(6) * np.timedelta64(3, "m")
+        ),
+        open=prices,
+        high=np.full(6, 101.0, dtype=np.float32),
+        low=np.array([99.0, 90.0, 99.0, 99.0, 99.0, 99.0], np.float32),
+        close=prices,
+        embeddings=np.zeros((6, 2), np.float32),
+    )
+    env = HistoricalChallengeEnv(
+        {"NQ": market},
+        tick_values={"NQ": 20.0},
+        round_trip_fees={"NQ": 0.0},
+        spec=_spec(max_loss=300.0, minimum_mll_headroom=0.0),
+        seed=1,
+    )
+    _, reset_info = env.reset(options={"ticker": "NQ", "start": 0})
+
+    _, _, terminated, _, info = env.step(Action.ENTER_LONG_1)
+
+    assert terminated is False
+    assert reset_info["minimum_mll_headroom"] == 300.0
+    assert info["mll_headroom"] == 300.0
+    assert info["minimum_mll_headroom"] == 100.0
+    assert info["maximum_mll_headroom_consumed"] == 200.0
+
+
 def test_flat_account_keeps_mll_proximity_penalty_after_realizing_drawdown() -> None:
     timestamps = (
         np.datetime64("2024-01-02T23:00")

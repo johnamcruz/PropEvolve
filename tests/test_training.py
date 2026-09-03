@@ -740,11 +740,21 @@ def test_balance_outcome_contrast_is_sparse_and_additive_to_training(
                 "bonus_sum": pytest.approx(0.2 * expected_pairs),
                 "bonus_mean": pytest.approx(0.2),
             },
-            "ENTER_SHORT_1": {
-                "rows": 0,
-                "bonus_sum": pytest.approx(0.0),
-                "bonus_mean": None,
-            },
+                "ENTER_SHORT_1": {
+                    "rows": 0,
+                    "bonus_sum": pytest.approx(0.0),
+                    "bonus_mean": None,
+                },
+                "HOLD": {
+                    "rows": 0,
+                    "bonus_sum": pytest.approx(0.0),
+                    "bonus_mean": None,
+                },
+                "CLOSE": {
+                    "rows": 0,
+                    "bonus_sum": pytest.approx(0.0),
+                    "bonus_mean": None,
+                },
         },
     }
 
@@ -6913,7 +6923,7 @@ def test_prop_safety_objective_hard_ranks_any_blow_below_zero_blow() -> None:
     ) >= 0.0
 
 
-def test_prop_safety_objective_penalizes_near_blow_timeouts() -> None:
+def test_prop_safety_objective_penalizes_pathwise_near_blows() -> None:
     common = dict(
         episodes=100,
         environment_steps=1000,
@@ -6928,8 +6938,8 @@ def test_prop_safety_objective_penalizes_near_blow_timeouts() -> None:
         mean_reward=0.0,
         mean_loss=1.0,
     )
-    safe = TrainingResult(near_blow_timeout_count=0, **common)
-    near_blow = TrainingResult(near_blow_timeout_count=45, **common)
+    safe = TrainingResult(pathwise_near_blow_count=0, **common)
+    near_blow = TrainingResult(pathwise_near_blow_count=45, **common)
 
     assert prop_safety_objective(
         safe, max_loss=3_000.0, profit_target=6_000.0
@@ -7411,8 +7421,8 @@ def test_evaluation_reports_pass_and_timeout_economics_separately(capsys) -> Non
     ) in output
     assert (
         "[validation] COMPLETE episodes=2 pass=1 blow=0 timeout=1 "
-        "near_blow_timeout=0 (0.0%) WR=35.7% winR=+1.800R "
-        "mean_pnl=+3750.00"
+        "near_blow_timeout=0 (0.0%) pathwise_near_blow=0 (0.0%) "
+        "WR=35.7% winR=+1.800R mean_pnl=+3750.00"
     ) in output
 
 
@@ -7450,6 +7460,42 @@ def test_evaluation_counts_timeouts_near_the_loss_limit(capsys) -> None:
     assert result.near_blow_timeout_count == 1
     assert result.near_blow_timeout_rate == 0.5
     assert "near_blow_timeout=1 (50.0%)" in capsys.readouterr().out
+
+
+def test_evaluation_counts_pathwise_near_blow_even_after_profitable_recovery(
+    capsys,
+) -> None:
+    class RecoveredEnvironment:
+        def reset(self):
+            return np.array([0.0], np.float32), {
+                "valid_actions": (Action.WAIT,),
+            }
+
+        def step(self, action):
+            return np.array([1.0], np.float32), 0.0, True, False, {
+                "valid_actions": (),
+                "ticker": "NQ",
+                "outcome": "timeout",
+                "trade_count": 0,
+                "win_count": 0,
+                "winning_r_sum": 0.0,
+                "equity_pnl": 1_000.0,
+                "minimum_mll_headroom": 500.0,
+                "maximum_mll_headroom_consumed": 2_500.0,
+            }
+
+    result = evaluate_agent(
+        Agent(),
+        RecoveredEnvironment(),
+        episodes=1,
+        recurrent_horizon=2,
+        near_blow_loss_threshold=2_250.0,
+    )
+
+    assert result.near_blow_timeout_count == 1
+    assert result.pathwise_near_blow_count == 1
+    assert result.pathwise_near_blow_rate == 1.0
+    assert "pathwise_near_blow=1 (100.0%)" in capsys.readouterr().out
 
 
 def test_evaluation_short_circuits_after_first_blow_when_zero_blow_is_required(

@@ -7,12 +7,65 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from propevolve.agent import RecurrentC51Agent, exact_action_margin_losses
+from propevolve.causal_separability import (
+    canonical_side_context,
+    temporal_ridge_separability,
+)
 from propevolve.decision import Action
 from propevolve.replay import BalancedSequenceReplay
 from propevolve.training import _prioritize_paired_a_plus_violations
 
 SIDES = (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
 SN = {SIDES[0]: "long", SIDES[1]: "short"}
+
+
+def causal_feature_families(
+    context: np.ndarray,
+    teacher_targets: np.ndarray,
+    anchor_index: int,
+    side: Action,
+) -> dict[str, np.ndarray]:
+    """Expose the causal feature families already available at one entry row."""
+    canonical = canonical_side_context(context, side)
+    families = {
+        "static_expansion": canonical[:4],
+        "regime": canonical[4:7],
+        "static_expansion_regime": canonical,
+    }
+    targets = np.asarray(teacher_targets, dtype=np.float32)
+    if (
+        targets.ndim != 2
+        or anchor_index < 5
+        or anchor_index >= len(targets)
+        or targets.shape[1] < 4
+    ):
+        return families
+    history = targets[anchor_index - 5:anchor_index + 1]
+    if not np.isfinite(history[:, :4]).all():
+        return families
+    expansion = history[:, :4]
+    if side == Action.ENTER_SHORT_1:
+        expansion = expansion[:, [2, 3, 0, 1]]
+    expansion_lifecycle = np.concatenate((
+        canonical[:4],
+        expansion[-1] - expansion[-2],
+        expansion[-1] - expansion[0],
+    )).astype(np.float32, copy=False)
+    families["expansion_lifecycle"] = expansion_lifecycle
+    combined = [expansion_lifecycle, canonical[4:7]]
+    if targets.shape[1] >= 11 and np.isfinite(history[:, 7:11]).all():
+        trend = history[:, 7:11]
+        if side == Action.ENTER_SHORT_1:
+            trend = trend[:, [1, 0, 3, 2]]
+        trend_lifecycle = np.concatenate((
+            trend[-1],
+            trend[-1] - trend[-2],
+            trend[-1] - trend[0],
+        )).astype(np.float32, copy=False)
+        families["trend_lifecycle"] = trend_lifecycle
+        combined.append(trend_lifecycle)
+    families["combined_causal_lifecycle"] = np.concatenate(combined)
+    return families
 
 
 def sha(path):
@@ -54,6 +107,44 @@ def challenge_outcome_cohort(
     if terminal_pnl <= near_blow_pnl:
         return "near_blow_timeout"
     return "negative_timeout"
+
+
+def challenge_return_credit_coverage(
+    sequences,
+    *,
+    recurrent_burn_in: int,
+    n_step_return: int,
+) -> dict[str, object]:
+    if not sequences:
+        return {
+            "sequences": 0,
+            "credited_rows": 0,
+            "learnable_credited_rows": 0,
+            "discarded_credited_rows": 0,
+            "actions": {},
+        }
+    sequence_length = len(sequences[0])
+    learning_end = sequence_length - n_step_return
+    counts = Counter()
+    credited_rows = 0
+    learnable_rows = 0
+    for sequence in sequences:
+        if len(sequence) != sequence_length:
+            raise ValueError("challenge-return credit coverage is ragged")
+        for index, transition in enumerate(sequence):
+            if transition.challenge_return_to_go is None:
+                continue
+            credited_rows += 1
+            counts[transition.action.name] += 1
+            if recurrent_burn_in <= index <= learning_end:
+                learnable_rows += 1
+    return {
+        "sequences": len(sequences),
+        "credited_rows": credited_rows,
+        "learnable_credited_rows": learnable_rows,
+        "discarded_credited_rows": credited_rows - learnable_rows,
+        "actions": dict(counts),
+    }
 
 
 def make_replay(
@@ -618,6 +709,7 @@ def main():
     winner_dominant_chop_mass = 0.0
     failure_dominant_chop_rows = 0
     failure_dominant_chop_mass = 0.0
+    separability_rows = defaultdict(list)
     for number, entry in enumerate(desc["episodes"], 1):
         path = replay_root / entry["path"]
         digest = sha(path)
@@ -684,6 +776,25 @@ def main():
                 violations[f"{SN[side]}_{label}_target_mismatch"] += int(
                     np.sum(mask & (targets != expected))
                 )
+                for ix in np.flatnonzero(mask & (targets == expected)):
+                    try:
+                        feature_families = causal_feature_families(
+                            contexts[ix],
+                            teacher_targets,
+                            int(ix),
+                            side,
+                        )
+                    except ValueError:
+                        violations["invalid_causal_separability_row"] += 1
+                        continue
+                    for family, features in feature_families.items():
+                        row = (
+                            int(p["ended_at_ns"]),
+                            int(win),
+                            np.asarray(features, dtype=np.float64),
+                        )
+                        separability_rows[(SN[side], family)].append(row)
+                        separability_rows[("pooled", family)].append(row)
                 eligible = (
                     p["outcome"] == "pass"
                     if win
@@ -711,6 +822,22 @@ def main():
             f'[audit] authenticated_and_scanned={number}/{len(desc["episodes"])}',
             flush=True,
         )
+    causal_separability = {}
+    for (scope, family), rows in sorted(separability_rows.items()):
+        try:
+            result = temporal_ridge_separability(
+                np.stack([row[2] for row in rows]),
+                np.asarray([row[1] for row in rows], dtype=np.int8),
+                np.asarray([row[0] for row in rows], dtype=np.int64),
+            )
+        except ValueError as error:
+            causal_separability[f"{scope}.{family}"] = {
+                "status": "invalid",
+                "error": str(error),
+                "rows": len(rows),
+            }
+        else:
+            causal_separability[f"{scope}.{family}"] = result.to_dict()
     for key, v in candidates.items():
         win = key[1]
         v.sort(
@@ -746,6 +873,18 @@ def main():
         desc["replay_schema_version"],
         payloads,
         paired_a_plus_context_matching=args.paired_context_matching,
+    )
+    challenge_credit_sequences = replay.sample_balance_outcome_contrast_pairs(
+        args.pair_count,
+        near_blow_pnl=args.near_blow_pnl,
+        max_examples=8,
+        pair_id_start=1_000_000,
+        challenge_return_discount=args.challenge_return_discount,
+    )
+    challenge_credit_coverage = challenge_return_credit_coverage(
+        challenge_credit_sequences,
+        recurrent_burn_in=contract["recurrent_burn_in"],
+        n_step_return=contract["n_step_return"],
     )
     seqs = []
     pair_report = []
@@ -1017,6 +1156,7 @@ def main():
         },
         "economic_label_population": dict(population),
         "economic_label_violations": dict(violations),
+        "causal_winner_failure_separability": causal_separability,
         "challenge_return_audit": {
             "discount": args.challenge_return_discount,
             "weight": args.challenge_return_weight,
@@ -1036,6 +1176,7 @@ def main():
             "audited_pass_winner_bonus_count": len(challenge_bonuses),
             "audited_pass_winner_bonus_mean": float(np.mean(challenge_bonuses)),
             "audited_pass_winner_bonus_max": float(np.max(challenge_bonuses)),
+            "production_replay_credit_coverage": challenge_credit_coverage,
         },
         "economic_winner_chop_conflict": {
             "legacy_winner_rows": winner_dominant_chop_rows,

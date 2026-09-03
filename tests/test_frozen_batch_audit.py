@@ -7,10 +7,14 @@ import sys
 import numpy as np
 
 from scripts.audit_frozen_checkpoint_batch import (
+    causal_feature_families,
+    challenge_return_credit_coverage,
     challenge_outcome_cohort,
     discounted_returns_to_go,
     make_replay,
 )
+from propevolve.decision import Action
+from propevolve.replay import Transition
 
 
 def test_discounted_challenge_returns_preserve_full_episode_credit() -> None:
@@ -29,6 +33,62 @@ def test_challenge_outcome_cohorts_separate_pass_and_safety_failures() -> None:
         challenge_outcome_cohort("timeout", -2_700.0, -2_250.0)
         == "near_blow_timeout"
     )
+
+
+def test_causal_feature_audit_uses_expansion_regime_and_trend_lifecycle() -> None:
+    context = np.asarray((0.9, 0.8, 0.2, 0.1, 0.1, 0.7, 0.2), np.float32)
+    targets = np.zeros((6, 11), np.float32)
+    targets[:, :4] = np.asarray((0.9, 0.8, 0.2, 0.1), np.float32)
+    targets[:, 7:11] = np.asarray((0.8, 0.2, 0.7, 0.1), np.float32)
+    targets[-1, 0] = 1.0
+    targets[-1, 7] = 0.9
+
+    families = causal_feature_families(
+        context,
+        targets,
+        5,
+        Action.ENTER_LONG_1,
+    )
+
+    assert set(families) == {
+        "static_expansion",
+        "regime",
+        "static_expansion_regime",
+        "expansion_lifecycle",
+        "trend_lifecycle",
+        "combined_causal_lifecycle",
+    }
+    assert families["combined_causal_lifecycle"].shape == (27,)
+
+
+def test_challenge_credit_audit_distinguishes_burn_in_from_learnable_rows() -> None:
+    transitions = tuple(
+        Transition(
+            observation=np.asarray((index,), np.float32),
+            action=(Action.WAIT, Action.ENTER_LONG_1, Action.HOLD)[index],
+            reward=0.0,
+            next_observation=np.asarray((index + 1,), np.float32),
+            terminated=False,
+            valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.HOLD),
+            next_valid_actions=(Action.WAIT, Action.ENTER_LONG_1, Action.HOLD),
+            challenge_return_to_go=1.0,
+        )
+        for index in range(3)
+    )
+
+    coverage = challenge_return_credit_coverage(
+        (transitions,),
+        recurrent_burn_in=1,
+        n_step_return=1,
+    )
+
+    assert coverage == {
+        "sequences": 1,
+        "credited_rows": 3,
+        "learnable_credited_rows": 2,
+        "discarded_credited_rows": 1,
+        "actions": {"WAIT": 1, "ENTER_LONG_1": 1, "HOLD": 1},
+    }
     assert (
         challenge_outcome_cohort("timeout", 100.0, -2_250.0)
         == "nonnegative_timeout"

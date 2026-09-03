@@ -1198,6 +1198,8 @@ def test_challenge_return_credits_exact_wait_and_entry_on_pass_path(
             for offset, reward in enumerate((0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2))
         )
     )
+    assert pass_rows.index(exact_wait) >= replay.recurrent_burn_in
+    assert pass_rows.index(exact_entry) >= replay.recurrent_burn_in
     assert sum(
         row.challenge_return_to_go is not None for row in pass_rows
     ) == 2

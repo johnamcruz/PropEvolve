@@ -14,6 +14,7 @@ from typing import Iterator, Mapping
 
 import numpy as np
 
+from .causal_separability import canonical_side_context
 from .decision import Action
 
 
@@ -2360,27 +2361,47 @@ class BalancedSequenceReplay:
                 (winner_episode, winner_index, winner_weight, True),
                 (failure_episode, failure_index, failure_weight, False),
             ):
+                sequence_anchor_index = anchor_index
+                pair_sequence_index = self.recurrent_burn_in
+                authenticated_entry = bool(
+                    economic_winner
+                    and challenge_return_discount is not None
+                    and int(episode.actions[anchor_index])
+                    == int(episode.entry_action_targets[anchor_index])
+                    == int(side)
+                )
+                if authenticated_entry:
+                    maximum_learning_lag = (
+                        self.sequence_length
+                        - self.n_step_return
+                        - self.recurrent_burn_in
+                    )
+                    earliest_wait = max(0, anchor_index - maximum_learning_lag)
+                    learnable_wait_indices = [
+                        index
+                        for index in range(earliest_wait, anchor_index)
+                        if int(episode.actions[index])
+                        == int(episode.entry_action_targets[index])
+                        == int(Action.WAIT)
+                    ]
+                    if learnable_wait_indices:
+                        sequence_anchor_index = max(learnable_wait_indices)
+                        pair_sequence_index += (
+                            anchor_index - sequence_anchor_index
+                        )
                 sequence = list(episode.target_anchored_sequence(
-                    anchor_index=anchor_index,
+                    anchor_index=sequence_anchor_index,
                     length=self.sequence_length,
                     recurrent_burn_in=self.recurrent_burn_in,
                     n_step_return=self.n_step_return,
                 ))
-                if economic_winner and challenge_return_discount is not None:
+                if authenticated_entry:
                     credit_rows: list[tuple[int, int]] = []
-                    anchor_action = int(episode.actions[anchor_index])
-                    anchor_target = int(
-                        episode.entry_action_targets[anchor_index]
-                    )
-                    if anchor_action == anchor_target == int(side):
-                        credit_rows.append((
-                            self.recurrent_burn_in,
-                            anchor_index,
-                        ))
+                    credit_rows.append((pair_sequence_index, anchor_index))
                     exact_wait_rows: list[tuple[int, int]] = []
                     for sequence_index, transition in enumerate(sequence):
                         episode_index = (
-                            anchor_index
+                            sequence_anchor_index
                             + sequence_index
                             - self.recurrent_burn_in
                         )
@@ -2390,7 +2411,11 @@ class BalancedSequenceReplay:
                             episode.entry_action_targets[episode_index]
                         )
                         action = int(episode.actions[episode_index])
-                        if action == target == int(Action.WAIT):
+                        if (
+                            self.recurrent_burn_in <= sequence_index
+                            <= self.sequence_length - self.n_step_return
+                            and action == target == int(Action.WAIT)
+                        ):
                             exact_wait_rows.append((
                                 sequence_index,
                                 episode_index,
@@ -2399,14 +2424,34 @@ class BalancedSequenceReplay:
                         credit_rows.append(min(
                             exact_wait_rows,
                             key=lambda item: (
-                                item[0] >= self.recurrent_burn_in,
-                                abs(item[0] - self.recurrent_burn_in),
+                                abs(item[0] - pair_sequence_index),
+                                -item[0],
                             ),
                         ))
+                    for management_action in (Action.HOLD, Action.CLOSE):
+                        management_rows = [
+                            (sequence_index, episode_index)
+                            for sequence_index, transition in enumerate(sequence)
+                            for episode_index in (
+                                sequence_anchor_index
+                                + sequence_index
+                                - self.recurrent_burn_in,
+                            )
+                            if (
+                                pair_sequence_index < sequence_index
+                                <= self.sequence_length - self.n_step_return
+                                and 0 <= episode_index < episode.transition_count
+                                and transition.action == management_action
+                                and management_action in transition.valid_actions
+                            )
+                        ]
+                        if management_rows:
+                            credit_rows.append(management_rows[-1])
                     for sequence_index, episode_index in credit_rows:
                         transition = sequence[sequence_index]
                         sequence[sequence_index] = replace(
                             transition,
+                            competence_anchor=True,
                             challenge_return_to_go=(
                                 self._challenge_return_to_go(
                                     episode,
@@ -2415,8 +2460,8 @@ class BalancedSequenceReplay:
                                 )
                             ),
                         )
-                sequence[self.recurrent_burn_in] = replace(
-                    sequence[self.recurrent_burn_in],
+                sequence[pair_sequence_index] = replace(
+                    sequence[pair_sequence_index],
                     paired_a_plus_pair_id=pair_id,
                     paired_a_plus_pair_side=side,
                     paired_a_plus_population_weight=population_weight,
@@ -2624,11 +2669,10 @@ class BalancedSequenceReplay:
         context = np.asarray(context, dtype=np.float32)
         if context.shape != (PAIRED_A_PLUS_CONTEXT_WIDTH,):
             raise ValueError("paired A+ context is invalid")
-        if side == Action.ENTER_LONG_1:
-            return context
-        if side == Action.ENTER_SHORT_1:
-            return context[[2, 3, 0, 1, 4, 5, 6]]
-        raise ValueError("paired A+ side is invalid")
+        try:
+            return canonical_side_context(context, side)
+        except ValueError as error:
+            raise ValueError("paired A+ side is invalid") from error
 
     def _paired_match_context(
         self,

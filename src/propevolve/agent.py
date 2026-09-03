@@ -1977,12 +1977,22 @@ class RecurrentC51Agent:
                 if (
                     not np.isfinite(value)
                     or transition.competence_anchor is not True
-                    or transition.action not in {
-                        Action.WAIT,
-                        Action.ENTER_LONG_1,
-                        Action.ENTER_SHORT_1,
-                    }
-                    or transition.entry_action_target != transition.action
+                    or (
+                        transition.action
+                        in {
+                            Action.WAIT,
+                            Action.ENTER_LONG_1,
+                            Action.ENTER_SHORT_1,
+                        }
+                        and transition.entry_action_target != transition.action
+                    )
+                    or (
+                        transition.action in {Action.HOLD, Action.CLOSE}
+                        and (
+                            transition.entry_action_target is not None
+                            or transition.action not in transition.valid_actions
+                        )
+                    )
                 ):
                     raise ValueError(
                         "challenge return requires an authenticated exact "
@@ -4705,19 +4715,11 @@ class RecurrentC51Agent:
                 challenge_return_active
                 & (actions == int(action))
             ).sum().to(torch.float32)
-            for action in (
-                Action.WAIT,
-                Action.ENTER_LONG_1,
-                Action.ENTER_SHORT_1,
-            )
+            for action in Action
         ))
         challenge_return_action_bonus_sums = torch.stack(tuple(
             challenge_return_bonus[actions == int(action)].sum()
-            for action in (
-                Action.WAIT,
-                Action.ENTER_LONG_1,
-                Action.ENTER_SHORT_1,
-            )
+            for action in Action
         ))
 
         diagnostic_values = torch.stack((
@@ -4869,9 +4871,13 @@ class RecurrentC51Agent:
             challenge_return_wait_rows_metric,
             challenge_return_long_rows_metric,
             challenge_return_short_rows_metric,
+            challenge_return_hold_rows_metric,
+            challenge_return_close_rows_metric,
             challenge_return_wait_bonus_sum_metric,
             challenge_return_long_bonus_sum_metric,
             challenge_return_short_bonus_sum_metric,
+            challenge_return_hold_bonus_sum_metric,
+            challenge_return_close_bonus_sum_metric,
             total_loss,
             gradient_norm_value,
             management_row_fraction,
@@ -5396,6 +5402,12 @@ class RecurrentC51Agent:
             "challenge_return_self_imitation_short_rows": (
                 challenge_return_short_rows_metric
             ),
+            "challenge_return_self_imitation_hold_rows": (
+                challenge_return_hold_rows_metric
+            ),
+            "challenge_return_self_imitation_close_rows": (
+                challenge_return_close_rows_metric
+            ),
             "challenge_return_self_imitation_wait_bonus_sum": (
                 challenge_return_wait_bonus_sum_metric
             ),
@@ -5404,6 +5416,12 @@ class RecurrentC51Agent:
             ),
             "challenge_return_self_imitation_short_bonus_sum": (
                 challenge_return_short_bonus_sum_metric
+            ),
+            "challenge_return_self_imitation_hold_bonus_sum": (
+                challenge_return_hold_bonus_sum_metric
+            ),
+            "challenge_return_self_imitation_close_bonus_sum": (
+                challenge_return_close_bonus_sum_metric
             ),
             "teacher_weight_scale": teacher_weight_scale,
             "entry_action_weight_scale": entry_action_weight_scale,

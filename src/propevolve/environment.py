@@ -394,6 +394,7 @@ class HistoricalChallengeEnv:
         self._recovery_relapse_count = 0
         self._post_recovery_min_realized_pnl: float | None = None
         self._post_recovery_was_negative = False
+        self._minimum_mll_headroom = math.inf
 
     @property
     def observation_dim(self) -> int:
@@ -512,6 +513,7 @@ class HistoricalChallengeEnv:
             self._recovery_success_pnl = start_state.recovery_success_pnl
         equity = self._equity(float(self._market.close[self._index]))
         headroom = self._account.mll_headroom(equity)
+        self._minimum_mll_headroom = headroom
         return self._observation(), {
             "ticker": ticker,
             "start": start,
@@ -520,6 +522,10 @@ class HistoricalChallengeEnv:
             "equity_pnl": equity,
             "mll_floor_pnl": self._account.mll_floor_pnl,
             "mll_headroom": headroom,
+            "minimum_mll_headroom": self._minimum_mll_headroom,
+            "maximum_mll_headroom_consumed": max(
+                0.0, self.spec.max_loss - self._minimum_mll_headroom
+            ),
             "mll_headroom_fraction": min(
                 1.0, max(0.0, headroom / self.spec.max_loss)
             ),
@@ -585,6 +591,10 @@ class HistoricalChallengeEnv:
         worst_price = self._adverse_price(next_index)
         worst_equity = self._equity(worst_price)
         info["worst_equity_pnl"] = worst_equity
+        self._minimum_mll_headroom = min(
+            self._minimum_mll_headroom,
+            self._account.mll_headroom(worst_equity),
+        )
         self._index = next_index
         outcome = None
         if self._account.outcome(worst_equity) == "blow":
@@ -626,6 +636,10 @@ class HistoricalChallengeEnv:
         self._update_recovery_retention()
 
         equity = self._equity(float(self._market.close[self._index]))
+        self._minimum_mll_headroom = min(
+            self._minimum_mll_headroom,
+            self._account.mll_headroom(equity),
+        )
         reward = (equity - previous_equity) / self.spec.max_loss
         shaping_reward, shaping_info = self._reward_shaping(
             equity,
@@ -658,6 +672,10 @@ class HistoricalChallengeEnv:
             "realized_pnl": self._account.realized_pnl,
             "mll_floor_pnl": self._account.mll_floor_pnl,
             "mll_headroom": mll_headroom,
+            "minimum_mll_headroom": self._minimum_mll_headroom,
+            "maximum_mll_headroom_consumed": max(
+                0.0, self.spec.max_loss - self._minimum_mll_headroom
+            ),
             "mll_headroom_fraction": min(
                 1.0, max(0.0, mll_headroom / self.spec.max_loss)
             ),

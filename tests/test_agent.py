@@ -221,6 +221,75 @@ def test_challenge_return_accepts_exact_wait_on_authenticated_pass_path() -> Non
     ] == 0.0
 
 
+@pytest.mark.parametrize("action", (Action.HOLD, Action.CLOSE))
+def test_challenge_return_accepts_authenticated_pass_management_action(
+    action: Action,
+) -> None:
+    agent = _agent(
+        1,
+        recurrent_burn_in=0,
+        n_step_return=1,
+        challenge_return_self_imitation_weight=0.05,
+    )
+    sequence = (
+        Transition(
+            observation=np.array([0.0], np.float32),
+            action=action,
+            reward=0.0,
+            next_observation=np.array([1.0], np.float32),
+            terminated=False,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(Action.HOLD, Action.CLOSE),
+            competence_anchor=True,
+            challenge_return_to_go=1.0,
+        ),
+        Transition(
+            observation=np.array([1.0], np.float32),
+            action=Action.CLOSE,
+            reward=0.0,
+            next_observation=np.array([2.0], np.float32),
+            terminated=True,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=(),
+        ),
+    )
+
+    agent.train_batch((sequence,))
+
+    assert agent.last_train_metrics[
+        f"challenge_return_self_imitation_{action.name.lower()}_rows"
+    ] == 1.0
+
+
+def test_challenge_return_rejects_unauthenticated_management_action() -> None:
+    agent = _agent(
+        1,
+        recurrent_burn_in=0,
+        n_step_return=1,
+        challenge_return_self_imitation_weight=0.05,
+    )
+    sequence = tuple(
+        Transition(
+            observation=np.array([index], np.float32),
+            action=Action.HOLD,
+            reward=0.0,
+            next_observation=np.array([index + 1], np.float32),
+            terminated=index == 1,
+            valid_actions=(Action.HOLD, Action.CLOSE),
+            next_valid_actions=() if index == 1 else (Action.HOLD, Action.CLOSE),
+            competence_anchor=False,
+            challenge_return_to_go=1.0 if index == 0 else None,
+        )
+        for index in range(2)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="authenticated exact pass action",
+    ):
+        agent.train_batch((sequence,))
+
+
 def test_auto_device_prefers_cuda_then_mps_then_cpu(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)

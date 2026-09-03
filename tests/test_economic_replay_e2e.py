@@ -1484,6 +1484,100 @@ def test_train_agent_reports_pass_replay_and_contrastive_boundaries_e2e(
 
 
 @pytest.mark.parametrize(
+    ("side", "context"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            (0.90, 0.85, 0.10, 0.10, 0.10, 0.70, 0.20),
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            (0.10, 0.10, 0.90, 0.85, 0.10, 0.70, 0.20),
+        ),
+    ),
+)
+def test_challenge_return_wait_and_entry_survive_burn_in_in_real_learner(
+    side: Action,
+    context: tuple[float, ...],
+) -> None:
+    replay = _replay(seed=619)
+    winner = _economic_episode(
+        episode_id=f"{side.name.lower()}-pass",
+        side=side,
+        economic_win=True,
+        context=context,
+        offset=1.0,
+    )
+    winner = replace(
+        winner,
+        transitions=tuple(
+            replace(
+                transition,
+                action=(Action.HOLD if index == 6 else transition.action),
+                valid_actions=(
+                    (Action.HOLD, Action.CLOSE)
+                    if index == 6
+                    else transition.valid_actions
+                ),
+                entry_action_target=(
+                    Action.WAIT
+                    if index == 4
+                    else transition.entry_action_target
+                ),
+            )
+            for index, transition in enumerate(winner.transitions)
+        ),
+    )
+    replay.add(winner)
+    replay.add(_economic_episode(
+        episode_id=f"{side.name.lower()}-failure",
+        side=side,
+        economic_win=False,
+        context=context,
+        offset=2.0,
+    ))
+
+    sequences = replay.sample_balance_outcome_contrast_pairs(
+        1,
+        near_blow_pnl=-2_250.0,
+        challenge_return_discount=0.5,
+    )
+    pass_sequence = next(
+        sequence
+        for sequence in sequences
+        if any(
+            transition.paired_a_plus_economic_win is True
+            and transition.paired_a_plus_pair_id is not None
+            for transition in sequence
+        )
+    )
+    credited = [
+        (index, transition.action)
+        for index, transition in enumerate(pass_sequence)
+        if transition.challenge_return_to_go is not None
+    ]
+    assert credited == [
+        (replay.recurrent_burn_in, Action.WAIT),
+        (replay.recurrent_burn_in + 1, side),
+        (replay.recurrent_burn_in + 2, Action.HOLD),
+    ]
+
+    agent = _agent(recurrent_burn_in=replay.recurrent_burn_in)
+    agent.challenge_return_self_imitation_weight = 0.05
+    agent.train_batch(sequences)
+
+    metrics = agent.last_train_metrics
+    assert metrics["challenge_return_self_imitation_rows"] == 3.0
+    assert metrics["challenge_return_self_imitation_wait_rows"] == 1.0
+    assert metrics["challenge_return_self_imitation_hold_rows"] == 1.0
+    assert metrics[
+        "challenge_return_self_imitation_long_rows"
+        if side == Action.ENTER_LONG_1
+        else "challenge_return_self_imitation_short_rows"
+    ] == 1.0
+
+
+@pytest.mark.parametrize(
     ("side", "context", "exit_reason", "authenticated_target", "expected"),
     (
         (

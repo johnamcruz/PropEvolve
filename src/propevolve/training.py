@@ -2486,6 +2486,7 @@ class TrainingResult:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    pathwise_near_blow_count: int = 0
     flat_decision_count: int = 0
     greedy_entry_count: int = 0
     long_entry_count: int = 0
@@ -2554,6 +2555,13 @@ class TrainingResult:
         return (
             self.near_blow_timeout_count / self.timeouts
             if self.timeouts else 0.0
+        )
+
+    @property
+    def pathwise_near_blow_rate(self) -> float:
+        return (
+            self.pathwise_near_blow_count / self.episodes
+            if self.episodes else 0.0
         )
 
     @property
@@ -3198,6 +3206,7 @@ class TrainingProgress:
     two_r_capture_sum: float = 0.0
     two_r_round_trip_count: int = 0
     near_blow_timeout_count: int = 0
+    pathwise_near_blow_count: int = 0
     recent_outcomes: tuple[str, ...] = ()
     recent_average_hold_bars: tuple[float, ...] = ()
     recent_voluntary_close_rates: tuple[float, ...] = ()
@@ -3234,6 +3243,7 @@ class TrainingProgress:
             two_r_capture_sum=self.two_r_capture_sum,
             two_r_round_trip_count=self.two_r_round_trip_count,
             near_blow_timeout_count=self.near_blow_timeout_count,
+            pathwise_near_blow_count=self.pathwise_near_blow_count,
             short_circuited=self.short_circuit_reason is not None,
             short_circuit_reason=self.short_circuit_reason,
         )
@@ -3255,8 +3265,24 @@ def prop_safety_objective(
         result.passes / result.episodes
         + 0.05 * margin
         + 0.02 * progress
-        - 0.5 * result.near_blow_timeout_rate
+        - 0.5 * result.pathwise_near_blow_rate
     )
+
+
+def _pathwise_near_blow(
+    terminal_info: Mapping[str, object],
+    *,
+    terminal_pnl: float,
+    near_blow_loss_threshold: float | None,
+) -> bool:
+    if near_blow_loss_threshold is None:
+        return False
+    consumed = terminal_info.get("maximum_mll_headroom_consumed")
+    if consumed is None:
+        return terminal_pnl <= -near_blow_loss_threshold
+    if isinstance(consumed, bool) or not np.isfinite(float(consumed)):
+        raise ValueError("pathwise MLL headroom consumption is invalid")
+    return float(consumed) >= near_blow_loss_threshold
 
 
 class HistoricalCandidateRunner:
@@ -4556,6 +4582,10 @@ class HistoricalCandidateRunner:
                     training.near_blow_timeout_count
                 ),
                 "near_blow_timeout_rate": training.near_blow_timeout_rate,
+                "pathwise_near_blow_count": float(
+                    training.pathwise_near_blow_count
+                ),
+                "pathwise_near_blow_rate": training.pathwise_near_blow_rate,
                 "short_circuited": float(training.short_circuited),
                 "retained_pass_policy_restored": float(
                     retained_policy_restored
@@ -4672,6 +4702,10 @@ class HistoricalCandidateRunner:
                     validation.near_blow_timeout_count
                 ),
                 "near_blow_timeout_rate": validation.near_blow_timeout_rate,
+                "pathwise_near_blow_count": float(
+                    validation.pathwise_near_blow_count
+                ),
+                "pathwise_near_blow_rate": validation.pathwise_near_blow_rate,
             }
             metrics.update(_outcome_metric_values(validation))
             return metrics
@@ -4727,6 +4761,9 @@ class HistoricalCandidateRunner:
                 "worst_pnl": balance_validation.worst_pnl,
                 "near_blow_timeout_rate": (
                     balance_validation.near_blow_timeout_rate
+                ),
+                "pathwise_near_blow_rate": (
+                    balance_validation.pathwise_near_blow_rate
                 ),
                 "trade_win_rate": balance_validation.trade_win_rate,
                 "average_win_r": balance_validation.average_win_r,
@@ -5366,6 +5403,9 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
         "near_blow_timeout_count": sum(
             bool(row.get("near_blow_timeout", False)) for row in rows
         ),
+        "pathwise_near_blow_count": sum(
+            bool(row.get("pathwise_near_blow", False)) for row in rows
+        ),
         "pass_rate": (
             sum(row.get("outcome") == "pass" for row in rows) / episodes
             if episodes else 0.0
@@ -5624,6 +5664,9 @@ def _diagnostic_aggregate(rows: list[dict]) -> dict[str, object]:
     timeouts = int(result["timeouts"])
     result["near_blow_timeout_rate"] = (
         int(result["near_blow_timeout_count"]) / timeouts if timeouts else 0.0
+    )
+    result["pathwise_near_blow_rate"] = (
+        int(result["pathwise_near_blow_count"]) / episodes if episodes else 0.0
     )
     for horizon in (5, 10, 20, 50):
         prefix = f"shadow_h{horizon}"
@@ -6786,11 +6829,12 @@ def train_agent(
                 "outcome": outcome,
                 "terminal_pnl": terminal_pnl,
             })
-        near_blow_timeout = bool(
-            outcome == "timeout"
-            and near_blow_loss_threshold is not None
-            and terminal_pnl <= -near_blow_loss_threshold
+        pathwise_near_blow = _pathwise_near_blow(
+            terminal_info,
+            terminal_pnl=terminal_pnl,
+            near_blow_loss_threshold=near_blow_loss_threshold,
         )
+        near_blow_timeout = outcome == "timeout" and pathwise_near_blow
         closed_trade_receipts = getattr(
             environment, "closed_trade_receipts", None
         )
@@ -7064,7 +7108,7 @@ def train_agent(
                 "challenge_return_self_imitation_added_clip_rows",
                 *(
                     f"challenge_return_self_imitation_{action}_{field}"
-                    for action in ("wait", "long", "short")
+                    for action in ("wait", "long", "short", "hold", "close")
                     for field in ("rows", "bonus_sum")
                 ),
                 *(
@@ -7507,6 +7551,9 @@ def train_agent(
             near_blow_timeout_count=(
                 progress.near_blow_timeout_count + int(near_blow_timeout)
             ),
+            pathwise_near_blow_count=(
+                progress.pathwise_near_blow_count + int(pathwise_near_blow)
+            ),
             recent_outcomes=recent_outcomes,
             recent_average_hold_bars=recent_hold_bars,
             recent_voluntary_close_rates=recent_close_rates,
@@ -7607,6 +7654,8 @@ def train_agent(
                 ("WAIT", "wait"),
                 ("ENTER_LONG_1", "long"),
                 ("ENTER_SHORT_1", "short"),
+                ("HOLD", "hold"),
+                ("CLOSE", "close"),
             ):
                 rows = int(round(sum(learner_diagnostics[
                     f"challenge_return_self_imitation_{metric_name}_rows"
@@ -7695,6 +7744,14 @@ def train_agent(
                 ),
                 "largest_mfe_trade": terminal_info.get("largest_mfe_trade"),
                 "terminal_pnl": terminal_pnl,
+                "minimum_mll_headroom": terminal_info.get(
+                    "minimum_mll_headroom"
+                ),
+                "maximum_mll_headroom_consumed": terminal_info.get(
+                    "maximum_mll_headroom_consumed"
+                ),
+                "pathwise_near_blow": pathwise_near_blow,
+                "near_blow_timeout": near_blow_timeout,
                 "recovery_entry_used": bool(recovery_entries_used),
                 "recovery_entries_used": recovery_entries_used,
                 "recovery_trade_closed": bool(
@@ -7787,7 +7844,6 @@ def train_agent(
                     if recovery_value_store is None
                     else len(recovery_value_store)
                 ),
-                "near_blow_timeout": near_blow_timeout,
                 "regime_trade_economics": regime_trade_economics,
                 "executed_failure_supervision_promoted_rows": (
                     executed_failure_supervision_promoted_rows
@@ -8158,6 +8214,7 @@ def evaluate_agent(
     two_r_eligible_count = two_r_round_trip_count = 0
     two_r_capture_sum = 0.0
     near_blow_timeout_count = 0
+    pathwise_near_blow_count = 0
     environment_steps = 0
     flat_decision_count = greedy_entry_count = 0
     long_entry_count = short_entry_count = 0
@@ -8300,12 +8357,14 @@ def evaluate_agent(
         outcomes[outcome] += 1
         rewards.append(total)
         terminal_pnl = float(info.get("equity_pnl", 0.0))
-        near_blow_timeout = bool(
-            outcome == "timeout"
-            and near_blow_loss_threshold is not None
-            and terminal_pnl <= -near_blow_loss_threshold
+        pathwise_near_blow = _pathwise_near_blow(
+            info,
+            terminal_pnl=terminal_pnl,
+            near_blow_loss_threshold=near_blow_loss_threshold,
         )
+        near_blow_timeout = outcome == "timeout" and pathwise_near_blow
         near_blow_timeout_count += int(near_blow_timeout)
+        pathwise_near_blow_count += int(pathwise_near_blow)
         episode_trades = int(info.get("trade_count", 0))
         episode_wins = int(info.get("win_count", 0))
         episode_winning_r = float(info.get("winning_r_sum", 0.0))
@@ -8394,6 +8453,11 @@ def evaluate_agent(
                 "starting_realized_pnl": starting_realized_pnl,
                 "reward": total,
                 "terminal_pnl": terminal_pnl,
+                "minimum_mll_headroom": info.get("minimum_mll_headroom"),
+                "maximum_mll_headroom_consumed": info.get(
+                    "maximum_mll_headroom_consumed"
+                ),
+                "pathwise_near_blow": pathwise_near_blow,
                 "near_blow_timeout": near_blow_timeout,
                 "trade_count": episode_trades,
                 "win_rate": episode_win_rate,
@@ -8517,6 +8581,7 @@ def evaluate_agent(
         two_r_capture_sum=two_r_capture_sum,
         two_r_round_trip_count=two_r_round_trip_count,
         near_blow_timeout_count=near_blow_timeout_count,
+        pathwise_near_blow_count=pathwise_near_blow_count,
         flat_decision_count=flat_decision_count,
         greedy_entry_count=greedy_entry_count,
         long_entry_count=long_entry_count,
@@ -8536,6 +8601,8 @@ def evaluate_agent(
         f"pass={result.passes} blow={result.blows} timeout={result.timeouts} "
         f"near_blow_timeout={result.near_blow_timeout_count} "
         f"({result.near_blow_timeout_rate:.1%}) "
+        f"pathwise_near_blow={result.pathwise_near_blow_count} "
+        f"({result.pathwise_near_blow_rate:.1%}) "
         f"WR={result.trade_win_rate:.1%} winR={result.average_win_r:+.3f}R "
         f"mean_pnl={result.mean_terminal_pnl:+.2f} "
         f"greedy_entry={result.greedy_entry_rate:.1%} "
