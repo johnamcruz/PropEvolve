@@ -964,7 +964,7 @@ def test_active_sweep_compiles_through_real_config_validation(
     assert result.status == "COMPLETE"
 
 
-def test_active_sweep_every_trend_value_compiles_through_real_validation(
+def test_active_sweep_every_search_value_compiles_through_real_validation(
     tmp_path: Path,
 ) -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
@@ -984,27 +984,28 @@ def test_active_sweep_every_trend_value_compiles_through_real_validation(
             normalized = load_experiment_config(path)
             assert optuna_engine._get_path(normalized, name) == value
             assert normalized["trend_start_confluence"]["enabled"] is True
-            agent_settings = _trend_start_confluence_agent_settings(
-                normalized["trend_start_confluence"]
-            )
-            agent_path = {
-                "trend_start_confluence.loss_weight": (
-                    "trend_start_confluence_loss_weight"
-                ),
-                "trend_start_confluence.opportunity_loss_weight": (
-                    "trend_start_confluence_opportunity_loss_weight"
-                ),
-                "trend_start_confluence.safety_loss_weight": (
-                    "trend_start_confluence_safety_loss_weight"
-                ),
-                "trend_start_confluence.margin": (
-                    "trend_start_confluence_margin"
-                ),
-                "trend_start_confluence.confirmation_lookback_bars": (
-                    "trend_start_confluence_confirmation_lookback_bars"
-                ),
-            }[name]
-            assert agent_settings[agent_path] == value
+            if name.startswith("trend_start_confluence."):
+                agent_settings = _trend_start_confluence_agent_settings(
+                    normalized["trend_start_confluence"]
+                )
+                agent_path = {
+                    "trend_start_confluence.loss_weight": (
+                        "trend_start_confluence_loss_weight"
+                    ),
+                    "trend_start_confluence.opportunity_loss_weight": (
+                        "trend_start_confluence_opportunity_loss_weight"
+                    ),
+                    "trend_start_confluence.safety_loss_weight": (
+                        "trend_start_confluence_safety_loss_weight"
+                    ),
+                    "trend_start_confluence.margin": (
+                        "trend_start_confluence_margin"
+                    ),
+                    "trend_start_confluence.confirmation_lookback_bars": (
+                        "trend_start_confluence_confirmation_lookback_bars"
+                    ),
+                }[name]
+                assert agent_settings[agent_path] == value
 
 
 def test_direct_trial_economics_are_scored_without_campaign_phase(
@@ -1163,38 +1164,38 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     assert trend["loss_weight"] == 0.0
 
 
-def test_active_sweep_searches_only_trend_usage() -> None:
+def test_active_sweep_searches_only_lifecycle_pair_learning() -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     assert sweep.base_config["trend_start_confluence"]["enabled"] is True
     assert set(sweep.search_space) == {
-        "trend_start_confluence.loss_weight",
-        "trend_start_confluence.opportunity_loss_weight",
-        "trend_start_confluence.safety_loss_weight",
-        "trend_start_confluence.margin",
-        "trend_start_confluence.confirmation_lookback_bars",
+        "training.paired_a_plus_control_candidates",
+        "training.paired_a_plus_violation_replay_update_period",
+        "training.paired_a_plus_violation_candidate_pairs_per_side",
+        "training.paired_a_plus_violation_pairs_per_side",
+        "regime_selectivity.paired_a_plus_winner_loss_weight",
     }
-    assert sweep.search_space["trend_start_confluence.loss_weight"] == {
+    assert sweep.search_space["training.paired_a_plus_control_candidates"] == {
         "type": "categorical",
-        "choices": [0.25, 0.50, 0.75, 1.00],
-    }
-    assert sweep.search_space["trend_start_confluence.margin"] == {
-        "type": "categorical",
-        "choices": [0.10, 0.25, 0.40],
+        "choices": [4, 8, 16],
     }
     assert sweep.search_space[
-        "trend_start_confluence.confirmation_lookback_bars"
+        "training.paired_a_plus_violation_replay_update_period"
     ] == {
         "type": "categorical",
-        "choices": [5, 10, 20, 50],
+        "choices": [2, 4, 8],
     }
-    for name in (
-        "trend_start_confluence.opportunity_loss_weight",
-        "trend_start_confluence.safety_loss_weight",
-    ):
-        assert sweep.search_space[name] == {
-            "type": "categorical",
-            "choices": [0.5, 1.0, 1.5],
-        }
+    assert sweep.search_space[
+        "training.paired_a_plus_violation_candidate_pairs_per_side"
+    ] == {
+        "type": "categorical",
+        "choices": [8, 16],
+    }
+    assert sweep.search_space[
+        "training.paired_a_plus_violation_pairs_per_side"
+    ] == {"type": "categorical", "choices": [1, 2]}
+    assert sweep.search_space[
+        "regime_selectivity.paired_a_plus_winner_loss_weight"
+    ] == {"type": "categorical", "choices": [2.5, 4.0, 6.0]}
     assert "trend_start_confluence.enabled" in sweep.frozen_paths
 
 

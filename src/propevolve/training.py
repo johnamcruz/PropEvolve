@@ -417,6 +417,7 @@ def _regime_selectivity_replay_settings(
     *,
     paired_a_plus_population_weighting: str,
     paired_a_plus_context_matching: str,
+    paired_a_plus_control_candidates: int = 8,
 ) -> dict[str, object]:
     """Project the frozen side sampler identity onto replay construction."""
     side_balance = (
@@ -432,6 +433,7 @@ def _regime_selectivity_replay_settings(
             paired_a_plus_population_weighting
         ),
         "paired_a_plus_context_matching": paired_a_plus_context_matching,
+        "paired_a_plus_control_candidates": paired_a_plus_control_candidates,
     }
 
 
@@ -3667,6 +3669,9 @@ class HistoricalCandidateRunner:
                 paired_a_plus_context_matching=str(
                     training_config["paired_a_plus_context_matching"]
                 ),
+                paired_a_plus_control_candidates=int(
+                    training_config["paired_a_plus_control_candidates"]
+                ),
             ),
             recurrent_burn_in=int(agent.recurrent_burn_in),
             n_step_return=int(agent.n_step_return),
@@ -3756,6 +3761,9 @@ class HistoricalCandidateRunner:
                     paired_a_plus_context_matching=str(
                         training_config["paired_a_plus_context_matching"]
                     ),
+                    paired_a_plus_control_candidates=int(
+                        training_config["paired_a_plus_control_candidates"]
+                    ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
                 n_step_return=int(agent.n_step_return),
@@ -3820,6 +3828,9 @@ class HistoricalCandidateRunner:
                     ),
                     paired_a_plus_context_matching=str(
                         training_config["paired_a_plus_context_matching"]
+                    ),
+                    paired_a_plus_control_candidates=int(
+                        training_config["paired_a_plus_control_candidates"]
                     ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),
@@ -3886,6 +3897,9 @@ class HistoricalCandidateRunner:
                     ),
                     paired_a_plus_context_matching=str(
                         training_config["paired_a_plus_context_matching"]
+                    ),
+                    paired_a_plus_control_candidates=int(
+                        training_config["paired_a_plus_control_candidates"]
                     ),
                 ),
                 recurrent_burn_in=int(agent.recurrent_burn_in),

@@ -1658,8 +1658,18 @@ def load_experiment_config(path: str | Path) -> dict:
     if paired_a_plus_context_matching not in {
         "static_expansion_regime_v1",
         "regime_control_expansion_lifecycle_v1",
+        "expansion_trend_lifecycle_control_v2",
     }:
         raise ValueError("paired A+ context matching is invalid")
+    paired_a_plus_control_candidates = training[
+        "paired_a_plus_control_candidates"
+    ]
+    if (
+        isinstance(paired_a_plus_control_candidates, bool)
+        or not isinstance(paired_a_plus_control_candidates, int)
+        or paired_a_plus_control_candidates < 1
+    ):
+        raise ValueError("paired A+ control candidate count is invalid")
     violation_update_period = training[
         "paired_a_plus_violation_replay_update_period"
     ]
@@ -1683,8 +1693,10 @@ def load_experiment_config(path: str | Path) -> dict:
         or violation_update_period > 0
         and not 1 <= violation_pairs <= violation_candidate_pairs
         or violation_update_period > 0
-        and paired_a_plus_context_matching
-        != "regime_control_expansion_lifecycle_v1"
+        and paired_a_plus_context_matching not in {
+            "regime_control_expansion_lifecycle_v1",
+            "expansion_trend_lifecycle_control_v2",
+        }
     ):
         raise ValueError("paired A+ violation replay is invalid")
     regime_selectivity = payload.get("regime_selectivity")

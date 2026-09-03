@@ -68,7 +68,8 @@ def make_replay(
         effective_contract["paired_a_plus_context_matching"] = (
             paired_a_plus_context_matching
         )
-        schema = 14
+        effective_contract.setdefault("paired_a_plus_control_candidates", 8)
+        schema = 15
     r = BalancedSequenceReplay(
         capacity_episodes=effective_contract["capacity_episodes"],
         capacity_transitions=effective_contract["capacity_transitions"],
@@ -94,6 +95,10 @@ def make_replay(
         paired_a_plus_context_matching=effective_contract.get(
             "paired_a_plus_context_matching",
             "static_expansion_regime_v1",
+        ),
+        paired_a_plus_control_candidates=effective_contract.get(
+            "paired_a_plus_control_candidates",
+            8,
         ),
         recurrent_burn_in=effective_contract["recurrent_burn_in"],
         n_step_return=effective_contract["n_step_return"],
@@ -161,8 +166,13 @@ def gradloss(agent, fn):
 
 
 def tdgrad(checkpoint, seqs):
-    a, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    a, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
     a.policy_retention_loss_weight = 0.0
+    a.trend_start_confluence_loss_weight = 0.0
     a.gradient_clip = 1e12
     a.optimizer.step = lambda *x, **y: None
     a.train_batch(
@@ -229,9 +239,14 @@ def waitgrad(checkpoint, seqs, td):
         )
         for s in seqs
     )
-    a, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    a, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
     a.policy_retention_loss_weight = 0.0
     a.entry_action_loss_weight = 0.0
+    a.trend_start_confluence_loss_weight = 0.0
     a.gradient_clip = 1e12
     a.optimizer.step = lambda *x, **y: None
     a.train_batch(
@@ -331,7 +346,11 @@ def grouped_economic_margins(q_values, seqs, *, recurrent_burn_in):
 
 def actual_configured_update(checkpoint, seqs, before):
     """Measure the real optimizer path on the frozen recurrent batch."""
-    agent, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    agent, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
     parameters_before = tuple(
         parameter.detach().clone() for parameter in agent.online.parameters()
     )
@@ -417,7 +436,11 @@ def configured_optimizer_overfit_probe(checkpoint, seqs, *, updates):
     """Prove whether the production learner can acquire one frozen pair batch."""
     if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
         raise ValueError("optimizer overfit updates must be a nonnegative integer")
-    agent, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    agent, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
 
     def margins():
         values = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
@@ -516,11 +539,17 @@ def main():
     )
     ap.add_argument("--challenge-return-weight", type=float, default=0.05)
     ap.add_argument("--optimizer-overfit-updates", type=int, default=0)
+    ap.add_argument("--device", choices=("cpu", "mps"), default="cpu")
+    ap.add_argument(
+        "--learner-backend-override",
+        choices=("pytorch", "mlx"),
+    )
     ap.add_argument(
         "--paired-context-matching",
         choices=(
             "static_expansion_regime_v1",
             "regime_control_expansion_lifecycle_v1",
+            "expansion_trend_lifecycle_control_v2",
         ),
     )
     ap.add_argument(
@@ -540,8 +569,10 @@ def main():
         or args.optimizer_overfit_updates < 0
         or args.violation_prioritized_pairs_per_side < 0
         or args.violation_prioritized_pairs_per_side > 0
-        and args.paired_context_matching
-        != "regime_control_expansion_lifecycle_v1"
+        and args.paired_context_matching not in {
+            "regime_control_expansion_lifecycle_v1",
+            "expansion_trend_lifecycle_control_v2",
+        }
     ):
         ap.error(
             "--near-blow-pnl must be negative and --pair-count must be at least two"
@@ -566,7 +597,11 @@ def main():
         replay_root = args.replay_root
         output = args.output
 
-    agent, manifest = RecurrentC51Agent.load(checkpoint, device="cpu")
+    agent, manifest = RecurrentC51Agent.load(
+        checkpoint,
+        device=args.device,
+        learner_backend_override=args.learner_backend_override,
+    )
     desc = manifest["replay_checkpoint"]
     contract = desc["contract"]
     population = Counter()
@@ -829,7 +864,18 @@ def main():
                         )[source_index]
                     ),
                 })
-            regime_distance = float(np.square(matched[0][0] - matched[1][0]).sum())
+            control_distance = float(
+                np.square(matched[0][0] - matched[1][0]).sum()
+            )
+            regime_slice = (
+                slice(4, 7)
+                if args.paired_context_matching
+                == "expansion_trend_lifecycle_control_v2"
+                else slice(None)
+            )
+            regime_distance = float(np.square(
+                matched[0][0][regime_slice] - matched[1][0][regime_slice]
+            ).sum())
             lifecycle = (
                 matched[0][1] if len(matched[0]) > 1 else matched[0][0]
             )
@@ -842,6 +888,7 @@ def main():
                 "context_squared_distance": float(
                     np.square(lifecycle - failure_lifecycle).sum()
                 ),
+                "control_squared_distance": control_distance,
                 "regime_squared_distance": regime_distance,
                 "anchors": anchor_report,
             })
@@ -870,7 +917,11 @@ def main():
             },
         ))
     td, tdloss = tdgrad(checkpoint, seqs)
-    ea, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    ea, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
     eg, el = gradloss(ea, lambda a: exactloss(a, seqs))
     wg, wl, wrows = waitgrad(checkpoint, seqs, td)
     grads = {"c51_td": td, "exact_action": eg, "chop_wait": wg}
@@ -881,7 +932,11 @@ def main():
         "paired_failure",
         "balance_outcome_total",
     ):
-        pa, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+        pa, _ = RecurrentC51Agent.load(
+            checkpoint,
+            device="cpu",
+            learner_backend_override="pytorch",
+        )
         g, l = gradloss(pa, lambda a, n=name: pairlosses(a, seqs)[n])
         grads[name] = g
         losses[name] = l
@@ -889,7 +944,11 @@ def main():
     cos = {n: {m: cosine(g, h) for m, h in grads.items()} for n, g in grads.items()}
     changes = {}
     for name, g in grads.items():
-        ca, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+        ca, _ = RecurrentC51Agent.load(
+            checkpoint,
+            device="cpu",
+            learner_backend_override="pytorch",
+        )
         applygrad(ca, g)
         after = qtrace(ca, seqs)[0][:, 0, :3].detach().cpu()
         ba = before.argmax(-1)
@@ -908,7 +967,11 @@ def main():
             "max_abs_q_change": float((after - before).abs().max()),
         }
     par = parity(agent, seqs)
-    rt, _ = RecurrentC51Agent.load(checkpoint, device="cpu")
+    rt, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
     configured_update = actual_configured_update(checkpoint, seqs, before)

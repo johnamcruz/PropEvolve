@@ -816,6 +816,27 @@ def test_checkpoint_round_trip_preserves_recurrent_credit_horizon(
     assert restored.recurrent_burn_in == 64
 
 
+def test_checkpoint_audit_can_explicitly_override_the_learner_backend(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(2)
+    checkpoint = agent.save(tmp_path / "audit-backend.pt", manifest={})
+
+    restored, _ = RecurrentC51Agent.load(
+        checkpoint,
+        device="cpu",
+        learner_backend_override="pytorch",
+    )
+
+    assert restored.learner_backend == "pytorch"
+    with pytest.raises(ValueError, match="backend override is invalid"):
+        RecurrentC51Agent.load(
+            checkpoint,
+            device="cpu",
+            learner_backend_override="invalid",
+        )
+
+
 def test_padded_two_step_terminal_recovery_has_valid_truncated_learning_rows() -> None:
     agent = _agent(
         2,

@@ -5873,12 +5873,22 @@ class RecurrentC51Agent:
         return agent, dict(payload["manifest"])
 
     @classmethod
-    def load(cls, path: str | Path, *, device: str) -> tuple["RecurrentC51Agent", dict]:
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        device: str,
+        learner_backend_override: str | None = None,
+    ) -> tuple["RecurrentC51Agent", dict]:
         payload = torch.load(Path(path), map_location=device, weights_only=False)
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")
         config = dict(payload["config"])
         config.setdefault("learner_backend", "pytorch")
+        if learner_backend_override is not None:
+            if learner_backend_override not in {"pytorch", "mlx"}:
+                raise ValueError("learner backend override is invalid")
+            config["learner_backend"] = learner_backend_override
         config.setdefault("mixed_precision", "off")
         config.setdefault("compile_model", False)
         config.setdefault("compile_backend", "inductor")

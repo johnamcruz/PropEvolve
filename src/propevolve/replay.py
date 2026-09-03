@@ -730,6 +730,7 @@ class BalancedSequenceReplay:
             "population_proportional_v1"
         ),
         paired_a_plus_context_matching: str = "static_expansion_regime_v1",
+        paired_a_plus_control_candidates: int = 8,
         recurrent_burn_in: int = 0,
         n_step_return: int = 1,
         seed: int,
@@ -803,8 +804,15 @@ class BalancedSequenceReplay:
         if paired_a_plus_context_matching not in {
             "static_expansion_regime_v1",
             "regime_control_expansion_lifecycle_v1",
+            "expansion_trend_lifecycle_control_v2",
         }:
             raise ValueError("replay paired A+ context matching is invalid")
+        if (
+            isinstance(paired_a_plus_control_candidates, bool)
+            or not isinstance(paired_a_plus_control_candidates, int)
+            or paired_a_plus_control_candidates < 1
+        ):
+            raise ValueError("replay paired A+ control candidate count is invalid")
         if (
             paired_a_plus_population_weighting == "equal_pair_mass_v1"
             and entry_opportunity_side_balance
@@ -818,6 +826,9 @@ class BalancedSequenceReplay:
             paired_a_plus_population_weighting
         )
         self.paired_a_plus_context_matching = paired_a_plus_context_matching
+        self.paired_a_plus_control_candidates = int(
+            paired_a_plus_control_candidates
+        )
         self._episodes: OrderedDict[str, _StoredEpisode] = OrderedDict()
         self._transition_count = 0
         self._random = random.Random(seed)
@@ -951,7 +962,7 @@ class BalancedSequenceReplay:
     def checkpoint_metadata(self) -> dict[str, object]:
         """Return the small replay contract and exact sampler state."""
         return {
-            "schema_version": 14,
+            "schema_version": 15,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -975,6 +986,9 @@ class BalancedSequenceReplay:
                 ),
                 "paired_a_plus_context_matching": (
                     self.paired_a_plus_context_matching
+                ),
+                "paired_a_plus_control_candidates": (
+                    self.paired_a_plus_control_candidates
                 ),
             },
             "random_state": self._random.getstate(),
@@ -1050,7 +1064,7 @@ class BalancedSequenceReplay:
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11, 12, 13, 14}:
+        if schema_version not in {7, 8, 9, 10, 11, 12, 13, 14, 15}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1076,7 +1090,14 @@ class BalancedSequenceReplay:
             "paired_a_plus_context_matching": (
                 self.paired_a_plus_context_matching
             ),
+            "paired_a_plus_control_candidates": (
+                self.paired_a_plus_control_candidates
+            ),
         }
+        if schema_version <= 14:
+            if self.paired_a_plus_control_candidates != 8:
+                raise ValueError("replay checkpoint contract drifted")
+            expected_contract.pop("paired_a_plus_control_candidates")
         if schema_version <= 13:
             if self.paired_a_plus_context_matching != "static_expansion_regime_v1":
                 raise ValueError("replay checkpoint contract drifted")
@@ -2322,13 +2343,10 @@ class BalancedSequenceReplay:
             winner_context = self._paired_match_context(
                 winner_episode, winner_index, side
             )
-            failure = min(
+            failure = self._select_paired_failure(
                 failures[side],
-                key=lambda item: self._paired_failure_rank(
-                    (item[3], item[4]),
-                    side=side,
-                    winner_context=winner_context,
-                ),
+                side=side,
+                winner_context=winner_context,
             )
             _, _, _, failure_episode, failure_index = failure
             pair_id = pair_id_start + offset
@@ -2625,20 +2643,50 @@ class BalancedSequenceReplay:
             return (point,)
         if anchor_index < 5 or episode.teacher_targets is None:
             raise ValueError("paired A+ lifecycle context is unavailable")
+        width = (
+            11
+            if self.paired_a_plus_context_matching
+            == "expansion_trend_lifecycle_control_v2"
+            else 4
+        )
         history = np.asarray(
-            episode.teacher_targets[anchor_index - 5:anchor_index + 1, :4],
+            episode.teacher_targets[anchor_index - 5:anchor_index + 1, :width],
             dtype=np.float32,
         )
-        if history.shape != (6, 4) or not np.isfinite(history).all():
+        if history.shape != (6, width) or not np.isfinite(history).all():
             raise ValueError("paired A+ lifecycle context is invalid")
+        expansion = history[:, :4]
         if side == Action.ENTER_SHORT_1:
-            history = history[:, [2, 3, 0, 1]]
-        lifecycle = np.concatenate((
-            history[-1],
-            history[-1] - history[-2],
-            history[-1] - history[0],
+            expansion = expansion[:, [2, 3, 0, 1]]
+        if self.paired_a_plus_context_matching == (
+            "regime_control_expansion_lifecycle_v1"
+        ):
+            lifecycle = np.concatenate((
+                expansion[-1],
+                expansion[-1] - expansion[-2],
+                expansion[-1] - expansion[0],
+            )).astype(np.float32, copy=False)
+            return point[4:7], lifecycle
+        headroom = float(
+            episode.regime_selectivity_headroom_fractions[anchor_index]
+        )
+        if not np.isfinite(headroom):
+            raise ValueError("paired A+ lifecycle headroom is unavailable")
+        trend = history[:, 7:11]
+        if side == Action.ENTER_SHORT_1:
+            trend = trend[:, [1, 0, 3, 2]]
+        control = np.concatenate((
+            point,
+            np.asarray((headroom,), dtype=np.float32),
+        ))
+        signature = np.concatenate((
+            trend[-1],
+            expansion[-1] - expansion[-2],
+            expansion[-1] - expansion[0],
+            trend[-1] - trend[-2],
+            trend[-1] - trend[0],
         )).astype(np.float32, copy=False)
-        return point[4:7], lifecycle
+        return control, signature
 
     def _paired_anchor_is_matchable(
         self,
@@ -2649,8 +2697,66 @@ class BalancedSequenceReplay:
             return True
         if anchor_index < 5 or episode.teacher_targets is None:
             return False
-        history = episode.teacher_targets[anchor_index - 5:anchor_index + 1, :4]
-        return history.shape == (6, 4) and bool(np.isfinite(history).all())
+        width = (
+            11
+            if self.paired_a_plus_context_matching
+            == "expansion_trend_lifecycle_control_v2"
+            else 4
+        )
+        history = episode.teacher_targets[
+            anchor_index - 5:anchor_index + 1, :width
+        ]
+        if history.shape != (6, width) or not bool(np.isfinite(history).all()):
+            return False
+        if self.paired_a_plus_context_matching == (
+            "expansion_trend_lifecycle_control_v2"
+        ):
+            return bool(np.isfinite(
+                episode.regime_selectivity_headroom_fractions[anchor_index]
+            ))
+        return True
+
+    def _select_paired_failure(
+        self,
+        candidates: Sequence[tuple[int, float, str, _StoredEpisode, int]],
+        *,
+        side: Action,
+        winner_context: tuple[np.ndarray, ...],
+    ) -> tuple[int, float, str, _StoredEpisode, int]:
+        """Select a comparable control that exposes a different lifecycle."""
+        if self.paired_a_plus_context_matching != (
+            "expansion_trend_lifecycle_control_v2"
+        ):
+            return min(
+                candidates,
+                key=lambda item: self._paired_failure_rank(
+                    (item[3], item[4]),
+                    side=side,
+                    winner_context=winner_context,
+                ),
+            )
+        ranked_controls = sorted(
+            candidates,
+            key=lambda item: (
+                float(np.square(
+                    winner_context[0]
+                    - self._paired_match_context(item[3], item[4], side)[0]
+                ).mean()),
+                item[2],
+                item[4],
+            ),
+        )[: self.paired_a_plus_control_candidates]
+        return min(
+            ranked_controls,
+            key=lambda item: (
+                -float(np.square(
+                    winner_context[1]
+                    - self._paired_match_context(item[3], item[4], side)[1]
+                ).mean()),
+                item[2],
+                item[4],
+            ),
+        )
 
     def _paired_failure_rank(
         self,

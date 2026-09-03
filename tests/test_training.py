@@ -1231,10 +1231,11 @@ def test_stage2a_recipe_projects_only_declared_selectivity_settings() -> None:
     ) == {
         "entry_opportunity_side_balance": "equal_long_short_v1",
         "paired_a_plus_population_weighting": "equal_pair_mass_v1",
-        "paired_a_plus_context_matching": (
-            "regime_control_expansion_lifecycle_v1"
-        ),
-    }
+            "paired_a_plus_context_matching": (
+                "regime_control_expansion_lifecycle_v1"
+            ),
+            "paired_a_plus_control_candidates": 8,
+        }
 
 
 @pytest.mark.parametrize(

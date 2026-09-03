@@ -39,6 +39,7 @@
       "entry_opportunity_sequence_fraction": 0.0,
       "paired_a_plus_population_weighting": "population_proportional_v1",
       "paired_a_plus_context_matching": "static_expansion_regime_v1",
+      "paired_a_plus_control_candidates": 8,
       "paired_a_plus_violation_replay_update_period": 0,
       "paired_a_plus_violation_candidate_pairs_per_side": 0,
       "paired_a_plus_violation_pairs_per_side": 0,

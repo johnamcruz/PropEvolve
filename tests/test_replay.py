@@ -330,7 +330,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 14
+    assert state["schema_version"] == 15
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -569,6 +569,7 @@ def _paired_a_plus_episode(
     outcome: str | None = None,
     terminal_pnl: float | None = None,
     expansion_history: tuple[tuple[float, float, float, float], ...] | None = None,
+    trend_history: tuple[tuple[float, float, float, float], ...] | None = None,
     anchor_index: int = 5,
 ) -> Episode:
     flat_actions = (
@@ -591,6 +592,11 @@ def _paired_a_plus_episode(
                     (
                         *expansion_history[index],
                         *context[4:],
+                        *(
+                            trend_history[index]
+                            if trend_history is not None
+                            else ()
+                        ),
                     )
                     if expansion_history is not None and index <= anchor_index
                     else context,
@@ -713,7 +719,6 @@ def test_lifecycle_pairing_controls_regime_and_preserves_expansion_edge() -> Non
         anchor for anchor in anchors if not anchor.paired_a_plus_economic_win
     )
     assert failure.source_decision_index == 105
-
     restored = BalancedSequenceReplay(
         capacity_episodes=8,
         sequence_length=6,
@@ -730,6 +735,142 @@ def test_lifecycle_pairing_controls_regime_and_preserves_expansion_edge() -> Non
     assert restored.paired_a_plus_context_matching == (
         "regime_control_expansion_lifecycle_v1"
     )
+
+
+@pytest.mark.parametrize(
+    ("side", "winner_context", "matched_context", "wrong_context"),
+    (
+        (
+            Action.ENTER_LONG_1,
+            (0.60, 0.62, 0.25, 0.58, 0.10, 0.70, 0.20),
+            (0.58, 0.61, 0.27, 0.57, 0.12, 0.68, 0.20),
+            (0.25, 0.58, 0.60, 0.62, 0.10, 0.70, 0.20),
+        ),
+        (
+            Action.ENTER_SHORT_1,
+            (0.25, 0.58, 0.60, 0.62, 0.10, 0.70, 0.20),
+            (0.27, 0.57, 0.58, 0.61, 0.12, 0.68, 0.20),
+            (0.60, 0.62, 0.25, 0.58, 0.10, 0.70, 0.20),
+        ),
+    ),
+)
+def test_expansion_trend_lifecycle_pairing_uses_regime_as_control_not_recipe(
+    side: Action,
+    winner_context: tuple[float, ...],
+    matched_context: tuple[float, ...],
+    wrong_context: tuple[float, ...],
+) -> None:
+    """Comparable starts must expose the differing causal lifecycle to RL."""
+    if side == Action.ENTER_LONG_1:
+        winner_expansion = tuple(
+            (0.20 + 0.08 * index, 0.57 + 0.01 * index, 0.30, 0.58)
+            for index in range(6)
+        )
+        matched_expansion = tuple(
+            (0.63 - 0.01 * index, 0.56 + 0.01 * index, 0.24, 0.57)
+            for index in range(6)
+        )
+        wrong_expansion = tuple(wrong_context[:4] for _ in range(6))
+        winner_trend = tuple(
+            (0.02 + 0.03 * index, 0.01, 0.55, 0.52)
+            for index in range(6)
+        )
+        matched_trend = tuple(
+            (0.15 - 0.02 * index, 0.06 + 0.02 * index, 0.55, 0.55)
+            for index in range(6)
+        )
+    else:
+        winner_expansion = tuple(
+            (0.30, 0.58, 0.20 + 0.08 * index, 0.57 + 0.01 * index)
+            for index in range(6)
+        )
+        matched_expansion = tuple(
+            (0.24, 0.57, 0.63 - 0.01 * index, 0.56 + 0.01 * index)
+            for index in range(6)
+        )
+        wrong_expansion = tuple(wrong_context[:4] for _ in range(6))
+        winner_trend = tuple(
+            (0.01, 0.02 + 0.03 * index, 0.52, 0.55)
+            for index in range(6)
+        )
+        matched_trend = tuple(
+            (0.06 + 0.02 * index, 0.15 - 0.02 * index, 0.55, 0.55)
+            for index in range(6)
+        )
+    wrong_trend = tuple((0.01, 0.01, 0.52, 0.52) for _ in range(6))
+    replay = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching=(
+            "expansion_trend_lifecycle_control_v2"
+        ),
+        paired_a_plus_control_candidates=2,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=97,
+    )
+    replay.add(_paired_a_plus_episode(
+        episode_id=f"{side.name}-winner",
+        ticker="NQ",
+        target=side,
+        side=side,
+        economic_win=True,
+        context=winner_context,
+        expansion_history=winner_expansion,
+        trend_history=winner_trend,
+        offset=0,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id=f"{side.name}-matched-failure",
+        ticker="ES",
+        target=Action.WAIT,
+        side=side,
+        economic_win=False,
+        context=matched_context,
+        expansion_history=matched_expansion,
+        trend_history=matched_trend,
+        offset=100,
+    ))
+    replay.add(_paired_a_plus_episode(
+        episode_id=f"{side.name}-regime-only-failure",
+        ticker="CL",
+        target=Action.WAIT,
+        side=side,
+        economic_win=False,
+        context=wrong_context,
+        expansion_history=wrong_expansion,
+        trend_history=wrong_trend,
+        offset=200,
+    ))
+
+    anchors = [
+        sequence[replay.recurrent_burn_in]
+        for sequence in replay.sample(2)
+    ]
+    failure = next(
+        anchor for anchor in anchors if not anchor.paired_a_plus_economic_win
+    )
+
+    assert failure.source_decision_index == 105
+    state = replay.state_dict()
+    assert state["contract"]["paired_a_plus_control_candidates"] == 2
+    restored = BalancedSequenceReplay(
+        capacity_episodes=8,
+        sequence_length=6,
+        entry_opportunity_sequence_fraction=1.0,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching=(
+            "expansion_trend_lifecycle_control_v2"
+        ),
+        paired_a_plus_control_candidates=2,
+        recurrent_burn_in=2,
+        n_step_return=2,
+        seed=999,
+    )
+    restored.load_state_dict(state)
+    assert restored.paired_a_plus_control_candidates == 2
 
 
 def test_violation_candidate_pairs_are_bounded_and_side_balanced() -> None:
@@ -1136,6 +1277,7 @@ def test_replay_schema_11_without_terminal_pnl_remains_loadable() -> None:
     legacy["schema_version"] = 11
     legacy["contract"].pop("paired_a_plus_population_weighting")
     legacy["contract"].pop("paired_a_plus_context_matching")
+    legacy["contract"].pop("paired_a_plus_control_candidates")
     for episode in legacy["episodes"]:
         episode.pop("terminal_pnl")
     restored = BalancedSequenceReplay(
@@ -1781,7 +1923,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 14
+    assert state["schema_version"] == 15
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -1827,6 +1969,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
     legacy = replay.state_dict()
     legacy["schema_version"] = 7
     legacy["contract"].pop("paired_a_plus_context_matching")
+    legacy["contract"].pop("paired_a_plus_control_candidates")
     legacy["contract"].pop("paired_a_plus_population_weighting")
     legacy["contract"].pop("regime_wait_sequence_fraction")
     legacy["contract"].pop("regime_wait_sequence_update_period")
@@ -2774,7 +2917,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 14
+    assert state["schema_version"] == 15
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

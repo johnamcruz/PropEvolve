@@ -42,6 +42,7 @@ def _economic_episode(
     context: tuple[float, ...],
     offset: float,
     expansion_history: tuple[tuple[float, float, float, float], ...] | None = None,
+    trend_history: tuple[tuple[float, float, float, float], ...] | None = None,
 ) -> Episode:
     target = side if economic_win else Action.WAIT
     outcome = "pass" if economic_win else "timeout"
@@ -79,7 +80,15 @@ def _economic_episode(
             valid_actions=FLAT_ACTIONS,
             next_valid_actions=() if index == 11 else FLAT_ACTIONS,
             teacher_target=(
-                np.asarray((*expansion, *context[4:]), dtype=np.float32)
+                np.asarray((
+                    *expansion,
+                    *context[4:],
+                    *(
+                        trend_history[index]
+                        if trend_history is not None and index <= 5
+                        else ()
+                    ),
+                ), dtype=np.float32)
                 if anchor or expansion_history is not None and index <= 5
                 else None
             ),
@@ -838,6 +847,127 @@ def test_lifecycle_violation_replay_transfers_both_sides_teacher_free() -> None:
     assert validation.actions[1][agent.recurrent_burn_in] == (
         Action.ENTER_SHORT_1
     )
+
+
+def test_expansion_trend_control_pairs_train_production_recurrent_boundaries(
+) -> None:
+    """The production learner must master both sides of a lifecycle pair."""
+    replay = _replay(
+        seed=617,
+        paired_a_plus_context_matching=(
+            "expansion_trend_lifecycle_control_v2"
+        ),
+        sequence_length=9,
+        recurrent_burn_in=5,
+    )
+    contexts = {
+        Action.ENTER_LONG_1: (
+            0.60, 0.62, 0.25, 0.58, 0.10, 0.70, 0.20,
+        ),
+        Action.ENTER_SHORT_1: (
+            0.25, 0.58, 0.60, 0.62, 0.10, 0.70, 0.20,
+        ),
+    }
+    histories = {
+        Action.ENTER_LONG_1: {
+            "winner_expansion": tuple(
+                (0.20 + 0.08 * index, 0.57 + 0.01 * index, 0.30, 0.58)
+                for index in range(6)
+            ),
+            "failure_expansion": tuple(
+                (0.63 - 0.01 * index, 0.56 + 0.01 * index, 0.24, 0.57)
+                for index in range(6)
+            ),
+            "winner_trend": tuple(
+                (0.02 + 0.03 * index, 0.01, 0.55, 0.52)
+                for index in range(6)
+            ),
+            "failure_trend": tuple(
+                (0.15 - 0.02 * index, 0.06 + 0.02 * index, 0.55, 0.55)
+                for index in range(6)
+            ),
+        },
+        Action.ENTER_SHORT_1: {
+            "winner_expansion": tuple(
+                (0.30, 0.58, 0.20 + 0.08 * index, 0.57 + 0.01 * index)
+                for index in range(6)
+            ),
+            "failure_expansion": tuple(
+                (0.24, 0.57, 0.63 - 0.01 * index, 0.56 + 0.01 * index)
+                for index in range(6)
+            ),
+            "winner_trend": tuple(
+                (0.01, 0.02 + 0.03 * index, 0.52, 0.55)
+                for index in range(6)
+            ),
+            "failure_trend": tuple(
+                (0.06 + 0.02 * index, 0.15 - 0.02 * index, 0.55, 0.55)
+                for index in range(6)
+            ),
+        },
+    }
+    for side, offset in (
+        (Action.ENTER_LONG_1, 0.0),
+        (Action.ENTER_SHORT_1, 2.0),
+    ):
+        values = histories[side]
+        replay.add(_economic_episode(
+            episode_id=f"{side.name}-trajectory-winner",
+            side=side,
+            economic_win=True,
+            context=contexts[side],
+            expansion_history=values["winner_expansion"],
+            trend_history=values["winner_trend"],
+            offset=offset,
+        ))
+        replay.add(_economic_episode(
+            episode_id=f"{side.name}-trajectory-failure",
+            side=side,
+            economic_win=False,
+            context=contexts[side],
+            expansion_history=values["failure_expansion"],
+            trend_history=values["failure_trend"],
+            offset=offset + 1.0,
+        ))
+
+    agent = _trend_confluence_agent(recurrent_burn_in=5)
+    agent.regime_selectivity_paired_a_plus_winner_loss_weight = 3.0
+    candidates = replay.sample_paired_a_plus_candidate_pairs(1)
+    before = _grouped_boundary_margins(agent, candidates)
+    for _ in range(256):
+        candidates = replay.sample_paired_a_plus_candidate_pairs(1)
+        selected, diagnostic = _prioritize_paired_a_plus_violations(
+            agent,
+            candidates,
+            pairs_per_side=1,
+        )
+        assert diagnostic["long_selected_pairs"] == 1.0
+        assert diagnostic["short_selected_pairs"] == 1.0
+        agent.train_batch(selected)
+
+    mastered = _grouped_boundary_margins(agent, candidates)
+    for _ in range(64):
+        candidates = replay.sample_paired_a_plus_candidate_pairs(1)
+        selected, diagnostic = _prioritize_paired_a_plus_violations(
+            agent,
+            candidates,
+            pairs_per_side=1,
+        )
+        assert diagnostic["long_selected_pairs"] == 1.0
+        assert diagnostic["short_selected_pairs"] == 1.0
+        agent.train_batch(selected)
+
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    after = _grouped_boundary_margins(agent, candidates)
+    for side in ("long", "short"):
+        assert after[f"{side}_winner_vs_wait"] > before[
+            f"{side}_winner_vs_wait"
+        ]
+        assert mastered[f"{side}_winner_vs_wait"] >= 0.25
+        assert after[f"{side}_winner_vs_wait"] >= 0.25
+        assert after[f"{side}_winner_vs_opposite"] >= 0.25
+        assert after[f"{side}_wait_vs_failure"] >= 0.25
 
 
 def test_equal_pair_mass_survives_replay_resume_and_real_optimizer_update(

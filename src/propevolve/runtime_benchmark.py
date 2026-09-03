@@ -150,6 +150,9 @@ def _authenticated_replay_sequences(
                 "static_expansion_regime_v1",
             )
         ),
+        paired_a_plus_control_candidates=int(
+            contract.get("paired_a_plus_control_candidates", 8)
+        ),
         seed=0,
     )
     replay.load_state_dict(state)
