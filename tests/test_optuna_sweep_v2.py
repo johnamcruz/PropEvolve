@@ -531,6 +531,57 @@ def test_v2_resumes_interrupted_trial_with_same_params_and_artifact_identity(
     assert retry.state is optuna_engine.optuna.trial.TrialState.COMPLETE
 
 
+def test_v2_retries_executor_failure_without_consuming_trial_target(
+    tmp_path: Path,
+) -> None:
+    contract = _contract(tmp_path, n_trials=2, n_jobs=1)
+    study_root = tmp_path / "study"
+
+    with pytest.raises(RuntimeError, match="resume infrastructure failed"):
+        run_optuna_sweep(
+            contract,
+            artifact_root=study_root,
+            config_root=tmp_path / "configs",
+            runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("resume infrastructure failed")
+            ),
+            state_loader=lambda *_args: None,
+            config_validator=lambda path: None,
+            code_commit="test-commit",
+        )
+
+    observed: list[str] = []
+
+    def working_runner(config_path: Path, *, run_id: str):
+        observed.append(run_id)
+        return {"evaluation_status": "PASS", "metrics": _metrics()}
+
+    result = run_optuna_sweep(
+        contract,
+        artifact_root=study_root,
+        config_root=tmp_path / "configs",
+        runner=working_runner,
+        state_loader=lambda *_args: None,
+        config_validator=lambda path: None,
+        code_commit="test-commit",
+    )
+
+    study = optuna_engine.optuna.load_study(
+        study_name="stage2_learning_contract_tpe_test",
+        storage=optuna_engine._study_storage(result.study_path),
+    )
+    retried = next(
+        trial for trial in study.trials
+        if trial.user_attrs.get("retry_of_trial") == 0
+    )
+    assert result.completed_trials == 2
+    assert result.failed_trials == 0
+    assert result.interrupted_trials == 1
+    assert len(observed) == 2
+    assert observed[0].endswith("screen-trial-000")
+    assert retried.state is optuna_engine.optuna.trial.TrialState.COMPLETE
+
+
 def test_v2_reports_one_economic_summary_when_trial_completes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -983,6 +1034,8 @@ def test_active_sweep_every_search_value_compiles_through_real_validation(
             optuna_engine._write_exact(path, config)
             normalized = load_experiment_config(path)
             assert optuna_engine._get_path(normalized, name) == value
+            assert normalized["runtime"]["learner_backend"] == "mlx"
+            assert normalized["agent"]["device"] == "mps"
             assert normalized["trend_start_confluence"]["enabled"] is True
             if name.startswith("trend_start_confluence."):
                 agent_settings = _trend_start_confluence_agent_settings(
@@ -1151,6 +1204,14 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     assert base["training"]["paired_a_plus_population_weighting"] == (
         "population_proportional_v1"
     )
+    assert base["training"]["paired_a_plus_control_candidates"] == 8
+    assert base["training"][
+        "paired_a_plus_violation_replay_update_period"
+    ] == 4
+    assert base["training"][
+        "paired_a_plus_violation_candidate_pairs_per_side"
+    ] == 16
+    assert base["training"]["paired_a_plus_violation_pairs_per_side"] == 1
     assert base["trend_start_confluence"]["enabled"] is True
     assert base["trend_start_confluence"]["loss_weight"] == 1.0
     assert base["trend_start_confluence"]["opportunity_loss_weight"] == 1.0
@@ -1164,39 +1225,47 @@ def test_active_sweep_inherits_trial15_empirical_control() -> None:
     assert trend["loss_weight"] == 0.0
 
 
-def test_active_sweep_searches_only_lifecycle_pair_learning() -> None:
+def test_active_sweep_searches_only_trend_usage() -> None:
     sweep = load_optuna_sweep(ACTIVE_CONTRACT)
     assert sweep.base_config["trend_start_confluence"]["enabled"] is True
     assert set(sweep.search_space) == {
+        "trend_start_confluence.loss_weight",
+        "trend_start_confluence.opportunity_loss_weight",
+        "trend_start_confluence.safety_loss_weight",
+        "trend_start_confluence.margin",
+        "trend_start_confluence.confirmation_lookback_bars",
+    }
+    assert sweep.search_space["trend_start_confluence.loss_weight"] == {
+        "type": "categorical",
+        "choices": [0.25, 0.5, 0.75, 1.0],
+    }
+    assert sweep.search_space[
+        "trend_start_confluence.opportunity_loss_weight"
+    ] == {
+        "type": "categorical",
+        "choices": [0.5, 1.0, 1.5],
+    }
+    assert sweep.search_space[
+        "trend_start_confluence.safety_loss_weight"
+    ] == {
+        "type": "categorical",
+        "choices": [0.5, 1.0, 1.5],
+    }
+    assert sweep.search_space[
+        "trend_start_confluence.margin"
+    ] == {"type": "categorical", "choices": [0.1, 0.25, 0.4]}
+    assert sweep.search_space[
+        "trend_start_confluence.confirmation_lookback_bars"
+    ] == {"type": "categorical", "choices": [5, 10, 20, 50]}
+    assert "trend_start_confluence.enabled" in sweep.frozen_paths
+    for path in (
         "training.paired_a_plus_control_candidates",
         "training.paired_a_plus_violation_replay_update_period",
         "training.paired_a_plus_violation_candidate_pairs_per_side",
         "training.paired_a_plus_violation_pairs_per_side",
         "regime_selectivity.paired_a_plus_winner_loss_weight",
-    }
-    assert sweep.search_space["training.paired_a_plus_control_candidates"] == {
-        "type": "categorical",
-        "choices": [4, 8, 16],
-    }
-    assert sweep.search_space[
-        "training.paired_a_plus_violation_replay_update_period"
-    ] == {
-        "type": "categorical",
-        "choices": [2, 4, 8],
-    }
-    assert sweep.search_space[
-        "training.paired_a_plus_violation_candidate_pairs_per_side"
-    ] == {
-        "type": "categorical",
-        "choices": [8, 16],
-    }
-    assert sweep.search_space[
-        "training.paired_a_plus_violation_pairs_per_side"
-    ] == {"type": "categorical", "choices": [1, 2]}
-    assert sweep.search_space[
-        "regime_selectivity.paired_a_plus_winner_loss_weight"
-    ] == {"type": "categorical", "choices": [2.5, 4.0, 6.0]}
-    assert "trend_start_confluence.enabled" in sweep.frozen_paths
+    ):
+        assert path in sweep.frozen_paths
 
 
 def test_v2_runs_top_k_confirmation_then_multiseed_winner_retrain(

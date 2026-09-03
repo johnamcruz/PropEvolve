@@ -85,42 +85,46 @@
     }
   },
   "search_space": {
-    "training.paired_a_plus_control_candidates": {
+    "trend_start_confluence.loss_weight": {
       "type": "categorical",
       "choices": [
-        4,
-        8,
-        16
+        0.25,
+        0.5,
+        0.75,
+        1
       ]
     },
-    "training.paired_a_plus_violation_replay_update_period": {
+    "trend_start_confluence.opportunity_loss_weight": {
       "type": "categorical",
       "choices": [
-        2,
-        4,
-        8
-      ]
-    },
-    "training.paired_a_plus_violation_candidate_pairs_per_side": {
-      "type": "categorical",
-      "choices": [
-        8,
-        16
-      ]
-    },
-    "training.paired_a_plus_violation_pairs_per_side": {
-      "type": "categorical",
-      "choices": [
+        0.5,
         1,
-        2
+        1.5
       ]
     },
-    "regime_selectivity.paired_a_plus_winner_loss_weight": {
+    "trend_start_confluence.safety_loss_weight": {
       "type": "categorical",
       "choices": [
-        2.5,
-        4,
-        6
+        0.5,
+        1,
+        1.5
+      ]
+    },
+    "trend_start_confluence.margin": {
+      "type": "categorical",
+      "choices": [
+        0.1,
+        0.25,
+        0.4
+      ]
+    },
+    "trend_start_confluence.confirmation_lookback_bars": {
+      "type": "categorical",
+      "choices": [
+        5,
+        10,
+        20,
+        50
       ]
     }
   },
@@ -316,6 +320,7 @@
       "regime_selectivity.side_balance",
       "regime_selectivity.loss_weight",
       "regime_selectivity.persistent_chop_negative_emphasis",
+      "regime_selectivity.paired_a_plus_winner_loss_weight",
       "training.sequence_length",
       "training.recurrent_horizon",
       "training.batch_sequences",
@@ -333,6 +338,10 @@
       "training.teacher_autonomy_start_fraction",
       "training.entry_supervision_autonomy_start_fraction",
       "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_control_candidates",
+      "training.paired_a_plus_violation_replay_update_period",
+      "training.paired_a_plus_violation_candidate_pairs_per_side",
+      "training.paired_a_plus_violation_pairs_per_side",
       "balance_curriculum.outcome_contrast_replay.update_period",
       "balance_curriculum.outcome_contrast_replay.max_examples",
       "balance_curriculum.pass_replay"

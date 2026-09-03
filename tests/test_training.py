@@ -6085,6 +6085,10 @@ def test_historical_candidate_recovery_reconciles_the_same_replayed_pass_twice(
                 }
             return LoadedAgent(), json.loads(path.read_text())
 
+        @classmethod
+        def load_manifest(cls, path):
+            return json.loads(Path(path).read_text())
+
     class RecoveringEnvironment:
         observation_dim = 1
 

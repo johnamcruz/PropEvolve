@@ -5996,3 +5996,14 @@ class RecurrentC51Agent:
             assert agent.retention_anchor is not None
             agent.retention_anchor.load_state_dict(payload["retention_anchor"])
         return agent, dict(payload["manifest"])
+
+    @classmethod
+    def load_manifest(cls, path: str | Path) -> dict:
+        """Read authenticated checkpoint metadata without constructing a learner."""
+        payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+        if payload.get("schema") != "propevolve_recurrent_c51_v1":
+            raise ValueError("unsupported PropEvolve model bundle")
+        manifest = payload.get("manifest")
+        if not isinstance(manifest, Mapping):
+            raise ValueError("PropEvolve model manifest is invalid")
+        return dict(manifest)

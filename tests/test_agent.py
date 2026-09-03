@@ -837,6 +837,32 @@ def test_checkpoint_audit_can_explicitly_override_the_learner_backend(
         )
 
 
+def test_mlx_checkpoint_manifest_is_readable_without_constructing_a_learner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _agent(2)
+    checkpoint = agent.save(
+        tmp_path / "mlx-retained-pass.pt",
+        manifest={"retention_evidence": {"episode": 15, "ticker": "RTY"}},
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["config"]["learner_backend"] = "mlx"
+    torch.save(payload, checkpoint)
+
+    monkeypatch.setattr(
+        RecurrentC51Agent,
+        "__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("manifest inspection constructed a learner")
+        ),
+    )
+
+    assert RecurrentC51Agent.load_manifest(checkpoint) == {
+        "retention_evidence": {"episode": 15, "ticker": "RTY"},
+    }
+
+
 def test_padded_two_step_terminal_recovery_has_valid_truncated_learning_rows() -> None:
     agent = _agent(
         2,

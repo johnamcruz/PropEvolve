@@ -3491,11 +3491,7 @@ class HistoricalCandidateRunner:
                 ),
             )
             def load_retained_manifest(candidate_path: Path) -> Mapping[str, object]:
-                _, retained_manifest = RecurrentC51Agent.load(
-                    candidate_path,
-                    device="cpu",
-                )
-                return retained_manifest
+                return RecurrentC51Agent.load_manifest(candidate_path)
 
             _reconcile_retained_pass_policies(
                 retained_policy_path,

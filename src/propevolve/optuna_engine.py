@@ -997,12 +997,18 @@ def _reconcile_interrupted_trials(study: optuna.Study) -> frozenset[int]:
     reconciled = set(int(value) for value in study.user_attrs.get(
         "reconciled_interrupted_trials", ()
     ))
-    running = tuple(
+    retryable = tuple(
         trial for trial in study.trials
-        if trial.state is optuna.trial.TrialState.RUNNING
+        if trial.number not in reconciled
+        and (
+            trial.state is optuna.trial.TrialState.RUNNING
+            or trial.state is optuna.trial.TrialState.FAIL
+            and trial.user_attrs.get("stopped_study_on_executor_error") is True
+        )
     )
-    for trial in running:
-        study.tell(trial.number, state=optuna.trial.TrialState.FAIL)
+    for trial in retryable:
+        if trial.state is optuna.trial.TrialState.RUNNING:
+            study.tell(trial.number, state=optuna.trial.TrialState.FAIL)
         reconciled.add(trial.number)
         if trial.params:
             retry_attrs = dict(trial.user_attrs)
