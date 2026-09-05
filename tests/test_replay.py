@@ -330,7 +330,7 @@ def test_replay_schedules_one_resumable_hard_wait_sequence_every_eight_updates(
         ) == 0
 
     state = replay.state_dict()
-    assert state["schema_version"] == 15
+    assert state["schema_version"] == 16
     assert state["sample_calls"] == 7
     restored = BalancedSequenceReplay(
         capacity_episodes=2,
@@ -372,6 +372,7 @@ def test_replay_sampler_state_resumes_without_serializing_episodes() -> None:
         "schema_version",
         "random_state",
         "sample_calls",
+        "mastered_pairs",
     }
     assert "episodes" not in sampler_state
     restored = BalancedSequenceReplay(
@@ -951,6 +952,139 @@ def test_violation_candidate_pairs_are_bounded_and_side_balanced() -> None:
             True,
             False,
         }
+
+
+def test_violation_candidates_revisit_older_winners_and_resume_exactly() -> None:
+    options = dict(
+        capacity_episodes=16, sequence_length=6, recurrent_burn_in=2,
+        n_step_return=2, seed=92,
+        entry_opportunity_side_balance="paired_recurrent_long_short_v1",
+        paired_a_plus_context_matching="regime_control_expansion_lifecycle_v1",
+    )
+    replay = BalancedSequenceReplay(**options)
+    expected = set()
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        context = (0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2)
+        for index in range(4):
+            offset = int(side) * 1000 + index * 100
+            expected.add(offset + 5)
+            replay.add(_paired_a_plus_episode(
+                episode_id=f"{side.name}-{index}", ticker="NQ", target=side,
+                side=side, economic_win=True, context=context, offset=offset,
+                expansion_history=tuple(context[:4] for _ in range(6)),
+            ))
+        replay.add(_paired_a_plus_episode(
+            episode_id=f"{side.name}-failure", ticker="NQ", target=Action.WAIT,
+            side=side, economic_win=False, context=context,
+            offset=int(side) * 1000 + 500,
+            expansion_history=tuple(context[:4] for _ in range(6)),
+        ))
+
+    def draw(buffer: BalancedSequenceReplay) -> tuple[int, ...]:
+        sequences = buffer.sample_paired_a_plus_candidate_pairs(2)
+        anchors = [sequence[2] for sequence in sequences]
+        assert len(anchors) == 8
+        assert sum(bool(row.paired_a_plus_economic_win) for row in anchors) == 4
+        return tuple(row.source_decision_index for row in anchors)
+
+    observed = set()
+    for _ in range(16):
+        observed.update(draw(replay)[::2])
+    assert observed == expected
+    restored = BalancedSequenceReplay(**options)
+    restored.load_state_dict(replay.state_dict())
+    for _ in range(8):
+        assert draw(restored) == draw(replay)
+    # New evidence replaces evicted episodes without retaining stale candidate
+    # pointers, including when both winner and failure cohorts are replenished.
+    replacement_winners = set()
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        for index in range(8):
+            win = index % 2 == 0
+            offset = 10_000 + int(side) * 1000 + index * 100
+            if win:
+                replacement_winners.add(offset + 5)
+            replay.add(_paired_a_plus_episode(
+                episode_id=f"new-{side.name}-{index}", ticker="NQ",
+                target=side if win else Action.WAIT, side=side,
+                economic_win=win, context=context, offset=offset,
+                expansion_history=tuple(context[:4] for _ in range(6)),
+            ))
+    observed = set()
+    for _ in range(16):
+        observed.update(draw(replay)[::2])
+    assert observed == replacement_winners
+
+
+def test_mastered_pair_rehearsal_requires_both_economic_boundaries_and_resumes(tmp_path) -> None:
+    options = dict(capacity_episodes=8, sequence_length=6, recurrent_burn_in=2,
+                   n_step_return=2, seed=92,
+                   entry_opportunity_side_balance="paired_recurrent_long_short_v1")
+    replay = BalancedSequenceReplay(**options)
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        for win in (True, False):
+            replay.add(_paired_a_plus_episode(
+                episode_id=f"mastery-{side.name}-{win}", ticker="NQ",
+                target=side if win else Action.WAIT, side=side, economic_win=win,
+                context=(0.9, 0.8, 0.1, 0.2, 0.1, 0.7, 0.2),
+                offset=int(side)*100 + int(win)*20,
+            ))
+    seqs = replay.sample_paired_a_plus_candidate_pairs(1)
+    q = np.zeros((len(seqs), 6, len(Action)), np.float32)
+    for si, seq in enumerate(seqs):
+        target = seq[2].entry_action_target
+        q[si, 2, int(target)] = 1.0
+    bad = q.copy()
+    bad[1, 2, int(Action.ENTER_LONG_1)] = 2.0
+    assert replay.remember_mastered_pairs(seqs, bad, margin=0.25, capacity_per_side=2) == 1
+    assert replay.remember_mastered_pairs(seqs, q, margin=0.25, capacity_per_side=2) == 1
+    assert replay.remember_mastered_pairs(seqs, q, margin=0.25, capacity_per_side=2) == 0
+    remembered = replay.sample_mastered_pairs(pair_id_start=100)
+    assert len(remembered) == 4
+    assert {s[2].paired_a_plus_pair_id for s in remembered} == {100, 101}
+    assert {s[2].source_episode_id for s in remembered} == {
+        f"mastery-{side.name}-{win}"
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1) for win in (True, False)
+    }
+    restored = BalancedSequenceReplay(**options)
+    restored.load_state_dict(replay.state_dict())
+    again = restored.sample_mastered_pairs(pair_id_start=100)
+    for a, b in zip(remembered, again, strict=True):
+        np.testing.assert_array_equal(np.stack([t.observation for t in a]),
+                                      np.stack([t.observation for t in b]))
+        assert a[2].entry_action_target == b[2].entry_action_target
+        assert a[2].paired_a_plus_economic_win == b[2].paired_a_plus_economic_win
+    state = replay.state_dict()
+    state["mastered_pairs"] = []
+    restored.load_state_dict(state)
+    restored.load_sampler_state_dict(replay.sampler_state_dict())
+    assert len(restored.sample_mastered_pairs()) == 4
+    from propevolve.replay import ReplayCheckpointStore
+    store = ReplayCheckpointStore(tmp_path / "replay")
+    descriptor = store.persist(replay)
+    restored = BalancedSequenceReplay(**options)
+    store.restore(restored, descriptor)
+    assert len(restored.sample_mastered_pairs()) == 4
+    external = tuple(tuple(replace(t, source_episode_id="external-pass-library")
+                           for t in s) for s in seqs)
+    assert replay.remember_mastered_pairs(external, q, margin=0.25, capacity_per_side=2) == 0
+    with pytest.raises(ValueError, match="shape"):
+        replay.remember_mastered_pairs(seqs, q[:, :1], margin=0.25, capacity_per_side=2)
+    legacy = replay.state_dict()
+    legacy["schema_version"] = 15
+    del legacy["mastered_pairs"]
+    restored.load_state_dict(legacy)
+    assert restored.sample_mastered_pairs() == ()
+    assert len(restored.sample_paired_a_plus_candidate_pairs(1)) == 4
+    # Replacing a source invalidates its remembered comparisons, not the other side.
+    replay.add(_paired_a_plus_episode(
+        episode_id="mastery-ENTER_LONG_1-True", ticker="NQ",
+        target=Action.ENTER_LONG_1, side=Action.ENTER_LONG_1, economic_win=True,
+        context=(0.9, 0.8, 0.1, 0.2, 0.1, 0.7, 0.2), offset=999,
+    ))
+    assert len(replay.sample_mastered_pairs()) == 2
+    assert all(s[2].paired_a_plus_pair_side == Action.ENTER_SHORT_1
+               for s in replay.sample_mastered_pairs())
 
 
 def test_balance_pass_replay_anchors_economic_winners_and_balances_sides(
@@ -1925,7 +2059,7 @@ def test_replay_checkpoint_versions_the_entry_side_balance_contract() -> None:
 
     state = replay.state_dict()
 
-    assert state["schema_version"] == 15
+    assert state["schema_version"] == 16
     assert state["contract"]["entry_opportunity_side_balance"] == (
         "equal_long_short_v1"
     )
@@ -2919,7 +3053,7 @@ def test_short_pass_replay_checkpoint_round_trip_is_exact_and_versioned() -> Non
         seed=999,
     )
 
-    assert state["schema_version"] == 15
+    assert state["schema_version"] == 16
     restored.load_state_dict(state)
     expected = replay.sample(1)[0]
     actual = restored.sample(1)[0]

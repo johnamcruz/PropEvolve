@@ -2415,8 +2415,9 @@ def test_historical_candidate_flow_materializes_the_challenge_contract(
     assert captured[0][2] is None
 
 
+@pytest.mark.parametrize("mastery_capacity", [0, 2])
 def test_historical_candidate_runs_the_complete_real_training_flow(
-    tmp_path: Path,
+    tmp_path: Path, mastery_capacity: int,
 ) -> None:
     class TinyEncoder:
         checkpoint = tmp_path / "checkpoint"
@@ -2559,6 +2560,7 @@ def test_historical_candidate_runs_the_complete_real_training_flow(
         },
     }
 
+    config["training"]["paired_a_plus_mastery_capacity_per_side"] = mastery_capacity
     candidate, evaluation = HistoricalCandidateRunner().run(
         config,
         parent_candidate_ids=(),

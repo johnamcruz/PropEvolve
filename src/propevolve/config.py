@@ -1673,6 +1673,9 @@ def load_experiment_config(path: str | Path) -> dict:
     violation_update_period = training[
         "paired_a_plus_violation_replay_update_period"
     ]
+    mastery_capacity = training["paired_a_plus_mastery_capacity_per_side"]
+    if isinstance(mastery_capacity, bool) or not isinstance(mastery_capacity, int) or mastery_capacity < 0:
+        raise ValueError("mastered pair replay capacity is invalid")
     violation_candidate_pairs = training[
         "paired_a_plus_violation_candidate_pairs_per_side"
     ]

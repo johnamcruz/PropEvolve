@@ -15,7 +15,7 @@ from propevolve.orchestration import _plan
 import propevolve.optuna_engine as optuna_engine
 from propevolve.optuna_sweep import load_optuna_sweep, run_optuna_sweep
 from propevolve.training import _trend_start_confluence_agent_settings
-from tests.recipe_fixtures import active_sweep_recipe
+from tests.recipe_fixtures import active_sweep_recipe, active_sweep_recipes
 
 
 ACTIVE_CONTRACT = active_sweep_recipe().resolve()
@@ -1018,6 +1018,23 @@ def test_v2_screening_applies_numeric_and_grouped_json_dimensions(
     ):
         root, leaf = path
         assert config[root][leaf] == base[root][leaf]
+
+
+@pytest.mark.parametrize("contract_path", active_sweep_recipes())
+def test_each_retained_sweep_compiles_its_config_values(tmp_path, contract_path) -> None:
+    sweep = load_optuna_sweep(contract_path)
+    base = load_experiment_config(sweep.base_config_path)
+    compiled = optuna_engine._compile_trial_config(
+        sweep, parameters=optuna_engine._baseline_parameters(sweep),
+        stage=sweep.stages["screening"], run_root=tmp_path / "run",
+    )
+    path = tmp_path / "arbitrary-trial-name.json"
+    optuna_engine._write_exact(path, compiled)
+    normalized = load_experiment_config(path)
+    assert normalized["runtime"] == base["runtime"]
+    assert normalized["training"]["paired_a_plus_mastery_capacity_per_side"] == (
+        base["training"]["paired_a_plus_mastery_capacity_per_side"]
+    )
 
 
 def test_active_sweep_compiles_through_real_config_validation(

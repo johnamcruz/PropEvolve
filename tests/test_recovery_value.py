@@ -1144,3 +1144,68 @@ def test_recovery_training_does_not_anchor_negative_pnl_entry_rows() -> None:
     assert agent.last_train_metrics[
         "healthy_entry_policy_retention_loss"
     ] == 0.0
+
+
+@pytest.mark.parametrize("target", [Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1])
+@pytest.mark.parametrize("anchor_correct", [False, True, "insufficient_margin"])
+@pytest.mark.parametrize("backend", ["pytorch", "mlx"])
+def test_entry_retention_yields_to_exact_economic_labels_after_reload(
+    tmp_path, target, anchor_correct, backend,
+) -> None:
+    from dataclasses import replace
+
+    if backend == "mlx":
+        pytest.importorskip("mlx.core")
+        if not torch.backends.mps.is_available():
+            pytest.skip("MLX requires MPS")
+
+    agent = _agent(313, policy_retention_loss_weight=10.0,
+                   entry_action_loss_weight=1.0, entry_action_margin=0.25)
+    preferred = target if anchor_correct else Action((int(target) + 1) % 3)
+    # A controlled saved anchor, not a mocked learner: one action has clearly
+    # higher expected return than both alternatives on every causal prefix.
+    with torch.no_grad():
+        for parameter in agent.online.parameters():
+            parameter.zero_()
+        agent.online.output.bias.view(len(Action), agent.atoms)[int(preferred), -1] = (
+            0.1 if anchor_correct == "insufficient_margin" else 6.0
+        )
+    agent.retain_policy(apply_to_all_management_rows=True)
+    with torch.no_grad():
+        agent.online.output.bias.view(len(Action), agent.atoms)[int(target), -1] += 0.5
+    checkpoint = tmp_path / "retained.pt"
+    agent.save(checkpoint, manifest={})
+    load_kwargs = dict(device="mps" if backend == "mlx" else "cpu",
+                       learner_backend_override=backend)
+    candidate, _ = RecurrentC51Agent.load(checkpoint, **load_kwargs)
+    control, _ = RecurrentC51Agent.load(checkpoint, **load_kwargs)
+    batch = tuple(tuple(replace(item, entry_action_target=target)
+                        for item in seq) for seq in _ordinary_v21_batch())
+    candidate.train_batch(batch, teacher_weight_scale=0.0,
+                          retain_nonnegative_entry_policy=True)
+    control.train_batch(batch, teacher_weight_scale=0.0,
+                        retain_nonnegative_entry_policy=False)
+    if anchor_correct is True:
+        assert candidate.last_train_metrics["healthy_entry_policy_retention_rows"] == 8
+        assert candidate.last_train_metrics["healthy_entry_policy_retention_loss"] > 0
+    else:
+        assert candidate.last_train_metrics["healthy_entry_policy_retention_rows"] == 0
+        # Wrong old rankings exert no opposing update on authenticated labels.
+        for observation in (np.array([0., 1.], np.float32), np.array([3., 1.], np.float32)):
+            kwargs = dict(valid_actions=(Action.WAIT, Action.ENTER_LONG_1,
+                                        Action.ENTER_SHORT_1), epsilon=0.,
+                          hidden=None, return_action_values=True)
+            np.testing.assert_allclose(candidate.select_action(observation, **kwargs)[2],
+                                       control.select_action(observation, **kwargs)[2],
+                                       atol=1e-7, rtol=0)
+
+
+def test_supervised_entry_retention_does_not_preserve_unverified_mixed_rows():
+    agent = _agent(317, policy_retention_loss_weight=10.0,
+                   entry_action_loss_weight=1.0, entry_action_margin=0.25)
+    agent.retain_policy(apply_to_all_management_rows=True)
+    agent.train_batch(_ordinary_v21_batch(), teacher_weight_scale=0.0,
+                      retain_nonnegative_entry_policy=True)
+    # No economic labels means no verified entry competence to distil. This
+    # must not quietly reinforce the old WAIT preference through mixed replay.
+    assert agent.last_train_metrics["healthy_entry_policy_retention_rows"] == 0

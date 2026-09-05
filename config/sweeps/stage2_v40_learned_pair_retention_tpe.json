@@ -1,0 +1,409 @@
+{
+  "schema": "propevolve_optuna_sweep_v2",
+  "name": "stage2_v40_learned_pair_retention_tpe",
+  "base_config": "../historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep.json",
+  "study_root": "runs/stage2_v40_learned_pair_retention_tpe",
+  "study": {
+    "sampler": "tpe",
+    "seed": 314159,
+    "n_trials": 100,
+    "n_jobs": 3,
+    "n_startup_trials": 12,
+    "multivariate": true,
+    "group": true
+  },
+  "artifacts": {
+    "screening_retention": "compact"
+  },
+  "objective": {
+    "terms": [
+      {
+        "metric": "selection.pass_rate",
+        "weight": 100
+      },
+      {
+        "metric": "selection.average_win_r",
+        "weight": 8,
+        "cap": 8
+      },
+      {
+        "metric": "selection.pathwise_near_blow_rate",
+        "weight": -20
+      }
+    ],
+    "constraints": {
+      "selection.blow_rate": {
+        "operator": "==",
+        "value": 0
+      },
+      "selection.expectancy_r": {
+        "operator": ">=",
+        "value": 0
+      },
+      "selection.two_r_mfe_capture_ratio": {
+        "operator": ">=",
+        "value": 0.7
+      },
+      "selection.long_entry_count": {
+        "operator": ">",
+        "value": 0
+      },
+      "selection.short_entry_count": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.sampled_entry_action_long_rows": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.sampled_entry_action_short_rows": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.regime_selectivity_paired_a_plus_long_pair_mass": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.regime_selectivity_paired_a_plus_short_pair_mass": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.final_regime_probe_transition_positive_long_response": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.final_regime_probe_transition_positive_short_response": {
+        "operator": ">",
+        "value": 0
+      },
+      "selection.pathwise_near_blow_rate": {
+        "operator": "<=",
+        "value": 0.5
+      },
+      "selection.short_circuited": {
+        "operator": "==",
+        "value": 0
+      }
+    }
+  },
+  "search_space": {
+    "entry_supervision.opportunity_loss_multiplier": {
+      "type": "categorical",
+      "choices": [
+        1,
+        1.25,
+        1.5,
+        2
+      ]
+    },
+    "agent.entry_action_margin": {
+      "type": "categorical",
+      "choices": [
+        0.25,
+        0.4,
+        0.6
+      ]
+    },
+    "regime_selectivity.paired_a_plus_winner_loss_weight": {
+      "type": "categorical",
+      "choices": [
+        1.5,
+        2,
+        2.5,
+        3
+      ]
+    },
+    "trend_start_confluence.loss_weight": {
+      "type": "categorical",
+      "choices": [
+        0.25,
+        0.5,
+        0.75,
+        1
+      ]
+    },
+    "trend_start_confluence.opportunity_loss_weight": {
+      "type": "categorical",
+      "choices": [
+        0.5,
+        1,
+        1.5
+      ]
+    },
+    "trend_start_confluence.safety_loss_weight": {
+      "type": "categorical",
+      "choices": [
+        0.5,
+        1,
+        1.5
+      ]
+    },
+    "trend_start_confluence.margin": {
+      "type": "categorical",
+      "choices": [
+        0.1,
+        0.25,
+        0.4
+      ]
+    },
+    "trend_start_confluence.confirmation_lookback_bars": {
+      "type": "categorical",
+      "choices": [
+        5,
+        10,
+        20,
+        50
+      ]
+    },
+    "challenge.minimum_mll_headroom": {
+      "type": "categorical",
+      "choices": [
+        300,
+        400,
+        500
+      ]
+    },
+    "challenge.mll_proximity_penalty_coefficient": {
+      "type": "categorical",
+      "choices": [
+        0.0002,
+        0.0003,
+        0.00045
+      ]
+    },
+    "agent.challenge_return_self_imitation_weight": {
+      "type": "categorical",
+      "choices": [
+        0,
+        0.025,
+        0.05
+      ]
+    },
+    "challenge.lead_giveback_penalty_coefficient": {
+      "type": "categorical",
+      "choices": [
+        0.00005,
+        0.0001,
+        0.0002
+      ]
+    }
+  },
+  "stages": {
+    "screening": {
+      "name": "contrast_rehearsal_200ep",
+      "training_episodes": 50,
+      "validation_episodes": 50,
+      "start_pnls": [
+        0
+      ],
+      "balance_validation_episodes": 0,
+      "short_circuit": {
+        "minimum_completed_episodes": 50,
+        "minimum_passes": 1,
+        "maximum_blow_rate": 0.3,
+        "collapse": {
+          "window_episodes": 5,
+          "minimum_prior_passes": 2,
+          "maximum_recent_passes": 0,
+          "maximum_average_hold_bars": 4,
+          "minimum_voluntary_close_rate": 0.8
+        }
+      }
+    },
+    "confirmation": {
+      "name": "contrast_rehearsal_200ep",
+      "training_episodes": 200,
+      "validation_episodes": 200,
+      "start_pnls": [
+        0
+      ],
+      "balance_validation_episodes": 0,
+      "short_circuit": null
+    },
+    "multi_seed": {
+      "name": "contrast_rehearsal_200ep",
+      "training_episodes": 200,
+      "validation_episodes": 200,
+      "start_pnls": [
+        0
+      ],
+      "balance_validation_episodes": 0,
+      "short_circuit": null
+    }
+  },
+  "promotion": {
+    "enabled": true,
+    "top_k": 4,
+    "finalist_top_k": 1,
+    "seeds": [
+      314159,
+      271828,
+      161803
+    ],
+    "seed_paths": [
+      "training.seed",
+      "balance_curriculum.schedule_seed"
+    ],
+    "required_feasible_seeds": 3,
+    "acceptance": {
+      "selection.pass_rate": {
+        "operator": ">=",
+        "value": 0.6
+      },
+      "selection.blow_rate": {
+        "operator": "==",
+        "value": 0
+      },
+      "selection.pathwise_near_blow_rate": {
+        "operator": "<=",
+        "value": 0.25
+      },
+      "selection.average_win_r": {
+        "operator": ">=",
+        "value": 1.75
+      },
+      "selection.expectancy_r": {
+        "operator": ">=",
+        "value": 0
+      },
+      "selection.two_r_mfe_capture_ratio": {
+        "operator": ">=",
+        "value": 0.7
+      },
+      "selection.long_entry_count": {
+        "operator": ">",
+        "value": 0
+      },
+      "selection.short_entry_count": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.final_regime_probe_transition_positive_long_response": {
+        "operator": ">",
+        "value": 0
+      },
+      "training.final_regime_probe_transition_positive_short_response": {
+        "operator": ">",
+        "value": 0
+      }
+    }
+  },
+  "frozen": {
+    "teacher_free_selection": true,
+    "external_parent_economic_search_paths": [
+      "challenge.minimum_mll_headroom"
+    ],
+    "allowed_search_prefixes": [
+      "agent.",
+      "challenge.",
+      "entry_supervision.",
+      "regime_selectivity.",
+      "training.",
+      "balance_curriculum.",
+      "trend_start_confluence."
+    ],
+    "paths": [
+      "assets",
+      "cache",
+      "cache_root",
+      "teachers",
+      "temporal",
+      "sealed_confirmation",
+      "tickers",
+      "training_only_tickers",
+      "trend_start_confluence.schema",
+      "trend_start_confluence.training_only",
+      "trend_start_confluence.target_source",
+      "trend_start_confluence.score_formula",
+      "trend_start_confluence.semantics",
+      "trend_start_confluence.enabled",
+      "deployment_tickers",
+      "timeframe_minutes",
+      "point_values",
+      "round_trip_fees",
+      "observation",
+      "entry_supervision.schema",
+      "entry_supervision.training_only",
+      "entry_supervision.decision_count",
+      "entry_supervision.fill_offsets",
+      "entry_supervision.execution",
+      "entry_supervision.risk_dollars",
+      "entry_supervision.launch",
+      "entry_supervision.continuation",
+      "entry_supervision.target_r",
+      "entry_supervision.stop_r",
+      "entry_supervision.horizon_bars",
+      "entry_supervision.collision",
+      "entry_supervision.action_class_balance",
+      "entry_supervision.loss_weight",
+      "agent.hidden_dim",
+      "agent.atoms",
+      "agent.value_min",
+      "agent.value_max",
+      "agent.gamma",
+      "agent.n_step_return",
+      "agent.recurrent_burn_in",
+      "agent.learning_rate",
+      "agent.weight_decay",
+      "agent.target_sync_updates",
+      "agent.target_update_mode",
+      "agent.target_soft_tau",
+      "agent.policy_retention_loss_weight",
+      "agent.auxiliary_gradient_conflict_mode",
+      "agent.exclude_economic_winners_from_chop_wait",
+      "challenge.profit_target",
+      "challenge.max_loss",
+      "challenge.episode_days",
+      "challenge.bars_per_day",
+      "challenge.max_position_size",
+      "challenge.trailing_mll_lock",
+      "challenge.per_trade_risk_dollars",
+      "challenge.large_win_bonus_coefficient",
+      "challenge.ratchet_activation_r",
+      "challenge.ratchet_giveback_r",
+      "challenge.ratchet_lock_floor_r",
+      "regime_selectivity.schema",
+      "regime_selectivity.training_only",
+      "regime_selectivity.target_source",
+      "regime_selectivity.action_order",
+      "regime_selectivity.formula",
+      "regime_selectivity.semantics",
+      "regime_selectivity.expansion_center_receipt",
+      "regime_selectivity.expansion_center_receipt_sha256",
+      "regime_selectivity.expansion_long_center",
+      "regime_selectivity.expansion_short_center",
+      "regime_selectivity.probability_epsilon",
+      "regime_selectivity.chop_wait_margin",
+      "regime_selectivity.failed_confluence_margin",
+      "regime_selectivity.paired_a_plus_margin",
+      "regime_selectivity.side_balance",
+      "regime_selectivity.loss_weight",
+      "regime_selectivity.persistent_chop_negative_emphasis",
+      "training.sequence_length",
+      "training.recurrent_horizon",
+      "training.batch_sequences",
+      "training.warmup_episodes",
+      "training.updates_per_episode",
+      "training.replay_capacity_episodes",
+      "training.replay_capacity_transitions",
+      "training.epsilon_start",
+      "training.epsilon_end",
+      "training.management_epsilon_start",
+      "training.management_epsilon_end",
+      "training.teacher_loss_end_scale",
+      "training.teacher_guidance_dropout_start",
+      "training.teacher_guidance_dropout_end",
+      "training.teacher_autonomy_start_fraction",
+      "training.entry_supervision_autonomy_start_fraction",
+      "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_control_candidates",
+      "training.paired_a_plus_violation_replay_update_period",
+      "training.paired_a_plus_violation_candidate_pairs_per_side",
+      "training.paired_a_plus_violation_pairs_per_side",
+      "balance_curriculum.outcome_contrast_replay.update_period",
+      "balance_curriculum.outcome_contrast_replay.max_examples",
+      "balance_curriculum.pass_replay",
+      "training.paired_a_plus_mastery_capacity_per_side"
+    ]
+  }
+}

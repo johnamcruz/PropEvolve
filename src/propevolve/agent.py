@@ -2305,8 +2305,10 @@ class RecurrentC51Agent:
             tuple[str, int, int, torch.Tensor]
         ] = []
         economic_boundary_margin_before: list[torch.Tensor] = []
+        economic_boundary_margin_graph: list[torch.Tensor] = []
         economic_boundary_backtracks = 0
         economic_boundary_active_constraint_count = 0
+        economic_boundary_individual_constraint_count = 0
         economic_boundary_hard_constraint_count = 0
         economic_boundary_initial_margin_deltas: dict[str, float] = {}
         economic_boundary_final_margin_deltas: dict[str, float] = {}
@@ -3387,14 +3389,16 @@ class RecurrentC51Agent:
                                         alternative_action,
                                         boundary_full_rows.detach(),
                                     ))
-                                    economic_boundary_margin_before.append((
+                                    row_margins = (
                                         boundary_all_flat_q[
                                             ..., preferred_action
                                         ]
                                         - boundary_all_flat_q[
                                             ..., alternative_action
                                         ]
-                                    )[boundary_full_rows].mean().detach())
+                                    )[boundary_full_rows]
+                                    economic_boundary_margin_before.append(row_margins.detach())
+                                    economic_boundary_margin_graph.append(row_margins)
                             regime_selectivity_paired_a_plus_loss = (
                                 paired_result.loss
                             )
@@ -4155,10 +4159,12 @@ class RecurrentC51Agent:
                         int(alternative_action),
                         boundary_full_rows.detach(),
                     ))
-                    economic_boundary_margin_before.append((
+                    row_margins = (
                         boundary_entry_q[..., int(preferred_action)]
                         - boundary_entry_q[..., int(alternative_action)]
-                    )[boundary_full_rows].mean().detach())
+                    )[boundary_full_rows].mean().reshape(1)
+                    economic_boundary_margin_before.append(row_margins.detach())
+                    economic_boundary_margin_graph.append(row_margins)
         management_valid_rows = auxiliary_valid & (
             valid_masks[:, self.recurrent_burn_in:, int(Action.HOLD)]
             & valid_masks[:, self.recurrent_burn_in:, int(Action.CLOSE)]
@@ -4210,6 +4216,30 @@ class RecurrentC51Agent:
                     anchor_recurrent[:, :-1]
                 ).float()
                 anchor_q = (anchor_logits.softmax(-1) * self.support).sum(-1)
+            if diagnostic_targets is not None and diagnostic_target_rows is not None:
+                # Retain demonstrated competence, not an old entry mistake.
+                # Exact economic targets take precedence when the saved anchor
+                # cannot satisfy their configured action margin. In supervised
+                # entry training, unlabelled rows are not evidence that the
+                # old policy was right. Management retention is independent.
+                anchor_entry_q = anchor_q[:, :training_steps, :3]
+                target_indices = diagnostic_targets.clamp_min(0)
+                target_q = anchor_entry_q.gather(
+                    -1, target_indices.unsqueeze(-1)
+                ).squeeze(-1)
+                alternatives = anchor_entry_q.masked_fill(
+                    nn.functional.one_hot(target_indices, num_classes=3).bool(),
+                    -torch.inf,
+                ).max(-1).values
+                contradicted = diagnostic_target_rows & (
+                    (target_q <= alternatives)
+                    | (target_q - alternatives < self.entry_action_margin)
+                )
+                verified_retention_rows = torch.zeros_like(healthy_entry_retention_rows)
+                verified_retention_rows[:, :training_steps] = (
+                    diagnostic_target_rows & ~contradicted
+                )
+                healthy_entry_retention_rows &= verified_retention_rows
             current_q = (all_logits.float().softmax(-1) * self.support).sum(-1)
             if bool(retention_rows.any().item()):
                 anchor_management_q = torch.stack((
@@ -4407,6 +4437,23 @@ class RecurrentC51Agent:
                     gradient_economic_boundary_losses[name]
                     for name in active_economic_boundary_names
                 )
+                # Group gradients alone need not preserve the individual row
+                # nearest its learned margin. Include that active constraint
+                # in the direction projection, not only the post-step check.
+                # All satisfied rows are still checked after AdamW below.
+                individual_boundary_losses = []
+                for values in economic_boundary_margin_graph:
+                    # Exact-action groups retain their existing aggregate
+                    # contract. Only multi-example authenticated pair groups
+                    # need an additional individual constraint direction.
+                    if values.numel() <= 1:
+                        continue
+                    satisfied = values.detach() >= self.entry_action_margin
+                    if bool(satisfied.any()):
+                        nearest = values.detach().masked_fill(~satisfied, torch.inf).argmin()
+                        individual_boundary_losses.append(-values[nearest])
+                protected_boundary_losses += tuple(individual_boundary_losses)
+                economic_boundary_individual_constraint_count = len(individual_boundary_losses)
                 economic_boundary_gradients = tuple(
                     materialized_gradients(
                         boundary_loss,
@@ -4420,7 +4467,7 @@ class RecurrentC51Agent:
                     )
                 )
                 economic_boundary_active_constraint_count = len(
-                    economic_boundary_gradients
+                    active_economic_boundary_names
                 )
             gradient_blend = conflict_aware_gradient_blend(
                 primary_gradients=primary_gradients,
@@ -4520,7 +4567,7 @@ class RecurrentC51Agent:
                         economic_boundary_margin_before,
                         strict=True,
                     ))
-                    if float(margin_before) >= self.entry_action_margin
+                    if bool((margin_before >= self.entry_action_margin).any())
                 )
                 economic_boundary_hard_constraint_count = len(
                     hard_constraint_indices
@@ -4570,17 +4617,24 @@ class RecurrentC51Agent:
                             ),
                             dim=-1,
                         )
-                        return tuple(
+                        margins = tuple(
                             (
                                 boundary_entry_q[..., preferred_action]
                                 - boundary_entry_q[..., alternative_action]
-                            )[boundary_rows].mean()
+                            )[boundary_rows]
                             for (
                                 _,
                                 preferred_action,
                                 alternative_action,
                                 boundary_rows,
                             ) in economic_boundary_specs
+                        )
+                        return tuple(
+                            values if values.shape == before.shape
+                            else values.mean().reshape_as(before)
+                            for values, before in zip(
+                                margins, economic_boundary_margin_before, strict=True,
+                            )
                         )
 
                 boundary_tolerance = 1e-7
@@ -4591,7 +4645,7 @@ class RecurrentC51Agent:
                     )
                     boundary_deltas = {
                         f"{name}#{boundary_index}": float(
-                            (after - before).detach()
+                            (after - before).min().detach()
                         )
                         for boundary_index, (
                             (name, _, _, _),
@@ -4605,13 +4659,12 @@ class RecurrentC51Agent:
                         ))
                     }
                     boundary_required_headrooms = {
+                        # A group average can hide the loss of a previously
+                        # learned example. Protect each satisfied row, while
+                        # leaving unsatisfied rows free to acquire its target.
                         f"{name}#{boundary_index}": float((
-                            after
-                            - economic_boundary_required_margin(
-                                before,
-                                target_margin=self.entry_action_margin,
-                            )
-                        ).detach())
+                            after - self.entry_action_margin
+                        )[before >= self.entry_action_margin].min().detach())
                         for boundary_index, (
                             (name, _, _, _),
                             before,
@@ -5449,6 +5502,9 @@ class RecurrentC51Agent:
             "economic_boundary_count": float(len(economic_boundary_specs)),
             "economic_boundary_active_constraint_count": float(
                 economic_boundary_active_constraint_count
+            ),
+            "economic_boundary_individual_constraint_count": float(
+                economic_boundary_individual_constraint_count
             ),
             "economic_boundary_hard_constraint_count": float(
                 economic_boundary_hard_constraint_count

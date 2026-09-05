@@ -75,15 +75,19 @@ def retained_sweep_recipe() -> Path:
     return candidates[0]
 
 
-def active_sweep_recipe() -> Path:
+def active_sweep_recipes() -> tuple[Path, ...]:
+    """Retained V2 contracts may coexist; no filename is an active-run marker."""
     candidates = tuple(
         path
         for path in sorted(Path("config/sweeps").glob("*.json"))
         if json.loads(path.read_text()).get("schema")
         == "propevolve_optuna_sweep_v2"
     )
-    if len(candidates) != 1:
-        raise AssertionError(
-            f"expected one active V2 sweep recipe, got {candidates}"
-        )
-    return candidates[0]
+    if not candidates:
+        raise AssertionError("at least one V2 sweep recipe must be retained")
+    return candidates
+
+
+def active_sweep_recipe() -> Path:
+    """Choose one deterministic fixture, without claiming it is a running sweep."""
+    return active_sweep_recipes()[0]

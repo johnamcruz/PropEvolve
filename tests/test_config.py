@@ -114,6 +114,24 @@ def _recovery_curriculum_payload() -> dict:
     return payload
 
 
+@pytest.mark.parametrize("capacity", [0, 1, 2, -1, True, 1.5])
+def test_mastered_pair_rehearsal_is_config_driven(tmp_path: Path, capacity) -> None:
+    source = _stage2a_config(tmp_path)
+    payload = json.loads(source.read_text())
+    path = source.with_name("arbitrary-name.json")
+    payload["training"]["paired_a_plus_mastery_capacity_per_side"] = capacity
+    path.write_text(json.dumps(payload))
+    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
+        with pytest.raises(ValueError, match="mastered pair"):
+            load_experiment_config(path)
+    else:
+        config = load_experiment_config(path)
+        assert config["training"]["paired_a_plus_mastery_capacity_per_side"] == capacity
+        del payload["training"]["paired_a_plus_mastery_capacity_per_side"]
+        path.write_text(json.dumps(payload))
+        assert load_experiment_config(path)["training"]["paired_a_plus_mastery_capacity_per_side"] == 0
+
+
 def test_effective_config_materialization_is_single_and_idempotent() -> None:
     source = {
         "challenge": {},

@@ -50,6 +50,8 @@ class Transition:
     paired_a_plus_pair_side: Action | None = None
     paired_a_plus_population_weight: float | None = None
     challenge_return_to_go: float | None = None
+    source_episode_id: str | None = None
+    source_episode_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -469,6 +471,8 @@ class _StoredEpisode:
                 ),
                 regime_wait_priority=float(self.regime_wait_priorities[index]),
                 training_valid=True,
+                source_episode_id=self.episode_id,
+                source_episode_index=index,
                 source_decision_index=(
                     None
                     if self.source_decision_indices[index] < 0
@@ -834,6 +838,7 @@ class BalancedSequenceReplay:
         self._transition_count = 0
         self._random = random.Random(seed)
         self._sample_calls = 0
+        self._mastered_pairs: OrderedDict[tuple[Action, str, int], tuple[str, int, float, float]] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._episodes)
@@ -963,7 +968,7 @@ class BalancedSequenceReplay:
     def checkpoint_metadata(self) -> dict[str, object]:
         """Return the small replay contract and exact sampler state."""
         return {
-            "schema_version": 15,
+            "schema_version": 16,
             "contract": {
                 "capacity_episodes": self.capacity,
                 "capacity_transitions": self.capacity_transitions,
@@ -994,6 +999,7 @@ class BalancedSequenceReplay:
             },
             "random_state": self._random.getstate(),
             "sample_calls": self._sample_calls,
+            "mastered_pairs": [list(key + value) for key, value in self._mastered_pairs.items()],
         }
 
     @staticmethod
@@ -1039,18 +1045,22 @@ class BalancedSequenceReplay:
     def sampler_state_dict(self) -> dict[str, object]:
         """Return resumable sampler metadata without duplicating episodes."""
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "random_state": self._random.getstate(),
             "sample_calls": self._sample_calls,
+            "mastered_pairs": [list(key + value) for key, value in self._mastered_pairs.items()],
         }
 
     def load_sampler_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore sampler metadata after immutable episodes are loaded."""
-        if set(state) != {"schema_version", "random_state", "sample_calls"}:
+        required = {"schema_version", "random_state", "sample_calls"}
+        if state.get("schema_version") == 2:
+            required.add("mastered_pairs")
+        if set(state) != required:
             raise ValueError("replay sampler state is invalid")
         sample_calls = state["sample_calls"]
         if (
-            state["schema_version"] != 1
+            state["schema_version"] not in {1, 2}
             or isinstance(sample_calls, bool)
             or not isinstance(sample_calls, int)
             or sample_calls < 0
@@ -1061,11 +1071,12 @@ class BalancedSequenceReplay:
         except (TypeError, ValueError) as error:
             raise ValueError("replay sampler state is invalid") from error
         self._sample_calls = sample_calls
+        self._restore_mastered_pairs(state.get("mastered_pairs", ()))
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         """Restore replay exactly and fail closed if its sampling contract drifted."""
         schema_version = state.get("schema_version")
-        if schema_version not in {7, 8, 9, 10, 11, 12, 13, 14, 15}:
+        if schema_version not in {7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
             raise ValueError("replay checkpoint schema is unsupported")
         expected_contract = {
             "capacity_episodes": self.capacity,
@@ -1431,6 +1442,113 @@ class BalancedSequenceReplay:
         self._transition_count = transition_count
         self._sample_calls = sample_calls
 
+        self._restore_mastered_pairs(state.get("mastered_pairs", ()))
+
+    def _restore_mastered_pairs(self, rows) -> None:
+        self._mastered_pairs = OrderedDict()
+        for row in rows:
+            if len(row) != 7:
+                raise ValueError("mastered pair checkpoint reference is invalid")
+            side, winner_id, winner_index, failure_id, failure_index, ww, fw = row
+            key = (Action(side), winner_id, winner_index)
+            value = (failure_id, failure_index, ww, fw)
+            if not self._valid_mastered_pair(key, value):
+                raise ValueError("mastered pair checkpoint source is invalid")
+            self._mastered_pairs[key] = value
+
+    def _valid_mastered_pair(self, key, value) -> bool:
+        side, winner_id, winner_index = key
+        failure_id, failure_index, ww, fw = value
+        if side not in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            return False
+        for eid, index, win, weight in ((winner_id, winner_index, True, ww),
+                                        (failure_id, failure_index, False, fw)):
+            ep = self._episodes.get(eid)
+            if (ep is None or isinstance(index, bool) or not isinstance(index, int)
+                or not 0 <= index < ep.transition_count or not np.isfinite(weight) or weight <= 0):
+                return False
+            if (ep.paired_a_plus_sides[index] != int(side)
+                or ep.paired_a_plus_economic_wins[index] != int(win)
+                or ep.entry_action_targets[index] != int(side if win else Action.WAIT)):
+                return False
+        return True
+
+    def remember_mastered_pairs(self, sequences, q_values, *, margin: float,
+                               capacity_per_side: int) -> int:
+        """Retain bounded source references only after both economic targets rank correctly."""
+        if (isinstance(capacity_per_side, bool) or not isinstance(capacity_per_side, int)
+            or capacity_per_side < 0 or not np.isfinite(margin) or margin < 0):
+            raise ValueError("mastered pair replay contract is invalid")
+        if capacity_per_side == 0:
+            self._mastered_pairs.clear()
+            return 0
+        q_values = np.asarray(q_values)
+        if (q_values.ndim != 3 or q_values.shape[0] != len(sequences)
+            or q_values.shape[1] != self.sequence_length or q_values.shape[2] != len(Action)
+            or any(len(seq) != self.sequence_length for seq in sequences)):
+            raise ValueError("mastered pair Q values have invalid shape")
+        groups = defaultdict(list)
+        for si, seq in enumerate(sequences):
+            anchor = seq[self.recurrent_burn_in]
+            if anchor.paired_a_plus_pair_id is not None:
+                groups[(anchor.paired_a_plus_pair_id, anchor.paired_a_plus_pair_side)].append((si, anchor))
+        promoted = 0
+        for (_, side), rows in groups.items():
+            if len(rows) != 2 or side not in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+                continue
+            wins = [r for r in rows if r[1].paired_a_plus_economic_win is True]
+            failures = [r for r in rows if r[1].paired_a_plus_economic_win is False]
+            if len(wins) != 1 or len(failures) != 1:
+                continue
+            wi, winner = wins[0]
+            fi, failure = failures[0]
+            if (winner.source_episode_id not in self._episodes
+                or failure.source_episode_id not in self._episodes):
+                # Separate retained-pass libraries own their own source lifetimes.
+                continue
+            wq, fq = q_values[wi, self.recurrent_burn_in, :3], q_values[fi, self.recurrent_burn_in, :3]
+            if not np.isfinite(wq).all() or not np.isfinite(fq).all():
+                raise ValueError("mastered pair Q values are non-finite")
+            opposite = Action.ENTER_SHORT_1 if side == Action.ENTER_LONG_1 else Action.ENTER_LONG_1
+            if (wq[int(side)] - max(wq[0], wq[int(opposite)]) < margin
+                or fq[0] - fq[int(side)] < margin):
+                continue
+            key = (side, winner.source_episode_id, winner.source_episode_index)
+            value = (failure.source_episode_id, failure.source_episode_index,
+                     winner.paired_a_plus_population_weight, failure.paired_a_plus_population_weight)
+            if not self._valid_mastered_pair(key, value):
+                raise ValueError("mastered pair lacks authentic replay source")
+            promoted += int(key not in self._mastered_pairs)
+            self._mastered_pairs[key] = value
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            keys = [key for key in self._mastered_pairs if key[0] == side]
+            for key in keys[:-capacity_per_side]:
+                del self._mastered_pairs[key]
+        return promoted
+
+    def sample_mastered_pairs(self, *, pair_id_start: int = 0):
+        """Rebuild complete remembered traces without copying market data into checkpoints."""
+        if isinstance(pair_id_start, bool) or not isinstance(pair_id_start, int) or pair_id_start < 0:
+            raise ValueError("mastered pair identity is invalid")
+        sequences = []
+        for key, value in list(self._mastered_pairs.items()):
+            if not self._valid_mastered_pair(key, value):
+                del self._mastered_pairs[key]
+                continue
+            side, wid, wi = key
+            fid, fi, ww, fw = value
+            for eid, index, weight in ((wid, wi, ww), (fid, fi, fw)):
+                seq = list(self._episodes[eid].target_anchored_sequence(
+                    anchor_index=index, length=self.sequence_length,
+                    recurrent_burn_in=self.recurrent_burn_in, n_step_return=self.n_step_return,
+                ))
+                seq[self.recurrent_burn_in] = replace(seq[self.recurrent_burn_in],
+                    paired_a_plus_pair_id=pair_id_start, paired_a_plus_pair_side=side,
+                    paired_a_plus_population_weight=weight)
+                sequences.append(tuple(seq))
+            pair_id_start += 1
+        return tuple(sequences)
+
     def add(self, episode: Episode) -> None:
         self._retain_stored_episode(_StoredEpisode.from_episode(episode))
 
@@ -1438,6 +1556,8 @@ class BalancedSequenceReplay:
         replaced = self._episodes.pop(stored.episode_id, None)
         if replaced is not None:
             self._transition_count -= replaced.transition_count
+            self._mastered_pairs = OrderedDict((key, value) for key, value in self._mastered_pairs.items()
+                                               if stored.episode_id not in (key[1], value[0]))
         self._episodes[stored.episode_id] = stored
         self._transition_count += stored.transition_count
         while len(self._episodes) > 1 and (
@@ -1461,6 +1581,8 @@ class BalancedSequenceReplay:
             )
             removed = self._episodes.pop(remove_id)
             self._transition_count -= removed.transition_count
+        self._mastered_pairs = OrderedDict((key, value) for key, value in self._mastered_pairs.items()
+                                           if key[1] in self._episodes and value[0] in self._episodes)
 
     def absorb_recent_successful_recoveries(
         self,
@@ -2202,10 +2324,16 @@ class BalancedSequenceReplay:
                 winner_count=len(winners[side]),
                 failure_count=len(failures[side]),
             )
-            for offset in range(count_per_side):
-                winner_episode, winner_index = winners[side][
-                    -(offset % len(winners[side])) - 1
-                ]
+            # Score a fresh bounded sample, not the same latest N anchors on
+            # every call. The replay RNG is already checkpointed, so older
+            # evidence remains eligible without adding non-resumable state.
+            candidate_winners: list[tuple[_StoredEpisode, int]] = []
+            while len(candidate_winners) < count_per_side:
+                candidate_winners.extend(self._random.sample(
+                    winners[side],
+                    min(count_per_side - len(candidate_winners), len(winners[side])),
+                ))
+            for winner_episode, winner_index in candidate_winners:
                 winner_context = self._paired_match_context(
                     winner_episode,
                     winner_index,
@@ -2968,6 +3096,7 @@ class ReplayCheckpointStore:
             "contract": metadata["contract"],
             "random_state": metadata["random_state"],
             "sample_calls": metadata["sample_calls"],
+            "mastered_pairs": metadata["mastered_pairs"],
             "episodes": entries,
         }
         self._known.update(
@@ -2989,6 +3118,8 @@ class ReplayCheckpointStore:
             "sample_calls",
             "episodes",
         }
+        if isinstance(descriptor, Mapping) and descriptor.get("replay_schema_version") == 16:
+            required.add("mastered_pairs")
         if (
             not isinstance(descriptor, Mapping)
             or set(descriptor) != required
@@ -3029,6 +3160,7 @@ class ReplayCheckpointStore:
             "contract": descriptor["contract"],
             "random_state": descriptor["random_state"],
             "sample_calls": descriptor["sample_calls"],
+            "mastered_pairs": descriptor.get("mastered_pairs", ()),
             "episodes": payloads,
         })
         self._known = known

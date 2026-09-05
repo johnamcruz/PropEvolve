@@ -13,7 +13,7 @@ from propevolve.causal_separability import (
 )
 from propevolve.decision import Action
 from propevolve.replay import BalancedSequenceReplay
-from propevolve.training import _prioritize_paired_a_plus_violations
+from propevolve.training import _prioritize_paired_a_plus_violations, train_replay_with_mastery
 
 SIDES = (Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
 SN = {SIDES[0]: "long", SIDES[1]: "short"}
@@ -435,12 +435,13 @@ def grouped_economic_margins(q_values, seqs, *, recurrent_burn_in):
     return {name: float(np.mean(rows)) for name, rows in values.items()}
 
 
-def actual_configured_update(checkpoint, seqs, before):
+def actual_configured_update(checkpoint, seqs, before, *, train_kwargs=None,
+                             device="cpu", learner_backend_override="pytorch"):
     """Measure the real optimizer path on the frozen recurrent batch."""
     agent, _ = RecurrentC51Agent.load(
         checkpoint,
-        device="cpu",
-        learner_backend_override="pytorch",
+        device=device,
+        learner_backend_override=learner_backend_override,
     )
     parameters_before = tuple(
         parameter.detach().clone() for parameter in agent.online.parameters()
@@ -450,7 +451,8 @@ def actual_configured_update(checkpoint, seqs, before):
         seqs,
         recurrent_burn_in=agent.recurrent_burn_in,
     )
-    agent.train_batch(seqs)
+    train_kwargs = dict(train_kwargs or {})
+    agent.train_batch(seqs, **train_kwargs)
     after = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
     margins_after = grouped_economic_margins(
         after,
@@ -465,6 +467,10 @@ def actual_configured_update(checkpoint, seqs, before):
     ).sqrt()
     metrics = agent.last_train_metrics
     return {
+        "train_call": train_kwargs,
+        "healthy_entry_policy_retention_rows": float(
+            metrics["healthy_entry_policy_retention_rows"]
+        ),
         "parameter_delta_norm": float(parameter_delta_norm),
         "mean_abs_q_change": float((after - before).abs().mean()),
         "max_abs_q_change": float((after - before).abs().max()),
@@ -523,15 +529,115 @@ def actual_configured_update(checkpoint, seqs, before):
     }
 
 
-def configured_optimizer_overfit_probe(checkpoint, seqs, *, updates):
+def configured_optimizer_overfit_probe(
+    checkpoint, seqs, *, updates, train_kwargs=None, mixed_batches=(),
+    retention_weight=None, mixed_candidate_batches=(), mixed_pairs_per_side=0,
+    mixed_rehearsal_period=0,
+    mastery_replay=None, mastery_capacity_per_side=0,
+    device="cpu", learner_backend_override="pytorch",
+):
     """Prove whether the production learner can acquire one frozen pair batch."""
     if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
         raise ValueError("optimizer overfit updates must be a nonnegative integer")
+    if (isinstance(mixed_rehearsal_period, bool)
+        or not isinstance(mixed_rehearsal_period, int) or mixed_rehearsal_period < 0):
+        raise ValueError("mixed rehearsal period must be a nonnegative integer")
     agent, _ = RecurrentC51Agent.load(
         checkpoint,
-        device="cpu",
-        learner_backend_override="pytorch",
+        device=device,
+        learner_backend_override=learner_backend_override,
     )
+    train_kwargs = dict(train_kwargs or {})
+    if mastery_capacity_per_side:
+        if mastery_replay is None:
+            raise ValueError("mastery replay source is required")
+        mastery_replay.remember_mastered_pairs((), np.empty((0, 0, len(Action))),
+                                             margin=0, capacity_per_side=0)
+
+    def train(batch):
+        if mastery_capacity_per_side:
+            return train_replay_with_mastery(agent, mastery_replay, batch,
+                                            capacity_per_side=mastery_capacity_per_side,
+                                            **train_kwargs)
+        return agent.train_batch(batch, **train_kwargs)
+    if retention_weight is not None:
+        if not np.isfinite(retention_weight) or retention_weight < 0:
+            raise ValueError("retention weight must be finite and nonnegative")
+        agent.policy_retention_loss_weight = float(retention_weight)
+    trajectory = []
+
+    def snapshot(phase, update, batch=(), selected=()):
+        values = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
+        rows = []
+        for index, (sequence, value) in enumerate(zip(seqs, values)):
+            anchor = sequence[agent.recurrent_burn_in]
+            side = Action(anchor.paired_a_plus_pair_side)
+            if anchor.paired_a_plus_economic_win:
+                opposite = SIDES[1] if side == SIDES[0] else SIDES[0]
+                comparisons = ((side, Action.WAIT), (side, opposite))
+            else:
+                comparisons = ((Action.WAIT, side),)
+            for preferred, alternative in comparisons:
+                rows.append({
+                    "sequence": index, "pair_id": anchor.paired_a_plus_pair_id,
+                    "source_index": anchor.source_decision_index,
+                    "winner": bool(anchor.paired_a_plus_economic_win),
+                    "side": side.name, "preferred": preferred.name,
+                    "alternative": alternative.name,
+                    "margin": float(value[int(preferred)] - value[int(alternative)]),
+                })
+        result = {
+            "phase": phase, "update": update, "boundary_rows": rows,
+            "all_boundaries_satisfied": all(
+                row["margin"] >= agent.entry_action_margin for row in rows
+            ),
+            "failures_below_wait": all(
+                row["margin"] > 0 for row in rows if not row["winner"]
+            ),
+            "healthy_entry_retention_rows": agent.last_train_metrics.get(
+                "healthy_entry_policy_retention_rows", 0
+            ),
+            "learner_metrics": {
+                k: float(v) for k, v in agent.last_train_metrics.items()
+                if k.endswith("_loss") or k.endswith("_norm")
+                or k.startswith("economic_boundary_") or k.startswith("paired_a_plus_mastery_")
+            },
+            "witness_exposure": [],
+            "mastered_sources": ([{
+                "source_index": s[agent.recurrent_burn_in].source_decision_index,
+                "side": int(s[agent.recurrent_burn_in].paired_a_plus_pair_side),
+                "winner": bool(s[agent.recurrent_burn_in].paired_a_plus_economic_win),
+            } for s in mastery_replay.sample_mastered_pairs()]
+                if mastery_capacity_per_side else []),
+            "selected_pairs": [
+                {"source_index": t.source_decision_index,
+                 "side": int(t.paired_a_plus_pair_side),
+                 "winner": bool(t.paired_a_plus_economic_win)}
+                for s in selected for t in s if t.paired_a_plus_pair_id is not None
+            ],
+        }
+        for witness in seqs:
+            anchor = witness[agent.recurrent_burn_in]
+            counts = {"learning_occurrences": 0, "burn_in_occurrences": 0,
+                      "tail_occurrences": 0, "paired_learning_occurrences": 0}
+            for sampled in batch:
+                for i, t in enumerate(sampled):
+                    if (t.training_valid and t.source_decision_index == anchor.source_decision_index
+                        and t.entry_action_target == anchor.entry_action_target
+                        and np.array_equal(t.observation, anchor.observation)):
+                        key = ("burn_in_occurrences" if i < agent.recurrent_burn_in
+                               else "tail_occurrences" if i > len(sampled) - agent.n_step_return
+                               else "learning_occurrences")
+                        counts[key] += 1
+                        counts["paired_learning_occurrences"] += int(
+                            key == "learning_occurrences" and t.paired_a_plus_pair_id is not None)
+            result["witness_exposure"].append({
+                "source_index": anchor.source_decision_index,
+                "side": int(anchor.paired_a_plus_pair_side),
+                "winner": bool(anchor.paired_a_plus_economic_win), **counts,
+            })
+        trajectory.append(result)
+        return values
 
     def margins():
         values = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
@@ -542,27 +648,69 @@ def configured_optimizer_overfit_probe(checkpoint, seqs, *, updates):
         )
 
     before = margins()
-    first_all_boundaries_satisfied = 0 if all(
-        value >= agent.entry_action_margin for value in before.values()
-    ) else None
+    snapshot("before", 0)
+    first_all_boundaries_satisfied = (
+        0 if trajectory[-1]["all_boundaries_satisfied"] else None
+    )
     backtrack_updates = 0
-    rejected_updates = 0
     for update in range(1, updates + 1):
-        agent.train_batch(seqs)
+        train(seqs)
         metrics = agent.last_train_metrics
         backtrack_updates += int(metrics["economic_boundary_backtracks"] > 0)
-        rejected_updates += int(metrics["economic_boundary_backtracks"] >= 12)
-        current = margins()
+        snapshot("acquisition", update, seqs)
         if (
             first_all_boundaries_satisfied is None
-            and all(
-                value >= agent.entry_action_margin
-                for value in current.values()
-            )
+            and trajectory[-1]["all_boundaries_satisfied"]
         ):
             first_all_boundaries_satisfied = update
+    after_acquisition = margins()
+    print(f"[audit] acquisition_complete updates={updates} margins={json.dumps(after_acquisition, sort_keys=True)}", flush=True)
+    mixed_violation_updates = 0
+    mixed_rehearsal_updates = 0
+    if mixed_candidate_batches and len(mixed_candidate_batches) != len(mixed_batches):
+        raise ValueError("mixed candidate plan must match mixed batches")
+    for update, batch in enumerate(mixed_batches, 1):
+        selected = ()
+        candidates = mixed_candidate_batches[update - 1] if mixed_candidate_batches else ()
+        if candidates:
+            selected, _ = _prioritize_paired_a_plus_violations(
+                agent, candidates, pairs_per_side=mixed_pairs_per_side,
+            )
+            batch = tuple(batch) + selected
+            mixed_violation_updates += 1
+        if mixed_rehearsal_period and update % mixed_rehearsal_period == 0:
+            # Diagnostic control only: keep the acquired evidence in the
+            # production learner's batch, with independent pair identities.
+            ids = [int(t.paired_a_plus_pair_id) for s in batch for t in s
+                   if t.paired_a_plus_pair_id is not None]
+            offset = max(ids, default=-1) + 1
+            rehearsal = tuple(tuple(
+                replace(t, paired_a_plus_pair_id=int(t.paired_a_plus_pair_id) + offset)
+                if t.paired_a_plus_pair_id is not None else t for t in s
+            ) for s in seqs)
+            batch = tuple(batch) + rehearsal
+            mixed_rehearsal_updates += 1
+        train(batch)
+        snapshot("mixed", update, batch, selected)
     after = margins()
+    print(f"[audit] mixed_replay_complete updates={len(mixed_batches)} margins={json.dumps(after, sort_keys=True)}", flush=True)
+    q_after = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
+    agent.discard_retention_anchor()
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    teacher_free_q = qtrace(agent, seqs)[0][:, 0, :3].detach().cpu()
     return {
+        "train_call": train_kwargs,
+        "mixed_violation_updates": mixed_violation_updates,
+        "mixed_rehearsal_updates": mixed_rehearsal_updates,
+        "mastery_capacity_per_side": mastery_capacity_per_side,
+        "learner_backend": agent.learner_backend,
+        "device": str(agent.device),
+        "retention_weight": retention_weight,
+        "trajectory": trajectory,
+        "margins_after_acquisition": after_acquisition,
+        "q_after": q_after.tolist(),
+        "teacher_free_max_abs_q_drift": float((q_after-teacher_free_q).abs().max()),
         "updates": updates,
         "target_margin": agent.entry_action_margin,
         "margins_before": before,
@@ -570,11 +718,11 @@ def configured_optimizer_overfit_probe(checkpoint, seqs, *, updates):
         "first_all_boundaries_satisfied_update": (
             first_all_boundaries_satisfied
         ),
-        "all_boundaries_satisfied": all(
-            value >= agent.entry_action_margin for value in after.values()
+        "all_boundaries_satisfied": trajectory[-1]["all_boundaries_satisfied"],
+        "failures_below_wait_throughout": all(
+            row["failures_below_wait"] for row in trajectory
         ),
         "backtrack_updates": backtrack_updates,
-        "rejected_updates": rejected_updates,
     }
 
 
@@ -621,6 +769,8 @@ def main():
     ap.add_argument("--checkpoint", type=Path)
     ap.add_argument("--replay-root", type=Path)
     ap.add_argument("--output", type=Path)
+    ap.add_argument("--reference-audit", type=Path,
+                    help="Reuse exact authenticated pair anchors from an earlier audit")
     ap.add_argument("--near-blow-pnl", type=float, default=-2250.0)
     ap.add_argument("--pair-count", type=int, default=4)
     ap.add_argument(
@@ -630,6 +780,17 @@ def main():
     )
     ap.add_argument("--challenge-return-weight", type=float, default=0.05)
     ap.add_argument("--optimizer-overfit-updates", type=int, default=0)
+    ap.add_argument("--train-call-config", type=Path,
+                    help="JSON containing explicit production train_batch keyword arguments")
+    ap.add_argument("--mixed-updates", type=int, default=0)
+    ap.add_argument("--mixed-batch-sequences", type=int, default=16)
+    ap.add_argument("--mixed-rehearsal-period", type=int, default=0,
+                    help="Diagnostic-only repetition of acquired pairs during mixed replay")
+    ap.add_argument("--mastery-capacity-per-side", type=int, default=0,
+                    help="Bounded automatic production learned-pair rehearsal")
+    ap.add_argument("--mixed-training-config", type=Path,
+                    help="Read existing violation replay cadence from a training config")
+    ap.add_argument("--retention-ablation-weight", type=float)
     ap.add_argument("--device", choices=("cpu", "mps"), default="cpu")
     ap.add_argument(
         "--learner-backend-override",
@@ -649,6 +810,37 @@ def main():
         default=0,
     )
     args = ap.parse_args()
+    mixed_violation = None
+    if args.mixed_training_config:
+        training = json.loads(args.mixed_training_config.read_text())["training"]
+        mixed_violation = {name: training[name] for name in (
+            "paired_a_plus_violation_replay_update_period",
+            "paired_a_plus_violation_candidate_pairs_per_side",
+            "paired_a_plus_violation_pairs_per_side",
+        )}
+        if any(type(v) is not int or v < 1 for v in mixed_violation.values()):
+            ap.error("mixed violation replay settings must be positive integers")
+        if mixed_violation["paired_a_plus_violation_pairs_per_side"] > mixed_violation["paired_a_plus_violation_candidate_pairs_per_side"]:
+            ap.error("mixed violation selection exceeds candidate pool")
+    train_kwargs = (
+        json.loads(args.train_call_config.read_text()) if args.train_call_config else {}
+    )
+    if args.optimizer_overfit_updates and not args.train_call_config:
+        ap.error("--optimizer-overfit-updates requires --train-call-config")
+    if args.train_call_config and (
+        not isinstance(train_kwargs, dict)
+        or set(train_kwargs) != {
+            "teacher_weight_scale", "entry_action_weight_scale",
+            "retain_nonnegative_entry_policy",
+        }
+        or type(train_kwargs["retain_nonnegative_entry_policy"]) is not bool
+        or any(type(train_kwargs[k]) not in (int, float)
+               or not np.isfinite(train_kwargs[k]) or not 0 <= train_kwargs[k] <= 1
+               for k in ("teacher_weight_scale", "entry_action_weight_scale"))
+    ):
+        ap.error("invalid explicit production train call")
+    if args.mixed_updates < 0 or args.mixed_batch_sequences < 1:
+        ap.error("invalid mixed replay budget")
     if (
         not np.isfinite(args.near_blow_pnl)
         or args.near_blow_pnl >= 0
@@ -694,6 +886,12 @@ def main():
         learner_backend_override=args.learner_backend_override,
     )
     desc = manifest["replay_checkpoint"]
+    reference = None
+    if args.reference_audit is not None:
+        reference = json.loads(args.reference_audit.read_text())
+        if (reference["resume_identity"] != manifest.get("resume_identity")
+            or reference["completed_episodes"] != manifest["progress"]["completed_episodes"]):
+            raise ValueError("reference audit checkpoint lineage differs")
     contract = desc["contract"]
     population = Counter()
     violations = Counter()
@@ -823,6 +1021,8 @@ def main():
             flush=True,
         )
     causal_separability = {}
+    if authenticated != len(desc["episodes"]):
+        raise ValueError("frozen replay authentication failed")
     for (scope, family), rows in sorted(separability_rows.items()):
         try:
             result = temporal_ridge_separability(
@@ -864,6 +1064,9 @@ def main():
         f = min(ff, key=dist)
         specs.append((pid, side, w, f, dist(f)[0], len(ww), len(ff)))
         selected.extend((w[2], f[2]))
+    if reference is not None:
+        selected.extend(anchor["episode"] for pair in reference["audited_pairs"]
+                        for anchor in pair["anchors"])
     payloads = []
     for eid in dict.fromkeys(selected):
         with (replay_root / index[eid]["path"]).open("rb") as f:
@@ -928,7 +1131,35 @@ def main():
             }
         )
     violation_diagnostic = None
-    if args.violation_prioritized_pairs_per_side > 0:
+    if reference is not None:
+        seqs = []
+        pair_report = reference["audited_pairs"]
+        for pair in pair_report:
+            side = SIDES[0] if pair["side"] == "long" else SIDES[1]
+            if len(pair["anchors"]) != 2 or {a["economic_win"] for a in pair["anchors"]} != {True, False}:
+                raise ValueError("reference audit pair is incomplete")
+            for recorded in pair["anchors"]:
+                ep = replay._episodes[recorded["episode"]]
+                seq = list(ep.target_anchored_sequence(
+                    anchor_index=recorded["source_index"], length=contract["sequence_length"],
+                    recurrent_burn_in=contract["recurrent_burn_in"],
+                    n_step_return=contract["n_step_return"],
+                ))
+                anchor = seq[contract["recurrent_burn_in"]]
+                target = side if recorded["economic_win"] else Action.WAIT
+                if (anchor.paired_a_plus_side != side
+                    or anchor.paired_a_plus_economic_win != recorded["economic_win"]
+                    or anchor.entry_action_target != target
+                    or not np.isfinite(recorded["population_weight"])
+                    or recorded["population_weight"] <= 0):
+                    raise ValueError("reference audit conflicts with authenticated evidence")
+                seq[contract["recurrent_burn_in"]] = replace(
+                    anchor, paired_a_plus_pair_id=pair["pair_id"],
+                    paired_a_plus_pair_side=side,
+                    paired_a_plus_population_weight=recorded["population_weight"],
+                )
+                seqs.append(tuple(seq))
+    elif args.violation_prioritized_pairs_per_side > 0:
         candidate_sequences = replay.sample_paired_a_plus_candidate_pairs(
             max(args.pair_count, args.violation_prioritized_pairs_per_side),
         )
@@ -1113,11 +1344,46 @@ def main():
     )
     rtq = qtrace(rt, seqs)[0][:, 0, :3].detach().cpu()
     par["checkpoint_roundtrip_max_abs_q"] = float((rtq - before).abs().max())
-    configured_update = actual_configured_update(checkpoint, seqs, before)
+    production_backend = dict(device=args.device,
+                              learner_backend_override=args.learner_backend_override)
+    configured_update = actual_configured_update(
+        checkpoint, seqs, before, train_kwargs=train_kwargs, **production_backend,
+    )
+    # Fixed draws from the reconstructed bounded source pool; reuse identically
+    # for both retention arms. This is not a full campaign continuation.
+    mixed_batches = tuple(replay.sample(args.mixed_batch_sequences)
+                          for _ in range(args.mixed_updates))
+    mixed_candidates = []
+    for update, batch in enumerate(mixed_batches, 1):
+        mixed_pair_candidates = ()
+        if mixed_violation and update % mixed_violation["paired_a_plus_violation_replay_update_period"] == 0:
+            existing = [int(t.paired_a_plus_pair_id) for seq in batch for t in seq
+                        if t.paired_a_plus_pair_id is not None]
+            mixed_pair_candidates = replay.sample_paired_a_plus_candidate_pairs(
+                mixed_violation["paired_a_plus_violation_candidate_pairs_per_side"],
+                pair_id_start=max(existing, default=-1) + 1,
+            )
+        mixed_candidates.append(mixed_pair_candidates)
+    mixed_plan = dict(mixed_candidate_batches=tuple(mixed_candidates),
+                      mixed_rehearsal_period=args.mixed_rehearsal_period,
+                      mastery_replay=replay, mastery_capacity_per_side=args.mastery_capacity_per_side,
+                      **production_backend,
+                      mixed_pairs_per_side=(mixed_violation["paired_a_plus_violation_pairs_per_side"]
+                                            if mixed_violation else 0))
     optimizer_overfit_probe = configured_optimizer_overfit_probe(
         checkpoint,
         seqs,
         updates=args.optimizer_overfit_updates,
+        train_kwargs=train_kwargs, mixed_batches=mixed_batches,
+        **mixed_plan,
+    )
+    retention_ablation = (
+        configured_optimizer_overfit_probe(
+            checkpoint, seqs, updates=args.optimizer_overfit_updates,
+            train_kwargs=train_kwargs, mixed_batches=mixed_batches,
+            retention_weight=args.retention_ablation_weight,
+            **mixed_plan,
+        ) if args.retention_ablation_weight is not None else None
     )
     challenge_bonuses = []
     for row_index, pair in enumerate(pair_report):
@@ -1200,6 +1466,14 @@ def main():
         "greedy_action_changes_one_sgd_step_at_configured_lr": changes,
         "actual_configured_optimizer_update": configured_update,
         "configured_optimizer_overfit_probe": optimizer_overfit_probe,
+        "retention_ablation": retention_ablation,
+        "mixed_replay": {
+            "violation_replay_settings": mixed_violation,
+            "updates": args.mixed_updates,
+            "batch_sequences": args.mixed_batch_sequences,
+            "source_episode_ids": list(dict.fromkeys(selected)),
+            "scope": "bounded reconstructed pair-source episodes",
+        },
         "recurrent_parity": par,
         "probe_greedy_before": dict(
             Counter(Action(int(x)).name for x in before.argmax(-1))

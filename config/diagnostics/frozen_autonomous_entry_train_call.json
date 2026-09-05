@@ -1,0 +1,5 @@
+{
+  "teacher_weight_scale": 0.0,
+  "entry_action_weight_scale": 1.0,
+  "retain_nonnegative_entry_policy": true
+}

@@ -43,6 +43,7 @@
       "paired_a_plus_violation_replay_update_period": 0,
       "paired_a_plus_violation_candidate_pairs_per_side": 0,
       "paired_a_plus_violation_pairs_per_side": 0,
+      "paired_a_plus_mastery_capacity_per_side": 0,
       "regime_wait_sequence_fraction": 0.0,
       "regime_wait_sequence_update_period": 0,
       "validation_no_trade_patience_episodes": 0,

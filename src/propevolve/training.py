@@ -437,6 +437,45 @@ def _regime_selectivity_replay_settings(
     }
 
 
+def train_replay_with_mastery(
+    agent: RecurrentC51Agent,
+    replay: BalancedSequenceReplay,
+    sequences: Sequence[Sequence[Transition]],
+    *,
+    capacity_per_side: int = 0,
+    **train_kwargs,
+) -> float:
+    """Rehearse bounded learned economic pairs through the unchanged learner."""
+    if isinstance(capacity_per_side, bool) or not isinstance(capacity_per_side, int) or capacity_per_side < 0:
+        raise ValueError("mastered pair capacity is invalid")
+    if capacity_per_side == 0:
+        return agent.train_batch(sequences, **train_kwargs)
+    pair_ids = [transition.paired_a_plus_pair_id for sequence in sequences
+                for transition in sequence if transition.paired_a_plus_pair_id is not None]
+    remembered = replay.sample_mastered_pairs(pair_id_start=max(pair_ids, default=-1) + 1)
+    present_sources = {(transition.source_episode_id, transition.source_episode_index)
+                       for sequence in sequences for transition in sequence
+                       if transition.paired_a_plus_pair_id is not None}
+    remembered = tuple(sequence for index in range(0, len(remembered), 2)
+                       if not all((part[agent.recurrent_burn_in].source_episode_id,
+                                   part[agent.recurrent_burn_in].source_episode_index) in present_sources
+                                  for part in remembered[index:index + 2])
+                       for sequence in remembered[index:index + 2])
+    loss = agent.train_batch(tuple(sequences) + remembered, **train_kwargs)
+    paired_sequences = tuple(sequence for sequence in sequences
+                             if sequence[agent.recurrent_burn_in].paired_a_plus_pair_id is not None)
+    promoted = 0
+    if paired_sequences:
+        _, q_values = agent.greedy_sequence_action_values(paired_sequences)
+        promoted = replay.remember_mastered_pairs(
+            paired_sequences, q_values, margin=agent.entry_action_margin,
+            capacity_per_side=capacity_per_side,
+        )
+    agent.last_train_metrics["paired_a_plus_mastery_promoted_pairs"] = float(promoted)
+    agent.last_train_metrics["paired_a_plus_mastery_rehearsed_sequences"] = float(len(remembered))
+    return loss
+
+
 def _prioritize_paired_a_plus_violations(
     agent: RecurrentC51Agent,
     candidates: Sequence[Sequence[Transition]],
@@ -4110,6 +4149,9 @@ class HistoricalCandidateRunner:
             paired_a_plus_violation_pairs_per_side=int(
                 training_config["paired_a_plus_violation_pairs_per_side"]
             ),
+            paired_a_plus_mastery_capacity_per_side=int(
+                training_config["paired_a_plus_mastery_capacity_per_side"]
+            ),
             greedy_diagnostic_interval_steps=int(
                 training_config["greedy_diagnostic_interval_steps"]
             ),
@@ -6050,6 +6092,7 @@ def train_agent(
     paired_a_plus_violation_replay_update_period: int = 0,
     paired_a_plus_violation_candidate_pairs_per_side: int = 0,
     paired_a_plus_violation_pairs_per_side: int = 0,
+    paired_a_plus_mastery_capacity_per_side: int = 0,
     greedy_diagnostic_interval_steps: int = 256,
     epsilon_start: float,
     epsilon_end: float,
@@ -6108,6 +6151,10 @@ def train_agent(
         paired_a_plus_violation_candidate_pairs_per_side,
         paired_a_plus_violation_pairs_per_side,
     )
+    if (isinstance(paired_a_plus_mastery_capacity_per_side, bool)
+        or not isinstance(paired_a_plus_mastery_capacity_per_side, int)
+        or paired_a_plus_mastery_capacity_per_side < 0):
+        raise ValueError("mastered pair replay capacity is invalid")
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in violation_replay_contract
@@ -7094,6 +7141,8 @@ def train_agent(
                 "paired_a_plus_violation_short_selected_pairs",
                 "paired_a_plus_violation_long_max_violation",
                 "paired_a_plus_violation_short_max_violation",
+                "paired_a_plus_mastery_promoted_pairs",
+                "paired_a_plus_mastery_rehearsed_sequences",
                 "regime_selectivity_dead_wait_minus_"
                 "transition_positive_model_wait",
                 "recovery_value_loss",
@@ -7408,7 +7457,11 @@ def train_agent(
                             recovery_curriculum.retain_nonnegative_entry_policy
                         ),
                     })
-                episode_losses.append(agent.train_batch(batch, **train_kwargs))
+                episode_losses.append(train_replay_with_mastery(
+                    agent, replay, batch,
+                    capacity_per_side=paired_a_plus_mastery_capacity_per_side,
+                    **train_kwargs,
+                ))
                 train_metrics = getattr(agent, "last_train_metrics", {})
                 if "rl_loss" in train_metrics:
                     episode_rl_losses.append(float(train_metrics["rl_loss"]))

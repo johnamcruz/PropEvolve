@@ -1150,6 +1150,110 @@ def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
         ), {"before": before, "after": after}
 
 
+@pytest.mark.parametrize("backend", ["pytorch", "mlx"])
+def test_individual_learned_pairs_are_not_erased_by_group_averages_e2e(
+    tmp_path, backend: str,
+) -> None:
+    if backend == "mlx":
+        pytest.importorskip("mlx.core")
+    replay = _replay(seed=91)
+    for index, side in enumerate((Action.ENTER_LONG_1, Action.ENTER_SHORT_1,
+                                  Action.ENTER_LONG_1, Action.ENTER_SHORT_1)):
+        for win in (True, False):
+            replay.add(_economic_episode(
+                episode_id=f"individual-{index}-{win}", side=side,
+                economic_win=win,
+                context=(0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2),
+                offset=float(index * 2 + int(not win)),
+            ))
+    sequences = replay.sample(8)
+    agent = _agent()
+    if backend == "mlx":
+        checkpoint = tmp_path / "individual-boundaries.pt"
+        agent.save(checkpoint, manifest={})
+        agent, _ = RecurrentC51Agent.load(
+            checkpoint, device="mps", learner_backend_override="mlx",
+        )
+
+    def individual_margins():
+        _, values = agent.greedy_sequence_action_values(sequences)
+        margins = []
+        for si, sequence in enumerate(sequences):
+            for i in range(agent.recurrent_burn_in, len(sequence)-agent.n_step_return+1):
+                t = sequence[i]
+                if t.paired_a_plus_pair_id is None:
+                    continue
+                side = int(t.paired_a_plus_pair_side)
+                if t.paired_a_plus_economic_win:
+                    for other in (int(Action.WAIT), 3-side):
+                        margins.append(values[si, i, side]-values[si, i, other])
+                else:
+                    margins.append(values[si, i, int(Action.WAIT)]-values[si, i, side])
+        return np.asarray(margins)
+
+    protected_count = 0
+    for _ in range(64):
+        before = individual_margins()
+        protected = before >= agent.entry_action_margin
+        protected_count += int(protected.sum())
+        agent.train_batch(sequences, teacher_weight_scale=0.0)
+        after = individual_margins()
+        assert np.all(after[protected] >= agent.entry_action_margin - 1e-6), (before, after)
+    assert protected_count > 0
+    actions_before, q_before = agent.greedy_sequence_action_values(sequences)
+    agent.discard_retention_anchor()
+    agent.discard_teacher()
+    agent.assert_teacher_free()
+    checkpoint = tmp_path / "teacher-free-individual-boundaries.pt"
+    agent.save(checkpoint, manifest={})
+    restored, _ = RecurrentC51Agent.load(
+        checkpoint, device="mps" if backend == "mlx" else "cpu",
+        learner_backend_override=backend,
+    )
+    restored.assert_teacher_free()
+    actions_after, q_after = restored.greedy_sequence_action_values(sequences)
+    np.testing.assert_array_equal(actions_after, actions_before)
+    np.testing.assert_allclose(q_after, q_before, atol=1e-6, rtol=0)
+
+
+@pytest.mark.parametrize("backend", ["pytorch", "mlx"])
+def test_production_mastery_replay_promotes_and_rehearses_learned_pairs_e2e(tmp_path, backend) -> None:
+    from propevolve.training import train_replay_with_mastery
+    replay = _replay(seed=91)
+    for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+        for win in (True, False):
+            replay.add(_economic_episode(
+                episode_id=f"mastery-{side.name}-{win}", side=side, economic_win=win,
+                context=(0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2),
+                offset=float(int(side)*2 + int(not win)),
+            ))
+    sequences = replay.sample_paired_a_plus_candidate_pairs(1)
+    agent = _agent()
+    if backend == "mlx":
+        pytest.importorskip("mlx.core")
+        checkpoint = tmp_path / "mastery-parent.pt"
+        agent.save(checkpoint, manifest={})
+        agent, _ = RecurrentC51Agent.load(checkpoint, device="mps", learner_backend_override="mlx")
+    promoted = rehearsed = 0
+    for _ in range(128):
+        train_replay_with_mastery(agent, replay, sequences, capacity_per_side=2,
+                                 teacher_weight_scale=0.0)
+        promoted += agent.last_train_metrics["paired_a_plus_mastery_promoted_pairs"]
+        rehearsed += agent.last_train_metrics["paired_a_plus_mastery_rehearsed_sequences"]
+    assert promoted == 2
+    assert rehearsed == 0  # Already-present pairs must not be overweighted.
+    assert len(replay.sample_mastered_pairs()) == 4
+    ordinary = tuple(tuple(replace(t, paired_a_plus_pair_id=None,
+                                  paired_a_plus_pair_side=None) for t in s)
+                     for s in sequences)
+    for _ in range(16):
+        train_replay_with_mastery(agent, replay, ordinary, capacity_per_side=2,
+                                 teacher_weight_scale=0.0)
+        assert agent.last_train_metrics["paired_a_plus_mastery_rehearsed_sequences"] == 4
+    margins = _grouped_boundary_margins(agent, sequences)
+    assert all(margin >= agent.entry_action_margin - 1e-6 for margin in margins.values()), margins
+
+
 def test_unsatisfied_boundary_cannot_rollback_the_whole_optimizer_step_e2e(
 ) -> None:
     """Reproduce v31: learning must continue while correct margins stay safe."""
