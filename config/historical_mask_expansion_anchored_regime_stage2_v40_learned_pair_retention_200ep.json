@@ -274,6 +274,7 @@
   "runtime": {
     "learner_backend": "mlx",
     "mlx_cache_limit_bytes": 268435456,
+    "mps_cache_clear_threshold_bytes": 268435456,
     "mixed_precision": "off",
     "compile_model": false,
     "compile_backend": "inductor",

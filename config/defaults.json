@@ -10,6 +10,7 @@
       "mps_prefer_metal": false,
       "mps_fast_math": false,
       "mlx_cache_limit_bytes": null,
+      "mps_cache_clear_threshold_bytes": null,
       "benchmark_max_relative_loss_drift": 0.05
     },
     "challenge": {

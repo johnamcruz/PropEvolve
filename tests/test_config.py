@@ -622,16 +622,20 @@ def test_replay_storage_is_configuration_driven(tmp_path, storage):
 
 
 @pytest.mark.parametrize("limit", [None, 0, 268435456, -1, True, 1.5, "256"])
-def test_mlx_cache_budget_is_optional_validated_json(tmp_path, limit):
+@pytest.mark.parametrize('field,message', [
+    ('mlx_cache_limit_bytes', 'MLX cache limit'),
+    ('mps_cache_clear_threshold_bytes', 'MPS cache clear threshold'),
+])
+def test_mlx_cache_budget_is_optional_validated_json(tmp_path, limit, field, message):
     payload = _generic_payload()
-    payload["runtime"]["mlx_cache_limit_bytes"] = limit
+    payload["runtime"][field] = limit
     path = tmp_path / "arbitrary-runtime.json"
     path.write_text(json.dumps(payload))
     if limit is not None and (type(limit) is not int or limit < 0):
-        with pytest.raises(ValueError, match="MLX cache limit"):
+        with pytest.raises(ValueError, match=message):
             load_experiment_config(path)
     else:
-        assert load_experiment_config(path)["runtime"]["mlx_cache_limit_bytes"] == limit
+        assert load_experiment_config(path)["runtime"][field] == limit
 
 
 def test_runtime_performance_contract_is_explicit_and_fail_closed(
@@ -1912,6 +1916,7 @@ def test_legacy_schema_v1_recipe_keeps_eager_fp32_runtime(tmp_path: Path) -> Non
         "mps_prefer_metal": False,
         "mps_fast_math": False,
         "mlx_cache_limit_bytes": None,
+        "mps_cache_clear_threshold_bytes": None,
         "benchmark_max_relative_loss_drift": 0.05,
     }
     assert config["training"]["prefetch_batches"] == 0

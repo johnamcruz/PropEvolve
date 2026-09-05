@@ -388,15 +388,21 @@ def test_mps_runtime_flags_are_applied_before_training(
     }
 
 
-def test_mlx_cache_budget_is_passed_to_worker_and_cleared_for_default(monkeypatch):
+@pytest.mark.parametrize('field,variable', [
+    ('mlx_cache_limit_bytes', 'PROPEVOLVE_MLX_CACHE_LIMIT_BYTES'),
+    ('mps_cache_clear_threshold_bytes', 'PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES'),
+])
+def test_mlx_cache_budget_is_passed_to_worker_and_cleared_for_default(monkeypatch, field, variable):
     import os
-    monkeypatch.delenv("PROPEVOLVE_MLX_CACHE_LIMIT_BYTES", raising=False)
+    monkeypatch.delenv(variable, raising=False)
     runtime = {"mps_prefer_metal": False, "mps_fast_math": False,
-               "mlx_cache_limit_bytes": 268435456}
+               field: 268435456}
     configure_runtime_environment(runtime)
-    assert os.environ["PROPEVOLVE_MLX_CACHE_LIMIT_BYTES"] == "268435456"
-    configure_runtime_environment({**runtime, "mlx_cache_limit_bytes": None})
-    assert "PROPEVOLVE_MLX_CACHE_LIMIT_BYTES" not in os.environ
+    assert os.environ[variable] == "268435456"
+    configure_runtime_environment({"mps_prefer_metal": False, "mps_fast_math": False})
+    assert os.environ[variable] == "268435456"
+    configure_runtime_environment({**runtime, field: None})
+    assert variable not in os.environ
 
 
 def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:

@@ -45,6 +45,7 @@ def _mlx_recurrent_primitive(
     recurrent_hidden_weight,
     recurrent_input_bias,
     recurrent_hidden_bias,
+    reset_mask,
 ):
     """Exact LayerNorm/Linear/SiLU/PyTorch-GRU equations in MLX."""
     mx = _mlx_core()
@@ -64,6 +65,7 @@ def _mlx_recurrent_primitive(
     outputs = []
     current = hidden
     for index in range(encoded.shape[-2]):
+        current = mx.where(reset_mask[..., index, None] > 0, mx.zeros_like(current), current)
         hidden_projection = (
             current @ recurrent_hidden_weight.T + recurrent_hidden_bias
         )
@@ -207,19 +209,31 @@ class _MlxExecutionWorker:
                         mx.eval(gradients)
                         result = tuple(_mlx_to_torch(gradients))
                     elif operation == "memory":
-                        mx.eval()
+                        mx.synchronize()
                         result = {
                             "active_memory_bytes": int(mx.get_active_memory()),
                             "cache_memory_bytes": int(mx.get_cache_memory()),
                             "peak_memory_bytes": int(mx.get_peak_memory()),
                             "configured_cache_limit_bytes": configured_cache_limit,
                         }
+                    elif operation == "release_cache":
+                        mx.synchronize()
+                        mx.clear_cache()
+                        result = None
                     else:
                         raise ValueError("unknown MLX worker operation")
                 except BaseException as error:
                     response.put((False, error))
                 else:
                     response.put((True, result))
+                finally:
+                    # Queue workers otherwise retain their previous request's
+                    # function locals while idle and across different branches.
+                    # Returned tensors own their shared buffers independently;
+                    # autograd owns any inputs needed for another backward.
+                    request = values = response = result = None
+                    mlx_values = outputs = gradients = mlx_cotangents = None
+                    torch_values = torch_cotangents = None
         finally:
             # Compiled functions are backed by a thread-local cache. They must
             # be released and their streams cleared on the owning thread while
@@ -279,7 +293,7 @@ def _torch_recurrent_operation():
     return Operation
 
 
-def mlx_torch_recurrent_features(network, observations, hidden=None):
+def mlx_torch_recurrent_features(network, observations, hidden=None, reset_rows=None):
     """Use MLX behind the existing Torch recurrent learner interface."""
     import torch
 
@@ -298,6 +312,11 @@ def mlx_torch_recurrent_features(network, observations, hidden=None):
             raise ValueError("recurrent hidden state shape is invalid")
         hidden_value = hidden[0]
     operation = _torch_recurrent_operation()
+    reset_mask = (
+        torch.zeros(observations.shape[:2], dtype=observations.dtype, device=observations.device)
+        if reset_rows is None else
+        torch.as_tensor(reset_rows, dtype=observations.dtype, device=observations.device)
+    )
     recurrent, final_hidden = operation.apply(
         observations,
         hidden_value,
@@ -309,6 +328,7 @@ def mlx_torch_recurrent_features(network, observations, hidden=None):
         network.recurrent.weight_hh_l0,
         network.recurrent.bias_ih_l0,
         network.recurrent.bias_hh_l0,
+        reset_mask,
     )
     return recurrent, final_hidden.unsqueeze(0)
 
@@ -316,3 +336,8 @@ def mlx_torch_recurrent_features(network, observations, hidden=None):
 def mlx_memory_metrics() -> dict[str, int | None]:
     """Return synchronized MLX allocator evidence for runtime benchmarks."""
     return _mlx_worker().call("memory")
+
+
+def release_mlx_cache() -> None:
+    """Release unused buffers on the owner thread, preserving live tensors."""
+    _mlx_worker().call("release_cache")

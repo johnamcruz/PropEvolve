@@ -1264,6 +1264,59 @@ def test_production_mastery_replay_promotes_and_rehearses_learned_pairs_e2e(tmp_
     assert all(margin >= agent.entry_action_margin - 1e-6 for margin in margins.values()), margins
 
 
+@pytest.mark.parametrize("capacity", [0, 2])
+def test_completed_replay_update_releases_consumed_gradients_without_changing_learning(
+    tmp_path, monkeypatch, capacity,
+) -> None:
+    pytest.importorskip("mlx.core")
+    from propevolve.training import train_replay_with_mastery
+
+    parent = tmp_path / "parent.pt"
+    _agent().save(parent, manifest={})
+    results = []
+    for cleanup in (False, True):
+        variable = "PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES"
+        if cleanup:
+            monkeypatch.setenv(variable, "0")
+        else:
+            monkeypatch.delenv(variable, raising=False)
+        agent, _ = RecurrentC51Agent.load(
+            parent, device="mps", learner_backend_override="mlx",
+        )
+        replay = _replay(seed=91)
+        for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
+            for win in (True, False):
+                replay.add(_economic_episode(
+                    episode_id=f"cleanup-{side.name}-{win}", side=side,
+                    economic_win=win, context=(0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2),
+                    offset=float(int(side)*2 + int(not win)),
+                ))
+        sequences = replay.sample_paired_a_plus_candidate_pairs(1)
+        steps = []
+        for _ in range(4):
+            loss = train_replay_with_mastery(
+                agent, replay, sequences, capacity_per_side=capacity,
+                teacher_weight_scale=0.0,
+            )
+            if cleanup:
+                assert all(p.grad is None for p in agent.online.parameters()), (
+                    "completed replay retained already-consumed gradients"
+                )
+            else:
+                assert any(p.grad is not None for p in agent.online.parameters())
+            steps.append((loss, {k: v.detach().cpu().clone()
+                                 for k, v in agent.online.state_dict().items()}))
+        agent.discard_teacher()
+        agent.assert_teacher_free()
+        actions, q_values = agent.greedy_sequence_action_values(sequences)
+        results.append((steps, actions, q_values))
+    for expected, actual in zip(results[0][0], results[1][0], strict=True):
+        assert actual[0] == pytest.approx(expected[0], abs=1e-6)
+        torch.testing.assert_close(actual[1], expected[1], atol=1e-6, rtol=1e-5)
+    np.testing.assert_array_equal(results[0][1], results[1][1])
+    np.testing.assert_allclose(results[0][2], results[1][2], atol=1e-6, rtol=1e-5)
+
+
 def test_unsatisfied_boundary_cannot_rollback_the_whole_optimizer_step_e2e(
 ) -> None:
     """Reproduce v31: learning must continue while correct margins stay safe."""

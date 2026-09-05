@@ -246,3 +246,6 @@ models/*
 !models/teachers/manifest.json
 !models/teachers/expansion/
 !models/teachers/expansion/expansion.pt
+
+# Generated local runtime-audit configs contain resolved artifact locations.
+/config/diagnostics/memory-*-trial-*.json

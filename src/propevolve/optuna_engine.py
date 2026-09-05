@@ -1071,11 +1071,12 @@ def _best_feasible(study: optuna.Study) -> optuna.trial.FrozenTrial | None:
 
 
 def _top_feasible(
-    study: optuna.Study, count: int
+    study: optuna.Study, count: int, *,
+    trials: Sequence[optuna.trial.FrozenTrial] | None = None,
 ) -> tuple[optuna.trial.FrozenTrial, ...]:
     eligible = [
         trial
-        for trial in study.trials
+        for trial in (study.trials if trials is None else trials)
         if trial.state is optuna.trial.TrialState.COMPLETE
         and trial.value is not None
         and all(value <= 0.0 for value in _constraints_func(trial))
@@ -1687,8 +1688,14 @@ def run_optuna_sweep(
             compact_recorded_trial(trial)
             limit = sweep.maximum_retained_feasible_trials
             if sweep.screening_artifact_retention == "compact" and limit is not None:
-                keep = {item.number for item in _top_feasible(_study, limit)}
-                for completed in _study.get_trials(deepcopy=False):
+                # Training can finish while cleanup holds its own lock. Rank
+                # and delete from one snapshot; a newly completed winner must
+                # never be deleted using a keep set calculated before it existed.
+                recorded = _study.get_trials(deepcopy=True)
+                keep = {item.number for item in _top_feasible(
+                    _study, limit, trials=recorded,
+                )}
+                for completed in recorded:
                     if (completed.state is optuna.trial.TrialState.COMPLETE
                             and completed.number not in keep):
                         _compact_screening_trial(artifacts=artifacts, trial=completed)

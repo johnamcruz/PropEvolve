@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from contextlib import nullcontext
 import math
+import os
 from pathlib import Path
 from typing import Mapping, NamedTuple, Sequence
 
@@ -1750,6 +1751,9 @@ class RecurrentC51Agent:
             or any(len(row) != observations.shape[1] for row in reset_rows)
         ):
             raise ValueError("recurrent reset mask does not match observations")
+        if network.learner_backend == 'mlx':
+            from .mlx_backend import mlx_torch_recurrent_features
+            return mlx_torch_recurrent_features(network, observations, hidden, reset_rows)
         grouped: dict[tuple[int, ...], list[int]] = {}
         for batch_index, row in enumerate(reset_rows):
             pattern = tuple(index for index, reset in enumerate(row) if reset)
@@ -1844,6 +1848,25 @@ class RecurrentC51Agent:
                 selected = Action(int(q_values.argmax().item()))
         values = q_values.cpu().numpy() if return_action_values else None
         return selected, next_hidden.detach(), values
+
+    def release_runtime_cache(self, *, completed_update: bool = False) -> bool:
+        """Optionally reclaim unused shared accelerator buffers after an update."""
+        threshold = os.environ.get('PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES')
+        if self.device.type != 'mps' or threshold is None:
+            return False
+        if torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory() <= int(threshold):
+            return False
+        if completed_update:
+            # AdamW, boundary repair, diagnostics, and mastery scoring have
+            # consumed these gradients. A >1 MiB gradient can otherwise pin
+            # an entire 1 GiB Metal heap until the next update's zero_grad.
+            self.optimizer.zero_grad(set_to_none=True)
+        torch.mps.synchronize()
+        if self.learner_backend == 'mlx':
+            from .mlx_backend import release_mlx_cache
+            release_mlx_cache()
+        torch.mps.empty_cache()
+        return True
 
     @torch.no_grad()
     def greedy_sequence_action_values(

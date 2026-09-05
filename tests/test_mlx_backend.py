@@ -13,6 +13,36 @@ from propevolve.agent import RecurrentC51Agent  # noqa: E402
 from propevolve import mlx_backend  # noqa: E402
 
 
+def test_completed_mlx_backward_releases_request_inputs_while_output_remains_valid():
+    """A completed training update must not pin the last batch in its worker."""
+    program = textwrap.dedent('''
+        import gc
+        import weakref
+        import torch
+        from propevolve.agent import RecurrentC51Agent
+        from propevolve.mlx_backend import mlx_memory_metrics, shutdown_mlx_backend
+        agent = RecurrentC51Agent(6, hidden_dim=8, atoms=11,
+            value_min=-3., value_max=3., gamma=.997, learning_rate=1e-4,
+            weight_decay=1e-5, gradient_clip=10., target_sync_updates=250,
+            device="mps", seed=37, learner_backend="mlx")
+        values = torch.ones(2, 7, 6, device="mps")
+        reference = weakref.ref(values)
+        result, hidden = agent.online(values)
+        expected = result.cpu().clone()
+        result.sum().backward()
+        agent.online.zero_grad(set_to_none=True)
+        del values, hidden
+        mlx_memory_metrics()  # complete a subsequent request before inspecting ownership
+        gc.collect()
+        assert reference() is None, "completed backward retained its input batch"
+        torch.testing.assert_close(result.cpu(), expected)
+        shutdown_mlx_backend()
+    ''')
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True,
+                            text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_mlx_worker_applies_runtime_cache_budget_in_real_process():
     program = textwrap.dedent('''
         import torch
@@ -39,6 +69,43 @@ def test_mlx_worker_applies_runtime_cache_budget_in_real_process():
         shutdown_mlx_backend()
     ''')
     result = subprocess.run([sys.executable, "-c", program], capture_output=True,
+                            text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_completed_update_reclaims_unused_mps_cache_without_changing_live_values():
+    program = textwrap.dedent('''
+        import os
+        import torch
+        from propevolve.agent import RecurrentC51Agent
+        from propevolve.mlx_backend import shutdown_mlx_backend
+        os.environ['PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES'] = '0'
+        agent = RecurrentC51Agent(6, hidden_dim=8, atoms=11,
+            value_min=-3., value_max=3., gamma=.997, learning_rate=1e-4,
+            weight_decay=1e-5, gradient_clip=10., target_sync_updates=250,
+            device="mps", seed=37, learner_backend="mlx")
+        values = torch.ones(2, 7, 6, device='mps')
+        result, _ = agent.online(values)
+        result.sum().backward()
+        expected = result.detach().cpu().clone()
+        expected_gradients = [p.grad.cpu().clone() for p in agent.online.parameters()]
+        temporary = torch.ones(4 * 1024 * 1024, device='mps')
+        torch.mps.synchronize()
+        del temporary
+        before = torch.mps.driver_allocated_memory()
+        assert agent.release_runtime_cache()
+        after = torch.mps.driver_allocated_memory()
+        assert after < before - 8 * 1024 * 1024, (before, after)
+        torch.testing.assert_close(result.detach().cpu(), expected)
+        for parameter, gradient in zip(agent.online.parameters(), expected_gradients):
+            torch.testing.assert_close(parameter.grad.cpu(), gradient)
+        agent.online.zero_grad(set_to_none=True)
+        agent.online(values)[0].sum().backward()
+        for parameter, gradient in zip(agent.online.parameters(), expected_gradients):
+            torch.testing.assert_close(parameter.grad.cpu(), gradient)
+        shutdown_mlx_backend()
+    ''')
+    result = subprocess.run([sys.executable, '-c', program], capture_output=True,
                             text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -140,6 +207,42 @@ def test_mlx_reuses_shared_recurrent_reset_and_burn_in_contract() -> None:
     torch.testing.assert_close(
         actual_logits, expected_logits, atol=2e-5, rtol=2e-4
     )
+
+
+@pytest.mark.parametrize('resets', [
+    ((False,) * 7,) * 3,
+    ((True,) * 7,) * 3,
+    ((True, False, False, False, False, False, True),
+     (False, False, True, True, False, False, False),
+     (False, True, False, False, True, False, False)),
+])
+def test_mlx_reset_mask_preserves_hidden_input_and_parameter_gradients(resets):
+    settings = dict(hidden_dim=8, atoms=11, value_min=-3., value_max=3.,
+        gamma=.997, learning_rate=1e-4, weight_decay=1e-5,
+        gradient_clip=10., target_sync_updates=250, device='mps', seed=37)
+    baseline = RecurrentC51Agent(6, **{**settings, 'device': 'cpu'})
+    baseline.online.double()
+    actual = RecurrentC51Agent(6, learner_backend='mlx', **settings)
+    source = torch.arange(126, dtype=torch.float32).reshape(3, 7, 6) / 100
+    results = []
+    for agent in (baseline, actual):
+        dtype = next(agent.online.parameters()).dtype
+        inputs = source.to(device=agent.device, dtype=dtype).detach().requires_grad_()
+        hidden = torch.ones(1, 3, 8, device=agent.device, dtype=dtype, requires_grad=True)
+        recurrent, final = agent._recurrent_features_with_resets(
+            agent.online, inputs, resets, hidden)
+        (recurrent.square().sum() + final.square().sum()).backward()
+        results.append((recurrent.detach(), final.detach(), inputs.grad,
+                        torch.zeros_like(hidden) if hidden.grad is None else hidden.grad,
+                        tuple(p.grad for p in agent.online.parameters() if p.grad is not None)))
+    for index, (expected, observed) in enumerate(zip(results[0][:-1], results[1][:-1])):
+        # Near-constant rows amplify FP32 LayerNorm input-gradient roundoff;
+        # the independent FP64 reference keeps this absolute error bounded.
+        tolerance = 1e-4 if index == 2 else 3e-5
+        torch.testing.assert_close(observed.cpu().double(), expected.cpu().double(), atol=tolerance, rtol=5e-4)
+    assert len(results[0][-1]) == len(results[1][-1])
+    for expected, observed in zip(results[0][-1], results[1][-1]):
+        torch.testing.assert_close(observed.cpu().double(), expected.cpu().double(), atol=3e-5, rtol=5e-4)
 
 
 @pytest.mark.skipif(

@@ -397,6 +397,12 @@ def configure_runtime_environment(runtime: dict) -> dict[str, str]:
             os.environ.pop("PROPEVOLVE_MLX_CACHE_LIMIT_BYTES", None)
         else:
             environment["PROPEVOLVE_MLX_CACHE_LIMIT_BYTES"] = str(cache_limit)
+    if 'mps_cache_clear_threshold_bytes' in runtime:
+        threshold = runtime['mps_cache_clear_threshold_bytes']
+        if threshold is None:
+            os.environ.pop('PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES', None)
+        else:
+            environment['PROPEVOLVE_MPS_CACHE_CLEAR_THRESHOLD_BYTES'] = str(threshold)
     os.environ.update(environment)
     return environment
 
@@ -1547,6 +1553,11 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("agent policy retention loss weight must be nonnegative")
     runtime = payload["runtime"]
+    threshold = runtime['mps_cache_clear_threshold_bytes']
+    if threshold is not None and (
+        isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 0
+    ):
+        raise ValueError('runtime MPS cache clear threshold must be nonnegative bytes or null')
     cache_limit = runtime["mlx_cache_limit_bytes"]
     if cache_limit is not None and (
         isinstance(cache_limit, bool) or not isinstance(cache_limit, int)

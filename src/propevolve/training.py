@@ -449,7 +449,9 @@ def train_replay_with_mastery(
     if isinstance(capacity_per_side, bool) or not isinstance(capacity_per_side, int) or capacity_per_side < 0:
         raise ValueError("mastered pair capacity is invalid")
     if capacity_per_side == 0:
-        return agent.train_batch(sequences, **train_kwargs)
+        loss = agent.train_batch(sequences, **train_kwargs)
+        agent.release_runtime_cache(completed_update=True)
+        return loss
     pair_ids = [transition.paired_a_plus_pair_id for sequence in sequences
                 for transition in sequence if transition.paired_a_plus_pair_id is not None]
     remembered = replay.sample_mastered_pairs(pair_id_start=max(pair_ids, default=-1) + 1)
@@ -473,6 +475,7 @@ def train_replay_with_mastery(
         )
     agent.last_train_metrics["paired_a_plus_mastery_promoted_pairs"] = float(promoted)
     agent.last_train_metrics["paired_a_plus_mastery_rehearsed_sequences"] = float(len(remembered))
+    agent.release_runtime_cache(completed_update=True)
     return loss
 
 

@@ -813,6 +813,51 @@ def test_v2_bounds_completed_feasible_artifacts_without_losing_best_or_evidence(
         assert (root / "screening-evidence" / f"trial-{number:03d}" / "diagnostic.json").exists()
 
 
+def test_concurrent_completion_cannot_delete_a_winner_missing_from_cleanup_snapshot(
+    tmp_path, monkeypatch,
+):
+    import time
+    import optuna
+    contract = _contract(tmp_path, n_trials=2, n_jobs=2)
+    payload = json.loads(contract.read_text())
+    payload["artifacts"]["maximum_retained_feasible_trials"] = 1
+    contract.write_text(json.dumps(payload))
+    release_winner = threading.Event()
+    original_top = optuna_engine._top_feasible
+
+    def interleaved_top(study, count, **kwargs):
+        selected = original_top(study, count, **kwargs)
+        if not release_winner.is_set():
+            release_winner.set()
+            deadline = time.monotonic() + 5
+            while not any(t.number == 1 and t.state is optuna.trial.TrialState.COMPLETE
+                          for t in study.trials):
+                assert time.monotonic() < deadline, "winner did not complete"
+                threading.Event().wait(0.01)
+        return selected
+
+    monkeypatch.setattr(optuna_engine, "_top_feasible", interleaved_top)
+
+    def runner(config_path, *, run_id):
+        root = Path(json.loads(config_path.read_text())["output"])
+        number = int(root.name.rsplit("-", 1)[-1])
+        root.mkdir(parents=True)
+        (root / "training-recovery.pt").write_bytes(b"checkpoint")
+        if number == 1:
+            assert release_winner.wait(5)
+        return {"evaluation_status": "PASS", "metrics": _metrics(**{
+            "selection.pass_rate": (0.2, 0.6)[number]})}
+
+    root = tmp_path / "study"
+    result = run_optuna_sweep(
+        contract, artifact_root=root, config_root=tmp_path / "configs",
+        runner=runner, state_loader=lambda *_: None,
+        config_validator=lambda _: None, code_commit="test-commit",
+    )
+    assert result.completed_trials == 2
+    assert (root / "screening" / "trial-001" / "training-recovery.pt").exists()
+
+
 def test_v2_reports_penalized_result_when_validation_short_circuits(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

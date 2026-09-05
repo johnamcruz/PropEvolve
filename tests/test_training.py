@@ -2188,6 +2188,10 @@ class Agent:
     def retain_policy(self) -> None:
         self.retention_calls += 1
 
+    def release_runtime_cache(self, *, completed_update=False) -> bool:
+        assert completed_update
+        return False  # This test double has no accelerator allocations.
+
     def select_action(
         self,
         observation,
@@ -2814,6 +2818,10 @@ def test_runner_finalizes_short_circuit_when_balanced_probe_rows_are_unavailable
     class TinyAgent:
         recurrent_burn_in = 0
         n_step_return = 1
+
+        def release_runtime_cache(self, *, completed_update=False) -> bool:
+            assert completed_update
+            return False
 
         def __init__(self, observation_dim: int, **settings) -> None:
             assert observation_dim == 1
