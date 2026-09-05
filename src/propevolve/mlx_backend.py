@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import gc
+import os
 from queue import Queue
 import threading
 from typing import Any
@@ -161,6 +162,8 @@ class _MlxExecutionWorker:
     def _run(self) -> None:
         global _MLX_RECURRENT_FUNCTION, _MLX_RECURRENT_VJP
         mx = _mlx_core()
+        configured_cache_limit = None
+        cache_configured = False
         try:
             while True:
                 request = self._requests.get()
@@ -168,6 +171,14 @@ class _MlxExecutionWorker:
                     return
                 operation, values, response = request
                 try:
+                    if not cache_configured:
+                        raw_limit = os.environ.get("PROPEVOLVE_MLX_CACHE_LIMIT_BYTES")
+                        if raw_limit is not None:
+                            configured_cache_limit = int(raw_limit)
+                            if configured_cache_limit < 0:
+                                raise ValueError("MLX cache budget must be nonnegative")
+                            mx.set_cache_limit(configured_cache_limit)
+                        cache_configured = True
                     if operation == "forward":
                         mlx_values = _torch_to_mlx(values)
                         outputs = _mlx_recurrent_function()(*mlx_values)
@@ -201,6 +212,7 @@ class _MlxExecutionWorker:
                             "active_memory_bytes": int(mx.get_active_memory()),
                             "cache_memory_bytes": int(mx.get_cache_memory()),
                             "peak_memory_bytes": int(mx.get_peak_memory()),
+                            "configured_cache_limit_bytes": configured_cache_limit,
                         }
                     else:
                         raise ValueError("unknown MLX worker operation")
@@ -301,6 +313,6 @@ def mlx_torch_recurrent_features(network, observations, hidden=None):
     return recurrent, final_hidden.unsqueeze(0)
 
 
-def mlx_memory_metrics() -> dict[str, int]:
+def mlx_memory_metrics() -> dict[str, int | None]:
     """Return synchronized MLX allocator evidence for runtime benchmarks."""
     return _mlx_worker().call("memory")

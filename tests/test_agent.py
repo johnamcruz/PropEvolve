@@ -49,6 +49,23 @@ def test_network_emits_distribution_for_every_time_action_and_atom() -> None:
     torch.testing.assert_close(logits.softmax(-1).sum(-1), torch.ones(3, 5, 5))
 
 
+@pytest.mark.parametrize("epsilon", [0.0, 1.0])
+def test_action_selection_accepts_readonly_replay_without_unsafe_alias(epsilon):
+    import warnings
+    agent = _agent(4)
+    observation = np.ones(4, dtype=np.float32)
+    expected = agent.select_action(observation, hidden=None,
+        valid_actions=(Action.WAIT,), epsilon=epsilon)
+    observation.flags.writeable = False
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message="The given NumPy array is not writable")
+        actual = agent.select_action(observation, hidden=None,
+            valid_actions=(Action.WAIT,), epsilon=epsilon)
+    assert actual[0] == expected[0]
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+    np.testing.assert_array_equal(observation, np.ones(4, dtype=np.float32))
+
+
 def test_conflict_aware_gradient_blend_preserves_primary_and_opportunity(
 ) -> None:
     opportunity = (torch.tensor([-1.0, 1.0]),)
@@ -369,6 +386,17 @@ def test_mps_runtime_flags_are_applied_before_training(
         "PYTORCH_MPS_PREFER_METAL": "1",
         "PYTORCH_MPS_FAST_MATH": "0",
     }
+
+
+def test_mlx_cache_budget_is_passed_to_worker_and_cleared_for_default(monkeypatch):
+    import os
+    monkeypatch.delenv("PROPEVOLVE_MLX_CACHE_LIMIT_BYTES", raising=False)
+    runtime = {"mps_prefer_metal": False, "mps_fast_math": False,
+               "mlx_cache_limit_bytes": 268435456}
+    configure_runtime_environment(runtime)
+    assert os.environ["PROPEVOLVE_MLX_CACHE_LIMIT_BYTES"] == "268435456"
+    configure_runtime_environment({**runtime, "mlx_cache_limit_bytes": None})
+    assert "PROPEVOLVE_MLX_CACHE_LIMIT_BYTES" not in os.environ
 
 
 def test_agent_never_selects_an_action_rejected_by_external_mask() -> None:

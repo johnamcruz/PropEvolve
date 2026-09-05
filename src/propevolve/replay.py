@@ -2979,9 +2979,35 @@ class ReplayCheckpointStore:
 
     _SCHEMA_VERSION = 1
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, observation_storage: str = "memory") -> None:
+        if observation_storage not in ("memory", "mmap"):
+            raise ValueError("replay observation storage is invalid")
         self.root = Path(root)
+        self.observation_storage = observation_storage
         self._known: dict[str, dict[str, object]] = {}
+        self._mapped: dict[str, np.memmap] = {}
+
+    def _mapped_observations(
+        self, entry: Mapping[str, object], payload: Mapping[str, object],
+    ) -> np.memmap:
+        """Derive a read-only working copy from an authenticated canonical shard.
+
+        Rebuild once per store lifetime rather than trusting a stale sidecar.
+        Canonical pickle bytes and checkpoint identities remain unchanged.
+        """
+        identity = str(entry["sha256"])
+        if identity not in self._mapped:
+            directory = self.root / "observations"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{identity}.npy"
+            temporary = path.with_suffix(".npy.tmp")
+            with temporary.open("wb") as stream:
+                np.save(stream, payload["observations"], allow_pickle=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._mapped[identity] = np.load(path, mmap_mode="r", allow_pickle=False)
+        return self._mapped[identity]
 
     @staticmethod
     def _shard_name(episode_id: str) -> str:
@@ -3089,6 +3115,11 @@ class ReplayCheckpointStore:
                 )
             )
             entries.append(entry)
+            if self.observation_storage == "mmap":
+                observations = self._mapped_observations(entry, payload)
+                replay._episodes[episode_id] = replace(
+                    replay._episodes[episode_id], observations=observations,
+                )
         metadata = replay.checkpoint_metadata()
         descriptor = {
             "schema_version": self._SCHEMA_VERSION,
@@ -3153,6 +3184,8 @@ class ReplayCheckpointStore:
                 or payload.get("episode_id") != episode_id
             ):
                 raise ValueError("replay checkpoint shard identity is invalid")
+            if self.observation_storage == "mmap":
+                payload["observations"] = self._mapped_observations(entry, payload)
             payloads.append(payload)
             known[episode_id] = entry
         replay.load_state_dict({
@@ -3181,6 +3214,16 @@ class ReplayCheckpointStore:
                 if relative not in retained:
                     path.unlink()
             for path in directory.glob("*.tmp"):
+                path.unlink()
+        retained_identities = {str(item["sha256"]) for item in episodes}
+        self._mapped = {key: value for key, value in self._mapped.items()
+                        if key in retained_identities}
+        observation_directory = self.root / "observations"
+        if observation_directory.is_dir():
+            for path in observation_directory.glob("*.npy"):
+                if path.stem not in retained_identities:
+                    path.unlink()
+            for path in observation_directory.glob("*.tmp"):
                 path.unlink()
         active_ids = {
             str(self._validate_entry(item)["episode_id"])

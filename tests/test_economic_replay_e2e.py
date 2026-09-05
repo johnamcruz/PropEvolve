@@ -1219,6 +1219,7 @@ def test_individual_learned_pairs_are_not_erased_by_group_averages_e2e(
 @pytest.mark.parametrize("backend", ["pytorch", "mlx"])
 def test_production_mastery_replay_promotes_and_rehearses_learned_pairs_e2e(tmp_path, backend) -> None:
     from propevolve.training import train_replay_with_mastery
+    from propevolve.replay import ReplayCheckpointStore
     replay = _replay(seed=91)
     for side in (Action.ENTER_LONG_1, Action.ENTER_SHORT_1):
         for win in (True, False):
@@ -1227,6 +1228,8 @@ def test_production_mastery_replay_promotes_and_rehearses_learned_pairs_e2e(tmp_
                 context=(0.9, 0.85, 0.1, 0.1, 0.1, 0.7, 0.2),
                 offset=float(int(side)*2 + int(not win)),
             ))
+    store = ReplayCheckpointStore(tmp_path / "replay", observation_storage="mmap")
+    store.persist(replay)
     sequences = replay.sample_paired_a_plus_candidate_pairs(1)
     agent = _agent()
     if backend == "mlx":
@@ -1243,6 +1246,13 @@ def test_production_mastery_replay_promotes_and_rehearses_learned_pairs_e2e(tmp_
     assert promoted == 2
     assert rehearsed == 0  # Already-present pairs must not be overweighted.
     assert len(replay.sample_mastered_pairs()) == 4
+    descriptor = store.persist(replay)
+    restored = _replay(seed=999)
+    ReplayCheckpointStore(store.root, observation_storage="mmap").restore(restored, descriptor)
+    _, before_q = agent.greedy_sequence_action_values(replay.sample_mastered_pairs())
+    _, after_q = agent.greedy_sequence_action_values(restored.sample_mastered_pairs())
+    np.testing.assert_array_equal(before_q, after_q)
+    replay = restored
     ordinary = tuple(tuple(replace(t, paired_a_plus_pair_id=None,
                                   paired_a_plus_pair_side=None) for t in s)
                      for s in sequences)

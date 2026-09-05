@@ -9,6 +9,7 @@
       "compile_mode": "default",
       "mps_prefer_metal": false,
       "mps_fast_math": false,
+      "mlx_cache_limit_bytes": null,
       "benchmark_max_relative_loss_drift": 0.05
     },
     "challenge": {
@@ -32,6 +33,7 @@
       "challenge_return_discount": 1.0
     },
     "training": {
+      "replay_observation_storage": "mmap",
       "prefetch_batches": 0,
       "short_circuit": null,
       "terminal_sequence_fraction": 0.0,

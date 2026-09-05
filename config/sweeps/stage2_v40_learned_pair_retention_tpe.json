@@ -2,7 +2,7 @@
   "schema": "propevolve_optuna_sweep_v2",
   "name": "stage2_v40_learned_pair_retention_tpe",
   "base_config": "../historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep.json",
-  "study_root": "runs/stage2_v40_learned_pair_retention_tpe",
+  "study_root": "runs/stage2_v40_learned_pair_retention_tpe_r2",
   "study": {
     "sampler": "tpe",
     "seed": 314159,
@@ -13,7 +13,8 @@
     "group": true
   },
   "artifacts": {
-    "screening_retention": "compact"
+    "screening_retention": "compact",
+    "maximum_retained_feasible_trials": 3
   },
   "objective": {
     "terms": [

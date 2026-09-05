@@ -3739,7 +3739,8 @@ class HistoricalCandidateRunner:
             seed=seed,
         )
         replay_checkpoint_store = ReplayCheckpointStore(
-            output / "training-replay"
+            output / "training-replay",
+            observation_storage=training_config["replay_observation_storage"],
         )
         if replay_checkpoint is not None:
             replay_checkpoint_store.restore(replay, replay_checkpoint)

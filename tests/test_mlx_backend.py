@@ -13,6 +13,36 @@ from propevolve.agent import RecurrentC51Agent  # noqa: E402
 from propevolve import mlx_backend  # noqa: E402
 
 
+def test_mlx_worker_applies_runtime_cache_budget_in_real_process():
+    program = textwrap.dedent('''
+        import torch
+        from propevolve.config import configure_runtime_environment
+        from propevolve.agent import RecurrentC51Agent
+        from propevolve.mlx_backend import mlx_memory_metrics, shutdown_mlx_backend
+        configure_runtime_environment({"mps_prefer_metal": False,
+            "mps_fast_math": False, "mlx_cache_limit_bytes": 262144})
+        settings = dict(hidden_dim=8, atoms=11, value_min=-3., value_max=3.,
+            gamma=.997, learning_rate=1e-4, weight_decay=1e-5,
+            gradient_clip=10., target_sync_updates=250, device="mps", seed=37)
+        baseline = RecurrentC51Agent(6, **settings)
+        actual = RecurrentC51Agent(6, learner_backend="mlx", **settings)
+        values = torch.ones(2, 7, 6, device="mps")
+        expected, _ = baseline.online(values)
+        for _ in range(3):
+            result, _ = actual.online(values)
+            torch.testing.assert_close(result, expected, atol=2e-5, rtol=2e-4)
+            result.sum().backward()
+            actual.online.zero_grad(set_to_none=True)
+        metrics = mlx_memory_metrics()
+        assert metrics["configured_cache_limit_bytes"] == 262144, metrics
+        assert metrics["cache_memory_bytes"] <= 262144, metrics
+        shutdown_mlx_backend()
+    ''')
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True,
+                            text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_mlx_projects_the_complete_recurrent_input_sequence_once() -> None:
     mx = mlx_backend._mlx_core()
     encoded = mx.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=mx.float32)

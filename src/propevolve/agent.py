@@ -1809,6 +1809,10 @@ class RecurrentC51Agent:
     ) -> tuple[Action, torch.Tensor, np.ndarray | None]:
         if not valid_actions:
             raise ValueError("at least one action must be valid")
+        # Torch cannot safely alias a read-only replay mapping. Copy only this
+        # observation, never the full episode archive.
+        if not observation.flags.writeable:
+            observation = observation.copy()
         explore = epsilon > 0.0 and self._rng.random() < epsilon
         selected = (
             valid_actions[int(self._rng.integers(len(valid_actions)))]

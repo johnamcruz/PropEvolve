@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Mapping, Sequence
 
 import optuna
@@ -211,6 +212,7 @@ class OptunaSweep:
     multivariate: bool
     group: bool
     screening_artifact_retention: str
+    maximum_retained_feasible_trials: int | None
     objective_terms: tuple[ObjectiveTerm, ...]
     constraints: dict[str, tuple[str, float]]
     search_space: dict[str, dict]
@@ -614,10 +616,17 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
     artifacts = payload["artifacts"]
     if (
         not isinstance(artifacts, dict)
-        or set(artifacts) != {"screening_retention"}
+        or "screening_retention" not in artifacts
+        or not set(artifacts) <= {"screening_retention", "maximum_retained_feasible_trials"}
         or artifacts["screening_retention"] not in {"compact", "keep"}
     ):
         raise ValueError("Optuna artifact retention contract is invalid")
+    retained_limit = artifacts.get("maximum_retained_feasible_trials")
+    if retained_limit is not None and (
+        isinstance(retained_limit, bool) or not isinstance(retained_limit, int)
+        or retained_limit < 1 or artifacts["screening_retention"] != "compact"
+    ):
+        raise ValueError("Optuna retained feasible trial limit is invalid")
 
     frozen = payload["frozen"]
     if (
@@ -754,6 +763,7 @@ def load_optuna_sweep(path: str | Path) -> OptunaSweep:
         multivariate=multivariate,
         group=group,
         screening_artifact_retention=str(artifacts["screening_retention"]),
+        maximum_retained_feasible_trials=retained_limit,
         objective_terms=objective_terms,
         constraints=constraints,
         search_space=search_space,
@@ -1665,11 +1675,23 @@ def run_optuna_sweep(
         ):
             _compact_screening_trial(artifacts=artifacts, trial=trial)
 
+    cleanup_lock = threading.Lock()
+
     def compact_terminal_trial(
         _study: optuna.Study,
         trial: optuna.trial.FrozenTrial,
     ) -> None:
-        compact_recorded_trial(trial)
+        # Optuna invokes callbacks from concurrent objective threads. Serialize
+        # artifact cleanup, never training, and retain the current best family.
+        with cleanup_lock:
+            compact_recorded_trial(trial)
+            limit = sweep.maximum_retained_feasible_trials
+            if sweep.screening_artifact_retention == "compact" and limit is not None:
+                keep = {item.number for item in _top_feasible(_study, limit)}
+                for completed in _study.get_trials(deepcopy=False):
+                    if (completed.state is optuna.trial.TrialState.COMPLETE
+                            and completed.number not in keep):
+                        _compact_screening_trial(artifacts=artifacts, trial=completed)
 
     terminal_states = {
         optuna.trial.TrialState.COMPLETE,

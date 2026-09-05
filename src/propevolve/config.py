@@ -389,6 +389,14 @@ def configure_runtime_environment(runtime: dict) -> dict[str, str]:
         ),
         "PYTORCH_MPS_FAST_MATH": "1" if bool(runtime["mps_fast_math"]) else "0",
     }
+    # Agent construction reapplies only MPS flags. It must not erase the full
+    # runtime's previously configured MLX budget.
+    if "mlx_cache_limit_bytes" in runtime:
+        cache_limit = runtime["mlx_cache_limit_bytes"]
+        if cache_limit is None:
+            os.environ.pop("PROPEVOLVE_MLX_CACHE_LIMIT_BYTES", None)
+        else:
+            environment["PROPEVOLVE_MLX_CACHE_LIMIT_BYTES"] = str(cache_limit)
     os.environ.update(environment)
     return environment
 
@@ -1539,6 +1547,12 @@ def load_experiment_config(path: str | Path) -> dict:
     ):
         raise ValueError("agent policy retention loss weight must be nonnegative")
     runtime = payload["runtime"]
+    cache_limit = runtime["mlx_cache_limit_bytes"]
+    if cache_limit is not None and (
+        isinstance(cache_limit, bool) or not isinstance(cache_limit, int)
+        or cache_limit < 0
+    ):
+        raise ValueError("runtime MLX cache limit must be nonnegative bytes or null")
     if runtime["learner_backend"] not in {"pytorch", "mlx"}:
         raise ValueError("runtime learner backend must be pytorch or mlx")
     if runtime["learner_backend"] == "mlx" and (
@@ -1600,6 +1614,8 @@ def load_experiment_config(path: str | Path) -> dict:
         or not 0 <= training["prefetch_batches"] <= 2
     ):
         raise ValueError("training replay prefetch must be between zero and two")
+    if training["replay_observation_storage"] not in ("memory", "mmap"):
+        raise ValueError("training replay observation storage is invalid")
     if (
         isinstance(training["replay_capacity_transitions"], bool)
         or int(training["replay_capacity_transitions"])

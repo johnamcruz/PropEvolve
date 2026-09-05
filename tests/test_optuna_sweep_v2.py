@@ -783,6 +783,36 @@ def test_v2_compacts_rejected_trial_only_after_terminal_study_record(
     assert trial.user_attrs["training.short_circuited"] == 1.0
 
 
+@pytest.mark.parametrize("jobs", [1, 3])
+def test_v2_bounds_completed_feasible_artifacts_without_losing_best_or_evidence(tmp_path, jobs):
+    contract = _contract(tmp_path, n_trials=4, n_jobs=jobs)
+    payload = json.loads(contract.read_text())
+    payload["artifacts"]["maximum_retained_feasible_trials"] = 2
+    contract.write_text(json.dumps(payload))
+    root = tmp_path / "study"
+    scores = (.4, .2, .6, .1)
+
+    def runner(config_path, *, run_id):
+        trial_root = Path(json.loads(config_path.read_text())["output"])
+        trial_root.mkdir(parents=True)
+        (trial_root / "training-recovery.pt").write_bytes(b"checkpoint")
+        (trial_root / "diagnostic.json").write_text('{"complete":true}')
+        number = int(trial_root.name.rsplit("-", 1)[-1])
+        return {"evaluation_status": "PASS", "metrics": _metrics(**{
+            "selection.pass_rate": scores[number]})}
+
+    result = run_optuna_sweep(contract, artifact_root=root,
+        config_root=tmp_path / "configs", runner=runner,
+        state_loader=lambda *_: None, config_validator=lambda _: None,
+        code_commit="test-commit")
+    assert result.completed_trials == 4
+    assert (root / "screening" / "trial-000" / "training-recovery.pt").exists()
+    assert (root / "screening" / "trial-002" / "training-recovery.pt").exists()
+    for number in (1, 3):
+        assert not (root / "screening" / f"trial-{number:03d}").exists()
+        assert (root / "screening-evidence" / f"trial-{number:03d}" / "diagnostic.json").exists()
+
+
 def test_v2_reports_penalized_result_when_validation_short_circuits(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
