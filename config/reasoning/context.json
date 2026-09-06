@@ -1,0 +1,28 @@
+{
+  "context_steps": 20,
+  "fields": [
+    "expansion.long_attempt_probability",
+    "expansion.long_clean_retained_given_attempt_probability",
+    "expansion.short_attempt_probability",
+    "expansion.short_clean_retained_given_attempt_probability",
+    "trend.long_launch_probability",
+    "trend.short_launch_probability",
+    "trend.long_conditional_quality",
+    "trend.short_conditional_quality",
+    "regime.chop_no_trend_probability",
+    "regime.chop_end_transition_probability",
+    "regime.expansion_trend_probability",
+    "account.realized_pnl_norm",
+    "account.equity_pnl_norm",
+    "account.peak_equity_pnl_norm",
+    "account.mll_headroom_norm",
+    "account.drawdown_norm",
+    "account.position_side",
+    "account.position_size_norm",
+    "account.unrealized_pnl_norm",
+    "account.session_remaining",
+    "account.challenge_remaining",
+    "account.point_value_norm",
+    "account.round_trip_fee_norm"
+  ]
+}

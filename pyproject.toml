@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 mlx = ["mlx>=0.32,<0.33"]
+reasoning = ["mlx>=0.32,<0.33", "mlx-lm>=0.25.2"]
 ffm = [
   "futures-foundation-model[foundation] @ git+https://github.com/johnamcruz/Futures-Foundation-Model.git@fbb96c3",
 ]

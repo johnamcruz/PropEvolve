@@ -1,0 +1,26 @@
+{
+  "schema": "propevolve_reasoning_development_v1",
+  "status": "implementation_only_do_not_launch",
+  "data_source": "existing_teacher_source_manifests",
+  "source_recipe": null,
+  "date_policy": "aligned_teacher_coverage_and_audited_temporal_roles",
+  "sealed_start": "2026-01-01",
+  "sealed_usage": "final_frozen_validation_only",
+  "specialist_inputs_at_inference": true,
+  "require_fold_safe_specialist_scores": true,
+  "context_config": "config/reasoning/context.json",
+  "sft_config": "config/reasoning/sft.json",
+  "stages": ["market_supervision", "action_supervision", "economic_evaluation"],
+  "maximum_examples_per_episode": 32,
+  "sample_stride": 20,
+  "rollout_max_steps": 20000,
+  "target_temperature": 1.0,
+  "opportunity_contract": {
+    "horizon": 150,
+    "target_r": 2.0,
+    "stop_r": 1.0
+  },
+  "temporal_split_audit": null,
+  "volume_source": null,
+  "refit_full_development_after_selection": true
+}
