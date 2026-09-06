@@ -50,14 +50,12 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
     recipe.write_text(json.dumps(effective))
     subprocess.run([sys.executable, "-m", "propevolve.reasoning_policy.mlx_sft",
                     "--config", str(recipe), "--view", str(tmp_path / "view"), "--train"], check=True)
-    policy = MLXActionPolicy.load(config["model"], adapter_path=effective["adapter_path"],
-                                 max_seq_length=config["max_seq_length"])
+    policy = MLXActionPolicy.from_config(recipe)
     after = score_labeled_examples(policy, records)
     del policy
     gc.collect()
     mx.clear_cache()
-    reloaded = MLXActionPolicy.load(config["model"], adapter_path=effective["adapter_path"],
-                                   max_seq_length=config["max_seq_length"])
+    reloaded = MLXActionPolicy.from_config(recipe)
     again = score_labeled_examples(reloaded, records)
     for old, new, repeat in zip(before, after, again):
         assert new["target_log_likelihood"] > old["target_log_likelihood"], new["target"]

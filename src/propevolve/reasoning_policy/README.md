@@ -38,6 +38,37 @@ has been executed. The selected model is provisional, not benchmark-selected.
 The optional runtime dependency is the `reasoning` extra. It has not been
 installed by this task. There is no model download at import time.
 
+## Configurable backbone and causal trade context
+
+`MLXActionPolicy.from_config(path)` reads `model`, `adapter_path`, and
+`max_seq_length` from any JSON recipe, including the SFT recipe. The model can
+be a compatible MLX-LM repository ID or local directory. Set `adapter_path` to
+null for base-model inference; SFT requires an explicit new output directory.
+Changing the base requires a matching adapter, not reuse of another model's LoRA
+weights. Loading checks the native adapter metadata before loading large weights.
+This is a compatibility guard, not a checkpoint content-authentication claim.
+
+Prompt-template options inherit `config/reasoning/defaults.json` and can be
+overridden with `chat_template_kwargs` in the recipe. Use the saved effective
+training recipe for inference to preserve prompt parity. No model-name allowlist
+or model-specific branch is needed. The decision interface stays
+`decide(context, legal_actions)`; simulator actions and outcomes do not change.
+Changing templates or models requires rebuilding tokenized views and revalidating
+learning. Arbitrary models, tokenizer behavior, and economic equivalence are not
+guaranteed by configuration alone.
+
+The reasoning context also selects completed-trade-history fields by name:
+current open-trade MFE/MAE in original-risk units, current R, giveback from MFE,
+holding bars, and explicit open-position/risk-availability masks. They come from
+one shared simulator snapshot used by collection and evaluation. They do not
+extend or reorder the C51 observation. MFE/MAE are gross price excursions;
+account equity and economic labels retain the simulator's fees. Final future
+excursions are NOT inference inputs. These inputs can support learning exits,
+but their presence is not evidence that the model has learned profitable exits.
+
+The new config and excursion tests are written but unexecuted, including
+Long/Short symmetry, future-price mutation, flat reset and model/adapter mismatch.
+
 When execution is authorized and the source dataset audit passes, the preparation
 entry point is:
 

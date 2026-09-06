@@ -10,10 +10,11 @@ from pathlib import Path
 import subprocess
 import sys
 from .integrity import file_digest
+from .model_config import validate_model_settings, model_defaults, template_options
 
 
 def read_sft_config(path: str | Path) -> dict:
-    payload = json.loads(Path(path).read_text())
+    payload = {**model_defaults(), **json.loads(Path(path).read_text())}
     required = {
         "model", "data", "adapter_path", "train", "fine_tune_type", "mask_prompt",
         "num_layers", "batch_size", "iters", "learning_rate", "max_seq_length",
@@ -21,6 +22,9 @@ def read_sft_config(path: str | Path) -> dict:
     }
     if not required.issubset(payload):
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
+    validate_model_settings(payload)
+    if payload["adapter_path"] is None:
+        raise ValueError("SFT requires an adapter output path")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
             or payload["mask_prompt"] is not True or payload.get("trust_remote_code") is not False):
         raise ValueError("challenger requires prompt-masked LoRA and no remote code")
@@ -86,7 +90,7 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         raise ValueError("unexpected SFT conversation schema")
                     prompt = tokenizer.apply_chat_template(
                         messages[:-1], tokenize=False, add_generation_prompt=True,
-                        enable_thinking=False,
+                        **template_options(config["chat_template_kwargs"]),
                     )
                     completion = messages[-1]["content"]
                     token_count = len(tokenizer.encode(prompt + completion + tokenizer.eos_token))

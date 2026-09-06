@@ -23,6 +23,13 @@
     "account.session_remaining",
     "account.challenge_remaining",
     "account.point_value_norm",
-    "account.round_trip_fee_norm"
+    "account.round_trip_fee_norm",
+    "trade.open",
+    "trade.risk_available",
+    "trade.mfe_r_so_far",
+    "trade.mae_r_so_far",
+    "trade.current_r",
+    "trade.giveback_r",
+    "trade.hold_bars"
   ]
 }

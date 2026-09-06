@@ -34,6 +34,38 @@ def passive_factory():
     )
 
 
+@pytest.mark.parametrize("side", [Action.ENTER_LONG_1, Action.ENTER_SHORT_1])
+def test_reasoning_excursions_only_use_completed_open_trade_bars(side):
+    from dataclasses import replace
+    env = environment()
+    market = env.markets["NQ"]
+    # Entry fills at 1000; one completed bar reaches +5/-2 points for Long.
+    market.open[:] = 1000
+    market.close[:] = 1001
+    market.high[:] = 1005
+    market.low[:] = 998
+    env = HistoricalChallengeEnv(
+        env.markets, tick_values={"NQ": 20.0}, round_trip_fees={"NQ": 4.0},
+        spec=replace(env.spec, per_trade_risk_dollars=300), seed=7,
+    )
+    env.reset(options={"ticker": "NQ", "start": 0})
+    assert env.causal_trade_context()["trade.open"] == 0
+    env.step(side)
+    snapshot = env.causal_trade_context()
+    assert snapshot["trade.open"] == 1
+    assert snapshot["trade.risk_available"] == 1
+    favorable, adverse = (5, 2) if side == Action.ENTER_LONG_1 else (2, 5)
+    # $300 risk includes $4 round-trip fees: $296 / $20 = 14.8 points.
+    assert snapshot["trade.mfe_r_so_far"] == pytest.approx(favorable / 14.8)
+    assert snapshot["trade.mae_r_so_far"] == pytest.approx(adverse / 14.8)
+    # Future bars cannot alter a decision-time feature.
+    market.high[2:] = 2000
+    market.low[2:] = 1
+    assert env.causal_trade_context() == snapshot
+    env.step(Action.CLOSE)
+    assert env.causal_trade_context()["trade.open"] == 0
+
+
 @pytest.mark.parametrize("direction,winner,loser", [
     (1, Action.ENTER_LONG_1, Action.ENTER_SHORT_1),
     (-1, Action.ENTER_SHORT_1, Action.ENTER_LONG_1),

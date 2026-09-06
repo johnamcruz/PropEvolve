@@ -43,6 +43,7 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
             observation, embedding_dim=market.embeddings.shape[1], ticker=ticker,
             row=row, sources=sources,
         )
+        fields.update(environment.causal_trade_context())
         # Selecting a declared subset allows optional production management
         # coordinates, without allowing a future label field into the adapter.
         if not set(context_config.fields).issubset(fields):

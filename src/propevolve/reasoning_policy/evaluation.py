@@ -29,6 +29,7 @@ resource cap is an error, never a fabricated economic timeout.
                 observation, embedding_dim=market.embeddings.shape[1],
                 ticker=options["ticker"], row=row, sources=sources,
             )
+            fields.update(environment.causal_trade_context())
             if not set(context_config.fields).issubset(fields):
                 raise ValueError("configured input unavailable during evaluation")
             context.append(
