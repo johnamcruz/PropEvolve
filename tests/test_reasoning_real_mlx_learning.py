@@ -19,7 +19,7 @@ import pytest
 @pytest.mark.skipif(not os.environ.get("PROPEVOLVE_REASONING_SFT_TEST_CONFIG"),
                     reason="real MLX model training requires explicit opt-in")
 def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_path):
-    from propevolve.reasoning_policy.mlx_sft import read_sft_config, verify_dataset
+    from propevolve.reasoning_policy.mlx_sft import EncodedDataset, read_sft_config, verify_dataset
     from propevolve.reasoning_policy.policy import MLXActionPolicy
     from propevolve.reasoning_policy.learning_audit import score_labeled_examples
     from propevolve.decision import Action
@@ -38,7 +38,8 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
     assert set(cohort) == {action.name for action in Action}, "real fixture must cover all five actions"
     records = list(cohort.values())
     policy = MLXActionPolicy.load(config["model"], adapter_path=None,
-                                 max_seq_length=config["max_seq_length"])
+                                 max_seq_length=config["max_seq_length"],
+                                 chat_template_kwargs=config["chat_template_kwargs"])
     before = score_labeled_examples(policy, records)
     del policy
     gc.collect()
@@ -51,6 +52,17 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
     subprocess.run([sys.executable, "-m", "propevolve.reasoning_policy.mlx_sft",
                     "--config", str(recipe), "--view", str(tmp_path / "view"), "--train"], check=True)
     policy = MLXActionPolicy.from_config(recipe)
+    encoded = EncodedDataset(tmp_path / "view" / "train.jsonl")
+    with (Path(config["data"]) / "train.jsonl").open() as stream:
+        for index, line in enumerate(stream):
+            record = json.loads(line)
+            messages = record["messages"]
+            tokens, offset = encoded.process(encoded[index])
+            # Real model tokenizer: training and inference must score exactly
+            # the same answer tokens, with exactly the same causal prefix.
+            assert policy.tokenize_completions(messages[:-1], [messages[-1]["content"]]) == (
+                (tuple(tokens), offset),
+            )
     after = score_labeled_examples(policy, records)
     del policy
     gc.collect()

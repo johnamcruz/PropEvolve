@@ -33,7 +33,7 @@ resource cap is an error, never a fabricated economic timeout.
             if not set(context_config.fields).issubset(fields):
                 raise ValueError("configured input unavailable during evaluation")
             context.append(
-                int(np.datetime64(info["timestamp"], "ns").astype(np.int64)),
+                int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
                 {key: fields[key] for key in context_config.fields},
             )
             action, scores = policy.decide(context.snapshot(), info["valid_actions"])

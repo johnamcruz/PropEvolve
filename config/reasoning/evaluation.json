@@ -1,0 +1,5 @@
+{
+  "model": "Qwen/Qwen3-4B-MLX-4bit",
+  "adapter_path": "runs/reasoning-challenger/rl-adapters",
+  "max_seq_length": 4096
+}

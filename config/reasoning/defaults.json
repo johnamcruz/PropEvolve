@@ -1,4 +1,8 @@
 {
+  "optimizer": "adam",
+  "optimizer_config": {"adam": {}},
+  "lr_schedule": null,
+  "resume_adapter_file": null,
   "chat_template_kwargs": {
     "enable_thinking": false
   }

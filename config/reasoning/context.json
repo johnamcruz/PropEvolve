@@ -30,6 +30,13 @@
     "trade.mae_r_so_far",
     "trade.current_r",
     "trade.giveback_r",
-    "trade.hold_bars"
+    "trade.hold_bars",
+    "challenge.profit_target_dollars",
+    "challenge.max_loss_dollars",
+    "challenge.realized_pnl_dollars",
+    "challenge.equity_pnl_dollars",
+    "challenge.target_remaining_dollars",
+    "challenge.mll_floor_dollars",
+    "challenge.headroom_dollars"
   ]
 }

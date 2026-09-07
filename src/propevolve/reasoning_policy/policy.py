@@ -5,6 +5,7 @@ import numpy as np
 from ..decision import Action
 from .dataset import context_messages
 from .model_config import read_model_settings, validate_model_settings, verify_adapter_base, template_options
+from .tokenization import encode_completion
 
 
 class MLXActionPolicy:
@@ -60,31 +61,32 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
     def completion_scores(self, messages, completions):
         """Public frozen-batch diagnostic for actual supervised answer likelihood."""
         import mlx.core as mx
+        completions = tuple(completions)
+        tokens = self.tokenize_completions(messages, completions)
+        scores = sequence_scores(self.model, tokens)
+        mx.eval(scores)
+        values = np.asarray(scores.tolist())
+        if not np.isfinite(values).all():
+            raise ValueError("nonfinite action scores")
+        return dict(zip(completions, values.tolist()))
 
+    def tokenize_completions(self, messages, completions):
+        """Shared token boundary for inference and differentiable RL updates."""
         completions = tuple(completions)
         if not completions or len(set(completions)) != len(completions):
             raise ValueError("completions must be nonempty and unique")
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False,
-            add_generation_prompt=True, **self.chat_template_kwargs,
-        )
-        prefix = self.tokenizer.encode(prompt)
-        if not prefix:
-            raise ValueError("empty tokenized prompt")
-        scores = []
-        for completion in completions:
-            full = self.tokenizer.encode(prompt + completion + self.tokenizer.eos_token)
-            if full[:len(prefix)] != prefix:
-                raise ValueError("tokenizer changes the prompt/action boundary")
-            if len(full) > self.max_seq_length:
-                raise ValueError("inference token budget exceeded; refusing truncation")
-            inputs = mx.array([full[:-1]])
-            logits = self.model(inputs)[:, len(prefix) - 1:, :].astype(mx.float32)
-            log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-            targets = mx.array(full[len(prefix):])[None, :, None]
-            score = mx.take_along_axis(log_probs, targets, axis=-1).sum()
-            mx.eval(score)
-            scores.append(float(score.item()))
-        if not np.isfinite(scores).all():
-            raise ValueError("nonfinite action scores")
-        return dict(zip(completions, scores))
+        return tuple(encode_completion(self.tokenizer, messages, completion,
+            max_seq_length=self.max_seq_length, chat_template_kwargs=self.chat_template_kwargs)
+            for completion in completions)
+
+
+def sequence_scores(model, tokenized):
+    """Differentiable action log likelihoods; no detach before RL gradients."""
+    import mlx.core as mx
+    scores = []
+    for full, prefix_length in tokenized:
+        logits = model(mx.array([full[:-1]]))[:, prefix_length - 1:, :].astype(mx.float32)
+        log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+        targets = mx.array(full[prefix_length:])[None, :, None]
+        scores.append(mx.take_along_axis(log_probs, targets, axis=-1).sum())
+    return mx.stack(scores)

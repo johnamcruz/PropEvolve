@@ -20,8 +20,10 @@ trained or economically validated replacement.
 6. `dataset.write_supervised_dataset` writes disjoint chronological roles with
    full label reserves and a sealed boundary. A reviewed matching `audit.json`
    is required before the MLX preparation command can proceed.
-7. `mlx_sft` creates native MLX-LM prompt/completion datasets and delegates adapter
-   training to MLX-LM. Inputs are loss-masked. Overlength samples fail rather than
+7. `mlx_sft` creates encoded token/offset datasets and delegates adapter
+   training to MLX-LM. SFT, RL and inference share one chat-tokenization boundary;
+   the native dataset adapter does not wrap the prompt a second time.
+   Inputs are loss-masked. Overlength samples fail rather than
    silently truncate. The first model candidate is quantized, so LoRA is QLoRA.
 8. `policy.MLXActionPolicy` scores only legal action completions. These scores
    are log likelihoods, not C51 Q values. `evaluation.evaluate_policy` returns
@@ -81,21 +83,73 @@ but does not train unless `--train` is also supplied. Run from the repository
 root or provide explicit resolved paths in the JSON. Existing output paths are
 never overwritten by the wrapper.
 
-## Remaining before a runnable experiment
+## Explicit job stages
+
+The module entry point consumes the job JSON, with no campaign-specific Python
+edits. It never starts a stage automatically:
+
+```sh
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json check
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json collect
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json prepare
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json train
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json rl
+python -m propevolve.reasoning_policy.job --config config/reasoning/development.json evaluate
+```
+
+Run from the declared workspace root. Source recipes reuse existing market/cache
+loaders and challenge configuration, not the C51 campaign runner. Collection uses
+a hash-verified local C51 checkpoint as a declared continuation; its weights are
+shared but each branch has independent recurrent state. This is a label generator,
+not the reasoning learner. Dataset audit is a separate required stage of review:
+collection never authors its own passing causality receipt. Both initial partial
+and full rolling contexts can enter collection, matching inference.
+
+Preparation is reusable only when its rendered data, audited source and effective
+recipe still match. Model and adapter outputs are never silently overwritten.
+Use separate configured datasets/adapters to perform optional market SFT before
+action SFT; current launch template selects action SFT.
+
+### RL implementation status
+
+`rl.py` implements a bounded actor-only clipped policy-gradient draft. It samples
+legal actions from the reasoning policy in the **existing HistoricalChallengeEnv**
+and uses existing simulator rewards, including full terminal outcomes. It does
+not create another trading simulator or change any prop-firm rules.
+
+Each group repeats one identical episode start under one frozen policy version.
+The learner uses complete undiscounted return-to-go and a leave-one-out baseline
+from other independently sampled trajectories in the group. PPO-style clipping,
+old-policy categorical KL, entropy weight, minibatch/update budgets, gradient
+clipping, learning rate and seed are JSON settings. Only the loaded LoRA leaves
+are trainable. Inference and RL share the same differentiable completion scorer.
+
+This is **not** full PPO with a critic/GAE, nor a claim of a faithful GRPO port.
+Old-policy KL is not a fixed SFT-reference retention constraint. Long-horizon
+credit assignment and economic lift remain to be tested. Outputs are immutable
+adapter snapshots; exact optimizer/RNG resumption is not implemented. Normal
+evaluation is deterministic and performs no gradient updates or promotion.
+
+CPU reference/simulator tests and explicit-opt-in real MLX update/reload tests
+are written. They have not been executed in this implementation session.
+
+## Remaining before launch acceptance
 
 - Resolve the source recipe and audited temporal roles from teacher manifests.
   Same source data does not mean in-sample teacher predictions are OOF inputs.
 - Keep 2026 sealed; all development labels must resolve before that boundary.
-- Wire approved real-data loading/collection into a job recipe; the collector
-  currently exposes a Python API, not an automatic whole-history export job.
+- Fill reviewed source/continuation identities and explicit episode starts in
+  the job JSON. Null placeholders are intentional blockers, not implicit defaults.
 - Exercise all new tests and the existing environment/replay/campaign regression.
 - Benchmark real tokenizer/model SFT and reload on the target 16 GB machine.
 - Verify natural-frequency Long/Short/failure learning and chronological economics.
-- Add the separate environment-RL learner only after the supervised challenger
-  is stable; PPO/GRPO is NOT implemented by this SFT checkpoint.
+- Verify the RL draft with the real adapter, including update direction, frozen
+  base, legal actions and save/reload parity, before any long RL campaign.
 - Volume inputs are not connected. No volume probabilities are fabricated.
 
 The first format uses named numeric specialist/account context, not thousands of
 serialized FFM latent coordinates. Generated reasoning traces, continuous market
 token projection, distillation to teacher-free inputs, and campaign promotion are
-not claimed by this implementation checkpoint.
+not claimed by this implementation checkpoint. The Stanford course note informs
+the verified-feedback/offline-improvement workflow, not a guaranteed trading edge
+or an automatically validated optimizer.

@@ -33,6 +33,7 @@ packages = ["src/propevolve"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "config/defaults.json" = "propevolve/defaults.json"
+"config/reasoning/defaults.json" = "propevolve/reasoning_policy/defaults.json"
 
 [tool.hatch.metadata]
 allow-direct-references = true

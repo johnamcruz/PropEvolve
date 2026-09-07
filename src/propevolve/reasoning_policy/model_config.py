@@ -11,8 +11,10 @@ from pathlib import Path
 
 def model_defaults():
     # Repository config discovery, not a model/run identity or numeric setting.
-    return json.loads((Path(__file__).resolve().parents[3] /
-                       "config/reasoning/defaults.json").read_text())
+    source = Path(__file__).resolve().parents[3] / "config/reasoning/defaults.json"
+    if not source.is_file():
+        source = Path(__file__).with_name("defaults.json")
+    return json.loads(source.read_text())
 
 
 def template_options(options=None):

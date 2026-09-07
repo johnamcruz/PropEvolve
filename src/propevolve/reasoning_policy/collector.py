@@ -49,10 +49,11 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
         if not set(context_config.fields).issubset(fields):
             raise ValueError("configured input is not available from causal sources")
         history.append(
-            int(np.datetime64(info["timestamp"], "ns").astype(np.int64)),
+            int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
             {key: fields[key] for key in context_config.fields},
         )
-        if history.snapshot().available.all() and step % sample_stride == 0:
+        # Match inference, including initially partial context with its mask.
+        if step % sample_stride == 0:
             window = history.snapshot()
             labels = label_actions(
                 environment, reset_options=reset_options, prefix=tuple(prefix),

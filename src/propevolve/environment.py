@@ -1310,7 +1310,17 @@ class HistoricalChallengeEnv:
         not fee-adjusted realized returns. Flat/undefined R has explicit masks.
         """
         position = self._position
+        if self._account is None or self._market is None:
+            raise ValueError("causal trade context requires an initialized episode")
+        equity = self._equity(float(self._market.close[self._index]))
         result = {
+            "challenge.profit_target_dollars": float(self.spec.profit_target),
+            "challenge.max_loss_dollars": float(self.spec.max_loss),
+            "challenge.realized_pnl_dollars": float(self._account.realized_pnl),
+            "challenge.equity_pnl_dollars": float(equity),
+            "challenge.target_remaining_dollars": float(max(0.0, self.spec.profit_target - equity)),
+            "challenge.mll_floor_dollars": float(self._account.mll_floor_pnl),
+            "challenge.headroom_dollars": float(self._account.mll_headroom(equity)),
             "trade.open": float(position is not None),
             "trade.risk_available": 0.0,
             "trade.mfe_r_so_far": 0.0, "trade.mae_r_so_far": 0.0,

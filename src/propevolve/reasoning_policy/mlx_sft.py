@@ -7,10 +7,11 @@ explicit operations, never side effects of importing the C51 application.
 import argparse
 import json
 from pathlib import Path
-import subprocess
-import sys
+import math
+from dataclasses import dataclass
 from .integrity import file_digest
-from .model_config import validate_model_settings, model_defaults, template_options
+from .model_config import validate_model_settings, model_defaults
+from .tokenization import encode_completion
 
 
 def read_sft_config(path: str | Path) -> dict:
@@ -34,6 +35,9 @@ def read_sft_config(path: str | Path) -> dict:
     rank = payload["lora_parameters"].get("rank")
     if type(rank) is not int or rank < 1:
         raise ValueError("LoRA rank must be a positive integer")
+    if (isinstance(payload["learning_rate"], bool)
+            or not math.isfinite(float(payload["learning_rate"])) or payload["learning_rate"] <= 0):
+        raise ValueError("learning_rate must be finite and positive")
     return payload
 
 
@@ -62,7 +66,7 @@ def verify_dataset(path: str | Path) -> dict:
 
 
 def prepare_mlx_view(config_path: str | Path, output: str | Path, *, tokenizer) -> Path:
-    """Make native completion datasets without target/prompt leakage/truncation.
+    """Make encoded native datasets without target/prompt leakage/truncation.
 
 The supplied tokenizer is the model's actual tokenizer. This is a deliberate
 system boundary for tests; the production caller loads it with MLX-LM.
@@ -88,26 +92,89 @@ system boundary for tests; the production caller loads it with MLX-LM.
                     messages = record["messages"]
                     if [item["role"] for item in messages] != ["system", "user", "assistant"]:
                         raise ValueError("unexpected SFT conversation schema")
-                    prompt = tokenizer.apply_chat_template(
-                        messages[:-1], tokenize=False, add_generation_prompt=True,
-                        **template_options(config["chat_template_kwargs"]),
-                    )
                     completion = messages[-1]["content"]
-                    token_count = len(tokenizer.encode(prompt + completion + tokenizer.eos_token))
-                    if token_count > config["max_seq_length"]:
-                        raise ValueError("SFT example exceeds token budget; refusing silent truncation")
-                    target.write(json.dumps({"prompt": prompt, "completion": completion}) + "\n")
+                    tokens, offset = encode_completion(tokenizer, messages[:-1], completion,
+                        max_seq_length=config["max_seq_length"],
+                        chat_template_kwargs=config["chat_template_kwargs"])
+                    target.write(json.dumps({"tokens": tokens, "offset": offset}) + "\n")
                     count += 1
             if count != manifest["counts"][role] or count < config["batch_size"]:
                 raise ValueError(f"{role} sample count mismatch or incomplete batch")
         effective = {**config, "data": str(output.resolve())}
         (temporary / "sft.json").write_text(json.dumps(effective, indent=2))
         (temporary / "source_manifest.json").write_text(json.dumps(manifest, indent=2))
+        (temporary / "view_manifest.json").write_text(json.dumps({
+            "config": config, "source_manifest": manifest,
+            "files": {role: file_digest(temporary / f"{role}.jsonl") for role in ("train", "valid")},
+        }, indent=2))
         os.rename(temporary, output)
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
     return output / "sft.json"
+
+
+def verify_mlx_view(config_path, output):
+    """Reuse preparation only if its source, recipe and rendered files match."""
+    config = read_sft_config(config_path)
+    manifest = verify_dataset(config["data"])
+    output = Path(output)
+    receipt = json.loads((output / "view_manifest.json").read_text())
+    if receipt["config"] != config or receipt["source_manifest"] != manifest:
+        raise ValueError("prepared view source or config changed")
+    for role in ("train", "valid"):
+        if file_digest(output / f"{role}.jsonl") != receipt["files"][role]:
+            raise ValueError("prepared view changed")
+    effective = output / "sft.json"
+    if json.loads(effective.read_text()) != {**config, "data": str(output.resolve())}:
+        raise ValueError("prepared SFT config changed")
+    return effective
+
+
+@dataclass(frozen=True)
+class EncodedExample:
+    tokens: tuple[int, ...]
+    offset: int
+
+    def __len__(self):
+        return len(self.tokens)
+
+
+class EncodedDataset:
+    """MLX-LM dataset interface without applying a second chat template."""
+    def __init__(self, path):
+        self.rows = []
+        with Path(path).open() as stream:
+            for line in stream:
+                row = json.loads(line)
+                tokens, offset = tuple(row["tokens"]), row["offset"]
+                if (type(offset) is not int or not 0 < offset < len(tokens)
+                        or any(type(token) is not int or token < 0 for token in tokens)):
+                    raise ValueError("invalid encoded supervision")
+                self.rows.append(EncodedExample(tokens, offset))
+
+    def __getitem__(self, index):
+        return self.rows[index]
+
+    def __len__(self):
+        return len(self.rows)
+
+    def process(self, row):
+        return list(row.tokens), row.offset
+
+
+def train_prepared(config_path, view):
+    """Use native MLX-LM optimizer/LoRA training with already verified tokens."""
+    from types import SimpleNamespace
+    from mlx_lm import load
+    from mlx_lm.lora import train_model
+    effective = verify_mlx_view(config_path, view)
+    config = json.loads(effective.read_text())
+    model, _ = load(config["model"], tokenizer_config={"trust_remote_code": False})
+    if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
+        raise ValueError("QLoRA requires a quantized base")
+    train_model(SimpleNamespace(**config), model, EncodedDataset(Path(view) / "train.jsonl"),
+                EncodedDataset(Path(view) / "valid.jsonl"))
 
 
 def main(argv=None):
@@ -120,18 +187,21 @@ def main(argv=None):
     verify_dataset(config["data"])
     if Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path to preserve checkpoints")
-    # Optional runtime is imported only after the cheap integrity checks.
-    from mlx_lm import load
-    model, tokenizer = load(config["model"])
-    if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
-        raise ValueError("initial challenger requires a quantized base for QLoRA")
-    effective = prepare_mlx_view(args.config, args.view, tokenizer=tokenizer)
-    del model
-    import mlx.core as mx
-    mx.synchronize()
-    mx.clear_cache()
+    if Path(args.view).exists():
+        effective = verify_mlx_view(args.config, args.view)
+    else:
+        # Optional runtime is imported only after the cheap integrity checks.
+        from mlx_lm import load
+        model, tokenizer = load(config["model"], tokenizer_config={"trust_remote_code": False})
+        if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
+            raise ValueError("initial challenger requires a quantized base for QLoRA")
+        effective = prepare_mlx_view(args.config, args.view, tokenizer=tokenizer)
+        del model
+        import mlx.core as mx
+        mx.synchronize()
+        mx.clear_cache()
     if args.train:
-        subprocess.run([sys.executable, "-m", "mlx_lm.lora", "--config", str(effective)], check=True)
+        train_prepared(args.config, args.view)
     return 0
 
 
