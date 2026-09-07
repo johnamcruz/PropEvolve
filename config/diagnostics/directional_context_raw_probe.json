@@ -1,0 +1,16 @@
+{
+  "base_config": "config/historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep.json",
+  "features": "config/diagnostics/directional_context.json",
+  "dataset": ".private/research/full-market-aplus-nq-1",
+  "learner": {
+    "max_iter": 100,
+    "max_leaf_nodes": 7,
+    "min_samples_leaf": 100,
+    "learning_rate": 0.1,
+    "l2_regularization": 1.0,
+    "early_stopping": false,
+    "random_state": 0
+  },
+  "selection_quantile": 0.75,
+  "cpu_threads": 1
+}

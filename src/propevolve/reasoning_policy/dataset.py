@@ -76,7 +76,8 @@ Exact value ties choose WAIT/HOLD when legal, never an arbitrary direction.
 
 
 def market_supervised_record(context: ContextWindow, *, opportunity: tuple[bool, bool],
-                             source_id: str, label_end_ns: int, economic_contract: dict) -> dict:
+                             source_id: str, label_end_ns: int, economic_contract: dict,
+                             excursions=None) -> dict:
     """An optional market-understanding SFT phase before action SFT.
 
 Two observed binary outcomes are targets, not certain ex-ante probabilities.
@@ -97,10 +98,16 @@ Both may be false or true; never infer one side by negating the other.
         "declared horizon. Return the two labeled outcomes as JSON. Future prices are unknown."
     )
     completion = {"long_target_before_stop": opportunity[0], "short_target_before_stop": opportunity[1]}
+    if excursions is not None:
+        completion["future_excursions"] = excursions
+        messages[0]["content"] += (
+            " Also estimate full-horizon gross MFE/MAE and terminal net R for both sides. "
+            "Excursion extrema are not stop-managed trade returns."
+        )
     return {
         "schema": "propevolve_reasoning_supervision_v1", "source_id": source_id,
         "completed_at_ns": context.timestamps[-1], "label_end_ns": label_end_ns,
-        "messages": messages + [{"role": "assistant", "content": json.dumps(completion)}],
+        "messages": messages + [{"role": "assistant", "content": json.dumps(completion, allow_nan=False)}],
         "targets": completion,
     }
 

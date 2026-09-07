@@ -90,7 +90,8 @@ def clipped_action_loss(log_probs, old_log_probs, selected, advantage, *, clip_e
 
 
 def read_rl_config(path):
-    config = json.loads(Path(path).read_text())
+    from .model_config import read_recipe
+    config = read_recipe(path)
     for name in ("groups", "group_size", "max_steps", "epochs", "minibatch_size", "max_update_rows"):
         if type(config[name]) is not int or config[name] < 1:
             raise ValueError(f"{name} must be a positive integer")
@@ -104,6 +105,11 @@ def read_rl_config(path):
     for name in ("kl_weight", "entropy_weight", "weight_decay"):
         if isinstance(config[name], bool) or not np.isfinite(config[name]) or config[name] < 0:
             raise ValueError(f"{name} must be finite and nonnegative")
+    if (type(config["checkpoint_every_groups"]) is not int or config["checkpoint_every_groups"] < 1
+            or not config["checkpoint_root"]):
+        raise ValueError("RL checkpoint cadence and root are required")
+    if type(config["checkpoint_keep"]) is not int or config["checkpoint_keep"] < 1:
+        raise ValueError("checkpoint_keep must be positive")
     return config
 
 
@@ -111,9 +117,11 @@ class MLXAdapterLearner:
     """Reuse the policy's actual token scores; update only loaded LoRA tensors."""
 
     def __init__(self, policy, config):
+        import mlx.core as mx
         import mlx.optimizers as optim
         from mlx.utils import tree_flatten
         self.policy, self.config = policy, config
+        mx.random.seed(config["seed"])
         self.optimizer = optim.AdamW(learning_rate=config["learning_rate"],
                                     weight_decay=config["weight_decay"])
         # Loaded adapters must be the only trainable leaves.
@@ -140,6 +148,7 @@ class MLXAdapterLearner:
         indices = rng.choice(len(rows), size=min(len(rows), config["max_update_rows"]), replace=False)
         selected_rows = [rows[int(i)] for i in indices]
         losses = []
+        gradient_norms = []
         def loss(model, tokens, old, selected, advantage):
             scores = sequence_scores(model, tokens)
             log_probs = scores - mx.logsumexp(scores)
@@ -166,13 +175,20 @@ class MLXAdapterLearner:
                 mx.eval(norm)
                 if not np.isfinite(float(norm.item())) or not np.isfinite(losses).all():
                     raise ValueError("nonfinite RL gradient or loss")
+                gradient_norms.append(float(norm.item()))
                 factor = mx.minimum(1.0, config["max_grad_norm"] / mx.maximum(norm, mx.array(1e-12)))
                 self.optimizer.update(self.policy.model, tree_map(lambda g: g * factor, accumulated))
                 mx.eval(self.policy.model.parameters(), self.optimizer.state)
                 mx.clear_cache()
-        return {"mean_loss": float(np.mean(losses)), "sampled_update_rows": len(selected_rows)}
+        by_action = {}
+        for decision, advantage in selected_rows:
+            by_action.setdefault(decision.actions[decision.selected], []).append(float(advantage))
+        return {"mean_loss": float(np.mean(losses)), "sampled_update_rows": len(selected_rows),
+                "mean_gradient_norm": float(np.mean(gradient_norms)),
+                "sampled_action_mass": {name: len(values) for name, values in by_action.items()},
+                "mean_advantage_by_action": {name: float(np.mean(values)) for name, values in by_action.items()}}
 
-    def save(self, destination, parent_adapter, metadata):
+    def save(self, destination, parent_adapter, metadata, *, runtime=None):
         import mlx.core as mx
         from mlx.utils import tree_flatten
         import os
@@ -188,19 +204,30 @@ class MLXAdapterLearner:
                                 dict(tree_flatten(self.policy.model.trainable_parameters())))
             shutil.copyfile(Path(parent_adapter) / "adapter_config.json", temporary / "adapter_config.json")
             (temporary / "rl_receipt.json").write_text(json.dumps(metadata, indent=2, allow_nan=False))
+            if runtime is not None:
+                from .checkpoints import save_training_state
+                save_training_state(temporary, optimizer=self.optimizer, runtime=runtime)
+                from .checkpoints import seal_checkpoint
+                seal_checkpoint(temporary)
             os.rename(temporary, destination)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
 
 
-def train_rl(policy, environment, *, learner, episodes, context_config, sources, config):
+def train_rl(policy, environment, *, learner, episodes, context_config, sources, config,
+             resume_state=None, checkpoint=None):
     """One policy version per complete same-start group; never update mid-rollout."""
     if not episodes:
         raise ValueError("RL training needs explicit training episodes")
     rng = np.random.default_rng(config["seed"])
-    metrics = []
-    for group in range(config["groups"]):
+    metrics = [] if resume_state is None else list(resume_state["metrics"])
+    start_group = 0 if resume_state is None else resume_state["next_group"]
+    if type(start_group) is not int or not 0 <= start_group <= config["groups"] or len(metrics) != start_group:
+        raise ValueError("invalid RL resume group")
+    if resume_state is not None:
+        rng.bit_generator.state = resume_state["numpy_rng"]
+    for group in range(start_group, config["groups"]):
         options = episodes[group % len(episodes)]
         trajectories, outcomes = [], []
         for _ in range(config["group_size"]):
@@ -214,4 +241,8 @@ def train_rl(policy, environment, *, learner, episodes, context_config, sources,
                   **learner.update(rows, rng)}
         print(json.dumps(report, allow_nan=False), flush=True)
         metrics.append(report)
+        if checkpoint is not None and ((group + 1) % config["checkpoint_every_groups"] == 0
+                                       or group + 1 == config["groups"]):
+            checkpoint({"next_group": group + 1, "numpy_rng": rng.bit_generator.state,
+                        "metrics": metrics})
     return metrics

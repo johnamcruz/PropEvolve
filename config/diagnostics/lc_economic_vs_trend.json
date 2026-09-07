@@ -1,0 +1,15 @@
+{
+  "base_config": "config/historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep.json",
+  "dataset": ".private/research/full-market-aplus-nq-1",
+  "output": ".private/research/lc-economic-vs-trend-expansion-inputs.json",
+  "ticker": "NQ",
+  "earlier_quantile": 0.75,
+  "lorentzian": {
+    "neighbors": 8,
+    "history_size": 256,
+    "label_horizon": 150,
+    "minimum_move": 0.0,
+    "minimum_vote": 0.0,
+    "label_source": "economic"
+  }
+}

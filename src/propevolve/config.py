@@ -1481,6 +1481,8 @@ def load_experiment_config(path: str | Path) -> dict:
     if not str(cache["encoder_identity_sha256"]).strip():
         raise ValueError("cache encoder identity must be declared")
     agent = payload["agent"]
+    if agent["economic_target_mode"] not in {"shared", "td_only"}:
+        raise ValueError("economic target mode must be shared or td_only")
     if agent["entry_action_loss_reduction"] not in ENTRY_ACTION_LOSS_REDUCTIONS:
         raise ValueError("entry action loss reduction is invalid")
     if (
@@ -1495,6 +1497,7 @@ def load_experiment_config(path: str | Path) -> dict:
         "pcgrad_safety_opportunity_v1",
         "pcgrad_preserve_opportunity_v2",
         "pcgrad_preserve_economic_boundaries_v3",
+        "pcgrad_preserve_paired_boundaries_v4",
     }:
         raise ValueError("auxiliary gradient conflict mode is invalid")
     if (
@@ -1521,6 +1524,7 @@ def load_experiment_config(path: str | Path) -> dict:
             "pcgrad_safety_opportunity_v1",
             "pcgrad_preserve_opportunity_v2",
             "pcgrad_preserve_economic_boundaries_v3",
+            "pcgrad_preserve_paired_boundaries_v4",
         }
         and payload["runtime"]["mixed_precision"] != "off"
     ):

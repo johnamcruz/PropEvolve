@@ -1,0 +1,10 @@
+{
+  "near_blow_headroom_fraction": 0.1,
+  "minimum_episodes": 100,
+  "minimum_pass_rate": 0.6,
+  "maximum_blow_rate": 0.0,
+  "maximum_near_blow_rate": 0.1,
+  "require_teacher_free": true,
+  "minimum_long_entries": 1,
+  "minimum_short_entries": 1
+}

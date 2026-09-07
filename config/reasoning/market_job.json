@@ -1,0 +1,7 @@
+{
+  "inherits": "development.json",
+  "dataset_kind": "market",
+  "dataset_output": "runs/reasoning-challenger/market-dataset",
+  "sft_config": "config/reasoning/market_sft.json",
+  "mlx_view": "runs/reasoning-challenger/market-mlx-view"
+}

@@ -1,6 +1,10 @@
 {
-  "input_policy_config": "config/reasoning/sft.json",
+  "input_policy_config": "config/reasoning/policy_sft.json",
   "output_adapter": "runs/reasoning-challenger/rl-adapters",
+  "resume_checkpoint": null,
+  "checkpoint_root": "runs/reasoning-challenger/rl-checkpoints",
+  "checkpoint_every_groups": 1,
+  "checkpoint_keep": 2,
   "seed": 17,
   "groups": 1,
   "group_size": 2,

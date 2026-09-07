@@ -89,6 +89,7 @@ _AUXILIARY_GRADIENT_CONFLICT_MODES = {
     "pcgrad_safety_opportunity_v1",
     "pcgrad_preserve_opportunity_v2",
     "pcgrad_preserve_economic_boundaries_v3",
+    "pcgrad_preserve_paired_boundaries_v4",
 }
 _ENTRY_BALANCE_ADDITIVE_FIELDS = (
     "rows",
@@ -1208,7 +1209,14 @@ class RecurrentC51Agent:
         compile_mode: str = "default",
         mps_prefer_metal: bool = False,
         mps_fast_math: bool = False,
+        economic_target_mode: str = "shared",
     ) -> None:
+        self._constructor_parameters = dict(locals())
+        self._constructor_parameters.pop("self")
+        if economic_target_mode not in {"shared", "td_only"}:
+            raise ValueError("economic target mode must be shared or td_only")
+        self.economic_target_mode = economic_target_mode
+        self._economic_critic: RecurrentC51Agent | None = None
         if trend_start_confluence_opportunity_loss_weight is None:
             trend_start_confluence_opportunity_loss_weight = (
                 1.0 if trend_start_confluence_loss_weight > 0.0 else 0.0
@@ -1345,6 +1353,7 @@ class RecurrentC51Agent:
                 "pcgrad_safety_opportunity_v1",
                 "pcgrad_preserve_opportunity_v2",
                 "pcgrad_preserve_economic_boundaries_v3",
+                "pcgrad_preserve_paired_boundaries_v4",
             }
             and mixed_precision != "off"
         ):
@@ -1692,6 +1701,10 @@ class RecurrentC51Agent:
     @torch.no_grad()
     def _update_target_network(self) -> None:
         """Apply the recipe-declared stable target-network update."""
+        if self._economic_critic is not None:
+            # Policy preferences must never enter the economic bootstrap.
+            self.target.load_state_dict(self._economic_critic.target.state_dict(), strict=False)
+            return
         if self.target_update_mode == "hard":
             if self._updates % self.target_sync_updates == 0:
                 self.target.load_state_dict(self.online.state_dict())
@@ -1973,6 +1986,33 @@ class RecurrentC51Agent:
         training_steps = (
             sequence_length - self.recurrent_burn_in - self.n_step_return + 1
         )
+        if self.economic_target_mode == "td_only":
+            if self._economic_critic is None:
+                parameters = dict(self._constructor_parameters)
+                parameters["economic_target_mode"] = "shared"
+                # Initialization must not perturb the policy's random stream.
+                with torch.random.fork_rng(devices=[]):
+                    critic = RecurrentC51Agent(**parameters)
+                critic.online.load_state_dict(self.online.state_dict())
+                critic.target.load_state_dict(self.target.state_dict())
+                critic.discard_teacher()
+                critic.discard_retention_anchor()
+                critic.policy_retention_loss_weight = 0.0
+                self._economic_critic = critic
+            # Schedules may change optimizer groups after construction. The
+            # economic learner must use the live schedule, not stale defaults.
+            for economic_group, policy_group in zip(
+                self._economic_critic.optimizer.param_groups,
+                self.optimizer.param_groups, strict=True,
+            ):
+                economic_group.update({
+                    name: value for name, value in policy_group.items()
+                    if name != "params"
+                })
+            self._economic_critic.train_batch(
+                sequences, teacher_weight_scale=0., entry_action_weight_scale=0.,
+            )
+            self._update_target_network()
         causal_observations = torch.as_tensor(
             _causal_observation_batch(sequences),
             dtype=torch.float32,
@@ -2251,7 +2291,24 @@ class RecurrentC51Agent:
                         -1, -1, len(Action), self.atoms
                     ),
                 )
-            online_q = (online_next.float().softmax(-1) * self.support).sum(-1)
+            bootstrap_online = online_next
+            if self._economic_critic is not None:
+                critic = self._economic_critic
+                critic_hidden = None
+                with self._autocast():
+                    if self.recurrent_burn_in:
+                        _, critic_hidden = self._recurrent_features_with_resets(
+                            critic.online, causal_observations[:, :self.recurrent_burn_in],
+                            burn_in_reset_rows,
+                        )
+                    critic_recurrent, _ = self._recurrent_features_with_resets(
+                        critic.online, causal_observations[:, self.recurrent_burn_in:],
+                        learning_reset_rows, critic_hidden,
+                    )
+                    bootstrap_online = critic.online.distribution_logits(critic_recurrent).gather(
+                        1, target_state_indices[..., None, None].expand(-1, -1, len(Action), self.atoms),
+                    )
+            online_q = (bootstrap_online.float().softmax(-1) * self.support).sum(-1)
             online_q = online_q.masked_fill(~next_masks, -torch.inf)
             next_actions = online_q.argmax(-1)
             target_current_logits = target_causal[:, :training_steps]
@@ -3267,7 +3324,10 @@ class RecurrentC51Agent:
                             )
                             if (
                                 self.auxiliary_gradient_conflict_mode
-                                == "pcgrad_preserve_economic_boundaries_v3"
+                                in {
+                                    "pcgrad_preserve_economic_boundaries_v3",
+                                    "pcgrad_preserve_paired_boundaries_v4",
+                                }
                             ):
                                 boundary_all_flat_q = (
                                     economic_boundary_q_values()[
@@ -4404,6 +4464,7 @@ class RecurrentC51Agent:
         gradient_conflict_post_projection_cosine = 0.0
         gradient_conflict_projected = 0.0
         preserve_economic_boundaries = False
+        protect_positive_pair_ordering = False
         economic_boundary_gradients: tuple[
             tuple[torch.Tensor, ...], ...
         ] = ()
@@ -4415,6 +4476,7 @@ class RecurrentC51Agent:
                 "pcgrad_safety_opportunity_v1",
                 "pcgrad_preserve_opportunity_v2",
                 "pcgrad_preserve_economic_boundaries_v3",
+                "pcgrad_preserve_paired_boundaries_v4",
             }
         ):
             trainable_parameters = tuple(
@@ -4453,7 +4515,10 @@ class RecurrentC51Agent:
             )
             preserve_economic_boundaries = (
                 self.auxiliary_gradient_conflict_mode
-                == "pcgrad_preserve_economic_boundaries_v3"
+                in {
+                    "pcgrad_preserve_economic_boundaries_v3",
+                    "pcgrad_preserve_paired_boundaries_v4",
+                }
             )
             opportunity_gradients = materialized_gradients(
                 gradient_opportunity_loss,
@@ -4476,8 +4541,12 @@ class RecurrentC51Agent:
                     if values.numel() <= 1:
                         continue
                     satisfied = values.detach() >= self.entry_action_margin
-                    if bool(satisfied.any()):
-                        nearest = values.detach().masked_fill(~satisfied, torch.inf).argmin()
+                    protected = (
+                        values.detach() > 0.0
+                        if protect_positive_pair_ordering else satisfied
+                    )
+                    if bool(protected.any()):
+                        nearest = values.detach().masked_fill(~protected, torch.inf).argmin()
                         individual_boundary_losses.append(-values[nearest])
                 protected_boundary_losses += tuple(individual_boundary_losses)
                 economic_boundary_individual_constraint_count = len(individual_boundary_losses)
@@ -4507,9 +4576,34 @@ class RecurrentC51Agent:
                         "pcgrad_preserve_opportunity_v2",
                         "pcgrad_preserve_economic_boundaries_v3",
                     }
+                    or (
+                        self.auxiliary_gradient_conflict_mode
+                        == "pcgrad_preserve_paired_boundaries_v4"
+                        and bool(economic_boundary_specs)
+                    )
                 ),
-                preserve_economic_boundaries=preserve_economic_boundaries,
+                preserve_economic_boundaries=(
+                    self.auxiliary_gradient_conflict_mode
+                    == "pcgrad_preserve_economic_boundaries_v3"
+                    or (
+                        self.auxiliary_gradient_conflict_mode
+                        == "pcgrad_preserve_paired_boundaries_v4"
+                        and bool(economic_boundary_specs)
+                    )
+                ),
             )
+            if (
+                self.auxiliary_gradient_conflict_mode
+                == "pcgrad_preserve_paired_boundaries_v4"
+            ):
+                # Protect explicit replay witnesses, not aggregate outcome
+                # classes whose expected economic preference can change.
+                gradient_blend = gradient_blend._replace(
+                    combined_gradients=_project_vector_onto_economic_boundaries(
+                        gradient_blend.combined_gradients,
+                        economic_boundary_gradients,
+                    ),
+                )
             for parameter, gradient in zip(
                 trainable_parameters,
                 gradient_blend.combined_gradients,
@@ -4594,7 +4688,11 @@ class RecurrentC51Agent:
                         economic_boundary_margin_before,
                         strict=True,
                     ))
-                    if bool((margin_before >= self.entry_action_margin).any())
+                    if bool((
+                        margin_before > 0.0
+                        if protect_positive_pair_ordering
+                        else margin_before >= self.entry_action_margin
+                    ).any())
                 )
                 economic_boundary_hard_constraint_count = len(
                     hard_constraint_indices
@@ -4687,11 +4785,23 @@ class RecurrentC51Agent:
                     }
                     boundary_required_headrooms = {
                         # A group average can hide the loss of a previously
-                        # learned example. Protect each satisfied row, while
-                        # leaving unsatisfied rows free to acquire its target.
+                        # learned example. Paired-only mode also preserves
+                        # correct ordering below the full target margin.
                         f"{name}#{boundary_index}": float((
-                            after - self.entry_action_margin
-                        )[before >= self.entry_action_margin].min().detach())
+                            after - (
+                                torch.where(
+                                    before >= self.entry_action_margin,
+                                    torch.full_like(before, self.entry_action_margin),
+                                    torch.zeros_like(before),
+                                )
+                                if protect_positive_pair_ordering
+                                else self.entry_action_margin
+                            )
+                        )[
+                            before > 0.0
+                            if protect_positive_pair_ordering
+                            else before >= self.entry_action_margin
+                        ].min().detach())
                         for boundary_index, (
                             (name, _, _, _),
                             before,
@@ -5340,6 +5450,11 @@ class RecurrentC51Agent:
 
         self.last_train_metrics = {
             "rl_loss": rl_loss_value,
+            "economic_target_td_only": float(self._economic_critic is not None),
+            "economic_critic_rl_loss": (
+                0.0 if self._economic_critic is None
+                else self._economic_critic.last_train_metrics["rl_loss"]
+            ),
             "teacher_loss": teacher_loss_value,
             "entry_search_loss": entry_search_loss_value,
             "entry_action_loss": entry_action_loss_value,
@@ -5650,6 +5765,8 @@ class RecurrentC51Agent:
 
     def discard_teacher(self) -> None:
         """Remove the training-only head while retaining shared learned weights."""
+        self._economic_critic = None
+        self.economic_target_mode = "shared"
         self.auxiliary_gradient_conflict_mode = "none"
         self.exclude_economic_winners_from_chop_wait = False
         self.challenge_return_self_imitation_weight = 0.0
@@ -5730,6 +5847,8 @@ class RecurrentC51Agent:
         """Fail closed unless this policy is safe for validation or shipping."""
         if (
             self.teacher_channels != 0
+            or self._economic_critic is not None
+            or self.economic_target_mode != "shared"
             or self.teacher_channel_names
             or self.teacher_channel_loss_weights
             or self.teacher_loss_weight != 0.0
@@ -5790,7 +5909,11 @@ class RecurrentC51Agent:
     def save(self, path: str | Path, *, manifest: dict) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
+        torch.save(self._checkpoint_payload(manifest=manifest), path)
+        return path
+
+    def _checkpoint_payload(self, *, manifest: dict) -> dict:
+        return {
             "schema": "propevolve_recurrent_c51_v1",
             "manifest": dict(manifest),
             "online": self.online.state_dict(),
@@ -5801,6 +5924,7 @@ class RecurrentC51Agent:
             "rng_state": self._rng.bit_generator.state,
             "support": self.support.cpu(),
             "config": {
+                "economic_target_mode": self.economic_target_mode,
                 "observation_dim": self.observation_dim,
                 "hidden_dim": self.hidden_dim,
                 "atoms": self.atoms,
@@ -5924,8 +6048,11 @@ class RecurrentC51Agent:
             "retention_anchor_applies_to_all_management_rows": (
                 self.retention_anchor_applies_to_all_management_rows
             ),
-        }, path)
-        return path
+            "economic_critic": (
+                None if self._economic_critic is None
+                else self._economic_critic._checkpoint_payload(manifest={})
+            ),
+        }
 
     @classmethod
     def warm_start(
@@ -5940,6 +6067,12 @@ class RecurrentC51Agent:
             map_location=str(config["device"]),
             weights_only=False,
         )
+        return cls._warm_start_payload(payload, config=config)
+
+    @classmethod
+    def _warm_start_payload(
+        cls, payload: dict, *, config: Mapping[str, object],
+    ) -> tuple["RecurrentC51Agent", dict]:
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")
         parent = dict(payload["config"])
@@ -5970,6 +6103,15 @@ class RecurrentC51Agent:
 
         load_shared(agent.online, payload["online"])
         load_shared(agent.target, payload["target"])
+        if agent.economic_target_mode == "td_only" and payload.get("economic_critic") is not None:
+            critic, _ = cls._warm_start_payload(
+                payload["economic_critic"],
+                config={**requested, "economic_target_mode": "shared"},
+            )
+            critic.discard_teacher()
+            critic.discard_retention_anchor()
+            critic.policy_retention_loss_weight = 0.0
+            agent._economic_critic = critic
         agent.retain_policy(apply_to_all_management_rows=True)
         return agent, dict(payload["manifest"])
 
@@ -5982,6 +6124,13 @@ class RecurrentC51Agent:
         learner_backend_override: str | None = None,
     ) -> tuple["RecurrentC51Agent", dict]:
         payload = torch.load(Path(path), map_location=device, weights_only=False)
+        return cls._from_checkpoint_payload(payload, device=device,
+            learner_backend_override=learner_backend_override)
+
+    @classmethod
+    def _from_checkpoint_payload(
+        cls, payload: dict, *, device: str, learner_backend_override: str | None = None,
+    ) -> tuple["RecurrentC51Agent", dict]:
         if payload.get("schema") != "propevolve_recurrent_c51_v1":
             raise ValueError("unsupported PropEvolve model bundle")
         config = dict(payload["config"])
@@ -6083,8 +6232,18 @@ class RecurrentC51Agent:
         if "scaler" in payload:
             agent.scaler.load_state_dict(payload["scaler"])
         agent._updates = int(payload["updates"])
+        if (agent.economic_target_mode == "td_only" and agent._updates > 0
+                and payload.get("economic_critic") is None):
+            raise ValueError("trained checkpoint is missing economic critic state")
         if "rng_state" in payload:
             agent._rng.bit_generator.state = payload["rng_state"]
+        if payload.get("economic_critic") is not None:
+            if agent.economic_target_mode != "td_only":
+                raise ValueError("economic critic requires td_only targets")
+            agent._economic_critic, _ = cls._from_checkpoint_payload(
+                payload["economic_critic"], device=device,
+                learner_backend_override=learner_backend_override,
+            )
         if payload.get("retention_anchor") is not None:
             agent.retain_policy(
                 apply_to_all_management_rows=bool(

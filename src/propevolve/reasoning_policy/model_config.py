@@ -44,8 +44,30 @@ def validate_model_settings(payload):
 
 
 def read_model_settings(path):
-    payload = {**model_defaults(), **json.loads(Path(path).read_text())}
+    payload = {**model_defaults(), **read_recipe(path)}
     return validate_model_settings(payload)
+
+
+def read_recipe(path, _parents=()):
+    """JSON inheritance is relative to the declaring file, never its name.
+
+Resource paths inside the recipe retain the documented workspace semantics.
+Inherited mappings merge recursively; explicit null replaces a prior value.
+    """
+    path = Path(path).resolve()
+    if path in _parents:
+        raise ValueError("cyclic reasoning configuration inheritance")
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("reasoning configuration must be a JSON object")
+    parent = payload.pop("inherits", None)
+    base = {} if parent is None else read_recipe(path.parent / parent, (*_parents, path))
+    def merge(left, right):
+        output = dict(left)
+        for key, value in right.items():
+            output[key] = merge(output[key], value) if isinstance(output.get(key), dict) and isinstance(value, dict) else value
+        return output
+    return merge(base, payload)
 
 
 def verify_adapter_base(model, adapter_path):

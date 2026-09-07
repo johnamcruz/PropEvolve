@@ -14,6 +14,36 @@ from ..decision import Action
 from ..environment import HistoricalChallengeEnv
 
 
+def label_future_excursions(market, *, decision, role_end, horizon, risk_dollars,
+                            point_value, round_trip_fee):
+    """Full-horizon market targets, not claims of an executed stop-managed trade.
+
+Entry reference is the next open. Gross extrema use the declared dollar risk
+budget as denominator; terminal net R includes one round-trip fee. The path may
+cross a stop before its MFE: target-before-stop remains a separate label.
+    """
+    if (type(decision) is not int or type(horizon) is not int or type(role_end) is not int
+            or decision < 0 or horizon < 1 or not decision < role_end <= len(market.close)):
+        raise ValueError("invalid excursion horizon")
+    if (not np.isfinite([risk_dollars, point_value, round_trip_fee]).all()
+            or risk_dollars <= 0 or point_value <= 0 or round_trip_fee < 0):
+        raise ValueError("invalid excursion economics")
+    first, end = decision + 1, decision + 1 + horizon
+    if end > role_end:
+        return None
+    entry = float(market.open[first])
+    high, low, close = float(np.max(market.high[first:end])), float(np.min(market.low[first:end])), float(market.close[end - 1])
+    if not np.isfinite([entry, high, low, close]).all():
+        raise ValueError("nonfinite excursion source")
+    scale = point_value / risk_dollars
+    return {side: {
+        "mfe_r_gross": max(0.0, favorable) * scale,
+        "mae_r_gross": max(0.0, adverse) * scale,
+        "terminal_r_net": (sign * (close - entry) * point_value - round_trip_fee) / risk_dollars,
+    } for side, sign, favorable, adverse in (
+        ("long", 1, high - entry, entry - low), ("short", -1, entry - low, high - entry))}
+
+
 def label_entry_opportunity(
     market, *, decision: int, role_end: int, horizon: int, risk_dollars: float,
     point_value: float, round_trip_fee: float, target_r: float, stop_r: float,

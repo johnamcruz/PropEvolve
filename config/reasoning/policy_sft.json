@@ -1,0 +1,4 @@
+{
+  "inherits": "sft.json",
+  "resume_adapter_file": "runs/reasoning-challenger/market-adapters/adapters.safetensors"
+}

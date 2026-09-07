@@ -10,12 +10,12 @@ from pathlib import Path
 import math
 from dataclasses import dataclass
 from .integrity import file_digest
-from .model_config import validate_model_settings, model_defaults
+from .model_config import validate_model_settings, model_defaults, read_recipe
 from .tokenization import encode_completion
 
 
 def read_sft_config(path: str | Path) -> dict:
-    payload = {**model_defaults(), **json.loads(Path(path).read_text())}
+    payload = {**model_defaults(), **read_recipe(path)}
     required = {
         "model", "data", "adapter_path", "train", "fine_tune_type", "mask_prompt",
         "num_layers", "batch_size", "iters", "learning_rate", "max_seq_length",
@@ -170,6 +170,18 @@ def train_prepared(config_path, view):
     from mlx_lm.lora import train_model
     effective = verify_mlx_view(config_path, view)
     config = json.loads(effective.read_text())
+    if Path(config["adapter_path"]).exists():
+        raise FileExistsError("adapter output exists; choose a new path")
+    if config["resume_adapter_file"] is not None:
+        from .model_config import verify_adapter_base
+        parent = Path(config["resume_adapter_file"]).parent
+        verify_adapter_base(config["model"], parent)
+        metadata = json.loads((parent / "adapter_config.json").read_text())
+        for key in ("lora_parameters", "num_layers", "chat_template_kwargs"):
+            if metadata.get(key) != config[key]:
+                raise ValueError(f"SFT warm-start contract differs at {key}")
+    import numpy as np
+    np.random.seed(config["seed"])
     model, _ = load(config["model"], tokenizer_config={"trust_remote_code": False})
     if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
         raise ValueError("QLoRA requires a quantized base")

@@ -35,16 +35,19 @@ Missing specialist history is an error, not a fabricated zero probability.
     names = ACCOUNT_FIELDS + (MANAGEMENT_FIELDS if len(account) > len(ACCOUNT_FIELDS) else ())
     fields = {f"account.{name}": float(value) for name, value in zip(names, account)}
     kinds = [source.kind for source in sources]
-    if len(kinds) != len(set(kinds)) or set(kinds) != {"expansion", "trend", "regime"}:
-        raise ValueError("challenger requires Expansion, Trend and Regime sources")
+    if (len(kinds) != len(set(kinds)) or not {"expansion", "trend", "regime"}.issubset(kinds)
+            or set(kinds) - {"expansion", "trend", "regime", "volume"}):
+        raise ValueError("challenger requires Expansion, Trend, Regime and optional Volume")
     for source in sources:
         values = source.targets.target(ticker, row)
         if values is None:
             raise ValueError(f"unavailable {source.kind} evidence")
         values = np.asarray(values)
-        if (values.shape != (len(source.channels),) or not np.isfinite(values).all()
-                or (values < 0).any() or (values > 1).any()):
-            raise ValueError(f"invalid {source.kind} probabilities")
+        bounds = np.asarray(getattr(source, "bounds", [(0.0, 1.0)] * len(source.channels)))
+        if (values.shape != (len(source.channels),) or bounds.shape != (len(source.channels), 2)
+                or not np.isfinite(values).all()
+                or (values < bounds[:, 0]).any() or (values > bounds[:, 1]).any()):
+            raise ValueError(f"invalid {source.kind} values")
         for channel, value in zip(source.channels, values):
             fields[f"{source.kind}.{channel}"] = float(value)
     return fields

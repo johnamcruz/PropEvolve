@@ -1,0 +1,5 @@
+{
+  "inherits": "sft.json",
+  "data": "runs/reasoning-challenger/market-dataset",
+  "adapter_path": "runs/reasoning-challenger/market-adapters"
+}

@@ -5,7 +5,7 @@ import numpy as np
 from .context import RollingContext
 from .dataset import supervised_record, market_supervised_record
 from .inputs import specialist_account_fields
-from .labels import label_actions, label_entry_opportunity
+from .labels import label_actions, label_entry_opportunity, label_future_excursions
 
 
 def collect_examples(
@@ -75,6 +75,9 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                 market_record = market_supervised_record(
                     window, opportunity=opportunity, source_id=source_id,
                     label_end_ns=int(market.timestamps[row + opportunity_contract["horizon"]].astype("datetime64[ns]").astype(np.int64)),
+                    excursions=label_future_excursions(market, decision=row, role_end=len(market.close),
+                        horizon=opportunity_contract["horizon"], risk_dollars=environment.spec.per_trade_risk_dollars,
+                        point_value=environment.tick_values[ticker], round_trip_fee=environment.round_trip_fees[ticker]),
                     economic_contract={
                         **opportunity_contract,
                         "risk_dollars": environment.spec.per_trade_risk_dollars,
