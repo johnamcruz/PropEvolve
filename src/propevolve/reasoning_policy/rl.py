@@ -13,8 +13,8 @@ import numpy as np
 
 from ..decision import Action
 from .context import RollingContext
-from .dataset import context_messages
-from .inputs import specialist_account_fields
+from .dataset import context_messages, embedding_payload
+from .inputs import observe_context
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class RLDecision:
     selected: int
     old_log_probs: tuple[float, ...]
     reward: float
+    market_context: dict | None = None
 
 
 def rollout(policy, environment, *, options, context_config, sources, rng, max_steps):
@@ -34,15 +35,12 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
     row = options["start"]
     decisions = []
     for _ in range(max_steps):
-        fields = specialist_account_fields(observation, embedding_dim=market.embeddings.shape[1],
-                                            ticker=options["ticker"], row=row, sources=sources)
-        fields.update(environment.causal_trade_context())
-        context.append(int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
-                       {key: fields[key] for key in context_config.fields})
+        observe_context(context, environment, observation, ticker=options["ticker"], row=row, sources=sources)
         actions = tuple(sorted((Action(a) for a in info["valid_actions"]), key=int))
         names = tuple(action.name for action in actions)
         messages = context_messages(context.snapshot(), actions)
-        scores = policy.completion_scores(messages, names)
+        market_context = embedding_payload(context.snapshot()) or None
+        scores = policy.completion_scores(messages, names, **({"market_context": market_context} if market_context else {}))
         logits = np.asarray([scores[name] for name in names], dtype=np.float64)
         if not np.isfinite(logits).all():
             raise ValueError("nonfinite rollout logits")
@@ -50,7 +48,7 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
         log_probs = logits - np.log(np.exp(logits).sum())
         selected = int(rng.choice(len(actions), p=np.exp(log_probs)))
         observation, reward, terminated, truncated, info = environment.step(actions[selected])
-        decisions.append(RLDecision(messages, names, selected, tuple(log_probs), float(reward)))
+        decisions.append(RLDecision(messages, names, selected, tuple(log_probs), float(reward), market_context))
         row = int(info["fill_index"])
         if terminated or truncated:
             if info["outcome"] not in {"pass", "blow", "timeout"}:
@@ -135,6 +133,8 @@ class MLXAdapterLearner:
         leaves = tree_flatten(policy.model.trainable_parameters())
         if not found or any(name.rsplit(".", 1)[-1] not in {"lora_a", "lora_b"} for name, _ in leaves):
             raise ValueError("RL requires trainable LoRA adapters and a frozen base")
+        if policy.input_mode == "embeddings":
+            policy.model.market_projector.unfreeze()
         policy.model.eval()  # deterministic scoring; eval does not disable gradients
 
     def update(self, rows, rng):
@@ -162,7 +162,8 @@ class MLXAdapterLearner:
                 batch = selected_rows[start:start + config["minibatch_size"]]
                 accumulated = None
                 for decision, advantage in batch:
-                    tokens = self.policy.tokenize_completions(decision.messages, decision.actions)
+                    tokens = self.policy.tokenize_completions(decision.messages, decision.actions,
+                        market_context=decision.market_context)
                     value, grads = grad_fn(self.policy.model, tokens, mx.array(decision.old_log_probs),
                                            decision.selected, advantage)
                     mx.eval(value, grads)
@@ -200,8 +201,8 @@ class MLXAdapterLearner:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".reasoning-rl-", dir=destination.parent))
         try:
-            mx.save_safetensors(str(temporary / "adapters.safetensors"),
-                                dict(tree_flatten(self.policy.model.trainable_parameters())))
+            from .projector import export_policy_weights
+            export_policy_weights(self.policy.model, temporary)
             shutil.copyfile(Path(parent_adapter) / "adapter_config.json", temporary / "adapter_config.json")
             (temporary / "rl_receipt.json").write_text(json.dumps(metadata, indent=2, allow_nan=False))
             if runtime is not None:
@@ -216,7 +217,7 @@ class MLXAdapterLearner:
 
 
 def train_rl(policy, environment, *, learner, episodes, context_config, sources, config,
-             resume_state=None, checkpoint=None):
+             resume_state=None, checkpoint=None, diagnostic_records=None):
     """One policy version per complete same-start group; never update mid-rollout."""
     if not episodes:
         raise ValueError("RL training needs explicit training episodes")
@@ -228,6 +229,8 @@ def train_rl(policy, environment, *, learner, episodes, context_config, sources,
     if resume_state is not None:
         rng.bit_generator.state = resume_state["numpy_rng"]
     for group in range(start_group, config["groups"]):
+        from .learning_audit import score_labeled_examples
+        before = None if diagnostic_records is None else score_labeled_examples(policy, diagnostic_records)
         options = episodes[group % len(episodes)]
         trajectories, outcomes = [], []
         for _ in range(config["group_size"]):
@@ -239,6 +242,18 @@ def train_rl(policy, environment, *, learner, episodes, context_config, sources,
         rows = training_rows(trajectories, advantage_scale=config["advantage_scale"])
         report = {"group": group, "episodes": outcomes, "rollout_decisions": len(rows),
                   **learner.update(rows, rng)}
+        from collections import Counter
+        available = Counter(decision.actions[decision.selected] for decision, _ in rows)
+        report["available_action_mass"] = dict(available)
+        selected = report.get("sampled_action_mass", {})
+        report["update_coverage"] = {name: selected.get(name, 0) / count for name, count in available.items()}
+        if before is not None:
+            after = score_labeled_examples(policy, diagnostic_records)
+            report.update(audit_before=before, audit_after=after,
+                ranking_regressions=sum(a["correct"] and not b["correct"] for a, b in zip(before, after)))
+            reference = metrics[0].get("audit_before", before) if metrics else before
+            report["regressions_from_initial_policy"] = sum(
+                a["correct"] and not b["correct"] for a, b in zip(reference, after))
         print(json.dumps(report, allow_nan=False), flush=True)
         metrics.append(report)
         if checkpoint is not None and ((group + 1) % config["checkpoint_every_groups"] == 0

@@ -1,5 +1,11 @@
 {
   "model": "Qwen/Qwen3-4B-MLX-4bit",
+  "input_mode": "embeddings",
+  "projector": {
+    "embedding_dim": 2560,
+    "context_steps": 20,
+    "market_tokens": 5
+  },
   "train": true,
   "fine_tune_type": "lora",
   "data": "runs/reasoning-challenger/dataset",
@@ -7,7 +13,7 @@
   "seed": 17,
   "num_layers": 8,
   "batch_size": 1,
-  "iters": 20,
+  "iters": 24,
   "val_batches": 4,
   "learning_rate": 0.00001,
   "steps_per_report": 1,

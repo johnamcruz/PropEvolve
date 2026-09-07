@@ -40,12 +40,36 @@ def validate_model_settings(payload):
     if type(payload["max_seq_length"]) is not int or payload["max_seq_length"] < 1:
         raise ValueError("max_seq_length must be positive")
     template_options(payload.get("chat_template_kwargs"))
+    if payload.get("input_mode", "specialists") not in {"specialists", "embeddings"}:
+        raise ValueError("invalid reasoning input mode")
+    if payload.get("input_mode") == "embeddings":
+        from .projector import validate_projector
+        validate_projector(payload.get("projector"))
     return payload
 
 
-def read_model_settings(path):
+def resolve_model_resources(payload, *, root=None):
+    """An explicit workspace wins; preserve legacy CWD semantics when omitted.
+
+Hub IDs are not paths. Local relative models must use model_source='local'.
+    """
+    payload = dict(payload)
+    if root is None:
+        root = payload.get("workspace_root")
+    if root is not None:
+        root = Path(root).resolve()
+        for key in ("adapter_path", "data", "resume_adapter_file"):
+            if payload.get(key) is not None:
+                payload[key] = str((root / payload[key]).resolve())
+        if payload.get("model_source") == "local":
+            payload["model"] = str((root / payload["model"]).resolve())
+        payload["workspace_root"] = str(root)
+    return payload
+
+
+def read_model_settings(path, *, root=None):
     payload = {**model_defaults(), **read_recipe(path)}
-    return validate_model_settings(payload)
+    return validate_model_settings(resolve_model_resources(payload, root=root))
 
 
 def read_recipe(path, _parents=()):

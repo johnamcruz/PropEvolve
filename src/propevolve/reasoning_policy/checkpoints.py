@@ -19,6 +19,9 @@ def verify_checkpoint(path):
     for name, digest in files.items():
         if Path(name).name != name or file_digest(path / name) != digest:
             raise ValueError("RL checkpoint content changed")
+    metadata = json.loads((path / "adapter_config.json").read_text())
+    if metadata.get("input_mode", "specialists") == "embeddings" and "projector.safetensors" not in files:
+        raise ValueError("embedding RL checkpoint is missing its learned projector")
     return json.loads((path / "rl_receipt.json").read_text())
 
 
@@ -68,8 +71,8 @@ def save_training_state(path, *, optimizer, runtime):
         if value is None or type(value) in (str, int, float, bool):
             return {"type": "scalar", "value": value}
         raise ValueError(f"unsupported checkpoint value type {type(value).__name__}")
-    payload = {"schema": "reasoning_rl_training_state_v1",
-        "tree": encode({"optimizer": optimizer.state, "mlx_rng": mx.random.state}),
+    payload = {"schema": "reasoning_rl_training_state_v2",
+        "tree": encode({"optimizer": optimizer.state}),
         "runtime": runtime}
     serialized = json.dumps(payload, allow_nan=False, indent=2)
     mx.eval(arrays)
@@ -82,7 +85,7 @@ def restore_training_state(path, *, optimizer):
     path = Path(path)
     verify_checkpoint(path)
     payload = json.loads((path / "training.json").read_text())
-    if payload.get("schema") != "reasoning_rl_training_state_v1":
+    if payload.get("schema") != "reasoning_rl_training_state_v2":
         raise ValueError("unsupported training checkpoint schema")
     arrays = mx.load(str(path / "training.safetensors"))
     def decode(node):
@@ -99,6 +102,5 @@ def restore_training_state(path, *, optimizer):
         raise ValueError("invalid training checkpoint tree")
     state = decode(payload["tree"])
     optimizer.state = state["optimizer"]
-    mx.random.state = state["mlx_rng"]
-    mx.eval(optimizer.state, mx.random.state)
+    mx.eval(optimizer.state)
     return payload["runtime"]

@@ -18,7 +18,7 @@ MANAGEMENT_FIELDS = (
 
 
 def specialist_account_fields(
-    observation, *, embedding_dim: int, ticker: str, row: int, sources,
+    observation, *, embedding_dim: int, ticker: str, row: int, sources, require_specialists=True,
 ) -> dict[str, float]:
     """Read only the exact aligned score row, plus production-normalized state.
 
@@ -34,6 +34,8 @@ Missing specialist history is an error, not a fabricated zero probability.
         raise ValueError("account observation contract mismatch")
     names = ACCOUNT_FIELDS + (MANAGEMENT_FIELDS if len(account) > len(ACCOUNT_FIELDS) else ())
     fields = {f"account.{name}": float(value) for name, value in zip(names, account)}
+    if not require_specialists:
+        return fields
     kinds = [source.kind for source in sources]
     if (len(kinds) != len(set(kinds)) or not {"expansion", "trend", "regime"}.issubset(kinds)
             or set(kinds) - {"expansion", "trend", "regime", "volume"}):
@@ -51,3 +53,17 @@ Missing specialist history is an error, not a fabricated zero probability.
         for channel, value in zip(source.channels, values):
             fields[f"{source.kind}.{channel}"] = float(value)
     return fields
+
+
+def observe_context(history, environment, observation, *, ticker, row, sources):
+    """One causal observation path shared by collection, RL and evaluation."""
+    market = environment.markets[ticker]
+    use_teachers = history.config.input_mode == "specialists"
+    fields = specialist_account_fields(observation, embedding_dim=market.embeddings.shape[1],
+        ticker=ticker, row=row, sources=sources, require_specialists=use_teachers)
+    fields.update(environment.causal_trade_context())
+    if not set(history.config.fields).issubset(fields):
+        raise ValueError("configured input unavailable from causal observation")
+    history.append(int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
+        {key: fields[key] for key in history.config.fields},
+        embedding=observation[:market.embeddings.shape[1]] if not use_teachers else None)

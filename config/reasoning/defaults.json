@@ -3,6 +3,15 @@
   "optimizer_config": {"adam": {}},
   "lr_schedule": null,
   "resume_adapter_file": null,
+  "action_supervision": {"enabled": false, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
+  "input_mode": "specialists",
+  "projector": null,
+  "clear_cache_threshold": 0,
+  "seed": 17,
+  "val_batches": 4,
+  "steps_per_report": 1,
+  "steps_per_eval": 5,
+  "save_every": 10,
   "chat_template_kwargs": {
     "enable_thinking": false
   }

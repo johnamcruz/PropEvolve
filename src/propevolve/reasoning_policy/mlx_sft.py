@@ -10,12 +10,12 @@ from pathlib import Path
 import math
 from dataclasses import dataclass
 from .integrity import file_digest
-from .model_config import validate_model_settings, model_defaults, read_recipe
+from .model_config import validate_model_settings, model_defaults, read_recipe, resolve_model_resources
 from .tokenization import encode_completion
 
 
-def read_sft_config(path: str | Path) -> dict:
-    payload = {**model_defaults(), **read_recipe(path)}
+def read_sft_config(path: str | Path, *, root=None) -> dict:
+    payload = resolve_model_resources({**model_defaults(), **read_recipe(path)}, root=root)
     required = {
         "model", "data", "adapter_path", "train", "fine_tune_type", "mask_prompt",
         "num_layers", "batch_size", "iters", "learning_rate", "max_seq_length",
@@ -24,6 +24,13 @@ def read_sft_config(path: str | Path) -> dict:
     if not required.issubset(payload):
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
     validate_model_settings(payload)
+    supervision = payload["action_supervision"]
+    if (type(supervision["enabled"]) is not bool or any(
+            isinstance(supervision[key], bool) or not math.isfinite(supervision[key]) or supervision[key] < 0
+            for key in ("soft_target_weight", "ranking_weight", "margin"))):
+        raise ValueError("invalid action supervision settings")
+    if supervision["enabled"] and supervision["soft_target_weight"] + supervision["ranking_weight"] <= 0:
+        raise ValueError("enabled action supervision requires learning weight")
     if payload["adapter_path"] is None:
         raise ValueError("SFT requires an adapter output path")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
@@ -32,9 +39,18 @@ def read_sft_config(path: str | Path) -> dict:
     for name in ("num_layers", "batch_size", "iters", "max_seq_length", "grad_accumulation_steps"):
         if type(payload[name]) is not int or payload[name] < 1:
             raise ValueError(f"{name} must be a positive integer")
-    rank = payload["lora_parameters"].get("rank")
+    if payload["iters"] % payload["grad_accumulation_steps"]:
+        raise ValueError("SFT iterations must complete gradient accumulation groups")
+    lora = payload["lora_parameters"]
+    if set(lora) != {"rank", "scale", "dropout"}:
+        raise ValueError("LoRA settings require exactly rank, scale and dropout")
+    rank = lora["rank"]
     if type(rank) is not int or rank < 1:
         raise ValueError("LoRA rank must be a positive integer")
+    if (isinstance(lora["scale"], bool) or not math.isfinite(float(lora["scale"]))
+            or lora["scale"] <= 0 or isinstance(lora["dropout"], bool)
+            or not math.isfinite(float(lora["dropout"])) or not 0 <= lora["dropout"] < 1):
+        raise ValueError("LoRA scale/dropout settings are invalid")
     if (isinstance(payload["learning_rate"], bool)
             or not math.isfinite(float(payload["learning_rate"])) or payload["learning_rate"] <= 0):
         raise ValueError("learning_rate must be finite and positive")
@@ -65,7 +81,7 @@ def verify_dataset(path: str | Path) -> dict:
     return manifest
 
 
-def prepare_mlx_view(config_path: str | Path, output: str | Path, *, tokenizer) -> Path:
+def prepare_mlx_view(config_path: str | Path, output: str | Path, *, tokenizer, root=None) -> Path:
     """Make encoded native datasets without target/prompt leakage/truncation.
 
 The supplied tokenizer is the model's actual tokenizer. This is a deliberate
@@ -75,7 +91,7 @@ system boundary for tests; the production caller loads it with MLX-LM.
     import shutil
     import tempfile
 
-    config = read_sft_config(config_path)
+    config = read_sft_config(config_path, root=root)
     source = Path(config["data"])
     manifest = verify_dataset(source)
     output = Path(output)
@@ -93,10 +109,33 @@ system boundary for tests; the production caller loads it with MLX-LM.
                     if [item["role"] for item in messages] != ["system", "user", "assistant"]:
                         raise ValueError("unexpected SFT conversation schema")
                     completion = messages[-1]["content"]
+                    reserved = config["projector"]["market_tokens"] if config["input_mode"] == "embeddings" else 0
                     tokens, offset = encode_completion(tokenizer, messages[:-1], completion,
-                        max_seq_length=config["max_seq_length"],
+                        max_seq_length=config["max_seq_length"] - reserved,
                         chat_template_kwargs=config["chat_template_kwargs"])
-                    target.write(json.dumps({"tokens": tokens, "offset": offset}) + "\n")
+                    encoded = {"tokens": tokens, "offset": offset}
+                    if config["action_supervision"]["enabled"]:
+                        from .supervision import action_targets
+                        alternatives = action_targets(record)
+                        encoded["action_targets"] = alternatives
+                        encoded["alternatives"] = [encode_completion(tokenizer, messages[:-1], name,
+                            max_seq_length=config["max_seq_length"] - reserved,
+                            chat_template_kwargs=config["chat_template_kwargs"])
+                            for name in alternatives["names"]]
+                    if config["input_mode"] == "embeddings":
+                        import numpy as np
+                        projector = config["projector"]
+                        embeddings = np.asarray(record.get("market_embeddings"), np.float32)
+                        available = np.asarray(record.get("market_available"), bool)
+                        if (embeddings.shape != (projector["context_steps"], projector["embedding_dim"])
+                                or available.shape != (projector["context_steps"],)
+                                or not available.any() or not np.isfinite(embeddings).all()):
+                            raise ValueError("supervised record lacks matching causal embedding window")
+                        prompt = json.loads(messages[-2]["content"])
+                        if any(not field.startswith(("account.", "trade.", "challenge.")) for field in prompt["fields"]):
+                            raise ValueError("teacher fields leaked into teacher-free SFT prompt")
+                        encoded.update(market_embeddings=embeddings.tolist(), market_available=available.tolist())
+                    target.write(json.dumps(encoded) + "\n")
                     count += 1
             if count != manifest["counts"][role] or count < config["batch_size"]:
                 raise ValueError(f"{role} sample count mismatch or incomplete batch")
@@ -114,9 +153,9 @@ system boundary for tests; the production caller loads it with MLX-LM.
     return output / "sft.json"
 
 
-def verify_mlx_view(config_path, output):
+def verify_mlx_view(config_path, output, *, root=None):
     """Reuse preparation only if its source, recipe and rendered files match."""
-    config = read_sft_config(config_path)
+    config = read_sft_config(config_path, root=root)
     manifest = verify_dataset(config["data"])
     output = Path(output)
     receipt = json.loads((output / "view_manifest.json").read_text())
@@ -163,13 +202,16 @@ class EncodedDataset:
         return list(row.tokens), row.offset
 
 
-def train_prepared(config_path, view):
+def train_prepared(config_path, view, *, root=None):
     """Use native MLX-LM optimizer/LoRA training with already verified tokens."""
     from types import SimpleNamespace
     from mlx_lm import load
     from mlx_lm.lora import train_model
-    effective = verify_mlx_view(config_path, view)
+    effective = verify_mlx_view(config_path, view, root=root)
     config = json.loads(effective.read_text())
+    if config["action_supervision"]["enabled"] or config["input_mode"] == "embeddings":
+        from .supervised_trainer import train_supervised
+        return train_supervised(config, view)
     if Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path")
     if config["resume_adapter_file"] is not None:
@@ -193,27 +235,28 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--view", required=True)
+    parser.add_argument("--root")
     parser.add_argument("--train", action="store_true", help="Explicitly launch native MLX-LM QLoRA")
     args = parser.parse_args(argv)
-    config = read_sft_config(args.config)
+    config = read_sft_config(args.config, root=args.root)
     verify_dataset(config["data"])
     if Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path to preserve checkpoints")
     if Path(args.view).exists():
-        effective = verify_mlx_view(args.config, args.view)
+        effective = verify_mlx_view(args.config, args.view, root=args.root)
     else:
         # Optional runtime is imported only after the cheap integrity checks.
         from mlx_lm import load
         model, tokenizer = load(config["model"], tokenizer_config={"trust_remote_code": False})
         if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
             raise ValueError("initial challenger requires a quantized base for QLoRA")
-        effective = prepare_mlx_view(args.config, args.view, tokenizer=tokenizer)
+        effective = prepare_mlx_view(args.config, args.view, tokenizer=tokenizer, root=args.root)
         del model
         import mlx.core as mx
         mx.synchronize()
         mx.clear_cache()
     if args.train:
-        train_prepared(args.config, args.view)
+        train_prepared(args.config, args.view, root=args.root)
     return 0
 
 

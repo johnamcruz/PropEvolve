@@ -70,6 +70,7 @@ def test_reasoning_adapter_preserves_legal_completion_scores():
     from propevolve.reasoning_policy.context import ContextConfig, RollingContext
     # External inference-runtime stand-in; simulator and adapter are real.
     class Runtime:
+        requires_specialists = True
         def decide(self, context, legal_actions):
             scores = {action.name: -float(int(action) + 1) for action in legal_actions}
             return max(legal_actions, key=lambda action: scores[action.name]), scores

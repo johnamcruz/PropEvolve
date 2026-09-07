@@ -54,7 +54,7 @@ def test_prepared_supervision_matches_policy_tokens_and_completion_boundary(tmp_
         "fine_tune_type": "lora", "mask_prompt": True, "num_layers": 1,
         "batch_size": 1, "iters": 1, "learning_rate": 1e-5,
         "max_seq_length": 1024, "grad_checkpoint": False,
-        "grad_accumulation_steps": 1, "lora_parameters": {"rank": 2},
+        "grad_accumulation_steps": 1, "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
         "trust_remote_code": False,
     }))
     tokenizer = LiteralTokenizer()

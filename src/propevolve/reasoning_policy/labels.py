@@ -90,6 +90,70 @@ class ActionLabels:
     outcomes: Mapping[Action, ActionOutcome]
 
 
+def label_market_actions(
+    market, *, decision, role_end, observation, risk_dollars, point_value,
+    round_trip_fee, minimum_mll_headroom, horizon, target_rs, stop_r, utilities,
+):
+    """Scratch-policy flat action ordering from one future economic barrier.
+
+    Future paths are labels only.  They never enter the causal prompt.  This is
+    an entry warm start; the unchanged challenge environment teaches sequential
+    Hold/Close and account-aware behavior during RL.
+    """
+    required = {"winner", "failure", "wait", "missed_opportunity", "conflict_margin"}
+    if set(utilities) != required or not np.isfinite(list(utilities.values())).all():
+        raise ValueError("invalid market action utility contract")
+    if not (utilities["winner"] > utilities["wait"] > utilities["failure"]
+            and utilities["conflict_margin"] > 0
+            and utilities["wait"] > utilities["missed_opportunity"] > utilities["failure"]):
+        raise ValueError("market action utilities violate the decision boundary")
+    target_rs = tuple(float(value) for value in target_rs)
+    if (not target_rs or tuple(sorted(set(target_rs))) != target_rs
+            or not np.isfinite(target_rs).all() or target_rs[0] <= 0):
+        raise ValueError("target R grid must be finite, positive and increasing")
+    grid = {target: label_entry_opportunity(
+        market, decision=decision, role_end=role_end, horizon=horizon,
+        risk_dollars=risk_dollars, point_value=point_value,
+        round_trip_fee=round_trip_fee, target_r=target, stop_r=stop_r,
+    ) for target in target_rs}
+    excursions = label_future_excursions(
+        market, decision=decision, role_end=role_end, horizon=horizon,
+        risk_dollars=risk_dollars, point_value=point_value,
+        round_trip_fee=round_trip_fee,
+    )
+    if any(value is None for value in grid.values()) or excursions is None:
+        raise ValueError("market action label is censored by its temporal role")
+    achieved = [max((target for target, result in grid.items() if result[side]), default=0.0)
+                for side in (0, 1)]
+    side_values = [utilities["failure"] if target == 0 else
+                   utilities["winner"] + target - target_rs[0] for target in achieved]
+    if achieved[0] > 0 and achieved[0] == achieved[1]:
+        wait_value = max(side_values) + utilities["conflict_margin"]
+    elif max(achieved) > 0:
+        wait_value = utilities["missed_opportunity"]
+    else:
+        wait_value = utilities["wait"]
+    values = {
+        Action.WAIT: wait_value,
+        Action.ENTER_LONG_1: side_values[0],
+        Action.ENTER_SHORT_1: side_values[1],
+    }
+    end_ns = int(market.timestamps[decision + horizon].astype("datetime64[ns]").astype(np.int64))
+    outcomes = {}
+    for action, value in values.items():
+        side = "long" if action is Action.ENTER_LONG_1 else "short" if action is Action.ENTER_SHORT_1 else None
+        terminal_pnl = 0.0 if side is None else excursions[side]["terminal_r_net"] * risk_dollars
+        outcomes[action] = ActionOutcome(
+            outcome=("wait" if side is None else
+                     f"target_{achieved[0 if side == 'long' else 1]:g}r_before_stop"
+                     if achieved[0 if side == "long" else 1] else "failed_target"),
+            terminal_pnl=float(terminal_pnl), reward_to_go=float(value),
+            minimum_mll_headroom=float(minimum_mll_headroom), steps=horizon,
+            outcome_end_ns=end_ns,
+        )
+    return ActionLabels(np.asarray(observation).copy(), outcomes)
+
+
 def label_actions(
     environment: HistoricalChallengeEnv, *, reset_options: dict,
     prefix: Sequence[Action], continuation_factory: Callable,

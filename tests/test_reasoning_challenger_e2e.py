@@ -13,7 +13,7 @@ def environment(direction=1):
     market = MarketSeries(
         ticker="NQ", timestamps=np.datetime64("2024-01-02T15:00")
         + np.arange(8) * np.timedelta64(3, "m"),
-        open=prices, high=prices + 1, low=prices - 1, close=prices,
+        open=prices.copy(), high=prices + 1, low=prices - 1, close=prices.copy(),
         embeddings=np.ones((8, 2), dtype=np.float32),
     )
     return HistoricalChallengeEnv(
@@ -46,7 +46,8 @@ def test_reasoning_excursions_only_use_completed_open_trade_bars(side):
     market.low[:] = 998
     env = HistoricalChallengeEnv(
         env.markets, tick_values={"NQ": 20.0}, round_trip_fees={"NQ": 4.0},
-        spec=replace(env.spec, per_trade_risk_dollars=300), seed=7,
+        spec=replace(env.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7,
     )
     env.reset(options={"ticker": "NQ", "start": 0})
     assert env.causal_trade_context()["trade.open"] == 0

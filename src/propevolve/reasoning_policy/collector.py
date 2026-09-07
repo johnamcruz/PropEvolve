@@ -2,17 +2,24 @@
 
 import numpy as np
 
+from ..decision import Action
 from .context import RollingContext
 from .dataset import supervised_record, market_supervised_record
-from .inputs import specialist_account_fields
-from .labels import label_actions, label_entry_opportunity, label_future_excursions
+from .inputs import specialist_account_fields, observe_context
+from .labels import (
+    label_actions,
+    label_entry_opportunity,
+    label_future_excursions,
+    label_market_actions,
+)
 
 
 def collect_examples(
     environment, *, reset_options, context_config, sources,
     behavior_factory, continuation_factory, source_id, continuation_id,
     maximum_examples, sample_stride, rollout_max_steps, target_temperature,
-    opportunity_contract,
+    opportunity_contract, collect_action_targets=True, collect_market_targets=True,
+    action_label_mode="continuation", collection_warmup_steps=0,
 ):
     """Yield market/action records from one declared chronological episode.
 
@@ -24,8 +31,14 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
         maximum_examples, sample_stride, rollout_max_steps,
     )):
         raise ValueError("collection budgets must be positive integers")
+    if type(collection_warmup_steps) is not int or collection_warmup_steps < 0:
+        raise ValueError("collection warmup must be a nonnegative integer")
     if not source_id or not continuation_id:
         raise ValueError("source and continuation identities required")
+    if not collect_action_targets and not collect_market_targets:
+        raise ValueError("collection must request at least one target family")
+    if action_label_mode not in {"continuation", "market_barrier_grid"}:
+        raise ValueError("unknown action label mode")
     if "ticker" not in reset_options or "start" not in reset_options:
         raise ValueError("collection requires explicit episode identity")
     ticker = reset_options["ticker"]
@@ -39,39 +52,53 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
     row = int(reset_options["start"])
     emitted = 0
     for step in range(rollout_max_steps):
-        fields = specialist_account_fields(
-            observation, embedding_dim=market.embeddings.shape[1], ticker=ticker,
-            row=row, sources=sources,
-        )
-        fields.update(environment.causal_trade_context())
-        # Selecting a declared subset allows optional production management
-        # coordinates, without allowing a future label field into the adapter.
-        if not set(context_config.fields).issubset(fields):
-            raise ValueError("configured input is not available from causal sources")
-        history.append(
-            int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
-            {key: fields[key] for key in context_config.fields},
-        )
+        observe_context(history, environment, observation, ticker=ticker, row=row, sources=sources)
         # Match inference, including initially partial context with its mask.
-        if step % sample_stride == 0:
+        if step >= collection_warmup_steps and (step - collection_warmup_steps) % sample_stride == 0:
             window = history.snapshot()
-            labels = label_actions(
-                environment, reset_options=reset_options, prefix=tuple(prefix),
-                continuation_factory=continuation_factory, max_steps=rollout_max_steps,
-            )
-            action_record = supervised_record(
-                window, labels, source_id=source_id, continuation_id=continuation_id,
-                target_temperature=target_temperature,
-            )
-            opportunity = label_entry_opportunity(
-                market, decision=row, role_end=len(market.close),
-                risk_dollars=environment.spec.per_trade_risk_dollars,
-                point_value=environment.tick_values[ticker],
-                round_trip_fee=environment.round_trip_fees[ticker],
-                **opportunity_contract,
-            )
+            action_record = None
+            if collect_action_targets:
+                if action_label_mode == "market_barrier_grid":
+                    legal = {Action(value) for value in info["valid_actions"]}
+                    expected = {Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
+                    if legal != expected:
+                        raise ValueError("market barrier labels require one flat decision state")
+                    labels = label_market_actions(
+                        market, decision=row, role_end=len(market.close),
+                        observation=observation,
+                        risk_dollars=environment.spec.per_trade_risk_dollars,
+                        point_value=environment.tick_values[ticker],
+                        round_trip_fee=environment.round_trip_fees[ticker],
+                        minimum_mll_headroom=info["minimum_mll_headroom"],
+                        **opportunity_contract,
+                    )
+                else:
+                    labels = label_actions(
+                        environment, reset_options=reset_options, prefix=tuple(prefix),
+                        continuation_factory=continuation_factory, max_steps=rollout_max_steps,
+                    )
+                action_record = supervised_record(
+                    window, labels, source_id=source_id, continuation_id=continuation_id,
+                    target_temperature=target_temperature,
+                )
+            target_grid = None
+            if collect_market_targets:
+                target_rs = opportunity_contract.get("target_rs")
+                if target_rs is None:
+                    target_rs = (opportunity_contract["target_r"],)
+                target_grid = {f"{float(target):g}": label_entry_opportunity(
+                    market, decision=row, role_end=len(market.close),
+                    risk_dollars=environment.spec.per_trade_risk_dollars,
+                    point_value=environment.tick_values[ticker],
+                    round_trip_fee=environment.round_trip_fees[ticker],
+                    horizon=opportunity_contract["horizon"], target_r=float(target),
+                    stop_r=opportunity_contract["stop_r"],
+                ) for target in target_rs}
+                opportunity = next(iter(target_grid.values()))
+            else:
+                opportunity = None
             market_record = None
-            if opportunity is not None:
+            if collect_market_targets and opportunity is not None:
                 market_record = market_supervised_record(
                     window, opportunity=opportunity, source_id=source_id,
                     label_end_ns=int(market.timestamps[row + opportunity_contract["horizon"]].astype("datetime64[ns]").astype(np.int64)),
@@ -85,7 +112,16 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                         "round_trip_fee": environment.round_trip_fees[ticker],
                         "execution": "next_bar_open", "same_bar_collision": "adverse_first",
                     },
+                    target_grid=target_grid,
                 )
+                if context_config.input_mode == "embeddings":
+                    import json
+                    teachers = specialist_account_fields(observation,
+                        embedding_dim=market.embeddings.shape[1], ticker=ticker, row=row, sources=sources)
+                    market_record["targets"]["specialist_targets"] = {
+                        key: value for key, value in teachers.items() if not key.startswith("account.")}
+                    market_record["messages"][-1]["content"] = json.dumps(market_record["targets"], allow_nan=False)
+                    market_record["messages"][0]["content"] += " Also estimate the labeled specialist market state."
             yield {"action": action_record, "market": market_record}
             emitted += 1
             if emitted >= maximum_examples:

@@ -1,4 +1,5 @@
 {
   "inherits": "sft.json",
+  "action_supervision": {"enabled": true, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
   "resume_adapter_file": "runs/reasoning-challenger/market-adapters/adapters.safetensors"
 }

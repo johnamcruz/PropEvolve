@@ -2,6 +2,7 @@
   "input_policy_config": "config/reasoning/policy_sft.json",
   "output_adapter": "runs/reasoning-challenger/rl-adapters",
   "resume_checkpoint": null,
+  "frozen_audit": null,
   "checkpoint_root": "runs/reasoning-challenger/rl-checkpoints",
   "checkpoint_every_groups": 1,
   "checkpoint_keep": 2,

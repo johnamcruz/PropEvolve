@@ -4,7 +4,7 @@ import numpy as np
 from ..policy import TradingPolicy, PolicyInput
 
 from .context import RollingContext
-from .inputs import specialist_account_fields
+from .inputs import observe_context
 
 
 def evaluate_policy(policy, environment, *, episodes, context_config, sources, max_steps,
@@ -21,31 +21,24 @@ resource cap is an error, never a fabricated economic timeout.
         raise ValueError("near-blow diagnostic fraction must be in [0, 1]")
     receipts = []
     shared_policy = isinstance(policy, TradingPolicy)
-    uses_specialists = policy.requires_specialists if shared_policy else True
+    uses_specialists = getattr(policy, "requires_specialists", True)
+    needs_context = policy.requires_context if shared_policy else True
+    if needs_context and (context_config.input_mode == "specialists") != uses_specialists:
+        raise ValueError("evaluation policy and context input mode differ")
     for options in episodes:
         if "ticker" not in options or "start" not in options:
             raise ValueError("evaluation requires explicit ticker/start")
         observation, info = environment.reset(options=options)
         market = environment.markets[options["ticker"]]
-        context = RollingContext(context_config) if uses_specialists else None
+        context = RollingContext(context_config) if needs_context else None
         if shared_policy:
             policy.reset()
         row = options["start"]
         total_reward = 0.0
         action_counts = {}
         for step in range(max_steps):
-            if uses_specialists:
-                fields = specialist_account_fields(
-                    observation, embedding_dim=market.embeddings.shape[1],
-                    ticker=options["ticker"], row=row, sources=sources,
-                )
-                fields.update(environment.causal_trade_context())
-                if not set(context_config.fields).issubset(fields):
-                    raise ValueError("configured input unavailable during evaluation")
-                context.append(
-                    int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
-                    {key: fields[key] for key in context_config.fields},
-                )
+            if context is not None:
+                observe_context(context, environment, observation, ticker=options["ticker"], row=row, sources=sources)
             if shared_policy:
                 decision = policy.decide(PolicyInput(observation, tuple(info["valid_actions"]),
                     None if context is None else context.snapshot()))

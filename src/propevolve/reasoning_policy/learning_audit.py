@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 from .decision_schema import legal_completion_names
@@ -14,13 +15,28 @@ def score_labeled_examples(policy, records):
     for record in records:
         answer = record["messages"][-1]["content"]
         choices = legal_completion_names(answer)
-        scores = policy.completion_scores(record["messages"][:-1], choices)
+        try:
+            supplied = json.loads(record["messages"][-2]["content"]).get("legal_actions")
+        except (ValueError, AttributeError):
+            supplied = None  # legacy externally prepared text-only fixtures
+        if supplied is not None:
+            if (not supplied or len(set(supplied)) != len(supplied)
+                    or not set(supplied).issubset(choices) or answer not in supplied):
+                raise ValueError("audit target conflicts with legal actions")
+            choices = tuple(supplied)
+        context = {key: record[key] for key in ("market_embeddings", "market_available") if key in record}
+        scores = policy.completion_scores(record["messages"][:-1], choices,
+            **({"market_context": context} if context else {}))
+        if set(scores) != set(choices) or not all(math.isfinite(x) for x in scores.values()):
+            raise ValueError("invalid frozen audit scores")
         predicted = max(scores, key=scores.get)
         output.append({
             "source_id": record["source_id"], "completed_at_ns": record["completed_at_ns"],
             "target": answer, "predicted": predicted,
             "correct": predicted == answer, "target_log_likelihood": scores[answer],
-            "target_advantage": scores[answer] - max(value for name, value in scores.items() if name != answer),
+            "scores": scores,
+            "target_advantage": (scores[answer] - max(value for name, value in scores.items() if name != answer)
+                                 if len(scores) > 1 else None),
         })
     if not output:
         raise ValueError("learning audit needs labeled examples")

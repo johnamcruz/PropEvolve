@@ -28,6 +28,7 @@ class PolicyDecision:
 
 
 class TradingPolicy(ABC):
+    requires_context = True
     @property
     @abstractmethod
     def requires_specialists(self) -> bool:
@@ -53,6 +54,7 @@ def _decision(action, scores, kind, legal):
 
 class R2D2Policy(TradingPolicy):
     requires_specialists = False
+    requires_context = False
 
     def __init__(self, agent, *, recurrent_horizon):
         if type(recurrent_horizon) is not int or recurrent_horizon < 1:
@@ -79,7 +81,9 @@ class R2D2Policy(TradingPolicy):
 
 
 class ReasoningPolicy(TradingPolicy):
-    requires_specialists = True
+    @property
+    def requires_specialists(self):
+        return self.policy.requires_specialists
 
     def __init__(self, policy):
         self.policy = policy
@@ -108,5 +112,5 @@ def load_policy(path, *, root):
         return R2D2Policy(agent, recurrent_horizon=config["recurrent_horizon"])
     if kind == "reasoning":
         from .reasoning_policy.policy import MLXActionPolicy
-        return ReasoningPolicy(MLXActionPolicy.from_config(root / config["model_config"]))
+        return ReasoningPolicy(MLXActionPolicy.from_config(root / config["model_config"], root=root))
     raise ValueError(f"unknown policy kind: {kind!r}")
