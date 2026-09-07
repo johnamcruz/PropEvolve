@@ -32,6 +32,15 @@ class NoLoadModel:
         pass
 
 
+ACTION_VERBALIZERS = {
+    "WAIT": "A",
+    "ENTER_LONG_1": "B",
+    "ENTER_SHORT_1": "C",
+    "HOLD": "D",
+    "CLOSE": "E",
+}
+
+
 @pytest.mark.parametrize("action", ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"])
 def test_prepared_supervision_matches_policy_tokens_and_completion_boundary(tmp_path, action):
     messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "state"}]
@@ -56,6 +65,7 @@ def test_prepared_supervision_matches_policy_tokens_and_completion_boundary(tmp_
         "max_seq_length": 1024, "grad_checkpoint": False,
         "grad_accumulation_steps": 1, "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
         "trust_remote_code": False,
+        "action_verbalizers": ACTION_VERBALIZERS,
     }))
     tokenizer = LiteralTokenizer()
     view = tmp_path / "view"
@@ -64,8 +74,9 @@ def test_prepared_supervision_matches_policy_tokens_and_completion_boundary(tmp_
     tokens, offset = native.process(native[0])
     # Independent literal expectation detects double chat wrapping and target leakage.
     assert "".join(map(chr, tokens[:offset])) == "<system>rules<user>state<assistant>"
-    assert "".join(map(chr, tokens[offset:])) == action + "!"
-    policy = MLXActionPolicy(NoLoadModel(), tokenizer, max_seq_length=1024)
+    assert "".join(map(chr, tokens[offset:])) == ACTION_VERBALIZERS[action] + "!"
+    policy = MLXActionPolicy(NoLoadModel(), tokenizer, max_seq_length=1024,
+                             action_verbalizers=ACTION_VERBALIZERS)
     assert policy.tokenize_completions(messages, [action]) == ((tuple(tokens), offset),)
     assert verify_mlx_view(config, view) == prepared
     with (view / "train.jsonl").open("a") as stream:
@@ -78,3 +89,13 @@ def test_policy_rejects_truncation_instead_of_dropping_action_tokens():
     policy = MLXActionPolicy(NoLoadModel(), LiteralTokenizer(), max_seq_length=2)
     with pytest.raises(ValueError, match="token budget"):
         policy.tokenize_completions([{"role": "user", "content": "state"}], ["WAIT"])
+
+
+def test_policy_rejects_missing_or_ambiguous_action_verbalizers():
+    with pytest.raises(ValueError, match="every action"):
+        MLXActionPolicy(NoLoadModel(), LiteralTokenizer(), max_seq_length=1024,
+                        action_verbalizers={"WAIT": "WAIT"})
+    ambiguous = dict(ACTION_VERBALIZERS, ENTER_SHORT_1="B")
+    with pytest.raises(ValueError, match="unique"):
+        MLXActionPolicy(NoLoadModel(), LiteralTokenizer(), max_seq_length=1024,
+                        action_verbalizers=ambiguous)

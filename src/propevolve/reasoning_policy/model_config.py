@@ -8,6 +8,8 @@ semantics. Importing configuration does not import MLX or download weights.
 import json
 from pathlib import Path
 
+from ..decision import Action
+
 
 def model_defaults():
     # Repository config discovery, not a model/run identity or numeric setting.
@@ -28,6 +30,18 @@ def template_options(options=None):
     return result
 
 
+def action_verbalizers(settings=None):
+    """Return the config-owned one-token policy vocabulary by canonical action."""
+    values = model_defaults()["action_verbalizers"] if settings is None else settings
+    expected = {action.name for action in Action}
+    if (not isinstance(values, dict) or set(values) != expected
+            or any(not isinstance(value, str) or not value.strip() for value in values.values())):
+        raise ValueError("action verbalizers must define every action")
+    if len(set(values.values())) != len(values):
+        raise ValueError("action verbalizers must be unique")
+    return dict(values)
+
+
 def validate_model_settings(payload):
     for key in ("model", "adapter_path", "max_seq_length"):
         if key not in payload:
@@ -40,6 +54,7 @@ def validate_model_settings(payload):
     if type(payload["max_seq_length"]) is not int or payload["max_seq_length"] < 1:
         raise ValueError("max_seq_length must be positive")
     template_options(payload.get("chat_template_kwargs"))
+    action_verbalizers(payload.get("action_verbalizers"))
     if payload.get("input_mode", "specialists") not in {"specialists", "embeddings"}:
         raise ValueError("invalid reasoning input mode")
     if payload.get("input_mode") == "embeddings":

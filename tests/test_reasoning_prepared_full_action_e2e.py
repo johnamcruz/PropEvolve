@@ -11,7 +11,7 @@ from propevolve.reasoning_policy.integrity import file_digest
 from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view
 from propevolve.reasoning_policy.supervised_trainer import pack_examples
 from test_reasoning_challenger_e2e import environment, passive_factory
-from test_reasoning_token_parity_e2e import LiteralTokenizer
+from test_reasoning_token_parity_e2e import ACTION_VERBALIZERS, LiteralTokenizer
 
 
 def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="external-runtime", iters=1):
@@ -41,6 +41,7 @@ def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="e
         "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
         "trust_remote_code": False, "input_mode": "embeddings" if embeddings else "specialists",
         "projector": {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2} if embeddings else None,
+        "action_verbalizers": ACTION_VERBALIZERS,
         "action_supervision": {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
     path = tmp_path / "recipe.json"
     path.write_text(json.dumps(config))

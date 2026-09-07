@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -134,7 +134,8 @@
     },
     "chop_wait_margin": 0.25,
     "failed_confluence_margin": 0.25,
-    "paired_a_plus_margin": 0.25
+    "paired_a_plus_margin": 0.25,
+    "paired_a_plus_winner_loss_weight": 2
   },
   "observation": {
     "management_state": "entry_risk_v1",
@@ -238,7 +239,11 @@
     "target_soft_tau": 0.005,
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
-    "entry_action_margin": 0.25
+    "entry_action_margin": 0.25,
+    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_economic_boundaries_v3",
+    "exclude_economic_winners_from_chop_wait": true,
+    "challenge_return_self_imitation_weight": 0.05,
+    "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
     "mixed_precision": "off",
@@ -283,7 +288,9 @@
   },
   "balance_curriculum": {
     "schedule_seed": 37,
-    "start_pnls": [-1500],
+    "start_pnls": [
+      -1500
+    ],
     "validation_episodes": 200,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/balance-curriculum",
@@ -291,10 +298,14 @@
       "update_period": 8,
       "max_examples": 8,
       "output": "balance-pass-replay.pt"
+    },
+    "outcome_contrast_replay": {
+      "update_period": 8,
+      "max_examples": 8
     }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$2,000 realized PnL to the original +$6,000 pass target, with one authenticated side-balanced historical pass winner anchored at the recurrent learning boundary every eight learner updates, will teach the entry decisions that avoid early low-headroom lockout. A $200 MLL entry guard permits one additional $300-risk recovery attempt from $400 headroom while blocking another entry at $100 headroom; the original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, paired economic contrast, action space, and teacher-free inference remain unchanged.",
+    "hypothesis": "On the unchanged immutable V21 parent, Expansion and Regime teachers, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner/failure margins, and opportunity-preserving PCGrad mode, bounded challenge-return credit for one exact WAIT and one exact winning-side action on each authenticated pass path will teach the causal action sequence that converts valid Expansion opportunities into completed challenges. The mechanism must preserve zero blows, reduce near-blow timeouts, keep both sides active, retain failure and dominant-chop WAIT pressure, and transfer without any teacher or challenge-return lookup during validation.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -310,9 +321,13 @@
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
+      "agent.auxiliary_gradient_conflict_mode",
+      "agent.challenge_return_discount",
+      "agent.challenge_return_self_imitation_weight",
       "agent.device",
       "agent.entry_action_loss_reduction",
       "agent.entry_action_margin",
+      "agent.exclude_economic_winners_from_chop_wait",
       "agent.gamma",
       "agent.gradient_clip",
       "agent.hidden_dim",
@@ -339,6 +354,7 @@
       "balance_curriculum.start_pnls",
       "balance_curriculum.validation_episodes",
       "balance_curriculum.pass_replay",
+      "balance_curriculum.outcome_contrast_replay",
       "regime_selectivity.action_order",
       "regime_selectivity.chop_wait_margin",
       "regime_selectivity.dominant_chop_pressure",
@@ -348,6 +364,7 @@
       "regime_selectivity.expansion_short_center",
       "regime_selectivity.failed_confluence_margin",
       "regime_selectivity.paired_a_plus_margin",
+      "regime_selectivity.paired_a_plus_winner_loss_weight",
       "regime_selectivity.formula",
       "regime_selectivity.headroom_pressure",
       "regime_selectivity.loss_weight",
@@ -402,11 +419,11 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v30_economic_boundary_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "balance_curriculum_200ep",
+        "name": "economic_boundary_200ep",
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
@@ -423,7 +440,7 @@
           {
             "metric": "selection.pass_rate",
             "operator": ">=",
-            "value": 0.2
+            "value": 0.6
           },
           {
             "metric": "selection.average_win_r",
@@ -453,7 +470,7 @@
           {
             "metric": "selection.near_blow_timeout_rate",
             "operator": "<=",
-            "value": 0.6263636363636363
+            "value": 0.5
           },
           {
             "metric": "balance_stress.blow_rate",
@@ -533,7 +550,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.2
+        "value": 0.4
       },
       {
         "metric": "selection.average_win_r",
@@ -563,7 +580,7 @@
       {
         "metric": "selection.near_blow_timeout_rate",
         "operator": "<=",
-        "value": 0.6263636363636363
+        "value": 0.5
       },
       {
         "metric": "balance_stress.blow_rate",
@@ -600,7 +617,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.25
+        "value": 0.5
       },
       {
         "metric": "selection.near_blow_timeout_rate",
@@ -647,5 +664,6 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v22_recovery_200ep"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v30_economic_boundary_200ep",
+  "hypothesis": "On the unchanged immutable V21 parent, preserve the established Expansion plus Regime A-plus selector, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner and failure economics, and teacher-free inference while protecting every authenticated Long, Short, and WAIT economic action boundary through the full recurrent burn-in graph. A 200-episode training and 200-episode validation run must demonstrate higher pass conversion toward 60 percent, zero blows, lower near-blow timeouts, both sides active, and no regression of dominant-chop WAIT behavior."
 }

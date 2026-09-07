@@ -7,7 +7,33 @@ import json
 from pathlib import Path
 import numpy as np
 
-from .supervision import action_objective
+from .supervision import action_objective, mean_completion_scores
+
+
+def balanced_action_order(rows, *, count, rng):
+    """Round-robin target classes so no optimizer window erases a side."""
+    if type(count) is not int or count < 1:
+        raise ValueError("balanced action sample count must be positive")
+    groups = {}
+    for index, row in enumerate(rows):
+        target = row.get("target_name")
+        if not isinstance(target, str) or not target:
+            raise ValueError("balanced action row lacks target_name")
+        groups.setdefault(target, []).append(index)
+    if len(groups) < 3:
+        raise ValueError("balanced action sampling requires at least three target classes")
+    names = sorted(groups)
+    queues = {name: list(rng.permutation(groups[name])) for name in names}
+    cursors = {name: 0 for name in names}
+    order = []
+    for position in range(count):
+        name = names[position % len(names)]
+        if cursors[name] == len(queues[name]):
+            queues[name] = list(rng.permutation(groups[name]))
+            cursors[name] = 0
+        order.append(int(queues[name][cursors[name]]))
+        cursors[name] += 1
+    return np.asarray(order, dtype=np.int64)
 
 
 def pack_examples(rows, *, max_seq_length):
@@ -39,7 +65,8 @@ def pack_examples(rows, *, max_seq_length):
             np.asarray(embeddings, np.float32), np.asarray(available, bool))
 
 
-def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None):
+def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
+                   sampling_strategy="random"):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
@@ -47,7 +74,10 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
         raise ValueError("not enough supervised rows for a batch")
     rng = np.random.default_rng(seed)
     while True:
-        order = rng.permutation(len(dataset)) if loop else np.arange(len(dataset))
+        if loop and sampling_strategy == "balanced_actions":
+            order = balanced_action_order(dataset, count=len(dataset), rng=rng)
+        else:
+            order = rng.permutation(len(dataset)) if loop else np.arange(len(dataset))
         for start in range(0, len(order) - batch_size + 1, batch_size):
             rows = [dataset[int(i)] for i in order[start:start + batch_size]]
             yield tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
@@ -68,7 +98,7 @@ def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, em
         token_scores = mx.take_along_axis(log_probs, targets, axis=-1).squeeze(-1)
         steps = mx.arange(1, tokens.shape[-1])
         mask = (steps >= offsets[index, :, None]) & (steps < lengths[index, :, None]) & valid[index, :, None]
-        scores = mx.where(mask, token_scores, 0.).sum(axis=-1)
+        scores = mean_completion_scores(token_scores, mask, xp=mx)
         if config["action_supervision"]["enabled"]:
             losses.append(action_objective(scores, probabilities[index], values[index],
                 config["action_supervision"], xp=mx, valid=valid[index]))
@@ -128,5 +158,6 @@ def train_supervised(config, view):
         clear_cache_threshold=config["clear_cache_threshold"])
     train(model, optimizer, datasets["train"], datasets["valid"], args=args,
         loss=partial(batch_loss, config=config),
-        iterate_batches=partial(tensor_batches, seed=config["seed"]))
+        iterate_batches=partial(tensor_batches, seed=config["seed"],
+                                sampling_strategy=config.get("batch_sampling", "random")))
     export_policy_weights(model, destination)

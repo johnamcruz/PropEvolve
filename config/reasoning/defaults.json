@@ -5,6 +5,7 @@
   "resume_adapter_file": null,
   "action_supervision": {"enabled": false, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
   "input_mode": "specialists",
+  "batch_sampling": "random",
   "projector": null,
   "clear_cache_threshold": 0,
   "seed": 17,
@@ -14,5 +15,12 @@
   "save_every": 10,
   "chat_template_kwargs": {
     "enable_thinking": false
+  },
+  "action_verbalizers": {
+    "WAIT": "WAIT",
+    "ENTER_LONG_1": "LONG",
+    "ENTER_SHORT_1": "SHORT",
+    "HOLD": "HOLD",
+    "CLOSE": "CLOSE"
   }
 }

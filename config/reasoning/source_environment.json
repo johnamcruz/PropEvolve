@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -65,8 +65,33 @@
       ],
       "loss_weight": 0.1,
       "entry_search_loss_weight": 0
+    },
+    {
+      "kind": "trend",
+      "cache_root": "cache/trend_teacher_9market_3min_pre2025_v1",
+      "channels": [
+        "long_launch_probability",
+        "short_launch_probability",
+        "long_conditional_quality",
+        "short_conditional_quality"
+      ],
+      "loss_weight": 0,
+      "entry_search_loss_weight": 0
     }
   ],
+  "trend_start_confluence": {
+    "schema": "trend_start_confluence_v1",
+    "training_only": true,
+    "target_source": "post_launch_economic_pair",
+    "score_formula": "causal_recent_max_launch_probability_times_conditional_quality",
+    "semantics": "economic_label_authority_causal_directional_confirmation_v1",
+    "enabled": true,
+    "loss_weight": 1,
+    "margin": 0.25,
+    "confirmation_lookback_bars": 50,
+    "opportunity_loss_weight": 1,
+    "safety_loss_weight": 1
+  },
   "entry_supervision": {
     "schema": "post_launch_entry_v1",
     "training_only": true,
@@ -90,8 +115,8 @@
       "adverse_r": 0.25,
       "horizon_bars": 3
     },
-    "target_r": 2.0,
-    "stop_r": 1.0,
+    "target_r": 2,
+    "stop_r": 1,
     "horizon_bars": 150,
     "collision": "stop_first",
     "loss_weight": 0.9,
@@ -155,7 +180,7 @@
     "episode_days": 30,
     "bars_per_day": 480,
     "max_position_size": 1,
-    "minimum_mll_headroom": 300,
+    "minimum_mll_headroom": 500,
     "trailing_mll_lock": true,
     "terminal_pass_reward": 250,
     "terminal_blow_reward": -1500,
@@ -220,8 +245,8 @@
     "teacher_free": true,
     "minimum_pass_rate": 0.5,
     "minimum_per_market_pass_rate": 0.5,
-    "maximum_blow_rate": 0.0,
-    "minimum_expectancy_r": 0.0
+    "maximum_blow_rate": 0,
+    "minimum_expectancy_r": 0
   },
   "agent": {
     "hidden_dim": 128,
@@ -247,6 +272,9 @@
     "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
+    "learner_backend": "mlx",
+    "mlx_cache_limit_bytes": 268435456,
+    "mps_cache_clear_threshold_bytes": 268435456,
     "mixed_precision": "off",
     "compile_model": false,
     "compile_backend": "inductor",
@@ -284,9 +312,15 @@
     "safety_sequence_fraction": 0.1875,
     "entry_opportunity_sequence_fraction": 0.375,
     "paired_a_plus_population_weighting": "population_proportional_v1",
-    "regime_wait_sequence_fraction": 0.0,
+    "paired_a_plus_context_matching": "expansion_trend_lifecycle_control_v2",
+    "paired_a_plus_control_candidates": 8,
+    "paired_a_plus_violation_replay_update_period": 4,
+    "paired_a_plus_violation_candidate_pairs_per_side": 16,
+    "paired_a_plus_violation_pairs_per_side": 1,
+    "regime_wait_sequence_fraction": 0,
     "regime_wait_sequence_update_period": 8,
-    "budget_mode": "episodes"
+    "budget_mode": "episodes",
+    "paired_a_plus_mastery_capacity_per_side": 8
   },
   "balance_curriculum": {
     "schedule_seed": 37,
@@ -307,7 +341,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Use the Trial 15 zero-blow, positive-expectancy, preserved-2R recipe as the empirical control while testing whether equal authenticated winner/failure pair mass improves Long and Short A-plus activation above WAIT without weakening matched-failure WAIT behavior, dominant-chop safety, teacher-free inference, or the immutable V21 parent.",
+    "hypothesis": "Preserve the verified Expansion opportunity, Trend confluence, Regime chop context, five-bar economic labels, recurrent learner, and teacher-free policy; test whether pairing comparable starting controls by their differing causal Expansion and Trend lifecycle teaches both Long and Short winners above WAIT while matched failures remain below WAIT.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -317,9 +351,6 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
-    "external_parent_economic_overrides": [
-      "minimum_mll_headroom"
-    ],
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
@@ -383,6 +414,7 @@
       "runtime",
       "sealed_confirmation",
       "teachers",
+      "trend_start_confluence",
       "temporal",
       "tickers",
       "timeframe_minutes",
@@ -391,6 +423,11 @@
       "training.checkpoint_every_episodes",
       "training.entry_opportunity_sequence_fraction",
       "training.paired_a_plus_population_weighting",
+      "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_control_candidates",
+      "training.paired_a_plus_violation_replay_update_period",
+      "training.paired_a_plus_violation_candidate_pairs_per_side",
+      "training.paired_a_plus_violation_pairs_per_side",
       "training.regime_wait_sequence_fraction",
       "training.regime_wait_sequence_update_period",
       "training.entry_supervision_autonomy_start_fraction",
@@ -422,7 +459,7 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v33_a_plus_pair_mass_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v38_aplus_lifecycle_control_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
@@ -471,7 +508,7 @@
             "value": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "operator": "<=",
             "value": 0.5
           },
@@ -503,7 +540,7 @@
             "minimum_delta": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "minimum_delta": 0
           }
@@ -530,7 +567,7 @@
             "maximum_regression": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "maximum_regression": 0
           }
@@ -581,7 +618,7 @@
         "value": 0
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
         "value": 0.5
       },
@@ -623,7 +660,7 @@
         "value": 0.5
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
         "value": 0.5
       },
@@ -646,7 +683,7 @@
       },
       {
         "name": "lowest_near_blow",
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "maximize": false
       },
       {
@@ -667,6 +704,6 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v33_a_plus_pair_mass_200ep",
-  "hypothesis": "Trial 15 is the empirical A-plus control. Search only authenticated winner activation, pair-mass weighting, and replay composition to move both Long and Short winners above WAIT while preserving zero blows, 2R capture, matched-failure WAIT, dominant-chop safety, and teacher-free inference."
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep",
+  "hypothesis": "Expansion remains the opportunity source, Trend remains directional confluence, and Regime remains chop context; test whether comparable-control, differing-lifecycle economic pairs convert authenticated Long and Short A+ paths into teacher-free winner-over-WAIT rankings while preserving failure rejection, zero blows, and 2R capture."
 }

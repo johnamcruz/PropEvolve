@@ -443,7 +443,7 @@ def test_v2_default_generated_configs_share_the_study_lifecycle(
 ) -> None:
     """A fresh study must not collide with configs from an older study."""
     base_payload = json.loads(BASE_CONFIG.read_text())
-    base_payload["workspace_root"] = str(BASE_CONFIG.parent.parent)
+    base_payload["workspace_root"] = str(Path.cwd())
     base_path = tmp_path / "base.json"
     base_path.write_text(json.dumps(base_payload))
     sweep_payload = _payload(n_trials=1, n_jobs=1)

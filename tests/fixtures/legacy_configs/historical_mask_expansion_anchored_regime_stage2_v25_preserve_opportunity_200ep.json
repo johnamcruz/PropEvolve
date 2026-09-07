@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -240,7 +240,7 @@
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
     "entry_action_margin": 0.25,
-    "auxiliary_gradient_conflict_mode": "pcgrad_safety_opportunity_v1"
+    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_opportunity_v2"
   },
   "runtime": {
     "mixed_precision": "off",
@@ -300,7 +300,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$1,500 realized PnL to the original +$6,000 pass target, while sparsely pairing each same-side successful pass with the nearest normalized Expansion-Regime near-blow timeout and doubling only the absolute winner action-over-WAIT pressure, will teach the policy to rank the passing action above WAIT while preserving the matched failure below WAIT. The original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, action space, failure pressure, and teacher-free inference remain unchanged.",
+    "hypothesis": "Warm-starting the same immutable authenticated zero-blow V21 A+ policy and preserving the full Opportunity gradient while projecting only the component of Safety that directly opposes Opportunity will recover genuine Long and Short entry recall without weakening non-conflicting WAIT learning. C51 TD, replay, economic labels, recurrent anchors, loss weights, margins, curriculum, +$6,000 pass, -$3,000 blow, 30-day timeout, and teacher-free inference remain unchanged from the matched V24 recipe.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -411,11 +411,11 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v24_pcgrad_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v25_preserve_opportunity_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "pcgrad_safety_opportunity_200ep",
+        "name": "pcgrad_preserve_opportunity_200ep",
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
@@ -656,5 +656,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v24_pcgrad_200ep"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v25_preserve_opportunity_200ep"
 }

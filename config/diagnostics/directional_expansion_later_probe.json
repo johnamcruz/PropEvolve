@@ -1,5 +1,5 @@
 {
-  "base_config": "config/historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep.json",
+  "base_config": "config/reasoning/source_environment.json",
   "features": "config/diagnostics/directional_context.json",
   "teacher_manifest": "teachers/manifest.json",
   "output": ".private/research/directional_expansion_later_probe_20260905.json",

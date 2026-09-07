@@ -1,7 +1,11 @@
 """Same-state simulator targets remain intact through the production objective."""
 import numpy as np
 import pytest
-from propevolve.reasoning_policy.supervision import action_objective, action_targets
+from propevolve.reasoning_policy.supervision import (
+    action_objective,
+    action_targets,
+    mean_completion_scores,
+)
 from propevolve.reasoning_policy.dataset import supervised_record
 from propevolve.reasoning_policy.context import ContextConfig, RollingContext
 from propevolve.reasoning_policy.labels import label_actions
@@ -37,3 +41,15 @@ def test_equal_economic_values_do_not_manufacture_a_directional_margin():
     config = {"soft_target_weight": 0., "ranking_weight": 1., "margin": .25}
     assert action_objective(np.array([0., 5., -5.]), np.ones(3)/3,
         np.ones(3), config, xp=np) == 0
+
+
+def test_action_score_is_not_biased_by_completion_token_count():
+    token_log_probs = np.array([
+        [-2., -2., 0., 0., 0.],
+        [-2., -2., -2., -2., -2.],
+    ])
+    mask = np.array([
+        [True, True, False, False, False],
+        [True, True, True, True, True],
+    ])
+    np.testing.assert_allclose(mean_completion_scores(token_log_probs, mask, xp=np), [-2., -2.])

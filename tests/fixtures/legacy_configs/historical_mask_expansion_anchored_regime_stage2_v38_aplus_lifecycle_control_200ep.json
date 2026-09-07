@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -180,7 +180,7 @@
     "episode_days": 30,
     "bars_per_day": 480,
     "max_position_size": 1,
-    "minimum_mll_headroom": 300,
+    "minimum_mll_headroom": 500,
     "trailing_mll_lock": true,
     "terminal_pass_reward": 250,
     "terminal_blow_reward": -1500,
@@ -272,6 +272,7 @@
     "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
+    "learner_backend": "mlx",
     "mixed_precision": "off",
     "compile_model": false,
     "compile_backend": "inductor",
@@ -309,9 +310,10 @@
     "safety_sequence_fraction": 0.1875,
     "entry_opportunity_sequence_fraction": 0.375,
     "paired_a_plus_population_weighting": "population_proportional_v1",
-    "paired_a_plus_context_matching": "regime_control_expansion_lifecycle_v1",
-    "paired_a_plus_violation_replay_update_period": 8,
-    "paired_a_plus_violation_candidate_pairs_per_side": 8,
+    "paired_a_plus_context_matching": "expansion_trend_lifecycle_control_v2",
+    "paired_a_plus_control_candidates": 8,
+    "paired_a_plus_violation_replay_update_period": 4,
+    "paired_a_plus_violation_candidate_pairs_per_side": 16,
     "paired_a_plus_violation_pairs_per_side": 1,
     "regime_wait_sequence_fraction": 0,
     "regime_wait_sequence_update_period": 8,
@@ -336,7 +338,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Preserve the verified V34 Expansion-opportunity and Regime-chop mechanics, then test whether training-only causal Trend direction reinforces authenticated Long and Short winners and countertrend failures without creating entries, reversing economic labels, weakening dominant-chop safety, or changing teacher-free inference.",
+    "hypothesis": "Preserve the verified Expansion opportunity, Trend confluence, Regime chop context, five-bar economic labels, recurrent learner, and teacher-free policy; test whether pairing comparable starting controls by their differing causal Expansion and Trend lifecycle teaches both Long and Short winners above WAIT while matched failures remain below WAIT.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -346,9 +348,6 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
-    "external_parent_economic_overrides": [
-      "minimum_mll_headroom"
-    ],
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
@@ -422,6 +421,7 @@
       "training.entry_opportunity_sequence_fraction",
       "training.paired_a_plus_population_weighting",
       "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_control_candidates",
       "training.paired_a_plus_violation_replay_update_period",
       "training.paired_a_plus_violation_candidate_pairs_per_side",
       "training.paired_a_plus_violation_pairs_per_side",
@@ -456,7 +456,7 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v36_trend_confluence_strength_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v38_aplus_lifecycle_control_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
@@ -505,7 +505,7 @@
             "value": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "operator": "<=",
             "value": 0.5
           },
@@ -537,7 +537,7 @@
             "minimum_delta": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "minimum_delta": 0
           }
@@ -564,7 +564,7 @@
             "maximum_regression": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "maximum_regression": 0
           }
@@ -615,7 +615,7 @@
         "value": 0
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
         "value": 0.5
       },
@@ -657,7 +657,7 @@
         "value": 0.5
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
         "value": 0.5
       },
@@ -680,7 +680,7 @@
       },
       {
         "name": "lowest_near_blow",
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "maximize": false
       },
       {
@@ -701,6 +701,6 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v36_trend_confluence_strength_200ep",
-  "hypothesis": "Expansion remains the opportunity source and Regime remains chop context; test whether independently scaled training-only Trend opportunity and safety confluence, global Trend strength, margin, and causal confirmation duration improve authenticated Long and Short winner-over-WAIT transfer while preserving zero blows, 2R capture, and teacher-free inference."
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v38_aplus_lifecycle_control_200ep",
+  "hypothesis": "Expansion remains the opportunity source, Trend remains directional confluence, and Regime remains chop context; test whether comparable-control, differing-lifecycle economic pairs convert authenticated Long and Short A+ paths into teacher-free winner-over-WAIT rankings while preserving failure rejection, zero blows, and 2R capture."
 }

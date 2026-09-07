@@ -57,7 +57,11 @@ STAGE2_V6_ASSOCIATION_FORMULA = (
 
 
 def _current_payload() -> dict:
-    return json.loads(CURRENT_RECIPE.read_text())
+    payload = json.loads(CURRENT_RECIPE.read_text())
+    # Tests materialize this fixture under a temporary ``config`` directory;
+    # retain the original contract that resources live one level above it.
+    payload["workspace_root"] = ".."
+    return payload
 
 
 @pytest.mark.parametrize('mode', ['shared', 'td_only'])

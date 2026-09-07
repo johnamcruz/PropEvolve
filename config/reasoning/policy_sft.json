@@ -1,5 +1,10 @@
 {
   "inherits": "sft.json",
+  "adapter_path": "runs/reasoning-challenger/action-verbalizer-adapters",
+  "iters": 64,
+  "steps_per_eval": 16,
+  "save_every": 32,
+  "batch_sampling": "balanced_actions",
   "action_supervision": {"enabled": true, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
   "resume_adapter_file": "runs/reasoning-challenger/market-adapters/adapters.safetensors"
 }

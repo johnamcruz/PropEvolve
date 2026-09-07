@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -135,7 +135,7 @@
     "chop_wait_margin": 0.25,
     "failed_confluence_margin": 0.25,
     "paired_a_plus_margin": 0.25,
-    "paired_a_plus_winner_loss_weight": 3
+    "paired_a_plus_winner_loss_weight": 2
   },
   "observation": {
     "management_state": "entry_risk_v1",
@@ -240,7 +240,10 @@
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
     "entry_action_margin": 0.25,
-    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_opportunity_v2"
+    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_opportunity_v2",
+    "exclude_economic_winners_from_chop_wait": true,
+    "challenge_return_self_imitation_weight": 0.05,
+    "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
     "mixed_precision": "off",
@@ -253,8 +256,8 @@
   },
   "training": {
     "prefetch_batches": 0,
-    "episodes": 200,
-    "validation_episodes": 200,
+    "episodes": 100,
+    "validation_episodes": 100,
     "validation_no_trade_patience_episodes": 5,
     "greedy_diagnostic_interval_steps": 256,
     "replay_capacity_episodes": 500,
@@ -286,7 +289,7 @@
   "balance_curriculum": {
     "schedule_seed": 37,
     "start_pnls": [-1500],
-    "validation_episodes": 200,
+    "validation_episodes": 100,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/balance-curriculum",
       "sha256": "32ddfd7738b25264d02065ef270e80abfa1089301c89fc6a38a68c80e68413a9",
@@ -300,7 +303,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Warm-starting the same immutable authenticated zero-blow V21 A+ policy and preserving the full Opportunity gradient while projecting only the component of Safety that directly opposes Opportunity will recover genuine Long and Short entry recall without weakening non-conflicting WAIT learning. C51 TD, replay, economic labels, recurrent anchors, loss weights, margins, curriculum, +$6,000 pass, -$3,000 blow, 30-day timeout, and teacher-free inference remain unchanged from the matched V24 recipe.",
+    "hypothesis": "On the unchanged immutable V21 parent and V27 challenge-credit recipe, restoring the previously proven pcgrad_preserve_opportunity_v2 mode will prevent dominant-chop and failed-setup Safety gradients from canceling exact-action, paired-winner, and balance-outcome Opportunity gradients while leaving C51 TD, non-conflicting WAIT learning, the Stage 1 fill-offset 1-5 contract, replay, margins, teacher-free inference, and challenge economics unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -317,9 +320,12 @@
     "frozen_paths": [
       "agent.atoms",
       "agent.auxiliary_gradient_conflict_mode",
+      "agent.challenge_return_discount",
+      "agent.challenge_return_self_imitation_weight",
       "agent.device",
       "agent.entry_action_loss_reduction",
       "agent.entry_action_margin",
+      "agent.exclude_economic_winners_from_chop_wait",
       "agent.gamma",
       "agent.gradient_clip",
       "agent.hidden_dim",
@@ -411,14 +417,14 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v26_winner_activation_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v28_preserve_opportunity_100ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "winner_activation_200ep",
+        "name": "preserve_opportunity_100ep",
         "budget_mode": "episodes",
-        "training_episodes": 200,
-        "validation_episodes": 200,
+        "training_episodes": 100,
+        "validation_episodes": 100,
         "allow_revisions": false,
         "warm_start_parent": true,
         "curriculum_override": {},
@@ -432,7 +438,7 @@
           {
             "metric": "selection.pass_rate",
             "operator": ">=",
-            "value": 0.2
+            "value": 0.6
           },
           {
             "metric": "selection.average_win_r",
@@ -542,7 +548,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.2
+        "value": 0.6
       },
       {
         "metric": "selection.average_win_r",
@@ -609,7 +615,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.25
+        "value": 0.6
       },
       {
         "metric": "selection.near_blow_timeout_rate",
@@ -656,5 +662,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v26_winner_activation_200ep"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v28_preserve_opportunity_100ep"
 }

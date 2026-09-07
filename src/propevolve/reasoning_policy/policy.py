@@ -4,7 +4,9 @@ import numpy as np
 
 from ..decision import Action
 from .dataset import context_messages
-from .model_config import read_model_settings, validate_model_settings, verify_adapter_base, template_options
+from .model_config import (action_verbalizers as validate_action_verbalizers,
+                           read_model_settings, validate_model_settings,
+                           verify_adapter_base, template_options)
 from .tokenization import encode_completion
 
 
@@ -19,7 +21,7 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
     requires_specialists = True
 
     def __init__(self, model, tokenizer, *, max_seq_length: int, chat_template_kwargs=None,
-                 input_mode="specialists", projector=None):
+                 input_mode="specialists", projector=None, action_verbalizers=None):
         if type(max_seq_length) is not int or max_seq_length < 1:
             raise ValueError("max_seq_length must be positive")
         self.model = model
@@ -29,21 +31,26 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
         self.projector_config = projector
         self.requires_specialists = input_mode == "specialists"
         self.chat_template_kwargs = template_options(chat_template_kwargs)
+        self.action_verbalizers = validate_action_verbalizers(action_verbalizers)
         self.model.eval()
 
     @classmethod
     def load(cls, model_path, *, adapter_path, max_seq_length, chat_template_kwargs=None,
-             input_mode="specialists", projector=None):
+             input_mode="specialists", projector=None, action_verbalizers=None):
+        verbalizers = validate_action_verbalizers(action_verbalizers)
         validate_model_settings({"model": str(model_path), "adapter_path":
                                  None if adapter_path is None else str(adapter_path),
-                                 "max_seq_length": max_seq_length, "input_mode": input_mode, "projector": projector})
+                                 "max_seq_length": max_seq_length, "input_mode": input_mode,
+                                 "projector": projector, "action_verbalizers": verbalizers})
         verify_adapter_base(str(model_path), adapter_path)
         if adapter_path is not None:
             import json
             from pathlib import Path
             metadata = json.loads((Path(adapter_path) / "adapter_config.json").read_text())
             if (metadata.get("input_mode", "specialists") != input_mode
-                    or metadata.get("projector") != projector):
+                    or metadata.get("projector") != projector
+                    or (metadata.get("action_supervision", {}).get("enabled")
+                        and metadata.get("action_verbalizers") != verbalizers)):
                 raise ValueError("adapter input/projector contract differs from configured policy")
         from mlx_lm import load
         model, tokenizer = load(model_path, adapter_path=adapter_path)
@@ -53,7 +60,8 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
             if adapter_path is not None:
                 restore_projector(model, adapter_path)
         return cls(model, tokenizer, max_seq_length=max_seq_length,
-                   chat_template_kwargs=chat_template_kwargs, input_mode=input_mode, projector=projector)
+                   chat_template_kwargs=chat_template_kwargs, input_mode=input_mode,
+                   projector=projector, action_verbalizers=verbalizers)
 
     @classmethod
     def from_config(cls, path, *, root=None):
@@ -66,7 +74,8 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
         return cls.load(settings["model"], adapter_path=settings["adapter_path"],
                         max_seq_length=settings["max_seq_length"],
                         chat_template_kwargs=settings["chat_template_kwargs"],
-                        input_mode=settings["input_mode"], projector=settings["projector"])
+                        input_mode=settings["input_mode"], projector=settings["projector"],
+                        action_verbalizers=settings["action_verbalizers"])
 
     def decide(self, context, legal_actions):
         actions = tuple(sorted({Action(action) for action in legal_actions}, key=int))
@@ -98,7 +107,7 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
         if (market_context is not None) != (self.input_mode == "embeddings"):
             raise ValueError("policy input mode and causal embeddings disagree")
         reserved = 0 if self.projector_config is None else self.projector_config["market_tokens"]
-        encoded = tuple(encode_completion(self.tokenizer, messages, completion,
+        encoded = tuple(encode_completion(self.tokenizer, messages, self.action_verbalizers[completion],
             max_seq_length=self.max_seq_length - reserved, chat_template_kwargs=self.chat_template_kwargs)
             for completion in completions)
         if market_context is None:
@@ -113,7 +122,7 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
 
 
 def sequence_scores(model, tokenized):
-    """Differentiable action log likelihoods; no detach before RL gradients."""
+    """Length-normalized action likelihoods; no detach before RL gradients."""
     import mlx.core as mx
     scores = []
     for item in tokenized:
@@ -127,5 +136,6 @@ def sequence_scores(model, tokenized):
         logits = logits[:, prefix_length - 1:, :].astype(mx.float32)
         log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         targets = mx.array(full[prefix_length:])[None, :, None]
-        scores.append(mx.take_along_axis(log_probs, targets, axis=-1).sum())
+        token_scores = mx.take_along_axis(log_probs, targets, axis=-1)
+        scores.append(token_scores.mean())
     return mx.stack(scores)

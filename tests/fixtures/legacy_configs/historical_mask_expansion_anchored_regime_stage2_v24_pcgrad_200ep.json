@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -240,10 +240,7 @@
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
     "entry_action_margin": 0.25,
-    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_economic_boundaries_v3",
-    "exclude_economic_winners_from_chop_wait": true,
-    "challenge_return_self_imitation_weight": 0.05,
-    "challenge_return_discount": 0.999951865937609
+    "auxiliary_gradient_conflict_mode": "pcgrad_safety_opportunity_v1"
   },
   "runtime": {
     "mixed_precision": "off",
@@ -288,9 +285,7 @@
   },
   "balance_curriculum": {
     "schedule_seed": 37,
-    "start_pnls": [
-      -1500
-    ],
+    "start_pnls": [-1500],
     "validation_episodes": 200,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/balance-curriculum",
@@ -300,12 +295,12 @@
       "output": "balance-pass-replay.pt"
     },
     "outcome_contrast_replay": {
-      "update_period": 1,
+      "update_period": 8,
       "max_examples": 8
     }
   },
   "evolution": {
-    "hypothesis": "On the unchanged immutable V21 parent, Expansion and Regime teachers, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner/failure margins, and economic-boundary-preserving PCGrad mode, rehearse the existing bounded authenticated pass-versus-near-blow contrast pair on every optimizer update so the learner receives enough repeated evidence to acquire all Long/Short ENTER-versus-WAIT boundaries. Preserve population correction, zero-blow safety, dominant-chop WAIT pressure, both sides, teacher-free inference, and every existing action and checkpoint contract.",
+    "hypothesis": "Warm-starting the immutable authenticated zero-blow V21 A+ policy and training that same recurrent policy from -$1,500 realized PnL to the original +$6,000 pass target, while sparsely pairing each same-side successful pass with the nearest normalized Expansion-Regime near-blow timeout and doubling only the absolute winner action-over-WAIT pressure, will teach the policy to rank the passing action above WAIT while preserving the matched failure below WAIT. The original +$6,000 pass, -$3,000 blow, 30-day timeout, V21 Expansion-Regime supervision, action space, failure pressure, and teacher-free inference remain unchanged.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -322,12 +317,9 @@
     "frozen_paths": [
       "agent.atoms",
       "agent.auxiliary_gradient_conflict_mode",
-      "agent.challenge_return_discount",
-      "agent.challenge_return_self_imitation_weight",
       "agent.device",
       "agent.entry_action_loss_reduction",
       "agent.entry_action_margin",
-      "agent.exclude_economic_winners_from_chop_wait",
       "agent.gamma",
       "agent.gradient_clip",
       "agent.hidden_dim",
@@ -419,11 +411,11 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v31_contrast_rehearsal_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v24_pcgrad_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "contrast_rehearsal_200ep",
+        "name": "pcgrad_safety_opportunity_200ep",
         "budget_mode": "episodes",
         "training_episodes": 200,
         "validation_episodes": 200,
@@ -440,7 +432,7 @@
           {
             "metric": "selection.pass_rate",
             "operator": ">=",
-            "value": 0.6
+            "value": 0.2
           },
           {
             "metric": "selection.average_win_r",
@@ -470,7 +462,7 @@
           {
             "metric": "selection.near_blow_timeout_rate",
             "operator": "<=",
-            "value": 0.5
+            "value": 0.6263636363636363
           },
           {
             "metric": "balance_stress.blow_rate",
@@ -550,7 +542,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.4
+        "value": 0.2
       },
       {
         "metric": "selection.average_win_r",
@@ -580,7 +572,7 @@
       {
         "metric": "selection.near_blow_timeout_rate",
         "operator": "<=",
-        "value": 0.5
+        "value": 0.6263636363636363
       },
       {
         "metric": "balance_stress.blow_rate",
@@ -617,7 +609,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.5
+        "value": 0.25
       },
       {
         "metric": "selection.near_blow_timeout_rate",
@@ -664,6 +656,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v31_contrast_rehearsal_200ep",
-  "hypothesis": "On the unchanged immutable V21 parent, preserve the established Expansion plus Regime A-plus selector, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner and failure economics, and teacher-free inference while rehearsing the bounded authenticated pass-versus-near-blow contrast pair on every optimizer update. A 200-episode training and 200-episode validation run must demonstrate higher pass conversion toward 60 percent, zero blows, lower near-blow timeouts, both sides active, and acquisition of all Long, Short, and WAIT economic action boundaries without regressing dominant-chop WAIT behavior."
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v24_pcgrad_200ep"
 }

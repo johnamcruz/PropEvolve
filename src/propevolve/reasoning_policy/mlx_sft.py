@@ -31,6 +31,10 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError("invalid action supervision settings")
     if supervision["enabled"] and supervision["soft_target_weight"] + supervision["ranking_weight"] <= 0:
         raise ValueError("enabled action supervision requires learning weight")
+    if payload.get("batch_sampling", "random") not in {"random", "balanced_actions"}:
+        raise ValueError("unknown SFT batch sampling strategy")
+    if not supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions":
+        raise ValueError("balanced action sampling requires action supervision")
     if payload["adapter_path"] is None:
         raise ValueError("SFT requires an adapter output path")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
@@ -109,8 +113,9 @@ system boundary for tests; the production caller loads it with MLX-LM.
                     if [item["role"] for item in messages] != ["system", "user", "assistant"]:
                         raise ValueError("unexpected SFT conversation schema")
                     completion = messages[-1]["content"]
+                    verbalizer = config["action_verbalizers"].get(completion, completion)
                     reserved = config["projector"]["market_tokens"] if config["input_mode"] == "embeddings" else 0
-                    tokens, offset = encode_completion(tokenizer, messages[:-1], completion,
+                    tokens, offset = encode_completion(tokenizer, messages[:-1], verbalizer,
                         max_seq_length=config["max_seq_length"] - reserved,
                         chat_template_kwargs=config["chat_template_kwargs"])
                     encoded = {"tokens": tokens, "offset": offset}
@@ -118,10 +123,15 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         from .supervision import action_targets
                         alternatives = action_targets(record)
                         encoded["action_targets"] = alternatives
-                        encoded["alternatives"] = [encode_completion(tokenizer, messages[:-1], name,
+                        encoded["alternatives"] = [encode_completion(
+                            tokenizer, messages[:-1], config["action_verbalizers"][name],
                             max_seq_length=config["max_seq_length"] - reserved,
                             chat_template_kwargs=config["chat_template_kwargs"])
                             for name in alternatives["names"]]
+                        completion_lengths = {len(tokens) - offset for tokens, offset in encoded["alternatives"]}
+                        if completion_lengths != {2}:
+                            raise ValueError("each action verbalizer must be exactly one tokenizer token")
+                        encoded["target_name"] = completion
                     if config["input_mode"] == "embeddings":
                         import numpy as np
                         projector = config["projector"]

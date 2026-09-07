@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -65,8 +65,33 @@
       ],
       "loss_weight": 0.1,
       "entry_search_loss_weight": 0
+    },
+    {
+      "kind": "trend",
+      "cache_root": "cache/trend_teacher_9market_3min_pre2025_v1",
+      "channels": [
+        "long_launch_probability",
+        "short_launch_probability",
+        "long_conditional_quality",
+        "short_conditional_quality"
+      ],
+      "loss_weight": 0,
+      "entry_search_loss_weight": 0
     }
   ],
+  "trend_start_confluence": {
+    "schema": "trend_start_confluence_v1",
+    "training_only": true,
+    "target_source": "post_launch_economic_pair",
+    "score_formula": "causal_recent_max_launch_probability_times_conditional_quality",
+    "semantics": "economic_label_authority_causal_directional_confirmation_v1",
+    "enabled": true,
+    "loss_weight": 1,
+    "margin": 0.25,
+    "confirmation_lookback_bars": 50,
+    "opportunity_loss_weight": 1,
+    "safety_loss_weight": 1
+  },
   "entry_supervision": {
     "schema": "post_launch_entry_v1",
     "training_only": true,
@@ -90,11 +115,12 @@
       "adverse_r": 0.25,
       "horizon_bars": 3
     },
-    "target_r": 2.0,
-    "stop_r": 1.0,
+    "target_r": 2,
+    "stop_r": 1,
     "horizon_bars": 150,
     "collision": "stop_first",
-    "loss_weight": 0.3,
+    "loss_weight": 0.9,
+    "opportunity_loss_multiplier": 1.5,
     "action_class_balance": {
       "schema": "inverse_frequency_v1",
       "action_order": [
@@ -114,7 +140,7 @@
       "ENTER_SHORT_1"
     ],
     "formula": "equal_present_group_mean(exact_wait_expansion_regime_confluence_weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_present_side_mean(mean(softplus(pair_margin+matched_economic_failure_side_q_minus_wait-matched_economic_winner_side_q_minus_wait),winner_population_weight*softplus(action_margin-matched_economic_winner_side_q_minus_wait),failure_population_weight*softplus(action_margin+matched_economic_failure_side_q_minus_wait)))",
-    "loss_weight": 0.3,
+    "loss_weight": 0.3604153677515533,
     "expansion_center_receipt": "config/receipts/expansion_entry_centers_9market_pre2025_v1.json",
     "expansion_center_receipt_sha256": "fe53640956e74413ad3316e8783dc09dfafb82f6559009b24ed58f24adc959ba",
     "expansion_long_center": 0.10249102659218842,
@@ -124,7 +150,7 @@
     "dominant_chop_pressure": 2,
     "q_temperature": 1,
     "semantics": "paired_recurrent_a_plus_expansion_regime_population_corrected_v9",
-    "persistent_chop_negative_emphasis": 2,
+    "persistent_chop_negative_emphasis": 2.25,
     "side_balance": {
       "schema": "paired_recurrent_long_short_v1",
       "action_order": [
@@ -135,7 +161,7 @@
     "chop_wait_margin": 0.25,
     "failed_confluence_margin": 0.25,
     "paired_a_plus_margin": 0.25,
-    "paired_a_plus_winner_loss_weight": 2
+    "paired_a_plus_winner_loss_weight": 2.5
   },
   "observation": {
     "management_state": "entry_risk_v1",
@@ -154,7 +180,7 @@
     "episode_days": 30,
     "bars_per_day": 480,
     "max_position_size": 1,
-    "minimum_mll_headroom": 300,
+    "minimum_mll_headroom": 500,
     "trailing_mll_lock": true,
     "terminal_pass_reward": 250,
     "terminal_blow_reward": -1500,
@@ -164,10 +190,10 @@
     "per_trade_risk_dollars": 300,
     "ratchet_activation_r": 2,
     "ratchet_giveback_r": 0.5,
-    "mll_proximity_penalty_coefficient": 0.0001,
-    "lead_giveback_penalty_coefficient": 0,
+    "mll_proximity_penalty_coefficient": 0.0003,
+    "lead_giveback_penalty_coefficient": 0.0001,
     "large_win_threshold_r": 2,
-    "large_win_bonus_coefficient": 0.1,
+    "large_win_bonus_coefficient": 0.125,
     "ratchet_lock_floor_r": 2
   },
   "point_values": {
@@ -219,8 +245,8 @@
     "teacher_free": true,
     "minimum_pass_rate": 0.5,
     "minimum_per_market_pass_rate": 0.5,
-    "maximum_blow_rate": 0.0,
-    "minimum_expectancy_r": 0.0
+    "maximum_blow_rate": 0,
+    "minimum_expectancy_r": 0
   },
   "agent": {
     "hidden_dim": 128,
@@ -239,13 +265,16 @@
     "target_soft_tau": 0.005,
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
-    "entry_action_margin": 0.25,
-    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_opportunity_v2",
+    "entry_action_margin": 0.4,
+    "auxiliary_gradient_conflict_mode": "pcgrad_preserve_economic_boundaries_v3",
     "exclude_economic_winners_from_chop_wait": true,
-    "challenge_return_self_imitation_weight": 0.05,
+    "challenge_return_self_imitation_weight": 0.025,
     "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
+    "learner_backend": "mlx",
+    "mlx_cache_limit_bytes": 268435456,
+    "mps_cache_clear_threshold_bytes": 268435456,
     "mixed_precision": "off",
     "compile_model": false,
     "compile_backend": "inductor",
@@ -256,8 +285,8 @@
   },
   "training": {
     "prefetch_batches": 0,
-    "episodes": 100,
-    "validation_episodes": 100,
+    "episodes": 200,
+    "validation_episodes": 200,
     "validation_no_trade_patience_episodes": 5,
     "greedy_diagnostic_interval_steps": 256,
     "replay_capacity_episodes": 500,
@@ -279,17 +308,26 @@
     "short_circuit": null,
     "seed": 314159,
     "checkpoint_every_episodes": 5,
-    "terminal_sequence_fraction": 0.5,
-    "safety_sequence_fraction": 0.25,
-    "entry_opportunity_sequence_fraction": 0.25,
-    "regime_wait_sequence_fraction": 0.0,
+    "terminal_sequence_fraction": 0.4375,
+    "safety_sequence_fraction": 0.1875,
+    "entry_opportunity_sequence_fraction": 0.375,
+    "paired_a_plus_population_weighting": "population_proportional_v1",
+    "paired_a_plus_context_matching": "expansion_trend_lifecycle_control_v2",
+    "paired_a_plus_control_candidates": 8,
+    "paired_a_plus_violation_replay_update_period": 4,
+    "paired_a_plus_violation_candidate_pairs_per_side": 16,
+    "paired_a_plus_violation_pairs_per_side": 1,
+    "regime_wait_sequence_fraction": 0,
     "regime_wait_sequence_update_period": 8,
-    "budget_mode": "episodes"
+    "budget_mode": "episodes",
+    "paired_a_plus_mastery_capacity_per_side": 8
   },
   "balance_curriculum": {
     "schedule_seed": 37,
-    "start_pnls": [-1500],
-    "validation_episodes": 100,
+    "start_pnls": [
+      -1500
+    ],
+    "validation_episodes": 200,
     "pass_replay": {
       "path": "runs/recovery-pass-replay/balance-curriculum",
       "sha256": "32ddfd7738b25264d02065ef270e80abfa1089301c89fc6a38a68c80e68413a9",
@@ -298,12 +336,12 @@
       "output": "balance-pass-replay.pt"
     },
     "outcome_contrast_replay": {
-      "update_period": 8,
+      "update_period": 5,
       "max_examples": 8
     }
   },
   "evolution": {
-    "hypothesis": "On the unchanged immutable V21 parent and V27 challenge-credit recipe, restoring the previously proven pcgrad_preserve_opportunity_v2 mode will prevent dominant-chop and failed-setup Safety gradients from canceling exact-action, paired-winner, and balance-outcome Opportunity gradients while leaving C51 TD, non-conflicting WAIT learning, the Stage 1 fill-offset 1-5 contract, replay, margins, teacher-free inference, and challenge economics unchanged.",
+    "hypothesis": "Preserve the verified Expansion opportunity, Trend confluence, Regime chop context, five-bar economic labels, recurrent learner, and teacher-free policy; test whether pairing comparable starting controls by their differing causal Expansion and Trend lifecycle teaches both Long and Short winners above WAIT while matched failures remain below WAIT.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -313,9 +351,6 @@
       "evaluation_id": "5366be9ccdac596288364fb1b82b224eb3db199719ee14910fc0ebbd5b289252",
       "model_sha256": "2cff0395fb972b53b9c5d3f3d5f69ea12bf6a7416ad9704fbb9cbadd89d09cab"
     },
-    "external_parent_economic_overrides": [
-      "minimum_mll_headroom"
-    ],
     "allowed_revision_paths": [],
     "frozen_paths": [
       "agent.atoms",
@@ -379,6 +414,7 @@
       "runtime",
       "sealed_confirmation",
       "teachers",
+      "trend_start_confluence",
       "temporal",
       "tickers",
       "timeframe_minutes",
@@ -386,6 +422,12 @@
       "training.budget_mode",
       "training.checkpoint_every_episodes",
       "training.entry_opportunity_sequence_fraction",
+      "training.paired_a_plus_population_weighting",
+      "training.paired_a_plus_context_matching",
+      "training.paired_a_plus_control_candidates",
+      "training.paired_a_plus_violation_replay_update_period",
+      "training.paired_a_plus_violation_candidate_pairs_per_side",
+      "training.paired_a_plus_violation_pairs_per_side",
       "training.regime_wait_sequence_fraction",
       "training.regime_wait_sequence_update_period",
       "training.entry_supervision_autonomy_start_fraction",
@@ -417,14 +459,14 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v28_preserve_opportunity_100ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v38_aplus_lifecycle_control_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "preserve_opportunity_100ep",
+        "name": "contrast_rehearsal_200ep",
         "budget_mode": "episodes",
-        "training_episodes": 100,
-        "validation_episodes": 100,
+        "training_episodes": 200,
+        "validation_episodes": 200,
         "allow_revisions": false,
         "warm_start_parent": true,
         "curriculum_override": {},
@@ -466,9 +508,9 @@
             "value": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "operator": "<=",
-            "value": 0.6263636363636363
+            "value": 0.5
           },
           {
             "metric": "balance_stress.blow_rate",
@@ -498,7 +540,7 @@
             "minimum_delta": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "minimum_delta": 0
           }
@@ -525,7 +567,7 @@
             "maximum_regression": 0
           },
           {
-            "metric": "selection.near_blow_timeout_rate",
+            "metric": "selection.pathwise_near_blow_rate",
             "direction": "minimize",
             "maximum_regression": 0
           }
@@ -548,7 +590,7 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.6
+        "value": 0.4
       },
       {
         "metric": "selection.average_win_r",
@@ -576,9 +618,9 @@
         "value": 0
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
-        "value": 0.6263636363636363
+        "value": 0.5
       },
       {
         "metric": "balance_stress.blow_rate",
@@ -615,10 +657,10 @@
       {
         "metric": "selection.pass_rate",
         "operator": ">=",
-        "value": 0.6
+        "value": 0.5
       },
       {
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "operator": "<=",
         "value": 0.5
       },
@@ -641,7 +683,7 @@
       },
       {
         "name": "lowest_near_blow",
-        "metric": "selection.near_blow_timeout_rate",
+        "metric": "selection.pathwise_near_blow_rate",
         "maximize": false
       },
       {
@@ -662,5 +704,6 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v28_preserve_opportunity_100ep"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v40_learned_pair_retention_200ep",
+  "hypothesis": "Expansion remains the opportunity source, Trend remains directional confluence, and Regime remains chop context; test whether comparable-control, differing-lifecycle economic pairs convert authenticated Long and Short A+ paths into teacher-free winner-over-WAIT rankings while preserving failure rejection, zero blows, and 2R capture."
 }

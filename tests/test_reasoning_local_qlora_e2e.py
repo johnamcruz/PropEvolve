@@ -69,12 +69,15 @@ def test_local_quantized_model_learns_full_action_labels_and_reloads(tmp_path):
     shutil.rmtree(tmp_path / "view")
     from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view
     prepare_mlx_view(recipe, tmp_path / "view", tokenizer=tokenizer)
-    base = MLXActionPolicy.load(model_path, adapter_path=None, max_seq_length=4096)
+    base = MLXActionPolicy.load(model_path, adapter_path=None, max_seq_length=4096,
+                                action_verbalizers=config["action_verbalizers"])
     before = score_labeled_examples(base, [record])[0]
     train_prepared(recipe, tmp_path / "view")
-    trained = MLXActionPolicy.load(model_path, adapter_path=config["adapter_path"], max_seq_length=4096)
+    trained = MLXActionPolicy.load(model_path, adapter_path=config["adapter_path"], max_seq_length=4096,
+                                   action_verbalizers=config["action_verbalizers"])
     after = score_labeled_examples(trained, [record])[0]
-    reloaded = MLXActionPolicy.load(model_path, adapter_path=config["adapter_path"], max_seq_length=4096)
+    reloaded = MLXActionPolicy.load(model_path, adapter_path=config["adapter_path"], max_seq_length=4096,
+                                    action_verbalizers=config["action_verbalizers"])
     repeat = score_labeled_examples(reloaded, [record])[0]
     assert after["target_log_likelihood"] > before["target_log_likelihood"]
     np.testing.assert_allclose(list(after["scores"].values()), list(repeat["scores"].values()), atol=1e-5)
@@ -100,7 +103,8 @@ def test_local_quantized_model_learns_full_action_labels_and_reloads(tmp_path):
     from propevolve.reasoning_policy.checkpoints import verify_checkpoint
     assert verify_checkpoint(rl_path)["contract"] == {"fixture": "real-mlx"}
     from propevolve.reasoning_policy.checkpoints import restore_training_state
-    rl_reloaded = MLXActionPolicy.load(model_path, adapter_path=rl_path, max_seq_length=4096)
+    rl_reloaded = MLXActionPolicy.load(model_path, adapter_path=rl_path, max_seq_length=4096,
+                                       action_verbalizers=config["action_verbalizers"])
     rl_scores = score_labeled_examples(rl_reloaded, [record])[0]["scores"]
     np.testing.assert_allclose(list(rl_scores.values()),
                                list(score_labeled_examples(trained, [record])[0]["scores"].values()), atol=1e-5)
@@ -137,7 +141,8 @@ def test_local_quantized_embedding_policy_evaluates_without_teacher_lookups(tmp_
     prepare_mlx_view(recipe, tmp_path / "view", tokenizer=tokenizer)
     train_prepared(recipe, tmp_path / "view")
     policy = MLXActionPolicy.load(model_path, adapter_path=config["adapter_path"],
-        max_seq_length=4096, input_mode="embeddings", projector=config["projector"])
+        max_seq_length=4096, input_mode="embeddings", projector=config["projector"],
+        action_verbalizers=config["action_verbalizers"])
     class ForbiddenSources:
         def __iter__(self):
             raise AssertionError("teacher lookup during teacher-free evaluation")

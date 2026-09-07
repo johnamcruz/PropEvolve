@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -65,33 +65,8 @@
       ],
       "loss_weight": 0.1,
       "entry_search_loss_weight": 0
-    },
-    {
-      "kind": "trend",
-      "cache_root": "cache/trend_teacher_9market_3min_pre2025_v1",
-      "channels": [
-        "long_launch_probability",
-        "short_launch_probability",
-        "long_conditional_quality",
-        "short_conditional_quality"
-      ],
-      "loss_weight": 0,
-      "entry_search_loss_weight": 0
     }
   ],
-  "trend_start_confluence": {
-    "schema": "trend_start_confluence_v1",
-    "training_only": true,
-    "target_source": "post_launch_economic_pair",
-    "score_formula": "causal_recent_max_launch_probability_times_conditional_quality",
-    "semantics": "economic_label_authority_causal_directional_confirmation_v1",
-    "enabled": true,
-    "loss_weight": 1,
-    "margin": 0.25,
-    "confirmation_lookback_bars": 50,
-    "opportunity_loss_weight": 1,
-    "safety_loss_weight": 1
-  },
   "entry_supervision": {
     "schema": "post_launch_entry_v1",
     "training_only": true,
@@ -115,12 +90,12 @@
       "adverse_r": 0.25,
       "horizon_bars": 3
     },
-    "target_r": 2,
-    "stop_r": 1,
+    "target_r": 2.0,
+    "stop_r": 1.0,
     "horizon_bars": 150,
     "collision": "stop_first",
     "loss_weight": 0.9,
-    "opportunity_loss_multiplier": 1.5,
+    "opportunity_loss_multiplier": 1.0,
     "action_class_balance": {
       "schema": "inverse_frequency_v1",
       "action_order": [
@@ -161,7 +136,7 @@
     "chop_wait_margin": 0.25,
     "failed_confluence_margin": 0.25,
     "paired_a_plus_margin": 0.25,
-    "paired_a_plus_winner_loss_weight": 2.5
+    "paired_a_plus_winner_loss_weight": 1.5
   },
   "observation": {
     "management_state": "entry_risk_v1",
@@ -245,8 +220,8 @@
     "teacher_free": true,
     "minimum_pass_rate": 0.5,
     "minimum_per_market_pass_rate": 0.5,
-    "maximum_blow_rate": 0,
-    "minimum_expectancy_r": 0
+    "maximum_blow_rate": 0.0,
+    "minimum_expectancy_r": 0.0
   },
   "agent": {
     "hidden_dim": 128,
@@ -265,14 +240,13 @@
     "target_soft_tau": 0.005,
     "device": "mps",
     "entry_action_loss_reduction": "equal_present_class_mean_v1",
-    "entry_action_margin": 0.4,
+    "entry_action_margin": 0.25,
     "auxiliary_gradient_conflict_mode": "pcgrad_preserve_economic_boundaries_v3",
     "exclude_economic_winners_from_chop_wait": true,
     "challenge_return_self_imitation_weight": 0.025,
     "challenge_return_discount": 0.999951865937609
   },
   "runtime": {
-    "learner_backend": "mlx",
     "mixed_precision": "off",
     "compile_model": false,
     "compile_backend": "inductor",
@@ -306,15 +280,10 @@
     "short_circuit": null,
     "seed": 314159,
     "checkpoint_every_episodes": 5,
-    "terminal_sequence_fraction": 0.4375,
-    "safety_sequence_fraction": 0.1875,
-    "entry_opportunity_sequence_fraction": 0.375,
-    "paired_a_plus_population_weighting": "population_proportional_v1",
-    "paired_a_plus_context_matching": "regime_control_expansion_lifecycle_v1",
-    "paired_a_plus_violation_replay_update_period": 8,
-    "paired_a_plus_violation_candidate_pairs_per_side": 8,
-    "paired_a_plus_violation_pairs_per_side": 1,
-    "regime_wait_sequence_fraction": 0,
+    "terminal_sequence_fraction": 0.375,
+    "safety_sequence_fraction": 0.375,
+    "entry_opportunity_sequence_fraction": 0.25,
+    "regime_wait_sequence_fraction": 0.0,
     "regime_wait_sequence_update_period": 8,
     "budget_mode": "episodes"
   },
@@ -337,7 +306,7 @@
     }
   },
   "evolution": {
-    "hypothesis": "Preserve the verified V34 Expansion-opportunity and Regime-chop mechanics, then test whether training-only causal Trend direction reinforces authenticated Long and Short winners and countertrend failures without creating entries, reversing economic labels, weakening dominant-chop safety, or changing teacher-free inference.",
+    "hypothesis": "On the unchanged immutable V21 parent, Expansion and Regime teachers, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner/failure margins, and economic-boundary-preserving PCGrad mode, rehearse the existing bounded authenticated pass-versus-near-blow contrast pair on every optimizer update so the learner receives enough repeated evidence to acquire all Long/Short ENTER-versus-WAIT boundaries. Preserve population correction, zero-blow safety, dominant-chop WAIT pressure, both sides, teacher-free inference, and every existing action and checkpoint contract.",
     "parent_candidate_ids": [
       "588c435236821b34ba0ea6ef09a1269fbec182226dfc38755ec53b0d91d60a23"
     ],
@@ -413,7 +382,6 @@
       "runtime",
       "sealed_confirmation",
       "teachers",
-      "trend_start_confluence",
       "temporal",
       "tickers",
       "timeframe_minutes",
@@ -421,11 +389,6 @@
       "training.budget_mode",
       "training.checkpoint_every_episodes",
       "training.entry_opportunity_sequence_fraction",
-      "training.paired_a_plus_population_weighting",
-      "training.paired_a_plus_context_matching",
-      "training.paired_a_plus_violation_replay_update_period",
-      "training.paired_a_plus_violation_candidate_pairs_per_side",
-      "training.paired_a_plus_violation_pairs_per_side",
       "training.regime_wait_sequence_fraction",
       "training.regime_wait_sequence_update_period",
       "training.entry_supervision_autonomy_start_fraction",
@@ -457,7 +420,7 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v37_mlx_trend_confluence_strength_200ep/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v32_a_plus_activation_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
@@ -702,6 +665,6 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v37_mlx_trend_confluence_strength_200ep",
-  "hypothesis": "Expansion remains the opportunity source and Regime remains chop context; test whether independently scaled training-only Trend opportunity and safety confluence, global Trend strength, margin, and causal confirmation duration improve authenticated Long and Short winner-over-WAIT transfer while preserving zero blows, 2R capture, and teacher-free inference."
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v32_a_plus_activation_200ep",
+  "hypothesis": "On the unchanged immutable V21 parent, preserve the established Expansion plus Regime A-plus selector, Stage 1 fill-offset 1-5 contract, recurrent C51 learner, paired winner and failure economics, and teacher-free inference while rehearsing the bounded authenticated pass-versus-near-blow contrast pair on every optimizer update. A 200-episode training and 200-episode validation run must demonstrate higher pass conversion toward 60 percent, zero blows, lower near-blow timeouts, both sides active, and acquisition of all Long, Short, and WAIT economic action boundaries without regressing dominant-chop WAIT behavior."
 }

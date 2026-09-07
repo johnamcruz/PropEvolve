@@ -1,6 +1,6 @@
 {
   "schema": "propevolve_historical_training_v1",
-  "workspace_root": "..",
+  "workspace_root": "../../..",
   "assets": "config/local-assets.json",
   "tickers": [
     "NQ",
@@ -45,13 +45,13 @@
         "short_clean_retained_given_attempt_probability"
       ],
       "loss_weight": 0.2,
-      "entry_search_loss_weight": 0.0,
+      "entry_search_loss_weight": 0,
       "entry_search_objective": "raw_probability",
       "entry_search_long_center": 0.5,
       "entry_search_short_center": 0.5,
       "entry_search_probability_epsilon": 0.000001,
-      "entry_search_teacher_temperature": 1.0,
-      "entry_search_q_temperature": 1.0,
+      "entry_search_teacher_temperature": 1,
+      "entry_search_q_temperature": 1,
       "entry_search_center_receipt": "",
       "entry_search_center_receipt_sha256": ""
     },
@@ -64,7 +64,7 @@
         "expansion_trend_probability"
       ],
       "loss_weight": 0.1,
-      "entry_search_loss_weight": 0.0
+      "entry_search_loss_weight": 0
     }
   ],
   "entry_supervision": {
@@ -113,7 +113,7 @@
       "ENTER_LONG_1",
       "ENTER_SHORT_1"
     ],
-    "formula": "equal_present_group_mean(exact_wait_expansion_regime_confluence_weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_present_side_mean(regime_similarity_weighted_mean(softplus(pair_margin+failed_side_q_minus_wait-valid_side_q_minus_wait)))",
+    "formula": "equal_present_group_mean(exact_wait_expansion_regime_confluence_weighted_ce,exact_long_ce,exact_short_ce,dead_vs_transition_positive_wait_rank,failed_long_vs_valid_long_wait_rank,failed_short_vs_valid_short_wait_rank)+membership_weighted_mean(all_action_dominant_chop_wait_margin,failed_long_wait_margin,failed_short_wait_margin)+equal_present_side_mean(mean(softplus(pair_margin+matched_economic_failure_side_q_minus_wait-matched_economic_winner_side_q_minus_wait),winner_population_weight*softplus(action_margin-matched_economic_winner_side_q_minus_wait),failure_population_weight*softplus(action_margin+matched_economic_failure_side_q_minus_wait)))",
     "loss_weight": 0.3,
     "expansion_center_receipt": "config/receipts/expansion_entry_centers_9market_pre2025_v1.json",
     "expansion_center_receipt_sha256": "fe53640956e74413ad3316e8783dc09dfafb82f6559009b24ed58f24adc959ba",
@@ -123,10 +123,10 @@
     "headroom_pressure": 1,
     "dominant_chop_pressure": 2,
     "q_temperature": 1,
-    "semantics": "paired_a_plus_expansion_regime_contrastive_v6",
-    "persistent_chop_negative_emphasis": 2.0,
+    "semantics": "paired_recurrent_a_plus_expansion_regime_population_corrected_v9",
+    "persistent_chop_negative_emphasis": 2,
     "side_balance": {
-      "schema": "equal_long_short_v1",
+      "schema": "paired_recurrent_long_short_v1",
       "action_order": [
         "ENTER_LONG_1",
         "ENTER_SHORT_1"
@@ -300,7 +300,7 @@
         "economic_futility": {
           "minimum_completed_episodes": 100,
           "maximum_near_blow_timeout_rate": 0.75,
-          "maximum_mean_terminal_pnl": -1500.0,
+          "maximum_mean_terminal_pnl": -1500,
           "maximum_expectancy_r": -0.15,
           "minimum_failed_conditions": 2
         }
@@ -316,7 +316,7 @@
     "budget_mode": "episodes"
   },
   "evolution": {
-    "hypothesis": "Starting from the immutable authenticated Stage 1 Expansion parent and validated three-state Expansion-anchored Regime teacher, ranking exact same-side economic winners above failed setups within comparable Regime states should teach the native recurrent policy which Expansion and Regime confluence is A+ while preserving teacher-free inference.",
+    "hypothesis": "Starting from the immutable authenticated Stage 1 Expansion parent and validated three-state Expansion-anchored Regime teacher, co-sampling complete recurrent sequences for same-side net +2R winners and context-nearest net +2R non-hits will teach the native policy which Expansion and Regime confluence is A+ while preserving ordinary C51 learning and teacher-free inference.",
     "parent_candidate_ids": [
       "1bccc5f5e81e87527644f8547b69b26cf5bc1227688b96971a664a81e9f964a0"
     ],
@@ -418,13 +418,13 @@
     "revision_bounds": {}
   },
   "campaign": {
-    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive/ml-loop-state",
+    "state_root": "runs/historical_mask_expansion_anchored_regime_stage2_v21_paired_recurrent_aplus_200ep/ml-loop-state",
     "max_revisions_per_stage": 0,
     "budget_stages": [
       {
-        "name": "paired_aplus_contrastive_100ep",
+        "name": "paired_recurrent_aplus_200ep",
         "budget_mode": "episodes",
-        "training_episodes": 100,
+        "training_episodes": 200,
         "validation_episodes": 200,
         "short_circuit_minimum_episodes": 18,
         "allow_revisions": false,
@@ -477,12 +477,12 @@
           {
             "metric": "selection.pass_rate",
             "direction": "maximize",
-            "minimum_delta": 0.0
+            "minimum_delta": 0
           },
           {
             "metric": "selection.near_blow_timeout_rate",
             "direction": "minimize",
-            "minimum_delta": 0.0
+            "minimum_delta": 0
           }
         ],
         "parent_retention_requirements": [
@@ -624,5 +624,5 @@
     ],
     "near_blow_loss_fraction": 0.75
   },
-  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v19_paired_aplus_contrastive"
+  "output": "runs/historical_mask_expansion_anchored_regime_stage2_v21_paired_recurrent_aplus_200ep"
 }

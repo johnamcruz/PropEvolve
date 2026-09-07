@@ -4,6 +4,14 @@ import numpy as np
 from ..decision import Action
 
 
+def mean_completion_scores(token_log_probs, mask, *, xp):
+    """Comparable categorical scores despite unequal action token lengths."""
+    counts = mask.sum(axis=-1)
+    if xp is np and (counts <= 0).any():
+        raise ValueError("completion score requires at least one target token")
+    return xp.where(mask, token_log_probs, 0.).sum(axis=-1) / xp.maximum(counts, 1)
+
+
 def action_targets(record):
     target = record["targets"]
     names = target["action_order"]
