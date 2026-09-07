@@ -116,6 +116,27 @@ def test_validation_runs_only_after_reported_optimizer_updates():
     assert [row["iteration"] for row in guard.summary()["history"]] == [0, 2, 4]
 
 
+def test_post_update_validation_exposes_pruner_metrics_at_same_boundary():
+    recorded = []
+    guard = ValidationLossGuard(
+        {"enabled": True, "patience_evaluations": 3, "min_delta": 0.0,
+         "restore_best": True, "monitor": "worst_action_advantage", "mode": "max"},
+        on_improvement=lambda report: None,
+    )
+    callback = PostUpdateValidation(
+        guard, every=2, total_iterations=4,
+        evaluate_loss=lambda: {"val_loss": 1.0, "worst_action_advantage": 0.3,
+                               "macro_accuracy": 1.0, "per_action": {}},
+        progress=lambda message: None, record_validation=recorded.append,
+    )
+
+    callback.evaluate(0)
+    callback.on_train_loss_report({"iteration": 2})
+
+    assert [row["iteration"] for row in recorded] == [0, 2]
+    assert all(row["worst_action_advantage"] == 0.3 for row in recorded)
+
+
 def test_balanced_action_optimizer_window_contains_every_action_equally():
     rows = ([{"target_name": "WAIT"}] * 5
             + [{"target_name": "ENTER_LONG_1"}] * 4

@@ -1,0 +1,17 @@
+{
+  "inherits": "action_full_history_job.json",
+  "status": "inner_temporal_action_mastery_selection",
+  "dataset_temporal": {
+    "train_start": "2021-01-01",
+    "train_end": "2024-01-01",
+    "validation_start": "2024-01-01",
+    "validation_end": "2025-01-01"
+  },
+  "economic_action_sampling": {
+    "train": {"per_action": 9, "seed": 4101},
+    "valid": {"per_action": 3, "seed": 4102}
+  },
+  "dataset_output": "runs/reasoning-challenger/action-mastery-selection-corpus",
+  "mlx_view": "runs/reasoning-challenger/action-mastery-selection-mlx-view",
+  "sft_config": "config/reasoning/action_mastery_selection_sft.json"
+}

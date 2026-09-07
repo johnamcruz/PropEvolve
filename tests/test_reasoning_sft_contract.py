@@ -2,12 +2,18 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from propevolve.reasoning_policy.context import ContextConfig, RollingContext
 from propevolve.reasoning_policy.dataset import write_supervised_dataset
-from propevolve.reasoning_policy.mlx_sft import read_sft_config, verify_dataset
+from propevolve.reasoning_policy.mlx_sft import (
+    read_sft_config,
+    verify_dataset,
+    verify_mlx_view,
+    view_contract,
+)
 
 
 def test_chronological_writer_rejects_label_crossing_train_boundary(tmp_path):
@@ -67,13 +73,17 @@ def test_every_sft_routes_through_shared_guarded_trainer(tmp_path, monkeypatch):
         "input_mode": "specialists"}))
     monkeypatch.setattr(mlx_sft, "verify_mlx_view",
                         lambda *args, **kwargs: effective)
+    monkeypatch.setattr(mlx_sft, "read_sft_config", lambda *args, **kwargs: {
+        "action_supervision": {"enabled": False}, "input_mode": "specialists"})
     calls = []
     monkeypatch.setattr(supervised_trainer, "train_supervised",
                         lambda config, view: calls.append((config, view)) or "guarded")
 
     assert mlx_sft.train_prepared("recipe.json", "prepared-view") == "guarded"
     assert calls == [({"action_supervision": {"enabled": False},
-                       "input_mode": "specialists"}, "prepared-view")]
+                       "input_mode": "specialists",
+                       "data": str(Path("prepared-view").resolve())},
+                      "prepared-view")]
 
 
 def test_sft_learning_rate_schedule_is_config_driven(tmp_path):
@@ -118,3 +128,54 @@ def test_sft_trainable_components_are_config_driven_and_fail_closed(tmp_path):
     recipe.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="trainable components"):
         read_sft_config(recipe)
+
+
+def test_prepared_view_can_be_reused_across_learning_hyperparameters(tmp_path):
+    view = tmp_path / "view"
+    view.mkdir()
+    data = tmp_path / "dataset"
+    data.mkdir()
+    base = {
+        "model": "fixture-model", "data": str(data),
+        "adapter_path": str(tmp_path / "adapter"), "train": True,
+        "fine_tune_type": "lora", "mask_prompt": True, "num_layers": 1,
+        "batch_size": 1, "iters": 3, "learning_rate": 1e-5,
+        "max_seq_length": 1024, "grad_checkpoint": True,
+        "grad_accumulation_steps": 1,
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+        "trust_remote_code": False, "input_mode": "embeddings",
+        "projector": {"embedding_dim": 2, "context_steps": 3,
+                      "market_tokens": 2, "temporal_encoding": "pooled_levels"},
+        "trainable_components": ["lora", "projector"],
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 1., "margin": .25},
+    }
+    first = tmp_path / "first.json"
+    first.write_text(json.dumps(base))
+    changed = {**base, "learning_rate": 3e-5,
+               "action_supervision": {**base["action_supervision"],
+                                      "ranking_weight": 4.}}
+    second = tmp_path / "second.json"
+    second.write_text(json.dumps(changed))
+    manifest = {"schema": "propevolve_reasoning_dataset_v1"}
+    for role in ("train", "valid"):
+        (view / f"{role}.jsonl").write_text(role)
+    from propevolve.reasoning_policy.integrity import file_digest
+    (view / "view_manifest.json").write_text(json.dumps({
+        "view_contract": view_contract(read_sft_config(first)),
+        "source_manifest": manifest,
+        "files": {role: file_digest(view / f"{role}.jsonl")
+                  for role in ("train", "valid")},
+    }))
+    from propevolve.reasoning_policy import mlx_sft
+    original = mlx_sft.verify_dataset
+    mlx_sft.verify_dataset = lambda path: manifest
+    try:
+        assert verify_mlx_view(second, view) == view / "sft.json"
+        incompatible = {**changed, "max_seq_length": 2048}
+        third = tmp_path / "third.json"
+        third.write_text(json.dumps(incompatible))
+        with pytest.raises(ValueError, match="prepared view contract"):
+            verify_mlx_view(third, view)
+    finally:
+        mlx_sft.verify_dataset = original

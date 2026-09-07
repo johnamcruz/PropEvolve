@@ -1,0 +1,12 @@
+{
+  "inherits": "policy_sft.json",
+  "data": "runs/reasoning-challenger/action-mastery-selection-corpus",
+  "adapter_path": "runs/reasoning-challenger/action-mastery-selection-placeholder",
+  "resume_adapter_file": "runs/reasoning-challenger/market-lifecycle-r3-adapters/adapters.safetensors",
+  "iters": 270,
+  "val_batches": 9,
+  "steps_per_eval": 54,
+  "save_every": 54,
+  "grad_accumulation_steps": 3,
+  "batch_sampling": "balanced_actions"
+}

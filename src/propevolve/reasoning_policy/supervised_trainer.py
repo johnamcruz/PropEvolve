@@ -112,17 +112,19 @@ class ValidationLossGuard:
 class PostUpdateValidation:
     """Run fixed validation only after completed optimizer updates."""
 
-    def __init__(self, guard, *, every, total_iterations, evaluate_loss, progress=print):
+    def __init__(self, guard, *, every, total_iterations, evaluate_loss, progress=print,
+                 record_validation=lambda report: None):
         if (not isinstance(guard, ValidationLossGuard) or type(every) is not int
                 or every < 1 or type(total_iterations) is not int
                 or total_iterations < 1 or not callable(evaluate_loss)
-                or not callable(progress)):
+                or not callable(progress) or not callable(record_validation)):
             raise ValueError("invalid post-update validation settings")
         self.guard = guard
         self.every = every
         self.total_iterations = total_iterations
         self.evaluate_loss = evaluate_loss
         self.progress = progress
+        self.record_validation = record_validation
 
     def evaluate(self, iteration):
         started = time.perf_counter()
@@ -134,7 +136,9 @@ class PostUpdateValidation:
                     f", Worst action advantage {report['worst_action_advantage']:+.3f}, "
                     f"Macro accuracy {report['macro_accuracy']:.1%}")
         self.progress(f"Iter {iteration}: Val loss {loss:.3f}{boundary}, Val took {elapsed:.3f}s")
-        self.guard.on_val_loss_report({"iteration": iteration, "val_time": elapsed, **report})
+        completed = {"iteration": iteration, "val_time": elapsed, **report}
+        self.record_validation(dict(completed))
+        self.guard.on_val_loss_report(completed)
 
     def on_train_loss_report(self, train_info):
         iteration = train_info.get("iteration")
@@ -491,8 +495,15 @@ def train_supervised(config, view):
                 clear_cache_threshold=config["clear_cache_threshold"])
         model.train()
         return value
+    metrics_path = config.get("validation_metrics_path")
+    def record_validation(report):
+        if metrics_path is None:
+            return
+        with Path(metrics_path).open("a") as stream:
+            stream.write(json.dumps(report, sort_keys=True, allow_nan=False) + "\n")
     validation = PostUpdateValidation(guard, every=config["steps_per_eval"],
-        total_iterations=config["iters"], evaluate_loss=evaluate_loss)
+        total_iterations=config["iters"], evaluate_loss=evaluate_loss,
+        record_validation=record_validation)
     args = TrainingArgs(batch_size=config["batch_size"], iters=config["iters"],
         val_batches=config["val_batches"], steps_per_report=config["steps_per_report"],
         steps_per_eval=config["steps_per_eval"], steps_per_save=config["save_every"],

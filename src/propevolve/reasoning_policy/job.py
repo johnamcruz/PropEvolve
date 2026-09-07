@@ -77,7 +77,7 @@ def stratified_action_rows(candidates, *, per_action, seed):
     rng = np.random.default_rng(seed)
     selected = []
     for action in (int(Action.WAIT), int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)):
-        groups = []
+        groups = {}
         for ticker, payload in sorted(candidates.items()):
             labels = np.asarray(payload["labels"])
             eligible = np.asarray(payload["eligible"], dtype=bool)
@@ -87,16 +87,31 @@ def stratified_action_rows(candidates, *, per_action, seed):
             for year in sorted(set(years[eligible & (labels == action)])):
                 rows = np.flatnonzero(eligible & (labels == action) & (years == year))
                 if len(rows):
-                    groups.append([ticker, list(rng.permutation(rows))])
-        if sum(len(rows) for _, rows in groups) < per_action:
+                    groups.setdefault(ticker, []).append(list(rng.permutation(rows)))
+        if sum(len(rows) for years in groups.values() for rows in years) < per_action:
             raise ValueError("insufficient natural economic labels for requested sample")
         action_rows = []
-        cursor = 0
+        tickers = sorted(groups)
+        ticker_cursor = 0
+        year_cursors = {ticker: 0 for ticker in tickers}
         while len(action_rows) < per_action:
-            ticker, rows = groups[cursor % len(groups)]
-            if rows:
-                action_rows.append((ticker, int(rows.pop()), action))
-            cursor += 1
+            ticker = tickers[ticker_cursor % len(tickers)]
+            year_groups = groups[ticker]
+            picked = False
+            for _ in range(len(year_groups)):
+                year_index = year_cursors[ticker] % len(year_groups)
+                year_cursors[ticker] += 1
+                if year_groups[year_index]:
+                    action_rows.append((ticker, int(year_groups[year_index].pop()), action))
+                    picked = True
+                    break
+            if not picked:
+                tickers.remove(ticker)
+                if not tickers:
+                    raise ValueError("economic action sample exhausted unexpectedly")
+                ticker_cursor %= len(tickers)
+                continue
+            ticker_cursor += 1
         selected.extend(action_rows)
     # Collection walks large frozen memmaps. Emit cache-local rows here and
     # randomize the lightweight prepared row indices during SFT instead.

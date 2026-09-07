@@ -9,6 +9,7 @@
   "batch_sampling": "random",
   "projector": null,
   "clear_cache_threshold": 0,
+  "validation_metrics_path": null,
   "seed": 17,
   "val_batches": 4,
   "steps_per_report": 1,

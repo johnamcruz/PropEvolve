@@ -78,3 +78,20 @@ def test_economic_row_selection_emits_cache_local_order_for_bounded_memory():
 
     assert selected == sorted(selected, key=lambda item: (item[0], item[1]))
     assert [sum(item[2] == action for item in selected) for action in (0, 1, 2)] == [4, 4, 4]
+
+
+def test_small_economic_sample_covers_markets_before_repeating_market_years():
+    candidates = {
+        ticker: {
+            "labels": np.asarray([0, 1, 2] * 3, np.int8),
+            "eligible": np.ones(9, dtype=bool),
+            "years": np.asarray(["2021"] * 3 + ["2022"] * 3 + ["2023"] * 3),
+        }
+        for ticker in ("NQ", "ES", "CL")
+    }
+
+    selected = stratified_action_rows(candidates, per_action=3, seed=29)
+
+    for action in (0, 1, 2):
+        assert {ticker for ticker, _, target in selected if target == action} == {
+            "NQ", "ES", "CL"}

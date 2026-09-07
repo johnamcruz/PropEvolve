@@ -55,11 +55,19 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     guard = ValidationLossGuard(payload.get("early_stopping"), on_improvement=lambda report: None)
     if not supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions":
         raise ValueError("balanced action sampling requires action supervision")
+    valid_action_monitors = {
+        ("worst_action_boundary_loss", "min"),
+        ("worst_action_advantage", "max"),
+    }
     if (supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions"
-            and (guard.monitor, guard.mode) != ("worst_action_boundary_loss", "min")):
-        raise ValueError("balanced action SFT must select checkpoints by worst action boundary loss")
+            and (guard.monitor, guard.mode) not in valid_action_monitors):
+        raise ValueError("balanced action SFT must select checkpoints by a worst-action boundary")
     if payload["adapter_path"] is None:
         raise ValueError("SFT requires an adapter output path")
+    metrics_path = payload.get("validation_metrics_path")
+    if metrics_path is not None and (not isinstance(metrics_path, str)
+                                     or not metrics_path.strip()):
+        raise ValueError("validation_metrics_path must be a nonempty path or null")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
             or payload["mask_prompt"] is not True or payload.get("trust_remote_code") is not False):
         raise ValueError("challenger requires prompt-masked LoRA and no remote code")
@@ -127,6 +135,22 @@ def verify_dataset(path: str | Path) -> dict:
                         or not (ticker_root / "timestamps.npy").is_file()):
                     raise ValueError("embedding source changed after audit")
     return manifest
+
+
+def view_contract(config: dict) -> dict:
+    """Return only immutable inputs that affect prepared token/context rows."""
+    keys = (
+        "model", "data", "input_mode", "projector", "max_seq_length",
+        "chat_template_kwargs", "action_verbalizers", "action_supervision",
+        "trust_remote_code",
+    )
+    contract = {key: config.get(key) for key in keys}
+    # Loss weights and margin affect optimization, never prepared alternatives.
+    supervision = contract["action_supervision"]
+    contract["action_supervision"] = {
+        "enabled": supervision["enabled"],
+    }
+    return contract
 
 
 def prepare_mlx_view(config_path: str | Path, output: str | Path, *, tokenizer, root=None) -> Path:
@@ -221,7 +245,8 @@ system boundary for tests; the production caller loads it with MLX-LM.
         (temporary / "sft.json").write_text(json.dumps(effective, indent=2))
         (temporary / "source_manifest.json").write_text(json.dumps(manifest, indent=2))
         (temporary / "view_manifest.json").write_text(json.dumps({
-            "config": config, "source_manifest": manifest,
+            "config": config, "view_contract": view_contract(config),
+            "source_manifest": manifest,
             "files": {role: file_digest(temporary / f"{role}.jsonl") for role in ("train", "valid")},
         }, indent=2))
         os.rename(temporary, output)
@@ -237,15 +262,17 @@ def verify_mlx_view(config_path, output, *, root=None):
     manifest = verify_dataset(config["data"])
     output = Path(output)
     receipt = json.loads((output / "view_manifest.json").read_text())
-    if receipt["config"] != config or receipt["source_manifest"] != manifest:
-        raise ValueError("prepared view source or config changed")
+    recorded_contract = receipt.get("view_contract")
+    if recorded_contract is None:
+        recorded_contract = view_contract(receipt["config"])
+    if recorded_contract != view_contract(config):
+        raise ValueError("prepared view contract changed")
+    if receipt["source_manifest"] != manifest:
+        raise ValueError("prepared view source changed")
     for role in ("train", "valid"):
         if file_digest(output / f"{role}.jsonl") != receipt["files"][role]:
             raise ValueError("prepared view changed")
-    effective = output / "sft.json"
-    if json.loads(effective.read_text()) != {**config, "data": str(output.resolve())}:
-        raise ValueError("prepared SFT config changed")
-    return effective
+    return output / "sft.json"
 
 
 @dataclass(frozen=True)
@@ -351,8 +378,9 @@ class PreparedDataset:
 
 def train_prepared(config_path, view, *, root=None):
     """Use the shared guarded MLX trainer with already verified tokens."""
-    effective = verify_mlx_view(config_path, view, root=root)
-    config = json.loads(effective.read_text())
+    verify_mlx_view(config_path, view, root=root)
+    config = read_sft_config(config_path, root=root)
+    config["data"] = str(Path(view).resolve())
     from .supervised_trainer import train_supervised
     return train_supervised(config, view)
 
