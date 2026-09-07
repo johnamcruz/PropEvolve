@@ -12,6 +12,15 @@ def mean_completion_scores(token_log_probs, mask, *, xp):
     return xp.where(mask, token_log_probs, 0.).sum(axis=-1) / xp.maximum(counts, 1)
 
 
+def action_completion_scores(token_log_probs, mask, *, xp):
+    """Score only the one legal-action token; EOS is formatting, not policy credit."""
+    counts = mask.sum(axis=-1)
+    if xp is np and ((counts != 2).any() or not mask.any(axis=-1).all()):
+        raise ValueError("action completion requires one action token followed by EOS")
+    first = xp.argmax(mask, axis=-1)
+    return xp.take_along_axis(token_log_probs, first[:, None], axis=-1).squeeze(-1)
+
+
 def action_targets(record):
     target = record["targets"]
     names = target["action_order"]

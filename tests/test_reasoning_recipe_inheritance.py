@@ -71,3 +71,11 @@ def test_sft_applies_json_declared_runtime_defaults_before_loading_model(tmp_pat
     assert selected["steps_per_report"] == 1
     assert selected["steps_per_eval"] == 5
     assert selected["save_every"] == 10
+    assert selected["early_stopping"] == {
+        "enabled": True,
+        "patience_evaluations": 2,
+        "min_delta": 0.0,
+        "restore_best": True,
+        "monitor": "val_loss",
+        "mode": "min",
+    }

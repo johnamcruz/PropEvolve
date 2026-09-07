@@ -122,7 +122,7 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
 
 
 def sequence_scores(model, tokenized):
-    """Length-normalized action likelihoods; no detach before RL gradients."""
+    """Legal-action token likelihoods; shared EOS formatting receives no credit."""
     import mlx.core as mx
     scores = []
     for item in tokenized:
@@ -133,9 +133,9 @@ def sequence_scores(model, tokenized):
             logits = market_logits(model, inputs, mx.array(item[2][None]), mx.array(item[3][None]))
         else:
             logits = model(inputs)
-        logits = logits[:, prefix_length - 1:, :].astype(mx.float32)
+        logits = logits[:, prefix_length - 1:prefix_length, :].astype(mx.float32)
         log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        targets = mx.array(full[prefix_length:])[None, :, None]
+        targets = mx.array(full[prefix_length:prefix_length + 1])[None, :, None]
         token_scores = mx.take_along_axis(log_probs, targets, axis=-1)
         scores.append(token_scores.mean())
     return mx.stack(scores)

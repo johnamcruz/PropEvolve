@@ -57,3 +57,41 @@ def test_context_snapshot_cannot_be_mutated_by_dataset_consumer():
     context.append(1, {"balance": 0})
     with pytest.raises(ValueError):
         context.snapshot().values[-1, 0] = 1
+
+
+def test_every_sft_routes_through_shared_guarded_trainer(tmp_path, monkeypatch):
+    from propevolve.reasoning_policy import mlx_sft, supervised_trainer
+
+    effective = tmp_path / "sft.json"
+    effective.write_text(json.dumps({"action_supervision": {"enabled": False},
+        "input_mode": "specialists"}))
+    monkeypatch.setattr(mlx_sft, "verify_mlx_view",
+                        lambda *args, **kwargs: effective)
+    calls = []
+    monkeypatch.setattr(supervised_trainer, "train_supervised",
+                        lambda config, view: calls.append((config, view)) or "guarded")
+
+    assert mlx_sft.train_prepared("recipe.json", "prepared-view") == "guarded"
+    assert calls == [({"action_supervision": {"enabled": False},
+                       "input_mode": "specialists"}, "prepared-view")]
+
+
+def test_sft_learning_rate_schedule_is_config_driven(tmp_path):
+    recipe = tmp_path / "schedule.json"
+    payload = {
+        "model": "fixture-model", "data": "fixture-data", "adapter_path": "new-adapter",
+        "train": True, "fine_tune_type": "lora", "mask_prompt": True,
+        "num_layers": 1, "batch_size": 1, "iters": 3, "learning_rate": 1e-5,
+        "max_seq_length": 1024, "grad_checkpoint": True,
+        "grad_accumulation_steps": 1,
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+        "trust_remote_code": False,
+    }
+    payload["lr_schedule"] = {"kind": "cosine_decay", "end": 1e-6,
+                              "decay_updates": 32}
+    recipe.write_text(json.dumps(payload))
+    assert read_sft_config(recipe)["lr_schedule"]["decay_updates"] == 32
+    payload["lr_schedule"]["end"] = payload["learning_rate"] * 2
+    recipe.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="learning-rate schedule"):
+        read_sft_config(recipe)

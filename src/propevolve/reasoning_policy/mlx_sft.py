@@ -31,10 +31,25 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError("invalid action supervision settings")
     if supervision["enabled"] and supervision["soft_target_weight"] + supervision["ranking_weight"] <= 0:
         raise ValueError("enabled action supervision requires learning weight")
+    schedule = payload.get("lr_schedule")
+    if schedule is not None and (not isinstance(schedule, dict)
+            or set(schedule) != {"kind", "end", "decay_updates"}
+            or schedule["kind"] != "cosine_decay"
+            or isinstance(schedule["end"], bool)
+            or not math.isfinite(float(schedule["end"]))
+            or not 0 <= schedule["end"] <= payload["learning_rate"]
+            or type(schedule["decay_updates"]) is not int
+            or schedule["decay_updates"] < 1):
+        raise ValueError("invalid learning-rate schedule")
     if payload.get("batch_sampling", "random") not in {"random", "balanced_actions"}:
         raise ValueError("unknown SFT batch sampling strategy")
+    from .supervised_trainer import ValidationLossGuard
+    guard = ValidationLossGuard(payload.get("early_stopping"), on_improvement=lambda report: None)
     if not supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions":
         raise ValueError("balanced action sampling requires action supervision")
+    if (supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions"
+            and (guard.monitor, guard.mode) != ("worst_action_boundary_loss", "min")):
+        raise ValueError("balanced action SFT must select checkpoints by worst action boundary loss")
     if payload["adapter_path"] is None:
         raise ValueError("SFT requires an adapter output path")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
@@ -45,6 +60,8 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
             raise ValueError(f"{name} must be a positive integer")
     if payload["iters"] % payload["grad_accumulation_steps"]:
         raise ValueError("SFT iterations must complete gradient accumulation groups")
+    if payload["steps_per_eval"] % payload["steps_per_report"]:
+        raise ValueError("SFT evaluation cadence must align with reported optimizer steps")
     lora = payload["lora_parameters"]
     if set(lora) != {"rank", "scale", "dropout"}:
         raise ValueError("LoRA settings require exactly rank, scale and dropout")
@@ -213,32 +230,11 @@ class EncodedDataset:
 
 
 def train_prepared(config_path, view, *, root=None):
-    """Use native MLX-LM optimizer/LoRA training with already verified tokens."""
-    from types import SimpleNamespace
-    from mlx_lm import load
-    from mlx_lm.lora import train_model
+    """Use the shared guarded MLX trainer with already verified tokens."""
     effective = verify_mlx_view(config_path, view, root=root)
     config = json.loads(effective.read_text())
-    if config["action_supervision"]["enabled"] or config["input_mode"] == "embeddings":
-        from .supervised_trainer import train_supervised
-        return train_supervised(config, view)
-    if Path(config["adapter_path"]).exists():
-        raise FileExistsError("adapter output exists; choose a new path")
-    if config["resume_adapter_file"] is not None:
-        from .model_config import verify_adapter_base
-        parent = Path(config["resume_adapter_file"]).parent
-        verify_adapter_base(config["model"], parent)
-        metadata = json.loads((parent / "adapter_config.json").read_text())
-        for key in ("lora_parameters", "num_layers", "chat_template_kwargs"):
-            if metadata.get(key) != config[key]:
-                raise ValueError(f"SFT warm-start contract differs at {key}")
-    import numpy as np
-    np.random.seed(config["seed"])
-    model, _ = load(config["model"], tokenizer_config={"trust_remote_code": False})
-    if not any("Quantized" in type(module).__name__ for _, module in model.named_modules()):
-        raise ValueError("QLoRA requires a quantized base")
-    train_model(SimpleNamespace(**config), model, EncodedDataset(Path(view) / "train.jsonl"),
-                EncodedDataset(Path(view) / "valid.jsonl"))
+    from .supervised_trainer import train_supervised
+    return train_supervised(config, view)
 
 
 def main(argv=None):

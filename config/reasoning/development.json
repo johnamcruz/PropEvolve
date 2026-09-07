@@ -16,7 +16,7 @@
   "sft_config": "config/reasoning/policy_sft.json",
   "rl_config": "config/reasoning/rl.json",
   "evaluation_policy_config": "config/reasoning/evaluation.json",
-  "mlx_view": "runs/reasoning-challenger/action-verbalizer-mlx-view",
+  "mlx_view": "runs/reasoning-challenger/action-token-guarded-mlx-view",
   "dataset_output": "runs/reasoning-challenger/dataset",
   "dataset_kind": "action",
   "evaluation_output": "runs/reasoning-challenger/evaluation.json",

@@ -4,10 +4,144 @@ No second optimizer loop. Reuses native LoRA conversion, accumulation,
 checkpointing, evaluation and loss callback interfaces.
 """
 import json
+import math
 from pathlib import Path
+import shutil
+import time
 import numpy as np
 
-from .supervision import action_objective, mean_completion_scores
+from .supervision import action_completion_scores, action_objective, mean_completion_scores
+
+
+class EarlyStopTraining(RuntimeError):
+    """Private control signal raised only at a completed validation boundary."""
+
+
+class ValidationLossGuard:
+    """Track validation loss, snapshot improvements, and stop stale training."""
+
+    def __init__(self, settings, *, on_improvement):
+        required = {"enabled", "patience_evaluations", "min_delta", "restore_best"}
+        optional = {"monitor", "mode"}
+        if (not isinstance(settings, dict) or not required.issubset(settings)
+                or set(settings) - required - optional
+                or type(settings["enabled"]) is not bool
+                or type(settings["restore_best"]) is not bool
+                or type(settings["patience_evaluations"]) is not int
+                or settings["patience_evaluations"] < 1
+                or isinstance(settings["min_delta"], bool)
+                or not math.isfinite(float(settings["min_delta"]))
+                or settings["min_delta"] < 0
+                or settings["restore_best"] and not settings["enabled"]):
+            raise ValueError("invalid early stopping settings")
+        self.settings = dict(settings)
+        self.monitor = settings.get("monitor", "val_loss")
+        self.mode = settings.get("mode", "min")
+        if (not isinstance(self.monitor, str) or not self.monitor
+                or self.mode not in {"min", "max"}):
+            raise ValueError("invalid early stopping monitor")
+        self.on_improvement = on_improvement
+        self.best_metric = math.inf if self.mode == "min" else -math.inf
+        self.best_loss = math.inf
+        self.best_report = None
+        self.best_iteration = None
+        self.evaluations = 0
+        self.stale_evaluations = 0
+        self.stopped_early = False
+        self.stop_iteration = None
+        self.history = []
+
+    def on_train_loss_report(self, train_info):
+        return None
+
+    def on_val_loss_report(self, val_info):
+        loss = val_info.get("val_loss")
+        iteration = val_info.get("iteration")
+        if (isinstance(loss, bool) or not isinstance(loss, (int, float))
+                or not math.isfinite(float(loss)) or type(iteration) is not int
+                or iteration < 0):
+            raise ValueError("invalid validation loss report")
+        metric = val_info.get(self.monitor)
+        if (isinstance(metric, bool) or not isinstance(metric, (int, float))
+                or not math.isfinite(float(metric))):
+            raise ValueError("invalid early stopping monitor report")
+        self.evaluations += 1
+        if not self.settings["enabled"]:
+            return
+        improved = (float(metric) < self.best_metric - self.settings["min_delta"]
+                    if self.mode == "min" else
+                    float(metric) > self.best_metric + self.settings["min_delta"])
+        history = {"iteration": iteration, "validation_loss": float(loss),
+                   "checkpoint_selected": improved}
+        if self.monitor != "val_loss":
+            history[self.monitor] = float(metric)
+        self.history.append(history)
+        if improved:
+            self.best_metric = float(metric)
+            self.best_loss = float(loss)
+            self.best_report = dict(val_info)
+            self.best_iteration = iteration
+            self.stale_evaluations = 0
+            if self.settings["restore_best"]:
+                self.on_improvement(dict(val_info))
+            return
+        self.stale_evaluations += 1
+        if self.stale_evaluations >= self.settings["patience_evaluations"]:
+            self.stopped_early = True
+            self.stop_iteration = iteration
+            raise EarlyStopTraining("validation loss stopped improving")
+
+    def summary(self):
+        return {
+            "best_iteration": self.best_iteration,
+            "best_validation_loss": None if self.best_iteration is None else self.best_loss,
+            "best_metric": None if self.best_iteration is None else self.best_metric,
+            "monitor": self.monitor,
+            "mode": self.mode,
+            "best_report": self.best_report,
+            "evaluations": self.evaluations,
+            "stopped_early": self.stopped_early,
+            "stop_iteration": self.stop_iteration,
+            "history": list(self.history),
+        }
+
+
+class PostUpdateValidation:
+    """Run fixed validation only after completed optimizer updates."""
+
+    def __init__(self, guard, *, every, total_iterations, evaluate_loss, progress=print):
+        if (not isinstance(guard, ValidationLossGuard) or type(every) is not int
+                or every < 1 or type(total_iterations) is not int
+                or total_iterations < 1 or not callable(evaluate_loss)
+                or not callable(progress)):
+            raise ValueError("invalid post-update validation settings")
+        self.guard = guard
+        self.every = every
+        self.total_iterations = total_iterations
+        self.evaluate_loss = evaluate_loss
+        self.progress = progress
+
+    def evaluate(self, iteration):
+        started = time.perf_counter()
+        result = self.evaluate_loss()
+        report = dict(result) if isinstance(result, dict) else {"val_loss": float(result)}
+        loss = float(report["val_loss"])
+        elapsed = time.perf_counter() - started
+        boundary = ("" if "worst_action_advantage" not in report else
+                    f", Worst action advantage {report['worst_action_advantage']:+.3f}, "
+                    f"Macro accuracy {report['macro_accuracy']:.1%}")
+        self.progress(f"Iter {iteration}: Val loss {loss:.3f}{boundary}, Val took {elapsed:.3f}s")
+        self.guard.on_val_loss_report({"iteration": iteration, "val_time": elapsed, **report})
+
+    def on_train_loss_report(self, train_info):
+        iteration = train_info.get("iteration")
+        if type(iteration) is not int or iteration < 1:
+            raise ValueError("invalid training iteration report")
+        if iteration % self.every == 0 or iteration == self.total_iterations:
+            self.evaluate(iteration)
+
+    def on_val_loss_report(self, val_info):
+        raise AssertionError("native pre-update validation must remain disabled")
 
 
 def balanced_action_order(rows, *, count, rng):
@@ -34,6 +168,86 @@ def balanced_action_order(rows, *, count, rng):
         order.append(int(queues[name][cursors[name]]))
         cursors[name] += 1
     return np.asarray(order, dtype=np.int64)
+
+
+def balanced_validation_order(rows, *, rng):
+    """Interleave action classes while visiting every fixed validation row once."""
+    groups = {}
+    for index, row in enumerate(rows):
+        target = row.get("target_name")
+        if not isinstance(target, str) or not target:
+            raise ValueError("balanced validation row lacks target_name")
+        groups.setdefault(target, []).append(index)
+    queues = {name: list(rng.permutation(indices)) for name, indices in sorted(groups.items())}
+    order = []
+    while any(queues.values()):
+        for name in sorted(queues):
+            if queues[name]:
+                order.append(int(queues[name].pop()))
+    return np.asarray(order, dtype=np.int64)
+
+
+def validate_balanced_optimizer_windows(config, rows):
+    """Each accumulated update must contain equal evidence from every action."""
+    if (not config["action_supervision"]["enabled"]
+            or config.get("batch_sampling") != "balanced_actions"):
+        return
+    classes = {row.get("target_name") for row in rows}
+    if None in classes or len(classes) < 2:
+        raise ValueError("balanced action optimizer requires multiple target classes")
+    examples_per_update = config["grad_accumulation_steps"] * config["batch_size"]
+    if examples_per_update % len(classes):
+        raise ValueError("balanced action optimizer window must divide evenly across target classes")
+
+
+def action_boundary_metrics(rows, score_rows, *, margin=0.0):
+    """Balanced exact-action evidence for checkpoint selection and promotion."""
+    if (len(rows) != len(score_rows) or not rows or isinstance(margin, bool)
+            or not math.isfinite(float(margin)) or margin < 0):
+        raise ValueError("action boundary metrics require aligned nonempty rows and scores")
+    advantages = {}
+    boundary_losses = {}
+    correct = {}
+    for row, raw_scores in zip(rows, score_rows):
+        target = row.get("target_name")
+        names = row.get("action_targets", {}).get("names")
+        scores = np.asarray(raw_scores, dtype=float)
+        if (not isinstance(target, str) or not isinstance(names, list)
+                or target not in names or scores.shape != (len(names),)
+                or not np.isfinite(scores).all() or len(names) < 2):
+            raise ValueError("invalid action boundary evidence")
+        index = names.index(target)
+        alternative = np.max(np.delete(scores, index))
+        advantages.setdefault(target, []).append(float(scores[index] - alternative))
+        boundary_losses.setdefault(target, []).append(
+            float(np.logaddexp(0.0, float(margin) - (scores[index] - alternative))))
+        correct.setdefault(target, []).append(int(index == int(np.argmax(scores))))
+    per_action = {name: {
+        "count": len(advantages[name]),
+        "mean_target_advantage": float(np.mean(advantages[name])),
+        "mean_boundary_loss": float(np.mean(boundary_losses[name])),
+        "accuracy": float(np.mean(correct[name])),
+    } for name in sorted(advantages)}
+    return {
+        "worst_action_advantage": min(row["mean_target_advantage"] for row in per_action.values()),
+        "worst_action_boundary_loss": max(row["mean_boundary_loss"] for row in per_action.values()),
+        "macro_accuracy": float(np.mean([row["accuracy"] for row in per_action.values()])),
+        "per_action": per_action,
+    }
+
+
+def validate_early_stopping_coverage(config, datasets):
+    """Fail closed when checkpoint selection sees partial or missing action evidence."""
+    if not config["early_stopping"]["enabled"]:
+        return
+    valid = datasets["valid"]
+    if config["val_batches"] * config["batch_size"] < len(valid):
+        raise ValueError("early stopping requires complete validation coverage")
+    if config["action_supervision"]["enabled"]:
+        train_classes = {row.get("target_name") for row in datasets["train"]}
+        valid_classes = {row.get("target_name") for row in valid}
+        if train_classes != valid_classes or None in train_classes:
+            raise ValueError("early stopping validation must cover all training action classes")
 
 
 def pack_examples(rows, *, max_seq_length):
@@ -76,6 +290,8 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
     while True:
         if loop and sampling_strategy == "balanced_actions":
             order = balanced_action_order(dataset, count=len(dataset), rng=rng)
+        elif not loop and sampling_strategy == "balanced_actions":
+            order = balanced_validation_order(dataset, rng=rng)
         else:
             order = rng.permutation(len(dataset)) if loop else np.arange(len(dataset))
         for start in range(0, len(order) - batch_size + 1, batch_size):
@@ -85,10 +301,12 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             return
 
 
-def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, embeddings, available, *, config):
+def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values,
+                   embeddings, available, *, config):
     import mlx.core as mx
     from .projector import market_logits
     losses = []
+    action_scores = []
     for index in range(tokens.shape[0]):
         inputs = tokens[index, :, :-1]
         logits = (market_logits(model, inputs, embeddings[index:index+1], available[index:index+1])
@@ -98,13 +316,48 @@ def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, em
         token_scores = mx.take_along_axis(log_probs, targets, axis=-1).squeeze(-1)
         steps = mx.arange(1, tokens.shape[-1])
         mask = (steps >= offsets[index, :, None]) & (steps < lengths[index, :, None]) & valid[index, :, None]
-        scores = mean_completion_scores(token_scores, mask, xp=mx)
+        scores = (action_completion_scores(token_scores, mask, xp=mx)
+                  if config["action_supervision"]["enabled"] else
+                  mean_completion_scores(token_scores, mask, xp=mx))
+        action_scores.append(scores)
         if config["action_supervision"]["enabled"]:
             losses.append(action_objective(scores, probabilities[index], values[index],
                 config["action_supervision"], xp=mx, valid=valid[index]))
         else:
             losses.append(-scores.sum() / mx.maximum(mask.sum(), 1))
-    return mx.stack(losses).mean(), mx.array(tokens.shape[0])
+    return (mx.stack(losses).mean(), mx.array(tokens.shape[0]),
+            mx.stack(action_scores))
+
+
+def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values,
+               embeddings, available, *, config):
+    loss, tokens_count, _ = _batch_outputs(
+        model, tokens, offsets, lengths, valid, probabilities, values,
+        embeddings, available, config=config)
+    return loss, tokens_count
+
+
+def evaluate_action_validation(model, dataset, config):
+    """Evaluate every fixed validation row once and expose balanced boundaries."""
+    import mlx.core as mx
+    order = balanced_validation_order(dataset, rng=np.random.default_rng(config["seed"]))
+    batch_size = config["batch_size"]
+    rows_seen, score_rows, weighted_loss = [], [], 0.0
+    for start in range(0, len(order), batch_size):
+        indices = order[start:start + batch_size]
+        if len(indices) < batch_size:
+            raise ValueError("validation rows must form complete batches")
+        rows = [dataset[int(index)] for index in indices]
+        tensors = tuple(mx.array(value) for value in pack_examples(
+            rows, max_seq_length=config["max_seq_length"]))
+        loss, _, scores = _batch_outputs(model, *tensors, config=config)
+        mx.eval(loss, scores)
+        weighted_loss += float(loss.item()) * len(rows)
+        rows_seen.extend(rows)
+        score_rows.extend(scores.tolist())
+    metrics = action_boundary_metrics(
+        rows_seen, score_rows, margin=config["action_supervision"]["margin"])
+    return {"val_loss": weighted_loss / len(rows_seen), **metrics}
 
 
 def train_supervised(config, view):
@@ -112,7 +365,7 @@ def train_supervised(config, view):
     import mlx.optimizers as optim
     from mlx_lm import load
     from mlx_lm.tuner.utils import linear_to_lora_layers
-    from mlx_lm.tuner.trainer import train, TrainingArgs
+    from mlx_lm.tuner.trainer import evaluate, train, TrainingArgs
     from functools import partial
     from .model_config import verify_adapter_base
     from .projector import attach_projector, export_policy_weights, restore_projector
@@ -142,22 +395,60 @@ def train_supervised(config, view):
             restore_projector(model, Path(parent).parent)
     optimizer_kind = config["optimizer"]
     constructors = {"adam": optim.Adam, "adamw": optim.AdamW}
-    if optimizer_kind not in constructors or config["lr_schedule"] is not None:
+    if optimizer_kind not in constructors:
         raise ValueError("configured optimizer/schedule unsupported by tensor SFT adapter")
-    optimizer = constructors[optimizer_kind](learning_rate=config["learning_rate"],
+    learning_rate = config["learning_rate"]
+    if config["lr_schedule"] is not None:
+        schedule = config["lr_schedule"]
+        learning_rate = optim.cosine_decay(
+            learning_rate, schedule["decay_updates"], end=schedule["end"])
+    optimizer = constructors[optimizer_kind](learning_rate=learning_rate,
         **config["optimizer_config"].get(optimizer_kind, {}))
     datasets = {role: [json.loads(line) for line in (Path(view) / f"{role}.jsonl").read_text().splitlines()]
                 for role in ("train", "valid")}
+    validate_early_stopping_coverage(config, datasets)
+    validate_balanced_optimizer_windows(config, datasets["train"])
     destination.mkdir(parents=True)
     (destination / "adapter_config.json").write_text(json.dumps(config, indent=2))
+    best = destination / ".best-validation"
+    guard = ValidationLossGuard(config["early_stopping"],
+        on_improvement=lambda report: (
+            best.mkdir(exist_ok=True), export_policy_weights(model, best)))
+    iterator = partial(tensor_batches, seed=config["seed"],
+                       sampling_strategy=config.get("batch_sampling", "random"))
+    def evaluate_loss():
+        if config["action_supervision"]["enabled"]:
+            value = evaluate_action_validation(model, datasets["valid"], config)
+        else:
+            value = evaluate(model, datasets["valid"], batch_size=config["batch_size"],
+                num_batches=config["val_batches"], max_seq_length=config["max_seq_length"],
+                loss=partial(batch_loss, config=config), iterate_batches=iterator,
+                clear_cache_threshold=config["clear_cache_threshold"])
+        model.train()
+        return value
+    validation = PostUpdateValidation(guard, every=config["steps_per_eval"],
+        total_iterations=config["iters"], evaluate_loss=evaluate_loss)
     args = TrainingArgs(batch_size=config["batch_size"], iters=config["iters"],
         val_batches=config["val_batches"], steps_per_report=config["steps_per_report"],
         steps_per_eval=config["steps_per_eval"], steps_per_save=config["save_every"],
         adapter_file=str(destination / "adapters.safetensors"), max_seq_length=config["max_seq_length"],
         grad_checkpoint=config["grad_checkpoint"], grad_accumulation_steps=config["grad_accumulation_steps"],
         clear_cache_threshold=config["clear_cache_threshold"])
-    train(model, optimizer, datasets["train"], datasets["valid"], args=args,
-        loss=partial(batch_loss, config=config),
-        iterate_batches=partial(tensor_batches, seed=config["seed"],
-                                sampling_strategy=config.get("batch_sampling", "random")))
+    try:
+        validation.evaluate(0)
+        train(model, optimizer, datasets["train"], None, args=args,
+            loss=partial(batch_loss, config=config),
+            iterate_batches=iterator, training_callback=validation)
+    except EarlyStopTraining:
+        print(f"Early stopping at validation iteration {guard.stop_iteration}; "
+              f"best iteration was {guard.best_iteration}.", flush=True)
+    if config["early_stopping"]["restore_best"]:
+        if guard.best_iteration is None or not (best / "adapters.safetensors").is_file():
+            raise ValueError("early stopping did not produce a best validation checkpoint")
+        model.load_weights(str(best / "adapters.safetensors"), strict=False)
+        if config["input_mode"] == "embeddings":
+            restore_projector(model, best)
     export_policy_weights(model, destination)
+    (destination / "training_selection.json").write_text(json.dumps(guard.summary(), indent=2))
+    if best.exists():
+        shutil.rmtree(best)

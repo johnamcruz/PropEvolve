@@ -13,6 +13,14 @@
   "steps_per_report": 1,
   "steps_per_eval": 5,
   "save_every": 10,
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 2,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "val_loss",
+    "mode": "min"
+  },
   "chat_template_kwargs": {
     "enable_thinking": false
   },
