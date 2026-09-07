@@ -39,3 +39,29 @@ def test_balanced_sampler_rejects_missing_action_class():
         assert "at least three" in str(error)
     else:
         raise AssertionError("missing action class was accepted")
+
+
+def test_indexed_sampler_balances_actions_inside_cache_local_ticker_blocks():
+    rows = []
+    for ticker in ("NQ", "ES"):
+        for target in ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"):
+            rows.extend({
+                "target_name": target,
+                "market_embedding_reference": {"ticker": ticker, "row": row,
+                                                 "available_count": 20},
+            } for row in range(4))
+
+    order = balanced_action_order(rows, count=len(rows), rng=np.random.default_rng(23))
+    ordered = [rows[index] for index in order]
+
+    for start in range(0, len(ordered), 3):
+        group = ordered[start:start + 3]
+        assert {item["target_name"] for item in group} == {
+            "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+        assert len({item["market_embedding_reference"]["ticker"] for item in group}) == 1
+    switches = sum(
+        ordered[index]["market_embedding_reference"]["ticker"]
+        != ordered[index - 1]["market_embedding_reference"]["ticker"]
+        for index in range(1, len(ordered))
+    )
+    assert switches == 1

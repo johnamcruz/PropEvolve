@@ -313,6 +313,10 @@ class PreparedDataset:
     def __len__(self):
         return len(self.rows)
 
+    def sampling_rows(self):
+        """Return lightweight targets/references without materializing embeddings."""
+        return self.rows
+
     def __getitem__(self, index):
         row = self.rows[index]
         if "market_embedding_reference" in row:

@@ -151,8 +151,9 @@ def balanced_action_order(rows, *, count, rng):
     """Round-robin target classes so no optimizer window erases a side."""
     if type(count) is not int or count < 1:
         raise ValueError("balanced action sample count must be positive")
+    sampling_rows = rows.sampling_rows() if hasattr(rows, "sampling_rows") else rows
     groups = {}
-    for index, row in enumerate(rows):
+    for index, row in enumerate(sampling_rows):
         target = row.get("target_name")
         if not isinstance(target, str) or not target:
             raise ValueError("balanced action row lacks target_name")
@@ -163,6 +164,33 @@ def balanced_action_order(rows, *, count, rng):
     # A new shuffled epoch must never bisect an accumulated equal-action
     # optimizer window. The omitted tail is reshuffled into a later epoch.
     count -= count % len(names)
+    references = [row.get("market_embedding_reference") for row in sampling_rows]
+    if all(isinstance(reference, dict) and isinstance(reference.get("ticker"), str)
+           for reference in references):
+        by_ticker = {}
+        for index, row in enumerate(sampling_rows):
+            by_ticker.setdefault(references[index]["ticker"], {}).setdefault(
+                row["target_name"], []).append(index)
+        if any(set(group) != set(names) for group in by_ticker.values()):
+            raise ValueError("indexed balanced sampling requires every action per ticker")
+        order = []
+        ticker_order = list(rng.permutation(sorted(by_ticker)))
+        remaining = count
+        for ticker in ticker_order:
+            local = by_ticker[ticker]
+            capacity = min(len(local[name]) for name in names) * len(names)
+            take = min(capacity, remaining)
+            take -= take % len(names)
+            queues = {name: list(rng.permutation(local[name])) for name in names}
+            cursors = {name: 0 for name in names}
+            for position in range(take):
+                name = names[position % len(names)]
+                order.append(int(queues[name][cursors[name]]))
+                cursors[name] += 1
+            remaining -= take
+        if remaining:
+            raise ValueError("indexed action corpus cannot satisfy balanced sample count")
+        return np.asarray(order, dtype=np.int64)
     queues = {name: list(rng.permutation(groups[name])) for name in names}
     cursors = {name: 0 for name in names}
     order = []
@@ -178,8 +206,9 @@ def balanced_action_order(rows, *, count, rng):
 
 def balanced_validation_order(rows, *, rng):
     """Interleave action classes while visiting every fixed validation row once."""
+    sampling_rows = rows.sampling_rows() if hasattr(rows, "sampling_rows") else rows
     groups = {}
-    for index, row in enumerate(rows):
+    for index, row in enumerate(sampling_rows):
         target = row.get("target_name")
         if not isinstance(target, str) or not target:
             raise ValueError("balanced validation row lacks target_name")

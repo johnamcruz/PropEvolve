@@ -98,7 +98,9 @@ def stratified_action_rows(candidates, *, per_action, seed):
                 action_rows.append((ticker, int(rows.pop()), action))
             cursor += 1
         selected.extend(action_rows)
-    rng.shuffle(selected)
+    # Collection walks large frozen memmaps. Emit cache-local rows here and
+    # randomize the lightweight prepared row indices during SFT instead.
+    selected.sort(key=lambda item: (item[0], item[1]))
     return selected
 
 
@@ -468,35 +470,82 @@ def collect_job(path):
         for role in ("train", "valid"):
             augment_action = kind == "action" and config.get("augment_action_targets", False)
             specialist_roles = tuple(config.get("specialist_supervision_roles", ("train",)))
+            include_specialists = (kind == "market" or
+                                   (augment_action and role in specialist_roles))
             env, sources = load_role(config, root, role_sources[role][0], role,
-                                     include_specialists=(kind == "market" or
-                                                          (augment_action and role in specialist_roles)))
+                                     include_specialists=include_specialists)
             episodes = (economic_episode_specs(config, env, sources, role)
                         if config.get("economic_action_sampling") is not None else
                         configured_episodes(config, env, role))
-            for selected in episodes:
-                episode = {key: selected[key] for key in ("ticker", "start")}
-                for pair in collect_examples(
-                    env, reset_options=episode, context_config=context, sources=sources,
-                    behavior_factory=factory, continuation_factory=factory,
-                    source_id=identity + ":" + json.dumps(episode, sort_keys=True),
-                    continuation_id=continuation_id,
-                    maximum_examples=config["maximum_examples_per_episode"],
-                    sample_stride=config["sample_stride"], rollout_max_steps=config["rollout_max_steps"],
-                    target_temperature=config["target_temperature"],
-                    opportunity_contract=config["opportunity_contract"],
-                    action_label_mode=action_label_mode,
-                    collection_warmup_steps=config.get("collection_warmup_steps", 0),
-                    collect_action_targets=kind == "action",
-                    collect_market_targets=kind == "market",
-                    augment_action_targets=augment_action,
-                ):
-                    if pair[kind] is not None:
-                        if kind == "action" and "expected_action" in selected:
-                            expected = Action(selected["expected_action"]).name
-                            if pair[kind]["messages"][-1]["content"] != expected:
-                                raise ValueError("selected economic action changed during collection")
-                        yield pair[kind]
+            if (config.get("economic_action_sampling") is not None
+                    and config.get("embedding_storage") == "source_embedding_reference_v1"):
+                # The schedule is now lightweight. Release the all-market selector
+                # before traversing one cache-local ticker at a time.
+                del env, sources
+                import gc
+                gc.collect()
+                groups = {}
+                for selected in episodes:
+                    groups.setdefault(selected["ticker"], []).append(selected)
+                for ticker in sorted(groups):
+                    single = dict(config)
+                    single["tickers"] = {**config["tickers"], role: [ticker]}
+                    ticker_env, ticker_sources = load_role(
+                        single, root, role_sources[role][0], role,
+                        include_specialists=include_specialists,
+                    )
+                    # Consume each ticker completely before loading the next.
+                    for selected in groups[ticker]:
+                        episode = {key: selected[key] for key in ("ticker", "start")}
+                        for pair in collect_examples(
+                            ticker_env, reset_options=episode, context_config=context,
+                            sources=ticker_sources, behavior_factory=factory,
+                            continuation_factory=factory,
+                            source_id=identity + ":" + json.dumps(episode, sort_keys=True),
+                            continuation_id=continuation_id,
+                            maximum_examples=config["maximum_examples_per_episode"],
+                            sample_stride=config["sample_stride"],
+                            rollout_max_steps=config["rollout_max_steps"],
+                            target_temperature=config["target_temperature"],
+                            opportunity_contract=config["opportunity_contract"],
+                            action_label_mode=action_label_mode,
+                            collection_warmup_steps=config.get("collection_warmup_steps", 0),
+                            collect_action_targets=kind == "action",
+                            collect_market_targets=kind == "market",
+                            augment_action_targets=augment_action,
+                        ):
+                            if pair[kind] is not None:
+                                expected = Action(selected["expected_action"]).name
+                                if pair[kind]["messages"][-1]["content"] != expected:
+                                    raise ValueError("selected economic action changed during collection")
+                                yield pair[kind]
+                    del ticker_env, ticker_sources
+                    gc.collect()
+            else:
+                for selected in episodes:
+                    episode = {key: selected[key] for key in ("ticker", "start")}
+                    for pair in collect_examples(
+                        env, reset_options=episode, context_config=context, sources=sources,
+                        behavior_factory=factory, continuation_factory=factory,
+                        source_id=identity + ":" + json.dumps(episode, sort_keys=True),
+                        continuation_id=continuation_id,
+                        maximum_examples=config["maximum_examples_per_episode"],
+                        sample_stride=config["sample_stride"],
+                        rollout_max_steps=config["rollout_max_steps"],
+                        target_temperature=config["target_temperature"],
+                        opportunity_contract=config["opportunity_contract"],
+                        action_label_mode=action_label_mode,
+                        collection_warmup_steps=config.get("collection_warmup_steps", 0),
+                        collect_action_targets=kind == "action",
+                        collect_market_targets=kind == "market",
+                        augment_action_targets=augment_action,
+                    ):
+                        if pair[kind] is not None:
+                            if kind == "action" and "expected_action" in selected:
+                                expected = Action(selected["expected_action"]).name
+                                if pair[kind]["messages"][-1]["content"] != expected:
+                                    raise ValueError("selected economic action changed during collection")
+                            yield pair[kind]
     manifest = write_supervised_dataset(
         records(), output, splits=dataset_splits, lineage=lineage,
         sealed_start_ns=sealed,

@@ -62,3 +62,19 @@ def test_economic_row_selection_is_balanced_across_actions_and_market_years():
         0: 4, 1: 4, 2: 4}
     assert {row[0] for row in selected} == {"NQ", "ES"}
     assert len({(ticker, row) for ticker, row, _ in selected}) == len(selected)
+
+
+def test_economic_row_selection_emits_cache_local_order_for_bounded_memory():
+    candidates = {
+        ticker: {
+            "labels": np.asarray([0, 1, 2, 0, 1, 2], np.int8),
+            "eligible": np.ones(6, dtype=bool),
+            "years": np.asarray(["2021", "2021", "2021", "2022", "2022", "2022"]),
+        }
+        for ticker in ("NQ", "ES")
+    }
+
+    selected = stratified_action_rows(candidates, per_action=4, seed=19)
+
+    assert selected == sorted(selected, key=lambda item: (item[0], item[1]))
+    assert [sum(item[2] == action for item in selected) for action in (0, 1, 2)] == [4, 4, 4]

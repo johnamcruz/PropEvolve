@@ -348,6 +348,10 @@ class HistoricalChallengeEnv:
             ticker: _cme_session_keys(market.timestamps)
             for ticker, market in self.markets.items()
         }
+        self._unique_sessions = {
+            ticker: np.unique(session_keys)
+            for ticker, session_keys in self._session_keys.items()
+        }
         self._episode_coverage = (
             DeterministicEpisodeCoverage(
                 {
@@ -442,7 +446,7 @@ class HistoricalChallengeEnv:
         ticker = str(options.get("ticker") or self._rng.choice(tuple(self.markets)))
         market = self.markets[ticker]
         session_keys = self._session_keys[ticker]
-        unique_sessions = np.unique(session_keys)
+        unique_sessions = self._unique_sessions[ticker]
         if len(unique_sessions) < self.spec.episode_days:
             raise ValueError(
                 f"market {ticker} cannot fit {self.spec.episode_days} trading days"

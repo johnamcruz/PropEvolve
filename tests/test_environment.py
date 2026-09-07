@@ -82,6 +82,21 @@ def _balance_start_state(realized_pnl: float) -> ChallengeStartState:
     )
 
 
+def test_repeated_resets_reuse_the_precomputed_session_schedule(monkeypatch) -> None:
+    env = HistoricalChallengeEnv(
+        {"NQ": _market()}, round_trip_fees={"NQ": 0.0},
+        tick_values={"NQ": 20.0}, spec=_spec(), seed=1,
+    )
+    first, first_info = env.reset(options={"ticker": "NQ", "start": 0})
+
+    monkeypatch.setattr(np, "unique", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("reset recomputed immutable session topology")))
+    second, second_info = env.reset(options={"ticker": "NQ", "start": 0})
+
+    np.testing.assert_array_equal(second, first)
+    assert second_info["start"] == first_info["start"]
+
+
 def test_balance_curriculum_crosses_breakeven_without_recovery_transition() -> None:
     market = _recovery_market(
         opens=(100.0, 100.0, 200.0, 200.0, 200.0, 200.0),

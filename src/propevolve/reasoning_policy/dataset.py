@@ -188,7 +188,9 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
     temporary = Path(tempfile.mkdtemp(prefix=".reasoning-dataset-", dir=output.parent))
     counts = {key: 0 for key in bounds}
     seen = set()
-    reference_caches = {}
+    reference_cache = None
+    reference_ticker = None
+    reference_sources = {}
     reference_shape = None
     try:
         from contextlib import ExitStack
@@ -236,12 +238,21 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
                     ticker = record.get("ticker")
                     if not isinstance(ticker, str) or not ticker:
                         raise ValueError("source embedding reference requires a ticker")
-                    cache = reference_caches.get(ticker)
-                    if cache is None:
-                        cache = EmbeddingCache.load(Path(embedding_source_cache_root) / ticker)
-                        if cache.manifest.get("ticker") != ticker:
+                    if reference_ticker != ticker:
+                        reference_cache = EmbeddingCache.load(
+                            Path(embedding_source_cache_root) / ticker)
+                        reference_ticker = ticker
+                        if reference_cache.manifest.get("ticker") != ticker:
                             raise ValueError("embedding cache ticker differs from supervised record")
-                        reference_caches[ticker] = cache
+                        descriptor = {
+                            "manifest_sha256": file_digest(
+                                reference_cache.root / "manifest.json"),
+                            "rows": len(reference_cache.embeddings),
+                        }
+                        if ticker in reference_sources and reference_sources[ticker] != descriptor:
+                            raise ValueError("embedding source changed during dataset publication")
+                        reference_sources[ticker] = descriptor
+                    cache = reference_cache
                     if (embeddings.ndim != 2 or available.shape != (embeddings.shape[0],)
                             or not available.any() or not np.isfinite(embeddings).all()):
                         raise ValueError("indexed dataset requires a finite embedding window")
@@ -290,10 +301,7 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
                 "cache_root": str(Path(embedding_source_cache_root)),
                 "context_steps": reference_shape[0],
                 "embedding_dim": reference_shape[1],
-                "sources": {ticker: {
-                    "manifest_sha256": file_digest(cache.root / "manifest.json"),
-                    "rows": len(cache.embeddings),
-                } for ticker, cache in sorted(reference_caches.items())},
+                "sources": dict(sorted(reference_sources.items())),
             }
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))
         os.rename(temporary, output)
