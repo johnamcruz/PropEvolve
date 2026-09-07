@@ -17,6 +17,20 @@ def test_each_optimizer_window_balances_long_short_and_wait():
         assert max(counts.values()) - min(counts.values()) <= 1
 
 
+def test_each_repeated_epoch_ends_on_a_complete_three_action_window():
+    rows = ([{"target_name": "ENTER_LONG_1"}] * 19
+            + [{"target_name": "ENTER_SHORT_1"}] * 24
+            + [{"target_name": "WAIT"}] * 21)
+    first = balanced_action_order(rows, count=len(rows), rng=np.random.default_rng(17))
+    second = balanced_action_order(rows, count=len(rows), rng=np.random.default_rng(18))
+    labels = [rows[index]["target_name"] for index in np.concatenate([first, second])]
+    assert len(first) == len(second) == 63
+    for start in range(0, len(labels), 3):
+        assert Counter(labels[start:start + 3]) == {
+            "ENTER_LONG_1": 1, "ENTER_SHORT_1": 1, "WAIT": 1,
+        }
+
+
 def test_balanced_sampler_rejects_missing_action_class():
     rows = [{"target_name": "WAIT"}, {"target_name": "ENTER_LONG_1"}]
     try:

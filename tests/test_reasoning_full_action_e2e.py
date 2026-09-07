@@ -5,6 +5,7 @@ from propevolve.reasoning_policy.supervision import (
     action_completion_scores,
     action_objective,
     action_targets,
+    completion_objective,
     mean_completion_scores,
 )
 from propevolve.reasoning_policy.dataset import supervised_record
@@ -54,6 +55,13 @@ def test_action_score_is_not_biased_by_completion_token_count():
         [True, True, True, True, True],
     ])
     np.testing.assert_allclose(mean_completion_scores(token_log_probs, mask, xp=np), [-2., -2.])
+
+
+def test_mean_completion_objective_is_not_divided_by_token_count_twice():
+    scores = mean_completion_scores(
+        np.asarray([[-2.0, -2.0], [-4.0, -4.0]]),
+        np.asarray([[True, True], [True, True]]), xp=np)
+    assert completion_objective(scores, np.asarray([True, True]), xp=np) == pytest.approx(3.0)
 
 
 def test_action_credit_uses_the_legal_action_token_not_shared_eos_formatting():

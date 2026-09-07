@@ -1,0 +1,12 @@
+{
+  "inherits": "policy_sft.json",
+  "data": "runs/reasoning-challenger/action-full-history-index",
+  "adapter_path": "runs/reasoning-challenger/action-full-history-index-adapters",
+  "resume_adapter_file": "runs/reasoning-challenger/market-full-history-adapters/adapters.safetensors",
+  "iters": 90000,
+  "val_batches": 9000,
+  "steps_per_eval": 9000,
+  "save_every": 18000,
+  "grad_accumulation_steps": 3,
+  "batch_sampling": "balanced_actions"
+}

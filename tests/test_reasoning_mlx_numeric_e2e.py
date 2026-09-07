@@ -6,8 +6,12 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
-from propevolve.reasoning_policy.projector import attach_projector, export_policy_weights, restore_projector
-from propevolve.reasoning_policy.supervised_trainer import batch_loss, pack_examples
+from propevolve.reasoning_policy.projector import (
+    attach_projector, export_policy_weights, restore_projector, temporal_features,
+)
+from propevolve.reasoning_policy.supervised_trainer import (
+    batch_loss, configure_trainable_components, pack_examples,
+)
 from propevolve.reasoning_policy.policy import sequence_scores
 
 
@@ -35,7 +39,8 @@ def tiny_backbone(vocabulary=16):
             return self.output(mx.cumsum(x, axis=1))
     model = Backbone()
     model.freeze()
-    attach_projector(model, {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2})
+    attach_projector(model, {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
+                             "temporal_encoding": "pooled_levels"})
     return model
 
 
@@ -44,6 +49,20 @@ def example():
         "alternatives": [([1, 2, 3, 4], 2), ([1, 2, 5, 4], 2), ([1, 2, 6, 4], 2)],
         "action_targets": {"probabilities": [.1, .8, .1], "values": [0., 10., -10.]},
         "market_embeddings": [[0., 0.], [1., 2.], [3., 4.]], "market_available": [False, True, True]}
+
+
+def test_latest_state_plus_causal_deltas_exposes_lifecycle_without_future_rows():
+    pooled = np.asarray([[[1., 10.], [3., 14.], [8., 12.]]], np.float32)
+    actual = temporal_features(pooled, "latest_plus_deltas", xp=np)
+    np.testing.assert_array_equal(actual, [[[8., 12.], [2., 4.], [5., -2.]]])
+    # Altering the latest completed bin changes only the latest-state token and
+    # the final transition; there is no lookahead token.
+    changed = pooled.copy()
+    changed[:, -1] = [10., 15.]
+    revised = temporal_features(changed, "latest_plus_deltas", xp=np)
+    np.testing.assert_array_equal(revised[:, 1], actual[:, 1])
+    np.testing.assert_array_equal(revised[:, 0], [[10., 15.]])
+    np.testing.assert_array_equal(revised[:, -1], [[7., 1.]])
 
 
 def test_real_mlx_projector_gradient_update_and_save_reload_preserve_scores(tmp_path):
@@ -65,13 +84,36 @@ def test_real_mlx_projector_gradient_update_and_save_reload_preserve_scores(tmp_
     tokens = tuple((*item, np.asarray(row["market_embeddings"], np.float32),
                    np.asarray(row["market_available"], bool)) for item in row["alternatives"])
     expected = sequence_scores(model, tokens)
+    model.market_projector.freeze()
     export_policy_weights(model, tmp_path)
+    assert (tmp_path / "projector.safetensors").is_file()
     restored = tiny_backbone()
     # Preserve the same frozen external backbone; only projector is reloaded.
     restored.model = model.model
     restored.output = model.output
     restore_projector(restored, tmp_path)
     np.testing.assert_allclose(np.asarray(sequence_scores(restored, tokens)), np.asarray(expected), atol=1e-6)
+
+
+def test_component_selection_can_train_projector_without_lora_and_preserve_both():
+    from mlx.utils import tree_flatten
+
+    class Adapter(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lora_a = mx.ones((2, 2))
+            self.lora_b = mx.ones((2, 2))
+
+    model = tiny_backbone()
+    model.adapter = Adapter()
+    configure_trainable_components(model, ["projector"])
+    assert set(dict(tree_flatten(model.trainable_parameters()))) == {
+        "market_projector.projection.weight"
+    }
+    configure_trainable_components(model, ["lora", "projector"])
+    assert set(dict(tree_flatten(model.trainable_parameters()))) == {
+        "adapter.lora_a", "adapter.lora_b", "market_projector.projection.weight"
+    }
 
 
 def test_masked_history_cannot_affect_projected_scores():
@@ -94,7 +136,8 @@ def test_actual_policy_selects_only_legal_actions_and_preserves_score_parity(nam
     history = RollingContext(ContextConfig(3, ("account.realized_pnl_norm",), input_mode="embeddings"))
     history.append(1, {"account.realized_pnl_norm": -.5}, embedding=np.array([1., 2.]))
     policy = MLXActionPolicy(tiny_backbone(128), LiteralTokenizer(), max_seq_length=2048,
-        input_mode="embeddings", projector={"embedding_dim": 2, "context_steps": 3, "market_tokens": 2})
+        input_mode="embeddings", projector={"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
+                                             "temporal_encoding": "pooled_levels"})
     actions = tuple(Action[name] for name in names)
     context = history.snapshot()
     chosen, scores = policy.decide(context, actions)

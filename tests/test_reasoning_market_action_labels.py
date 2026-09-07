@@ -1,5 +1,5 @@
 from propevolve.decision import Action
-from propevolve.reasoning_policy.labels import label_market_actions
+from propevolve.reasoning_policy.labels import classify_market_action_rows, label_market_actions
 from test_reasoning_challenger_e2e import environment
 
 
@@ -39,3 +39,26 @@ def test_no_economic_winner_teaches_wait_above_both_entries():
 def test_target_grid_assigns_more_credit_to_larger_trend_capture():
     two_r = _labels(1).outcomes[Action.ENTER_LONG_1].reward_to_go
     assert two_r == 4.0  # fixture reaches the configured 4R target before -1R
+
+
+def test_vectorized_full_history_classes_match_scalar_economic_labels():
+    utilities = {"winner": 2.0, "failure": -1.0, "wait": 0.0,
+                 "missed_opportunity": -0.25, "conflict_margin": 0.25}
+    for kind in (-1, 0, 1):
+        env = environment(kind)
+        market = env.markets["NQ"]
+        actual = classify_market_action_rows(
+            market, role_end=len(market.close), risk_dollars=300.0,
+            point_value=20.0, round_trip_fee=0.0, horizon=2,
+            target_rs=(2.0, 3.0, 4.0), stop_r=1.0, chunk_size=2,
+        )
+        for decision in range(len(market.close) - 2):
+            labels = label_market_actions(
+                market, decision=decision, role_end=len(market.close), observation=[0.0],
+                risk_dollars=300.0, point_value=20.0, round_trip_fee=0.0,
+                minimum_mll_headroom=3000.0, horizon=2,
+                target_rs=(2.0, 3.0, 4.0), stop_r=1.0, utilities=utilities,
+            )
+            expected = max(labels.outcomes, key=lambda action: labels.outcomes[action].reward_to_go)
+            assert actual[decision] == int(expected)
+        assert (actual[-2:] == -1).all()

@@ -10,6 +10,8 @@ def validate_projector(config):
         raise ValueError("projector requires positive dimensions from the authenticated embedding contract")
     if config["market_tokens"] > config["context_steps"]:
         raise ValueError("market token count exceeds context window")
+    if config.get("temporal_encoding") not in {"pooled_levels", "latest_plus_deltas"}:
+        raise ValueError("projector requires a configured temporal encoding")
 
 
 def pooling_weights(available, market_tokens):
@@ -22,6 +24,15 @@ def pooling_weights(available, market_tokens):
         membership[index, positions] = 1
     weights = membership[None, :, :] * available[:, None, :]
     return weights / np.maximum(weights.sum(axis=-1, keepdims=True), 1)
+
+
+def temporal_features(pooled, encoding, *, xp):
+    """Expose current state plus completed-history changes without future data."""
+    if encoding == "pooled_levels":
+        return pooled
+    if encoding != "latest_plus_deltas" or pooled.ndim != 3 or pooled.shape[1] < 2:
+        raise ValueError("invalid temporal projector encoding")
+    return xp.concatenate([pooled[:, -1:], pooled[:, 1:] - pooled[:, :-1]], axis=1)
 
 
 def attach_projector(model, config):
@@ -48,7 +59,9 @@ def attach_projector(model, config):
             weights = mx.array(membership)[None, :, :] * available[:, None, :]
             weights = weights / mx.maximum(weights.sum(axis=-1, keepdims=True), 1)
             clean = mx.where(available[:, :, None], embeddings, 0.)
-            return self.projection(weights @ clean)
+            pooled = weights @ clean
+            features = temporal_features(pooled, config["temporal_encoding"], xp=mx)
+            return self.projection(features)
     model.market_projector = MarketProjector()
 
 
@@ -66,10 +79,12 @@ def market_logits(model, tokens, embeddings, available):
 def export_policy_weights(model, destination):
     import mlx.core as mx
     from mlx.utils import tree_flatten
-    weights = dict(tree_flatten(model.trainable_parameters()))
+    weights = dict(tree_flatten(model.parameters()))
     projector = {name: value for name, value in weights.items() if name.startswith("market_projector.")}
-    base = {name: value for name, value in weights.items() if name not in projector}
-    mx.save_safetensors(str(Path(destination) / "adapters.safetensors"), base)
+    base = {name: value for name, value in weights.items()
+            if name.rsplit(".", 1)[-1] in {"lora_a", "lora_b"}}
+    if base:
+        mx.save_safetensors(str(Path(destination) / "adapters.safetensors"), base)
     if projector:
         mx.save_safetensors(str(Path(destination) / "projector.safetensors"), projector)
 

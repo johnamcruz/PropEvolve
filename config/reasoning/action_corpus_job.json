@@ -1,0 +1,23 @@
+{
+  "inherits": "development.json",
+  "status": "bounded_full_period_label_corpus",
+  "dataset_kind": "action",
+  "temporal_split_audit": "runs/reasoning-challenger/corpus-source-audit.json",
+  "dataset_output": "runs/reasoning-challenger/action-corpus",
+  "mlx_view": "runs/reasoning-challenger/action-corpus-mlx-view",
+  "sft_config": "config/reasoning/action_corpus_sft.json",
+  "episode_sampling": {
+    "train": {
+      "count": 64,
+      "seed": 2701,
+      "minimum_start_separation": 2000
+    },
+    "valid": {
+      "count": 32,
+      "seed": 2702,
+      "minimum_start_separation": 2000
+    }
+  },
+  "maximum_examples_per_episode": 8,
+  "sample_stride": 200
+}

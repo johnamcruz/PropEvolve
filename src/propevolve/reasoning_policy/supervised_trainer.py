@@ -10,7 +10,10 @@ import shutil
 import time
 import numpy as np
 
-from .supervision import action_completion_scores, action_objective, mean_completion_scores
+from .supervision import (
+    action_completion_scores, action_objective, completion_objective,
+    mean_completion_scores,
+)
 
 
 class EarlyStopTraining(RuntimeError):
@@ -157,6 +160,9 @@ def balanced_action_order(rows, *, count, rng):
     if len(groups) < 3:
         raise ValueError("balanced action sampling requires at least three target classes")
     names = sorted(groups)
+    # A new shuffled epoch must never bisect an accumulated equal-action
+    # optimizer window. The omitted tail is reshuffled into a later epoch.
+    count -= count % len(names)
     queues = {name: list(rng.permutation(groups[name])) for name in names}
     cursors = {name: 0 for name in names}
     order = []
@@ -250,6 +256,35 @@ def validate_early_stopping_coverage(config, datasets):
             raise ValueError("early stopping validation must cover all training action classes")
 
 
+def configure_trainable_components(model, components):
+    """Select LoRA/projector learning without changing the serialized policy contract."""
+    from mlx.utils import tree_flatten
+    if (not isinstance(components, list) or not components
+            or len(components) != len(set(components))
+            or set(components) - {"lora", "projector"}):
+        raise ValueError("invalid trainable components")
+    model.freeze()
+    found_lora = 0
+    if "lora" in components:
+        for _, module in model.named_modules():
+            keys = [key for key in ("lora_a", "lora_b") if hasattr(module, key)]
+            if keys:
+                module.unfreeze(keys=keys, recurse=False)
+                found_lora += 1
+        if not found_lora:
+            raise ValueError("LoRA component requested but no adapters are attached")
+    if "projector" in components:
+        if not hasattr(model, "market_projector"):
+            raise ValueError("projector component requested but no projector is attached")
+        model.market_projector.unfreeze()
+    leaves = dict(tree_flatten(model.trainable_parameters()))
+    invalid = [name for name in leaves if not (
+        name.startswith("market_projector.") or name.rsplit(".", 1)[-1] in {"lora_a", "lora_b"})]
+    if invalid or not leaves:
+        raise ValueError("trainable component selection exposed invalid parameters")
+    return tuple(sorted(leaves))
+
+
 def pack_examples(rows, *, max_seq_length):
     alternatives = [row.get("alternatives", [(row["tokens"], row["offset"])]) for row in rows]
     actions = max(map(len, alternatives))
@@ -324,7 +359,7 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             losses.append(action_objective(scores, probabilities[index], values[index],
                 config["action_supervision"], xp=mx, valid=valid[index]))
         else:
-            losses.append(-scores.sum() / mx.maximum(mask.sum(), 1))
+            losses.append(completion_objective(scores, valid[index], xp=mx))
     return (mx.stack(losses).mean(), mx.array(tokens.shape[0]),
             mx.stack(action_scores))
 
@@ -393,6 +428,7 @@ def train_supervised(config, view):
         attach_projector(model, config["projector"])
         if parent is not None:
             restore_projector(model, Path(parent).parent)
+    configure_trainable_components(model, config["trainable_components"])
     optimizer_kind = config["optimizer"]
     constructors = {"adam": optim.Adam, "adamw": optim.AdamW}
     if optimizer_kind not in constructors:
@@ -404,8 +440,8 @@ def train_supervised(config, view):
             learning_rate, schedule["decay_updates"], end=schedule["end"])
     optimizer = constructors[optimizer_kind](learning_rate=learning_rate,
         **config["optimizer_config"].get(optimizer_kind, {}))
-    datasets = {role: [json.loads(line) for line in (Path(view) / f"{role}.jsonl").read_text().splitlines()]
-                for role in ("train", "valid")}
+    from .mlx_sft import PreparedDataset
+    datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
     validate_early_stopping_coverage(config, datasets)
     validate_balanced_optimizer_windows(config, datasets["train"])
     destination.mkdir(parents=True)

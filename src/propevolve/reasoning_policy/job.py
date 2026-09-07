@@ -28,11 +28,14 @@ def resolve(root, value):
     return root / value
 
 
-def sample_episode_specs(environment, *, tickers, count, seed, explicit=None):
+def sample_episode_specs(
+    environment, *, tickers, count, seed, explicit=None, minimum_start_separation=0,
+):
     """Materialize reproducible challenge windows without implicit run state."""
     if explicit:
         return [dict(item) for item in explicit]
     if (type(count) is not int or count < 1 or type(seed) is not int
+            or type(minimum_start_separation) is not int or minimum_start_separation < 0
             or not tickers or len(set(tickers)) != len(tickers)):
         raise ValueError("invalid episode sampling contract")
     from ..environment import HistoricalChallengeEnv
@@ -48,19 +51,96 @@ def sample_episode_specs(environment, *, tickers, count, seed, explicit=None):
         schedule_rng.shuffle(cycle)
         schedule.extend(cycle)
     result, seen = [], set()
+    starts_by_ticker = {ticker: [] for ticker in tickers}
     attempts = 0
     while len(result) < count and attempts < count * 100:
         ticker = schedule[len(result)]
         _, info = sampler.reset(options={"ticker": ticker})
         identity = (ticker, int(info["start"]))
         attempts += 1
-        if identity in seen:
+        if (identity in seen or any(
+                abs(identity[1] - prior) < minimum_start_separation
+                for prior in starts_by_ticker[ticker])):
             continue
         seen.add(identity)
+        starts_by_ticker[ticker].append(identity[1])
         result.append({"ticker": ticker, "start": identity[1]})
     if len(result) != count:
         raise ValueError("unable to sample unique challenge episodes")
     return result
+
+
+def stratified_action_rows(candidates, *, per_action, seed):
+    """Choose equal action mass while spreading rows over market and year."""
+    if type(per_action) is not int or per_action < 1 or type(seed) is not int:
+        raise ValueError("invalid economic action sampling contract")
+    rng = np.random.default_rng(seed)
+    selected = []
+    for action in (int(Action.WAIT), int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)):
+        groups = []
+        for ticker, payload in sorted(candidates.items()):
+            labels = np.asarray(payload["labels"])
+            eligible = np.asarray(payload["eligible"], dtype=bool)
+            years = np.asarray(payload["years"])
+            if labels.shape != eligible.shape or labels.shape != years.shape:
+                raise ValueError("economic candidates are not aligned")
+            for year in sorted(set(years[eligible & (labels == action)])):
+                rows = np.flatnonzero(eligible & (labels == action) & (years == year))
+                if len(rows):
+                    groups.append([ticker, list(rng.permutation(rows))])
+        if sum(len(rows) for _, rows in groups) < per_action:
+            raise ValueError("insufficient natural economic labels for requested sample")
+        action_rows = []
+        cursor = 0
+        while len(action_rows) < per_action:
+            ticker, rows = groups[cursor % len(groups)]
+            if rows:
+                action_rows.append((ticker, int(rows.pop()), action))
+            cursor += 1
+        selected.extend(action_rows)
+    rng.shuffle(selected)
+    return selected
+
+
+def economic_episode_specs(config, environment, sources, role):
+    """Turn the exhaustive economic census into reproducible SFT anchors."""
+    sampling = config["economic_action_sampling"][role]
+    if (not isinstance(sampling, dict) or set(sampling) != {"per_action", "seed"}):
+        raise ValueError("economic action sampling requires per_action and seed")
+    from .labels import classify_market_action_rows
+    contract = config["opportunity_contract"]
+    warmup = config.get("collection_warmup_steps", 0)
+    candidates = {}
+    for ticker in config["tickers"][role]:
+        market = environment.markets[ticker]
+        labels = classify_market_action_rows(
+            market, role_end=len(market.close),
+            risk_dollars=environment.spec.per_trade_risk_dollars,
+            point_value=environment.tick_values[ticker],
+            round_trip_fee=environment.round_trip_fees[ticker],
+            horizon=contract["horizon"], target_rs=contract["target_rs"],
+            stop_r=contract["stop_r"],
+            chunk_size=config.get("label_census_chunk_size", 16384),
+        )
+        eligible = labels >= 0
+        eligible[:warmup] = False
+        session_keys = environment._session_keys[ticker]
+        unique_sessions = np.unique(session_keys)
+        last_start_session = unique_sessions[-environment.spec.episode_days]
+        maximum_start = min(
+            len(market.close) - 2,
+            int(np.searchsorted(session_keys, last_start_session, side="right") - 1),
+        )
+        eligible[maximum_start + warmup + 1:] = False
+        for specialist in sources:
+            eligible &= np.asarray(specialist.targets.availability[ticker], dtype=bool)
+        candidates[ticker] = {
+            "labels": labels, "eligible": eligible,
+            "years": np.asarray(market.timestamps, dtype="datetime64[Y]").astype(str),
+        }
+    return [{"ticker": ticker, "start": row - warmup, "expected_action": action}
+            for ticker, row, action in stratified_action_rows(
+                candidates, per_action=sampling["per_action"], seed=sampling["seed"])]
 
 
 def configured_episodes(config, environment, role, *, evaluation=False):
@@ -73,10 +153,13 @@ def configured_episodes(config, environment, role, *, evaluation=False):
     if explicit:
         return sample_episode_specs(environment, tickers=tuple(config["tickers"][role]),
                                     count=len(explicit), seed=config["seed"], explicit=explicit)
-    if not isinstance(spec, dict) or set(spec) != {"count", "seed"}:
+    if (not isinstance(spec, dict)
+            or set(spec) - {"count", "seed", "minimum_start_separation"}
+            or not {"count", "seed"}.issubset(spec)):
         raise ValueError(f"missing episode sampling for {role}")
     return sample_episode_specs(environment, tickers=tuple(config["tickers"][role]),
-                                count=spec["count"], seed=spec["seed"])
+                                count=spec["count"], seed=spec["seed"],
+                                minimum_start_separation=spec.get("minimum_start_separation", 0))
 
 
 def collection_source_for_role(config, source, role, source_splits):
@@ -202,7 +285,8 @@ def publish_source_audit(path):
         raise ValueError("invalid specialist supervision roles")
     role_receipts = {}
     for role in ("train", "valid"):
-        env, sources = load_role(config, root, source, role,
+        role_source, dataset_bounds = collection_source_for_role(config, source, role, splits)
+        env, sources = load_role(config, root, role_source, role,
                                  include_specialists=role in specialist_roles)
         dimensions = {market.embeddings.shape[1] for market in env.markets.values()}
         if dimensions != {config["embedding_dim"]}:
@@ -214,6 +298,7 @@ def publish_source_audit(path):
             "tickers": sorted(env.markets), "embedding_dim": dimensions.pop(),
             "rows": {ticker: len(market.close) for ticker, market in env.markets.items()},
             "specialists": list(kinds),
+            "dataset_bounds": dataset_bounds,
         }
     policy = config["collection_policy"]
     if policy.get("kind") == "frozen_c51":
@@ -381,9 +466,16 @@ def collect_job(path):
 
     def records():
         for role in ("train", "valid"):
+            augment_action = kind == "action" and config.get("augment_action_targets", False)
+            specialist_roles = tuple(config.get("specialist_supervision_roles", ("train",)))
             env, sources = load_role(config, root, role_sources[role][0], role,
-                                     include_specialists=kind == "market")
-            for episode in configured_episodes(config, env, role):
+                                     include_specialists=(kind == "market" or
+                                                          (augment_action and role in specialist_roles)))
+            episodes = (economic_episode_specs(config, env, sources, role)
+                        if config.get("economic_action_sampling") is not None else
+                        configured_episodes(config, env, role))
+            for selected in episodes:
+                episode = {key: selected[key] for key in ("ticker", "start")}
                 for pair in collect_examples(
                     env, reset_options=episode, context_config=context, sources=sources,
                     behavior_factory=factory, continuation_factory=factory,
@@ -397,20 +489,110 @@ def collect_job(path):
                     collection_warmup_steps=config.get("collection_warmup_steps", 0),
                     collect_action_targets=kind == "action",
                     collect_market_targets=kind == "market",
+                    augment_action_targets=augment_action,
                 ):
                     if pair[kind] is not None:
+                        if kind == "action" and "expected_action" in selected:
+                            expected = Action(selected["expected_action"]).name
+                            if pair[kind]["messages"][-1]["content"] != expected:
+                                raise ValueError("selected economic action changed during collection")
                         yield pair[kind]
-    manifest = write_supervised_dataset(records(), output, splits=dataset_splits, lineage=lineage,
-                                        sealed_start_ns=sealed)
+    manifest = write_supervised_dataset(
+        records(), output, splits=dataset_splits, lineage=lineage,
+        sealed_start_ns=sealed,
+        embedding_storage=config.get("embedding_storage", "json"),
+        embedding_source_cache_root=(
+            resolve(root, source["cache_root"])
+            if config.get("embedding_storage") == "source_embedding_reference_v1"
+            else None
+        ),
+    )
     # No fabricated PASS: dataset audit is explicitly required after generation.
     return {"dataset": str(output), "counts": manifest["counts"],
             "next": "review dataset and supply matching audit.json before SFT"}
 
 
+def label_census_job(path):
+    """Count every causal economic action label before selecting an SFT corpus."""
+    config, root = read_job(path)
+    source, _, splits, sealed, identity = load_source_contract(config, root)
+    destination = resolve(root, config["label_census_output"])
+    if destination.exists():
+        raise FileExistsError(f"label census already exists: {destination}")
+    from .context import ContextConfig
+    from .labels import classify_market_action_rows
+    context = ContextConfig.load(resolve(root, config["context_config"]))
+    contract = config["opportunity_contract"]
+    report = {
+        "schema": "propevolve_reasoning_action_label_census_v1",
+        "status": "PASS", "source_identity": identity,
+        "sealed_start_ns": sealed, "sealed_touched": False,
+        "economic_contract": contract, "roles": {},
+    }
+    action_names = {int(action): action.name for action in (
+        Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)}
+    for role in ("train", "valid"):
+        role_counts = {name: 0 for name in action_names.values()}
+        role_years = {}
+        ticker_reports = {}
+        for ticker in config["tickers"][role]:
+            single = dict(config)
+            single["tickers"] = {**config["tickers"], role: [ticker]}
+            include_specialists = role in tuple(config.get("specialist_supervision_roles", ("train",)))
+            env, sources = load_role(single, root, source, role,
+                                     include_specialists=include_specialists)
+            market = env.markets[ticker]
+            labels = classify_market_action_rows(
+                market, role_end=len(market.close),
+                risk_dollars=env.spec.per_trade_risk_dollars,
+                point_value=env.tick_values[ticker],
+                round_trip_fee=env.round_trip_fees[ticker],
+                horizon=contract["horizon"], target_rs=contract["target_rs"],
+                stop_r=contract["stop_r"],
+                chunk_size=config.get("label_census_chunk_size", 16384),
+            )
+            eligible = labels >= 0
+            eligible[:context.context_steps - 1] = False
+            for specialist in sources:
+                eligible &= np.asarray(specialist.targets.availability[ticker], dtype=bool)
+            counts = {name: int(np.count_nonzero(eligible & (labels == value)))
+                      for value, name in action_names.items()}
+            years = np.asarray(market.timestamps, dtype="datetime64[Y]").astype(str)
+            by_year = {}
+            for year in sorted(set(years[eligible])):
+                mask = eligible & (years == year)
+                by_year[year] = {name: int(np.count_nonzero(mask & (labels == value)))
+                                 for value, name in action_names.items()}
+                aggregate = role_years.setdefault(year, {name: 0 for name in action_names.values()})
+                for name, value in by_year[year].items():
+                    aggregate[name] += value
+            ticker_reports[ticker] = {
+                "eligible_rows": int(np.count_nonzero(eligible)),
+                "actions": counts, "years": by_year,
+            }
+            for name, value in counts.items():
+                role_counts[name] += value
+        report["roles"][role] = {
+            "bounds_ns": splits[role], "eligible_rows": sum(role_counts.values()),
+            "actions": role_counts, "years": role_years, "tickers": ticker_reports,
+        }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".reasoning-label-census-", suffix=".json", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(report, stream, indent=2, allow_nan=False)
+        os.rename(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("stage", choices=("check", "publish-source-audit", "collect", "publish-audit", "audit", "prepare", "train", "rl", "evaluate"))
+    parser.add_argument("stage", choices=("check", "publish-source-audit", "census", "collect", "publish-audit", "audit", "prepare", "train", "rl", "evaluate"))
     args = parser.parse_args(argv)
     config, root = read_job(args.config)
     if args.stage == "check":
@@ -419,6 +601,8 @@ def main(argv=None):
         result = publish_source_audit(args.config)
     elif args.stage == "collect":
         result = collect_job(args.config)
+    elif args.stage == "census":
+        result = label_census_job(args.config)
     elif args.stage == "publish-audit":
         from .dataset import audit_supervised_dataset
         _, source_audit, _, _, _ = load_source_contract(config, root)

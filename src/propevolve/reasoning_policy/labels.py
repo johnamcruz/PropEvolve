@@ -74,6 +74,64 @@ These are setup labels, not account-aware action prescriptions.
     ) for side in ("long", "short"))
 
 
+def classify_market_action_rows(
+    market, *, role_end, risk_dollars, point_value, round_trip_fee,
+    horizon, target_rs, stop_r, chunk_size=16384,
+):
+    """Classify every uncensored flat state with the scalar barrier contract.
+
+    This is the exhaustive-corpus counterpart of ``label_market_actions``.
+    It returns Action integer values and -1 for the censored tail. OHLC ties
+    remain adverse-first, exactly like ``_target_before_adverse``.
+    """
+    if (type(role_end) is not int or type(horizon) is not int or type(chunk_size) is not int
+            or not 1 <= role_end <= len(market.close) or horizon < 1 or chunk_size < 1):
+        raise ValueError("invalid full-history label bounds")
+    numbers = np.asarray([risk_dollars, point_value, round_trip_fee, stop_r], dtype=float)
+    targets = np.asarray(tuple(target_rs), dtype=float)
+    if (not np.isfinite(numbers).all() or risk_dollars <= 0 or point_value <= 0
+            or round_trip_fee < 0 or stop_r <= 0 or targets.ndim != 1 or not len(targets)
+            or not np.isfinite(targets).all() or (targets <= 0).any()
+            or not np.all(np.diff(targets) > 0)):
+        raise ValueError("invalid full-history economic contract")
+    adverse_points = (stop_r * risk_dollars - round_trip_fee) / point_value
+    if adverse_points <= 0:
+        raise ValueError("entry supervision adverse distance must be positive")
+    target_points = (targets * risk_dollars + round_trip_fee) / point_value
+    eligible = role_end - horizon
+    result = np.full(role_end, -1, dtype=np.int8)
+    if eligible <= 0:
+        return result
+    from numpy.lib.stride_tricks import sliding_window_view
+    high_windows = sliding_window_view(np.asarray(market.high[1:role_end]), horizon)
+    low_windows = sliding_window_view(np.asarray(market.low[1:role_end]), horizon)
+    entries = np.asarray(market.open[1:eligible + 1])
+    steps = np.arange(horizon)[None, :]
+
+    for start in range(0, eligible, chunk_size):
+        end = min(start + chunk_size, eligible)
+        entry = entries[start:end, None]
+        high = high_windows[start:end]
+        low = low_windows[start:end]
+        achieved = []
+        for favorable, adverse in ((high - entry, entry - low),
+                                    (entry - low, high - entry)):
+            adverse_hits = adverse >= adverse_points
+            first_adverse = np.argmax(adverse_hits, axis=1)
+            first_adverse = np.where(adverse_hits.any(axis=1), first_adverse, horizon)
+            before_adverse = steps < first_adverse[:, None]
+            maximum = np.max(np.where(before_adverse, favorable, -np.inf), axis=1)
+            maximum = np.maximum(maximum, 0.0)
+            levels = (maximum[:, None] >= target_points[None, :]).sum(axis=1)
+            achieved.append(levels)
+        long_levels, short_levels = achieved
+        chosen = np.full(end - start, int(Action.WAIT), dtype=np.int8)
+        chosen[long_levels > short_levels] = int(Action.ENTER_LONG_1)
+        chosen[short_levels > long_levels] = int(Action.ENTER_SHORT_1)
+        result[start:end] = chosen
+    return result
+
+
 @dataclass(frozen=True)
 class ActionOutcome:
     outcome: str

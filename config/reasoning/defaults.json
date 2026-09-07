@@ -2,6 +2,7 @@
   "optimizer": "adam",
   "optimizer_config": {"adam": {}},
   "lr_schedule": null,
+  "trainable_components": ["lora"],
   "resume_adapter_file": null,
   "action_supervision": {"enabled": false, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
   "input_mode": "specialists",

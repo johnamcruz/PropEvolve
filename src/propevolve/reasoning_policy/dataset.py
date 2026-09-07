@@ -151,7 +151,8 @@ Both may be false or true; never infer one side by negating the other.
 
 
 def write_supervised_dataset(records, output: str | Path, *, splits: dict, lineage: dict,
-                             sealed_start_ns: int):
+                             sealed_start_ns: int, embedding_storage="json",
+                             embedding_source_cache_root=None):
     """Publish a bounded dataset with disjoint chronological label reserves.
 
 All timestamps are completed-bar UTC nanoseconds. The caller provides audited
@@ -165,6 +166,12 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"dataset already exists: {output}")
+    if embedding_storage not in {
+            "json", "float32_sidecar_v1", "source_embedding_reference_v1"}:
+        raise ValueError("unknown embedding storage")
+    if ((embedding_storage == "source_embedding_reference_v1")
+            != (embedding_source_cache_root is not None)):
+        raise ValueError("source embedding storage requires exactly one cache root")
     if set(splits) != {"train", "valid"}:
         raise ValueError("dataset requires train and valid chronological roles")
     bounds = {key: tuple(int(x) for x in value) for key, value in splits.items()}
@@ -181,9 +188,21 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
     temporary = Path(tempfile.mkdtemp(prefix=".reasoning-dataset-", dir=output.parent))
     counts = {key: 0 for key in bounds}
     seen = set()
+    reference_caches = {}
+    reference_shape = None
     try:
-        with (temporary / "train.jsonl").open("x") as train, (temporary / "valid.jsonl").open("x") as valid:
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            train = stack.enter_context((temporary / "train.jsonl").open("x"))
+            valid = stack.enter_context((temporary / "valid.jsonl").open("x"))
             handles = {"train": train, "valid": valid}
+            embedding_handles = available_handles = None
+            embedding_shapes = {key: None for key in bounds}
+            if embedding_storage == "float32_sidecar_v1":
+                embedding_handles = {role: stack.enter_context(
+                    (temporary / f"{role}.embeddings.f32").open("xb")) for role in bounds}
+                available_handles = {role: stack.enter_context(
+                    (temporary / f"{role}.available.u8").open("xb")) for role in bounds}
             for record in records:
                 start, end = int(record["completed_at_ns"]), int(record["label_end_ns"])
                 if end <= start:
@@ -191,10 +210,59 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
                 roles = [key for key, (lower, upper) in bounds.items() if lower <= start < end < upper]
                 if len(roles) != 1:
                     raise ValueError("label crosses temporal role or is outside declared data")
-                identity = (record["source_id"], start)
+                identity = (record.get("ticker", record["source_id"]), start)
                 if identity in seen:
                     raise ValueError("duplicate supervised state")
                 seen.add(identity)
+                if embedding_handles is not None:
+                    record = dict(record)
+                    embeddings = np.asarray(record.pop("market_embeddings", None), np.float32)
+                    available = np.asarray(record.pop("market_available", None), bool)
+                    if (embeddings.ndim != 2 or available.shape != (embeddings.shape[0],)
+                            or not available.any() or not np.isfinite(embeddings).all()):
+                        raise ValueError("compact dataset requires a finite embedding window")
+                    shape = tuple(int(value) for value in embeddings.shape)
+                    if embedding_shapes[roles[0]] not in {None, shape}:
+                        raise ValueError("embedding windows must have one shape per role")
+                    embedding_shapes[roles[0]] = shape
+                    record["market_embedding_index"] = counts[roles[0]]
+                    embedding_handles[roles[0]].write(embeddings.tobytes(order="C"))
+                    available_handles[roles[0]].write(available.astype(np.uint8).tobytes(order="C"))
+                elif embedding_storage == "source_embedding_reference_v1":
+                    from ..cache import EmbeddingCache
+                    record = dict(record)
+                    embeddings = np.asarray(record.pop("market_embeddings", None), np.float32)
+                    available = np.asarray(record.pop("market_available", None), bool)
+                    ticker = record.get("ticker")
+                    if not isinstance(ticker, str) or not ticker:
+                        raise ValueError("source embedding reference requires a ticker")
+                    cache = reference_caches.get(ticker)
+                    if cache is None:
+                        cache = EmbeddingCache.load(Path(embedding_source_cache_root) / ticker)
+                        if cache.manifest.get("ticker") != ticker:
+                            raise ValueError("embedding cache ticker differs from supervised record")
+                        reference_caches[ticker] = cache
+                    if (embeddings.ndim != 2 or available.shape != (embeddings.shape[0],)
+                            or not available.any() or not np.isfinite(embeddings).all()):
+                        raise ValueError("indexed dataset requires a finite embedding window")
+                    shape = tuple(int(value) for value in embeddings.shape)
+                    if reference_shape not in {None, shape}:
+                        raise ValueError("indexed embedding windows must share one shape")
+                    reference_shape = shape
+                    expected_mask = np.arange(shape[0]) >= shape[0] - int(available.sum())
+                    if not np.array_equal(available, expected_mask):
+                        raise ValueError("embedding availability must be one causal suffix")
+                    timestamp = np.datetime64(start, "ns")
+                    row = int(np.searchsorted(cache.timestamps, timestamp))
+                    count = int(available.sum())
+                    first = row - count + 1
+                    if (row >= len(cache.timestamps) or cache.timestamps[row] != timestamp
+                            or first < 0 or not np.array_equal(
+                                embeddings[-count:], np.asarray(cache.embeddings[first:row + 1], np.float32))):
+                        raise ValueError("embedding window differs from authenticated source cache")
+                    record["market_embedding_reference"] = {
+                        "ticker": ticker, "row": row, "available_count": count,
+                    }
                 handles[roles[0]].write(json.dumps(record, allow_nan=False) + "\n")
                 counts[roles[0]] += 1
         if not all(counts.values()):
@@ -205,6 +273,28 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
             "sealed_start_ns": sealed_start_ns,
             "files": {key: file_digest(temporary / f"{key}.jsonl") for key in bounds},
         }
+        if embedding_storage == "float32_sidecar_v1":
+            manifest["embedding_storage"] = {
+                "kind": embedding_storage,
+                "roles": {role: {
+                    "shape": [counts[role], *embedding_shapes[role]],
+                    "embeddings_file": f"{role}.embeddings.f32",
+                    "embeddings_sha256": file_digest(temporary / f"{role}.embeddings.f32"),
+                    "available_file": f"{role}.available.u8",
+                    "available_sha256": file_digest(temporary / f"{role}.available.u8"),
+                } for role in bounds},
+            }
+        elif embedding_storage == "source_embedding_reference_v1":
+            manifest["embedding_storage"] = {
+                "kind": embedding_storage,
+                "cache_root": str(Path(embedding_source_cache_root)),
+                "context_steps": reference_shape[0],
+                "embedding_dim": reference_shape[1],
+                "sources": {ticker: {
+                    "manifest_sha256": file_digest(cache.root / "manifest.json"),
+                    "rows": len(cache.embeddings),
+                } for ticker, cache in sorted(reference_caches.items())},
+            }
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))
         os.rename(temporary, output)
     finally:
@@ -241,9 +331,27 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
 
     counts = {"train": 0, "valid": 0}
     actions = {}
+    actions_by_role = {"train": {}, "valid": {}}
+    tickers_by_role = {"train": {}, "valid": {}}
     teacher_free = 0
     specialist_target_records = 0
     seen = set()
+    storage = manifest.get("embedding_storage")
+    reference_caches = {}
+    if storage is not None and storage.get("kind") == "source_embedding_reference_v1":
+        from ..cache import EmbeddingCache
+        cache_root = Path(storage.get("cache_root", ""))
+        if (type(storage.get("context_steps")) is not int or storage["context_steps"] < 1
+                or type(storage.get("embedding_dim")) is not int or storage["embedding_dim"] < 1
+                or not isinstance(storage.get("sources"), dict) or not storage["sources"]):
+            raise ValueError("invalid embedding source reference storage")
+        for ticker, descriptor in storage["sources"].items():
+            cache = EmbeddingCache.load(cache_root / ticker)
+            if (cache.manifest.get("ticker") != ticker
+                    or file_digest(cache.root / "manifest.json") != descriptor.get("manifest_sha256")
+                    or cache.embeddings.shape != (descriptor.get("rows"), storage["embedding_dim"])):
+                raise ValueError("embedding source differs from dataset manifest")
+            reference_caches[ticker] = cache
     for role in ("train", "valid"):
         filename = root / f"{role}.jsonl"
         if file_digest(filename) != manifest["files"][role]:
@@ -251,6 +359,25 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
         lower, upper = manifest["splits"][role]
         if not (type(lower) is type(upper) is int and lower < upper <= sealed):
             raise ValueError("invalid or unsealed dataset role")
+        side_embeddings = side_available = None
+        if storage is not None:
+            if storage.get("kind") not in {
+                    "float32_sidecar_v1", "source_embedding_reference_v1"}:
+                raise ValueError("unknown embedding storage")
+            if storage.get("kind") == "float32_sidecar_v1":
+                descriptor = storage["roles"][role]
+                shape = tuple(descriptor["shape"])
+                if (shape[0] != manifest["counts"][role] or len(shape) != 3
+                        or min(shape) < 1):
+                    raise ValueError("invalid embedding sidecar shape")
+                embedding_file = root / descriptor["embeddings_file"]
+                available_file = root / descriptor["available_file"]
+                if (file_digest(embedding_file) != descriptor["embeddings_sha256"]
+                        or file_digest(available_file) != descriptor["available_sha256"]):
+                    raise ValueError("embedding sidecar differs from manifest")
+                side_embeddings = np.memmap(embedding_file, dtype=np.float32, mode="r", shape=shape)
+                side_available = np.memmap(
+                    available_file, dtype=np.uint8, mode="r", shape=(shape[0], shape[1]))
         with filename.open() as stream:
             for line in stream:
                 record = json.loads(line)
@@ -258,10 +385,15 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                 if (type(start) is not int or type(end) is not int
                         or not lower <= start < end < upper):
                     raise ValueError("record crosses its chronological role")
-                identity = (record.get("source_id"), start)
+                identity = (record.get("ticker", record.get("source_id")), start)
                 if not identity[0] or identity in seen:
                     raise ValueError("missing or duplicate supervised state")
                 seen.add(identity)
+                ticker = record.get("ticker")
+                if ticker is not None:
+                    if not isinstance(ticker, str) or not ticker:
+                        raise ValueError("invalid supervised ticker")
+                    tickers_by_role[role][ticker] = tickers_by_role[role].get(ticker, 0) + 1
                 messages = record.get("messages")
                 if (not isinstance(messages, list)
                         or [item.get("role") for item in messages] != ["system", "user", "assistant"]):
@@ -276,6 +408,29 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                     raise ValueError("invalid causal prompt history")
                 embeddings = record.get("market_embeddings")
                 available = record.get("market_available")
+                if side_embeddings is not None:
+                    index = record.get("market_embedding_index")
+                    if type(index) is not int or index != counts[role]:
+                        raise ValueError("invalid embedding sidecar index")
+                    embeddings = side_embeddings[index]
+                    available = side_available[index].astype(bool)
+                elif reference_caches:
+                    reference = record.get("market_embedding_reference")
+                    if (not isinstance(reference, dict)
+                            or set(reference) != {"ticker", "row", "available_count"}
+                            or reference["ticker"] != ticker
+                            or type(reference["row"]) is not int
+                            or type(reference["available_count"]) is not int):
+                        raise ValueError("invalid embedding source reference")
+                    cache = reference_caches.get(ticker)
+                    row, count = reference["row"], reference["available_count"]
+                    first = row - count + 1
+                    if (cache is None or first < 0 or row >= len(cache.timestamps)
+                            or not 1 <= count <= storage["context_steps"]
+                            or int(cache.timestamps[row].astype("datetime64[ns]").astype(np.int64)) != start):
+                        raise ValueError("embedding source reference differs from causal row")
+                    embeddings = cache.embeddings[first:row + 1]
+                    available = np.ones(count, dtype=bool)
                 if embeddings is not None or available is not None:
                     values = np.asarray(embeddings, dtype=np.float64)
                     mask = np.asarray(available)
@@ -310,6 +465,8 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                     if action not in targets["action_order"]:
                         raise ValueError("assistant action is not a legal target")
                     actions[action] = actions.get(action, 0) + 1
+                    role_actions = actions_by_role[role]
+                    role_actions[action] = role_actions.get(action, 0) + 1
                 elif not {"long_target_before_stop", "short_target_before_stop"}.issubset(targets):
                     raise ValueError("record has neither action nor market supervision")
                 counts[role] += 1
@@ -326,6 +483,12 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
         "sealed_touched": False,
         "counts": counts,
         "actions": dict(sorted(actions.items())),
+        "actions_by_role": {
+            role: dict(sorted(values.items())) for role, values in actions_by_role.items()
+        },
+        "tickers_by_role": {
+            role: dict(sorted(values.items())) for role, values in tickers_by_role.items()
+        },
         "teacher_free_prompt_records": teacher_free,
         "specialist_target_records": specialist_target_records,
     }

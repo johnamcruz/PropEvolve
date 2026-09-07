@@ -95,3 +95,26 @@ def test_sft_learning_rate_schedule_is_config_driven(tmp_path):
     recipe.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="learning-rate schedule"):
         read_sft_config(recipe)
+
+
+def test_sft_trainable_components_are_config_driven_and_fail_closed(tmp_path):
+    recipe = tmp_path / "components.json"
+    payload = {
+        "model": "fixture-model", "data": "fixture-data", "adapter_path": "new-adapter",
+        "train": True, "fine_tune_type": "lora", "mask_prompt": True,
+        "num_layers": 1, "batch_size": 1, "iters": 1, "learning_rate": 1e-5,
+        "max_seq_length": 1024, "grad_checkpoint": True,
+        "grad_accumulation_steps": 1,
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+        "trust_remote_code": False,
+        "input_mode": "embeddings",
+        "projector": {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
+                      "temporal_encoding": "pooled_levels"},
+        "trainable_components": ["projector"],
+    }
+    recipe.write_text(json.dumps(payload))
+    assert read_sft_config(recipe)["trainable_components"] == ["projector"]
+    payload["trainable_components"] = ["projector", "unknown"]
+    recipe.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="trainable components"):
+        read_sft_config(recipe)

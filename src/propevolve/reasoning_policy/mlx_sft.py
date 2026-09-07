@@ -8,6 +8,7 @@ import argparse
 import json
 from pathlib import Path
 import math
+import numpy as np
 from dataclasses import dataclass
 from .integrity import file_digest
 from .model_config import validate_model_settings, model_defaults, read_recipe, resolve_model_resources
@@ -43,6 +44,13 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError("invalid learning-rate schedule")
     if payload.get("batch_sampling", "random") not in {"random", "balanced_actions"}:
         raise ValueError("unknown SFT batch sampling strategy")
+    components = payload.get("trainable_components")
+    if (not isinstance(components, list) or not components
+            or len(components) != len(set(components))
+            or set(components) - {"lora", "projector"}):
+        raise ValueError("invalid trainable components")
+    if "projector" in components and payload["input_mode"] != "embeddings":
+        raise ValueError("projector trainable component requires embedding inputs")
     from .supervised_trainer import ValidationLossGuard
     guard = ValidationLossGuard(payload.get("early_stopping"), on_improvement=lambda report: None)
     if not supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions":
@@ -99,6 +107,25 @@ def verify_dataset(path: str | Path) -> dict:
         digest = file_digest(filename)
         if digest != manifest["files"][role]:
             raise ValueError(f"{role} dataset changed after audit")
+    storage = manifest.get("embedding_storage")
+    if storage is not None:
+        kind = storage.get("kind")
+        if kind not in {"float32_sidecar_v1", "source_embedding_reference_v1"}:
+            raise ValueError("unknown embedding storage")
+        if kind == "float32_sidecar_v1":
+            for descriptor in storage["roles"].values():
+                for file_key, digest_key in (("embeddings_file", "embeddings_sha256"),
+                                             ("available_file", "available_sha256")):
+                    if file_digest(root / descriptor[file_key]) != descriptor[digest_key]:
+                        raise ValueError("embedding sidecar changed after audit")
+        else:
+            cache_root = Path(storage["cache_root"])
+            for ticker, descriptor in storage["sources"].items():
+                ticker_root = cache_root / ticker
+                if (file_digest(ticker_root / "manifest.json") != descriptor["manifest_sha256"]
+                        or not (ticker_root / "embeddings.npy").is_file()
+                        or not (ticker_root / "timestamps.npy").is_file()):
+                    raise ValueError("embedding source changed after audit")
     return manifest
 
 
@@ -152,16 +179,40 @@ system boundary for tests; the production caller loads it with MLX-LM.
                     if config["input_mode"] == "embeddings":
                         import numpy as np
                         projector = config["projector"]
-                        embeddings = np.asarray(record.get("market_embeddings"), np.float32)
-                        available = np.asarray(record.get("market_available"), bool)
-                        if (embeddings.shape != (projector["context_steps"], projector["embedding_dim"])
-                                or available.shape != (projector["context_steps"],)
-                                or not available.any() or not np.isfinite(embeddings).all()):
-                            raise ValueError("supervised record lacks matching causal embedding window")
+                        if "market_embedding_reference" in record:
+                            reference = record["market_embedding_reference"]
+                            storage = manifest.get("embedding_storage", {})
+                            if (storage.get("kind") != "source_embedding_reference_v1"
+                                    or set(reference) != {"ticker", "row", "available_count"}
+                                    or reference["ticker"] not in storage["sources"]
+                                    or type(reference["row"]) is not int
+                                    or type(reference["available_count"]) is not int
+                                    or not 0 <= reference["row"] < storage["sources"][reference["ticker"]]["rows"]
+                                    or not 1 <= reference["available_count"] <= projector["context_steps"]
+                                    or storage["context_steps"] != projector["context_steps"]
+                                    or storage["embedding_dim"] != projector["embedding_dim"]):
+                                raise ValueError("supervised record has an invalid embedding source reference")
+                            encoded["market_embedding_reference"] = reference
+                        elif "market_embedding_index" in record:
+                            index = record["market_embedding_index"]
+                            storage = manifest.get("embedding_storage", {}).get("roles", {}).get(role)
+                            if (type(index) is not int or index != count or storage is None
+                                    or storage["shape"][1:] != [projector["context_steps"],
+                                                               projector["embedding_dim"]]):
+                                raise ValueError("supervised record lacks matching compact embedding window")
+                            encoded["market_embedding_index"] = index
+                        else:
+                            embeddings = np.asarray(record.get("market_embeddings"), np.float32)
+                            available = np.asarray(record.get("market_available"), bool)
+                            if (embeddings.shape != (projector["context_steps"], projector["embedding_dim"])
+                                    or available.shape != (projector["context_steps"],)
+                                    or not available.any() or not np.isfinite(embeddings).all()):
+                                raise ValueError("supervised record lacks matching causal embedding window")
+                            encoded.update(market_embeddings=embeddings.tolist(),
+                                           market_available=available.tolist())
                         prompt = json.loads(messages[-2]["content"])
                         if any(not field.startswith(("account.", "trade.", "challenge.")) for field in prompt["fields"]):
                             raise ValueError("teacher fields leaked into teacher-free SFT prompt")
-                        encoded.update(market_embeddings=embeddings.tolist(), market_available=available.tolist())
                     target.write(json.dumps(encoded) + "\n")
                     count += 1
             if count != manifest["counts"][role] or count < config["batch_size"]:
@@ -227,6 +278,71 @@ class EncodedDataset:
 
     def process(self, row):
         return list(row.tokens), row.offset
+
+
+class PreparedDataset:
+    """Lightweight encoded rows with mmap-backed market context."""
+
+    def __init__(self, view, role):
+        import numpy as np
+        view = Path(view)
+        self.rows = [json.loads(line) for line in (view / f"{role}.jsonl").read_text().splitlines()]
+        receipt = json.loads((view / "view_manifest.json").read_text())
+        source = Path(receipt["config"]["data"])
+        storage = receipt["source_manifest"].get("embedding_storage", {})
+        descriptor = storage.get("roles", {}).get(role)
+        self.embeddings = self.available = None
+        self.source_embeddings = {}
+        if descriptor is not None:
+            shape = tuple(descriptor["shape"])
+            self.embeddings = np.memmap(
+                source / descriptor["embeddings_file"], dtype=np.float32, mode="r", shape=shape)
+            self.available = np.memmap(
+                source / descriptor["available_file"], dtype=np.uint8, mode="r",
+                shape=(shape[0], shape[1]))
+        if storage.get("kind") == "source_embedding_reference_v1":
+            cache_root = Path(storage["cache_root"])
+            for ticker, source_descriptor in storage["sources"].items():
+                self.source_embeddings[ticker] = np.load(
+                    cache_root / ticker / "embeddings.npy", mmap_mode="r")
+                if self.source_embeddings[ticker].shape != (
+                        source_descriptor["rows"], storage["embedding_dim"]):
+                    raise ValueError("embedding source shape differs from dataset manifest")
+            self.context_steps = storage["context_steps"]
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        row = self.rows[index]
+        if "market_embedding_reference" in row:
+            reference = row["market_embedding_reference"]
+            source = self.source_embeddings.get(reference["ticker"])
+            if source is None:
+                raise ValueError("prepared row references a missing embedding source")
+            count = reference["available_count"]
+            end = reference["row"] + 1
+            start = end - count
+            if start < 0 or count > self.context_steps:
+                raise ValueError("prepared embedding reference crosses its source boundary")
+            result = dict(row)
+            result.pop("market_embedding_reference")
+            embeddings = np.zeros((self.context_steps, source.shape[1]), np.float32)
+            available = np.zeros(self.context_steps, bool)
+            embeddings[-count:] = source[start:end]
+            available[-count:] = True
+            result["market_embeddings"] = embeddings
+            result["market_available"] = available
+            return result
+        if "market_embedding_index" not in row:
+            return row
+        if self.embeddings is None:
+            raise ValueError("prepared row references missing embedding sidecar")
+        result = dict(row)
+        sidecar_index = result.pop("market_embedding_index")
+        result["market_embeddings"] = self.embeddings[sidecar_index]
+        result["market_available"] = self.available[sidecar_index].astype(bool)
+        return result
 
 
 def train_prepared(config_path, view, *, root=None):

@@ -1,10 +1,12 @@
 {
   "model": "Qwen/Qwen3-4B-MLX-4bit",
   "input_mode": "embeddings",
+  "trainable_components": ["lora", "projector"],
   "projector": {
     "embedding_dim": 2560,
     "context_steps": 20,
-    "market_tokens": 5
+    "market_tokens": 5,
+    "temporal_encoding": "latest_plus_deltas"
   },
   "train": true,
   "fine_tune_type": "lora",

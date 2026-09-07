@@ -1,0 +1,21 @@
+{
+  "inherits": "development.json",
+  "status": "scalable_source_referenced_action_corpus",
+  "tickers": {
+    "train": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"],
+    "valid": ["NQ"]
+  },
+  "temporal_split_audit": "runs/reasoning-challenger/full-history-source-audit.json",
+  "label_census_output": ".private/research/reasoning-action-label-census.json",
+  "label_census_chunk_size": 16384,
+  "economic_action_sampling": {
+    "train": {"per_action": 100000, "seed": 3801},
+    "valid": {"per_action": 30000, "seed": 3802}
+  },
+  "maximum_examples_per_episode": 1,
+  "sample_stride": 1,
+  "dataset_output": "runs/reasoning-challenger/action-full-history-index",
+  "mlx_view": "runs/reasoning-challenger/action-full-history-index-mlx-view",
+  "sft_config": "config/reasoning/action_full_history_sft.json",
+  "embedding_storage": "source_embedding_reference_v1"
+}

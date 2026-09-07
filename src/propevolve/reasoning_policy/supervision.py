@@ -21,6 +21,11 @@ def action_completion_scores(token_log_probs, mask, *, xp):
     return xp.take_along_axis(token_log_probs, first[:, None], axis=-1).squeeze(-1)
 
 
+def completion_objective(scores, valid, *, xp):
+    """Average already-normalized completion scores exactly once."""
+    return -(xp.where(valid, scores, 0.).sum() / xp.maximum(valid.sum(), 1))
+
+
 def action_targets(record):
     target = record["targets"]
     names = target["action_order"]

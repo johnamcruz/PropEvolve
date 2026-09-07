@@ -34,6 +34,8 @@
   "collection_policy": {"kind": "reset_states"},
   "stages": ["collect", "prepare", "train", "rl", "evaluate"],
   "maximum_examples_per_episode": 1,
+  "embedding_storage": "json",
+  "augment_action_targets": true,
   "collection_warmup_steps": 19,
   "sample_stride": 200,
   "rollout_max_steps": 20000,

@@ -67,6 +67,39 @@ def test_action_collection_in_embedding_mode_never_reads_specialists():
     assert examples[0]["market"] is None
 
 
+def test_action_corpus_joins_existing_specialists_and_multi_r_economics_as_targets_only():
+    base = environment(1)
+    env = HistoricalChallengeEnv(base.markets, tick_values=base.tick_values,
+        round_trip_fees=base.round_trip_fees,
+        spec=replace(base.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7)
+    record = next(collect_examples(
+        env, reset_options={"ticker": "NQ", "start": 0},
+        context_config=ContextConfig(2, ("account.realized_pnl_norm",), input_mode="embeddings"),
+        sources=sources(), behavior_factory=passive_factory,
+        continuation_factory=passive_factory, source_id="fixture",
+        continuation_id="market-barrier-grid", maximum_examples=1, sample_stride=1,
+        rollout_max_steps=8, target_temperature=1.0,
+        opportunity_contract={
+            "horizon": 2, "target_rs": [2.0, 3.0, 4.0], "stop_r": 1.0,
+            "utilities": {"winner": 2.0, "failure": -1.0, "wait": 0.0,
+                          "missed_opportunity": -0.25, "conflict_margin": 0.25},
+        }, action_label_mode="market_barrier_grid", collect_market_targets=False,
+        augment_action_targets=True,
+    ))["action"]
+    assert record["ticker"] == "NQ"
+    assert record["targets"]["target_before_stop_by_r"]["4"] == {
+        "long": True, "short": False,
+    }
+    assert record["targets"]["future_excursions"]["long"]["mfe_r_gross"] >= 4.0
+    assert set(record["targets"]["specialist_targets"]) == {
+        "expansion.probability", "trend.probability", "regime.probability",
+    }
+    prompt = record["messages"][1]["content"]
+    assert "specialist_targets" not in prompt
+    assert "future_excursions" not in prompt
+
+
 def test_market_collection_does_not_compute_expensive_action_counterfactuals():
     class ForbiddenContinuation:
         def __call__(self):
@@ -89,6 +122,32 @@ def test_market_collection_does_not_compute_expensive_action_counterfactuals():
     ))
     assert examples[0]["action"] is None
     assert examples[0]["market"]["targets"]["specialist_targets"]
+
+
+def test_corpus_skips_unavailable_teacher_rows_without_calling_them_wait():
+    class InitiallyUnavailable:
+        def target(self, ticker, row):
+            return None if row == 0 else np.array([0.5])
+
+    delayed = tuple(SimpleNamespace(kind=kind, channels=("probability",),
+                                    targets=InitiallyUnavailable())
+                    for kind in ("expansion", "trend", "regime"))
+    base = environment()
+    env = HistoricalChallengeEnv(base.markets, tick_values=base.tick_values,
+        round_trip_fees=base.round_trip_fees,
+        spec=replace(base.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7)
+    record = next(collect_examples(
+        env, reset_options={"ticker": "NQ", "start": 0},
+        context_config=ContextConfig(2, ("account.realized_pnl_norm",), input_mode="embeddings"),
+        sources=delayed, behavior_factory=passive_factory,
+        continuation_factory=passive_factory, source_id="fixture", continuation_id="unused",
+        maximum_examples=1, sample_stride=1, rollout_max_steps=8, target_temperature=1.0,
+        opportunity_contract={"horizon": 2, "target_r": 2.0, "stop_r": 1.0},
+        collect_action_targets=False, collect_market_targets=True,
+    ))["market"]
+    assert record["completed_at_ns"] == int(
+        env.markets["NQ"].timestamps[1].astype("datetime64[ns]").astype(np.int64))
 
 
 def test_market_collection_teaches_multi_r_capture_and_excursions():
