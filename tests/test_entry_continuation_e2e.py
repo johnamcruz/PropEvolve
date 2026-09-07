@@ -96,7 +96,11 @@ def test_supervised_entry_preserves_profitable_holding_after_reload(tmp_path, wi
             agent.train_batch(batch, teacher_weight_scale=0.)
             restored.train_batch(batch, teacher_weight_scale=0.)
         for old, new in zip(decisions(agent), decisions(restored), strict=True):
-            np.testing.assert_array_equal(old[2], new[2])
+            # The MLX/MPS recurrent primitive may change one float32 result by
+            # a few ULPs across independently scheduled continuation updates.
+            # Save/reload above remains bit-exact; continuation parity is the
+            # public economic contract and therefore uses a tight tolerance.
+            np.testing.assert_allclose(old[2], new[2], atol=1e-6, rtol=0.)
         restored.discard_teacher()
         restored.discard_retention_anchor()
         restored.assert_teacher_free()
