@@ -102,10 +102,25 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
             raise ValueError(
                 "component learning rates require positive LoRA/projector rates, "
                 "both trainable components, and no shared schedule")
+    requirements = payload.get("dataset_requirements")
+    if requirements is not None:
+        if (not isinstance(requirements, dict)
+                or set(requirements) != {
+                    "minimum_rows_per_action", "expected_splits", "sealed_start_ns"}
+                or set(requirements["minimum_rows_per_action"]) != {"train", "valid"}
+                or set(requirements["expected_splits"]) != {"train", "valid"}
+                or any(type(value) is not int or value < 1
+                       for value in requirements["minimum_rows_per_action"].values())
+                or any(not isinstance(bounds, list) or len(bounds) != 2
+                       or any(type(value) is not int for value in bounds)
+                       or bounds[0] >= bounds[1]
+                       for bounds in requirements["expected_splits"].values())
+                or type(requirements["sealed_start_ns"]) is not int):
+            raise ValueError("invalid SFT dataset requirements")
     return payload
 
 
-def verify_dataset(path: str | Path) -> dict:
+def verify_dataset(path: str | Path, *, requirements=None) -> dict:
     """Reject unreviewed or changed data before loading any large model."""
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text())
@@ -126,6 +141,18 @@ def verify_dataset(path: str | Path) -> dict:
         digest = file_digest(filename)
         if digest != manifest["files"][role]:
             raise ValueError(f"{role} dataset changed after audit")
+    if requirements is not None:
+        if (manifest.get("splits") != requirements["expected_splits"]
+                or manifest.get("sealed_start_ns") != requirements["sealed_start_ns"]):
+            raise ValueError("dataset temporal roles differ from SFT requirements")
+        action_counts = audit.get("actions_by_role")
+        for role, minimum in requirements["minimum_rows_per_action"].items():
+            counts = None if not isinstance(action_counts, dict) else action_counts.get(role)
+            if (not isinstance(counts, dict) or set(counts) != {
+                    "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+                    or any(type(count) is not int or count < minimum
+                           for count in counts.values())):
+                raise ValueError(f"{role} dataset lacks minimum rows per action")
     storage = manifest.get("embedding_storage")
     if storage is not None:
         kind = storage.get("kind")
@@ -153,7 +180,7 @@ def view_contract(config: dict) -> dict:
     keys = (
         "model", "data", "input_mode", "projector", "max_seq_length",
         "chat_template_kwargs", "action_verbalizers", "action_supervision",
-        "trust_remote_code",
+        "trust_remote_code", "dataset_requirements",
     )
     contract = {key: config.get(key) for key in keys}
     # Loss weights and margin affect optimization, never prepared alternatives.
@@ -176,7 +203,7 @@ system boundary for tests; the production caller loads it with MLX-LM.
 
     config = read_sft_config(config_path, root=root)
     source = Path(config["data"])
-    manifest = verify_dataset(source)
+    manifest = verify_dataset(source, requirements=config.get("dataset_requirements"))
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"MLX view already exists: {output}")
@@ -270,7 +297,8 @@ system boundary for tests; the production caller loads it with MLX-LM.
 def verify_mlx_view(config_path, output, *, root=None):
     """Reuse preparation only if its source, recipe and rendered files match."""
     config = read_sft_config(config_path, root=root)
-    manifest = verify_dataset(config["data"])
+    manifest = verify_dataset(
+        config["data"], requirements=config.get("dataset_requirements"))
     output = Path(output)
     receipt = json.loads((output / "view_manifest.json").read_text())
     recorded_contract = receipt.get("view_contract")
@@ -404,7 +432,7 @@ def main(argv=None):
     parser.add_argument("--train", action="store_true", help="Explicitly launch native MLX-LM QLoRA")
     args = parser.parse_args(argv)
     config = read_sft_config(args.config, root=args.root)
-    verify_dataset(config["data"])
+    verify_dataset(config["data"], requirements=config.get("dataset_requirements"))
     if Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path to preserve checkpoints")
     if Path(args.view).exists():
