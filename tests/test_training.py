@@ -1670,6 +1670,16 @@ def test_recovery_rejects_auxiliary_gradient_conflict_mode_drift() -> None:
         })
 
 
+def test_recovery_rejects_economic_target_mode_drift() -> None:
+    class Agent:
+        entry_action_class_weights = (1.0, 1.0, 1.0)
+        economic_target_mode = 'td_only'
+
+    with pytest.raises(ValueError, match='recovery entry balance drifted'):
+        _assert_recovery_entry_balance(Agent(), {'economic_target_mode': 'shared'})
+    _assert_recovery_entry_balance(Agent(), {'economic_target_mode': 'td_only'})
+
+
 def test_recovery_rejects_regime_learning_identity_drift() -> None:
     class Agent:
         regime_selectivity_semantics = "static_state_v1"

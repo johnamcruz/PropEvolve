@@ -1,0 +1,10 @@
+{
+  "inherits": "market_sft.json",
+  "data": "runs/reasoning-challenger/market-corpus",
+  "adapter_path": "runs/reasoning-challenger/market-corpus-adapters",
+  "iters": 1024,
+  "val_batches": 256,
+  "steps_per_eval": 256,
+  "save_every": 512,
+  "grad_accumulation_steps": 8
+}

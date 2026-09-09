@@ -1,0 +1,22 @@
+{
+  "inherits": "market_job.json",
+  "status": "full_history_market_structure_corpus",
+  "tickers": {
+    "train": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"],
+    "valid": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"]
+  },
+  "specialist_supervision_roles": ["train", "valid"],
+  "temporal_split_audit": "runs/reasoning-challenger/market-full-history-source-audit.json",
+  "label_census_output": ".private/research/reasoning-market-label-census.json",
+  "label_census_chunk_size": 16384,
+  "economic_action_sampling": {
+    "train": {"per_action": 10000, "seed": 4001},
+    "valid": {"per_action": 2000, "seed": 4002}
+  },
+  "maximum_examples_per_episode": 1,
+  "sample_stride": 1,
+  "dataset_output": "runs/reasoning-challenger/market-full-history-corpus",
+  "mlx_view": "runs/reasoning-challenger/market-full-history-mlx-view",
+  "sft_config": "config/reasoning/market_full_history_sft.json",
+  "embedding_storage": "source_embedding_reference_v1"
+}

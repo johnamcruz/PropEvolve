@@ -1,0 +1,23 @@
+{
+  "input_policy_config": "config/reasoning/policy_sft.json",
+  "output_adapter": "runs/reasoning-challenger/rl-adapters",
+  "resume_checkpoint": null,
+  "frozen_audit": null,
+  "checkpoint_root": "runs/reasoning-challenger/rl-checkpoints",
+  "checkpoint_every_groups": 1,
+  "checkpoint_keep": 2,
+  "seed": 17,
+  "groups": 1,
+  "group_size": 2,
+  "max_steps": 20000,
+  "epochs": 1,
+  "minibatch_size": 1,
+  "max_update_rows": 16,
+  "learning_rate": 0.000001,
+  "weight_decay": 0.0,
+  "advantage_scale": 1.0,
+  "max_grad_norm": 1.0,
+  "clip_epsilon": 0.2,
+  "kl_weight": 0.01,
+  "entropy_weight": 0.0
+}

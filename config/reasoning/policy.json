@@ -1,0 +1,4 @@
+{
+  "kind": "reasoning",
+  "model_config": "config/reasoning/evaluation.json"
+}

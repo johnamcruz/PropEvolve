@@ -237,6 +237,8 @@ def _assert_recovery_entry_balance(
         != expected_opportunity_multiplier
         or getattr(agent, "auxiliary_gradient_conflict_mode", "none")
         != expected_gradient_conflict_mode
+        or getattr(agent, "economic_target_mode", "shared")
+        != agent_settings.get("economic_target_mode", "shared")
     ):
         raise ValueError("training recovery entry balance drifted")
 
@@ -7072,6 +7074,8 @@ def train_agent(
             key: []
             for key in (
                 "gradient_norm",
+                "economic_target_td_only",
+                "economic_critic_rl_loss",
                 "gradient_conflict_primary_norm",
                 "gradient_conflict_safety_norm",
                 "gradient_conflict_opportunity_norm",

@@ -57,7 +57,29 @@ STAGE2_V6_ASSOCIATION_FORMULA = (
 
 
 def _current_payload() -> dict:
-    return json.loads(CURRENT_RECIPE.read_text())
+    payload = json.loads(CURRENT_RECIPE.read_text())
+    # Tests materialize this fixture under a temporary ``config`` directory;
+    # retain the original contract that resources live one level above it.
+    payload["workspace_root"] = ".."
+    return payload
+
+
+@pytest.mark.parametrize('mode', ['shared', 'td_only'])
+def test_economic_target_mode_is_config_driven(tmp_path, mode):
+    payload = _generic_payload()
+    payload['agent']['economic_target_mode'] = mode
+    path = tmp_path / 'arbitrary_recipe_name.json'
+    path.write_text(json.dumps(payload))
+    assert load_experiment_config(path)['agent']['economic_target_mode'] == mode
+
+
+def test_economic_target_mode_rejects_unknown_values(tmp_path):
+    payload = _generic_payload()
+    payload['agent']['economic_target_mode'] = 'silent_fallback'
+    path = tmp_path / 'recipe.json'
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match='economic target mode'):
+        load_experiment_config(path)
 
 
 def _generic_payload() -> dict:
@@ -1321,21 +1343,21 @@ def test_preserve_opportunity_gradient_conflict_mode_is_config_driven(
     )
 
 
+@pytest.mark.parametrize("mode", [
+    "pcgrad_preserve_economic_boundaries_v3",
+    "pcgrad_preserve_paired_boundaries_v4",
+])
 def test_preserve_economic_boundaries_mode_is_config_driven(
-    tmp_path: Path,
+    tmp_path: Path, mode: str,
 ) -> None:
     payload = _generic_payload()
-    payload["agent"]["auxiliary_gradient_conflict_mode"] = (
-        "pcgrad_preserve_economic_boundaries_v3"
-    )
+    payload["agent"]["auxiliary_gradient_conflict_mode"] = mode
     path = tmp_path / "preserve-economic-boundaries.json"
     path.write_text(json.dumps(payload))
 
     loaded = load_experiment_config(path)
 
-    assert loaded["agent"]["auxiliary_gradient_conflict_mode"] == (
-        "pcgrad_preserve_economic_boundaries_v3"
-    )
+    assert loaded["agent"]["auxiliary_gradient_conflict_mode"] == mode
 
 
 @pytest.mark.parametrize(

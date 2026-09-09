@@ -1,0 +1,4 @@
+{
+  "inherits": "policy_sft.json",
+  "adapter_path": "runs/reasoning-challenger/rl-adapters"
+}

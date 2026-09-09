@@ -1,0 +1,4 @@
+{
+  "inherits": "development.json",
+  "policy_config": "config/reasoning/policy.json"
+}

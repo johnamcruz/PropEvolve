@@ -348,6 +348,10 @@ class HistoricalChallengeEnv:
             ticker: _cme_session_keys(market.timestamps)
             for ticker, market in self.markets.items()
         }
+        self._unique_sessions = {
+            ticker: np.unique(session_keys)
+            for ticker, session_keys in self._session_keys.items()
+        }
         self._episode_coverage = (
             DeterministicEpisodeCoverage(
                 {
@@ -442,7 +446,7 @@ class HistoricalChallengeEnv:
         ticker = str(options.get("ticker") or self._rng.choice(tuple(self.markets)))
         market = self.markets[ticker]
         session_keys = self._session_keys[ticker]
-        unique_sessions = np.unique(session_keys)
+        unique_sessions = self._unique_sessions[ticker]
         if len(unique_sessions) < self.spec.episode_days:
             raise ValueError(
                 f"market {ticker} cannot fit {self.spec.episode_days} trading days"
@@ -1301,6 +1305,60 @@ class HistoricalChallengeEnv:
             ratchet_active=ratchet_active,
             protected_r=protected_r,
         )
+
+    def causal_trade_context(self) -> dict[str, float]:
+        """Optional reasoning inputs, separate from the frozen C51 observation.
+
+        Excursions include only completed bars while the current position was
+        open. R uses the original trade risk; values are gross price excursions,
+        not fee-adjusted realized returns. Flat/undefined R has explicit masks.
+        """
+        position = self._position
+        if self._account is None or self._market is None:
+            raise ValueError("causal trade context requires an initialized episode")
+        equity = self._equity(float(self._market.close[self._index]))
+        result = {
+            "challenge.profit_target_dollars": float(self.spec.profit_target),
+            "challenge.max_loss_dollars": float(self.spec.max_loss),
+            "challenge.realized_pnl_dollars": float(self._account.realized_pnl),
+            "challenge.equity_pnl_dollars": float(equity),
+            "challenge.target_remaining_dollars": float(max(0.0, self.spec.profit_target - equity)),
+            "challenge.mll_floor_dollars": float(self._account.mll_floor_pnl),
+            "challenge.headroom_dollars": float(self._account.mll_headroom(equity)),
+            "trade.open": float(position is not None),
+            "trade.risk_available": 0.0,
+            "trade.mfe_r_so_far": 0.0, "trade.mae_r_so_far": 0.0,
+            "trade.current_r": 0.0, "trade.giveback_r": 0.0,
+            "trade.hold_bars": 0.0,
+        }
+        if position is None:
+            return result
+        result["trade.hold_bars"] = float(max(0, self._index - position.entry_index))
+        risk = position.initial_risk_points
+        if risk is None or risk <= 0:
+            return result
+        assert self._market is not None
+        highs = self._market.high[position.entry_index:self._index + 1]
+        lows = self._market.low[position.entry_index:self._index + 1]
+        if len(highs) == 0:
+            raise ValueError("open position lacks completed trade history")
+        entry = position.average_entry
+        if position.side == PositionSide.LONG:
+            favorable = float(np.max(highs)) - entry
+            adverse = entry - float(np.min(lows))
+        else:
+            favorable = entry - float(np.min(lows))
+            adverse = float(np.max(highs)) - entry
+        current = (float(self._market.close[self._index]) - entry) * int(position.side) / risk
+        mfe = max(0.0, favorable / risk)
+        result.update({
+            "trade.risk_available": 1.0,
+            "trade.mfe_r_so_far": mfe,
+            "trade.mae_r_so_far": max(0.0, adverse / risk),
+            "trade.current_r": current,
+            "trade.giveback_r": max(0.0, mfe - current),
+        })
+        return result
 
     def _observation(self) -> np.ndarray:
         assert self._market is not None

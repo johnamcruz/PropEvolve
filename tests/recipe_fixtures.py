@@ -9,11 +9,14 @@ from propevolve.balance_aware_regime_selectivity import (
 )
 
 
+LEGACY_CONFIG_ROOT = Path("tests/fixtures/legacy_configs")
+
+
 def retained_stage2_recipes() -> tuple[Path, ...]:
     """Discover retained Stage 2 recipes by serialized contract values."""
 
     recipes = []
-    for path in Path("config").glob("*.json"):
+    for path in LEGACY_CONFIG_ROOT.glob("*.json"):
         payload = json.loads(path.read_text())
         if (
             payload.get("schema") == "propevolve_historical_training_v1"
@@ -64,7 +67,7 @@ def paired_recurrent_aplus_recipe(training_episodes: int) -> Path:
 def retained_sweep_recipe() -> Path:
     candidates = tuple(
         path
-        for path in sorted(Path("config/sweeps").glob("*.json"))
+        for path in sorted((LEGACY_CONFIG_ROOT / "sweeps").glob("*.json"))
         if json.loads(path.read_text()).get("schema")
         == "propevolve_optuna_sweep_v1"
     )
@@ -79,7 +82,7 @@ def active_sweep_recipes() -> tuple[Path, ...]:
     """Retained V2 contracts may coexist; no filename is an active-run marker."""
     candidates = tuple(
         path
-        for path in sorted(Path("config/sweeps").glob("*.json"))
+        for path in sorted((LEGACY_CONFIG_ROOT / "sweeps").glob("*.json"))
         if json.loads(path.read_text()).get("schema")
         == "propevolve_optuna_sweep_v2"
     )

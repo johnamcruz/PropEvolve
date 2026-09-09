@@ -135,7 +135,7 @@ def _replay(
     )
 
 
-def _agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
+def _agent(*, recurrent_burn_in: int = 2, economic_target_mode: str = 'shared') -> RecurrentC51Agent:
     return RecurrentC51Agent(
         3,
         hidden_dim=24,
@@ -151,6 +151,7 @@ def _agent(*, recurrent_burn_in: int = 2) -> RecurrentC51Agent:
         recurrent_burn_in=recurrent_burn_in,
         device="cpu",
         seed=601,
+        economic_target_mode=economic_target_mode,
         teacher_channels=len(TEACHER_CHANNELS),
         teacher_channel_names=TEACHER_CHANNELS,
         teacher_loss_weight=1e-6,
@@ -1151,8 +1152,12 @@ def test_satisfied_economic_boundaries_stay_in_every_optimizer_projection(
 
 
 @pytest.mark.parametrize("backend", ["pytorch", "mlx"])
+@pytest.mark.parametrize("boundary_mode", [
+    "pcgrad_preserve_economic_boundaries_v3",
+    "pcgrad_preserve_paired_boundaries_v4",
+])
 def test_individual_learned_pairs_are_not_erased_by_group_averages_e2e(
-    tmp_path, backend: str,
+    tmp_path, backend: str, boundary_mode: str,
 ) -> None:
     if backend == "mlx":
         pytest.importorskip("mlx.core")
@@ -1168,6 +1173,7 @@ def test_individual_learned_pairs_are_not_erased_by_group_averages_e2e(
             ))
     sequences = replay.sample(8)
     agent = _agent()
+    agent.auxiliary_gradient_conflict_mode = boundary_mode
     if backend == "mlx":
         checkpoint = tmp_path / "individual-boundaries.pt"
         agent.save(checkpoint, manifest={})
@@ -1198,8 +1204,11 @@ def test_individual_learned_pairs_are_not_erased_by_group_averages_e2e(
         protected_count += int(protected.sum())
         agent.train_batch(sequences, teacher_weight_scale=0.0)
         after = individual_margins()
-        assert np.all(after[protected] >= agent.entry_action_margin - 1e-6), (before, after)
+        required = np.minimum(before[protected], agent.entry_action_margin)
+        assert np.all(after[protected] >= required - 1e-6), (before, after)
     assert protected_count > 0
+    if boundary_mode == "pcgrad_preserve_paired_boundaries_v4":
+        assert np.all(individual_margins() >= agent.entry_action_margin - 1e-6)
     actions_before, q_before = agent.greedy_sequence_action_values(sequences)
     agent.discard_retention_anchor()
     agent.discard_teacher()
@@ -1390,10 +1399,12 @@ def test_unsatisfied_boundary_cannot_rollback_the_whole_optimizer_step_e2e(
         ),
     ),
 )
+@pytest.mark.parametrize('economic_target_mode', ['shared', 'td_only'])
 def test_repeated_pairs_learn_entry_opposite_and_wait_boundaries_e2e(
     side: Action,
     side_name: str,
     contexts: tuple[tuple[float, ...], ...],
+    economic_target_mode: str,
 ) -> None:
     """Each authenticated side must be learnable, not merely preserved."""
     replay = _replay(seed=91)
@@ -1407,7 +1418,7 @@ def test_repeated_pairs_learn_entry_opposite_and_wait_boundaries_e2e(
                 offset=float(index * 2 + int(not economic_win)),
             ))
     sequences = replay.sample(4)
-    agent = _agent()
+    agent = _agent(economic_target_mode=economic_target_mode)
     agent.regime_selectivity_paired_a_plus_winner_loss_weight = 2.0
     for group in agent.optimizer.param_groups:
         group["lr"] = 0.003
@@ -1423,7 +1434,8 @@ def test_repeated_pairs_learn_entry_opposite_and_wait_boundaries_e2e(
     assert margins[f"{side_name}_wait_vs_failure"] >= 0.25
 
 
-def test_directional_tie_replay_learns_wait_over_both_entries_e2e() -> None:
+@pytest.mark.parametrize('economic_target_mode', ['shared', 'td_only'])
+def test_directional_tie_replay_learns_wait_over_both_entries_e2e(economic_target_mode) -> None:
     """Equal Long and Short evidence must become a learned WAIT boundary."""
     tied_context = (0.90, 0.85, 0.90, 0.85, 0.10, 0.70, 0.20)
     replay = _replay(seed=92)
@@ -1438,7 +1450,7 @@ def test_directional_tie_replay_learns_wait_over_both_entries_e2e() -> None:
             offset=float(index),
         ))
     sequences = replay.sample(2)
-    agent = _agent()
+    agent = _agent(economic_target_mode=economic_target_mode)
     for group in agent.optimizer.param_groups:
         group["lr"] = 0.003
 

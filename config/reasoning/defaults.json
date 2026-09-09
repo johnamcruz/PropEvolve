@@ -1,0 +1,37 @@
+{
+  "optimizer": "adam",
+  "optimizer_config": {"adam": {}},
+  "component_learning_rates": null,
+  "lr_schedule": null,
+  "trainable_components": ["lora"],
+  "resume_adapter_file": null,
+  "action_supervision": {"enabled": false, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
+  "input_mode": "specialists",
+  "batch_sampling": "random",
+  "projector": null,
+  "clear_cache_threshold": 0,
+  "validation_metrics_path": null,
+  "seed": 17,
+  "val_batches": 4,
+  "steps_per_report": 1,
+  "steps_per_eval": 5,
+  "save_every": 10,
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 2,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "val_loss",
+    "mode": "min"
+  },
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "action_verbalizers": {
+    "WAIT": "WAIT",
+    "ENTER_LONG_1": "LONG",
+    "ENTER_SHORT_1": "SHORT",
+    "HOLD": "HOLD",
+    "CLOSE": "CLOSE"
+  }
+}

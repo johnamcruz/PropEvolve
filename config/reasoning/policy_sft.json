@@ -1,0 +1,22 @@
+{
+  "inherits": "sft.json",
+  "adapter_path": "runs/reasoning-challenger/action-token-guarded-adapters",
+  "iters": 96,
+  "learning_rate": 0.00001,
+  "lr_schedule": null,
+  "val_batches": 32,
+  "steps_per_eval": 12,
+  "save_every": 24,
+  "grad_accumulation_steps": 3,
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 4,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "worst_action_boundary_loss",
+    "mode": "min"
+  },
+  "batch_sampling": "balanced_actions",
+  "action_supervision": {"enabled": true, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
+  "resume_adapter_file": "runs/reasoning-challenger/market-adapters/adapters.safetensors"
+}

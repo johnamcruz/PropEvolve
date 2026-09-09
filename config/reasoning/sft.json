@@ -1,0 +1,34 @@
+{
+  "model": "Qwen/Qwen3-4B-MLX-4bit",
+  "input_mode": "embeddings",
+  "trainable_components": ["lora", "projector"],
+  "projector": {
+    "embedding_dim": 2560,
+    "context_steps": 20,
+    "market_tokens": 5,
+    "temporal_encoding": "latest_plus_deltas"
+  },
+  "train": true,
+  "fine_tune_type": "lora",
+  "data": "runs/reasoning-challenger/dataset",
+  "adapter_path": "runs/reasoning-challenger/adapters",
+  "seed": 17,
+  "num_layers": 8,
+  "batch_size": 1,
+  "iters": 24,
+  "val_batches": 4,
+  "learning_rate": 0.00001,
+  "steps_per_report": 1,
+  "steps_per_eval": 5,
+  "save_every": 10,
+  "max_seq_length": 4096,
+  "grad_checkpoint": true,
+  "grad_accumulation_steps": 8,
+  "mask_prompt": true,
+  "trust_remote_code": false,
+  "lora_parameters": {
+    "rank": 8,
+    "dropout": 0.0,
+    "scale": 16.0
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "inherits": "development.json",
+  "dataset_kind": "market",
+  "dataset_temporal": {
+    "train_start": "2021-01-01",
+    "train_end": "2024-01-01",
+    "validation_start": "2024-01-01",
+    "validation_end": "2025-01-01"
+  },
+  "dataset_output": "runs/reasoning-challenger/market-dataset",
+  "sft_config": "config/reasoning/market_sft.json",
+  "mlx_view": "runs/reasoning-challenger/market-mlx-view"
+}
