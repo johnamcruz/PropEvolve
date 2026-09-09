@@ -70,6 +70,7 @@ def test_sft_applies_json_declared_runtime_defaults_before_loading_model(tmp_pat
     assert selected["val_batches"] == 4
     assert selected["steps_per_report"] == 1
     assert selected["steps_per_eval"] == 5
+    assert selected["training_log_filename"] == "training.log"
     assert selected["save_every"] == 10
     assert selected["early_stopping"] == {
         "enabled": True,
@@ -79,3 +80,19 @@ def test_sft_applies_json_declared_runtime_defaults_before_loading_model(tmp_pat
         "monitor": "val_loss",
         "mode": "min",
     }
+
+
+def test_sft_rejects_training_log_paths_outside_adapter_directory(tmp_path):
+    from propevolve.reasoning_policy.mlx_sft import read_sft_config
+    recipe = tmp_path / "training.json"
+    recipe.write_text(json.dumps({
+        "model": "external/base", "adapter_path": "output", "data": "data",
+        "train": True, "fine_tune_type": "lora", "mask_prompt": True,
+        "trust_remote_code": False, "num_layers": 1, "batch_size": 1,
+        "iters": 2, "grad_accumulation_steps": 1, "learning_rate": 1e-5,
+        "max_seq_length": 64, "grad_checkpoint": False,
+        "training_log_filename": "../training.log",
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+    }))
+    with pytest.raises(ValueError, match="training_log_filename"):
+        read_sft_config(recipe)

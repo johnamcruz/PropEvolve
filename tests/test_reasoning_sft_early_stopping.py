@@ -1,4 +1,5 @@
 import pytest
+import json
 
 from propevolve.reasoning_policy.supervised_trainer import (
     action_boundary_metrics,
@@ -8,6 +9,7 @@ from propevolve.reasoning_policy.supervised_trainer import (
     balanced_validation_order,
     validate_balanced_optimizer_windows,
     validate_early_stopping_coverage,
+    TrainingEventLog,
 )
 
 
@@ -135,6 +137,62 @@ def test_post_update_validation_exposes_pruner_metrics_at_same_boundary():
 
     assert [row["iteration"] for row in recorded] == [0, 2]
     assert all(row["worst_action_advantage"] == 0.3 for row in recorded)
+
+
+def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
+    log = TrainingEventLog(
+        tmp_path / "training.log", train_batches=10, total_iterations=40)
+    guard = ValidationLossGuard(
+        {"enabled": True, "patience_evaluations": 2, "min_delta": 0.1,
+         "restore_best": True, "monitor": "val_loss", "mode": "min"},
+        on_improvement=lambda report: None,
+    )
+    callback = PostUpdateValidation(
+        guard, every=10, total_iterations=40, train_batches=10,
+        evaluate_loss=lambda: 2.0, progress=lambda message: None,
+        record_training=log.record_training,
+        record_validation_started=log.record_validation_started,
+        record_validation=log.record_validation,
+    )
+
+    log.record_start({"train_rows": 10, "valid_rows": 3})
+    callback.evaluate(0)
+    callback.on_train_loss_report({"iteration": 10, "train_loss": 1.5})
+    log.record_complete(guard.summary())
+
+    rows = [json.loads(line) for line in (tmp_path / "training.log").read_text().splitlines()]
+    assert [row["event"] for row in rows] == [
+        "start", "validation_started", "validation", "training",
+        "validation_started", "validation", "complete"]
+    assert rows[2] == {
+        "event": "validation", "iteration": 0, "epoch": 0.0,
+        "val_loss": 2.0, "checkpoint_selected": True,
+        "monitor": "val_loss", "monitor_value": 2.0,
+        "best_metric": 2.0, "best_iteration": 0,
+        "stale_evaluations": 0, "patience_evaluations": 2,
+        "min_delta": 0.1, "stopped_early": False,
+        "val_time": pytest.approx(rows[2]["val_time"]),
+    }
+    assert rows[3]["epoch"] == 1.0
+    assert rows[3]["iteration"] == 10
+    assert rows[3]["train_loss"] == 1.5
+    assert rows[-1]["best_epoch"] == 0.0
+
+
+def test_epoch_progress_message_uses_epoch_not_only_iteration():
+    messages = []
+    guard = ValidationLossGuard(
+        {"enabled": True, "patience_evaluations": 2, "min_delta": 0.0,
+         "restore_best": True, "monitor": "val_loss", "mode": "min"},
+        on_improvement=lambda report: None,
+    )
+    callback = PostUpdateValidation(
+        guard, every=10, total_iterations=20, train_batches=10,
+        evaluate_loss=lambda: 1.0, progress=messages.append,
+    )
+    callback.evaluate(0)
+    assert messages[0].startswith("Epoch 0.000")
+    assert "iteration 0/20" in messages[0]
 
 
 def test_balanced_action_optimizer_window_contains_every_action_equally():

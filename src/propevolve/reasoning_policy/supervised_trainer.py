@@ -5,6 +5,7 @@ checkpointing, evaluation and loss callback interfaces.
 """
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import time
@@ -18,6 +19,51 @@ from .supervision import (
 
 class EarlyStopTraining(RuntimeError):
     """Private control signal raised only at a completed validation boundary."""
+
+
+class TrainingEventLog:
+    """Durable JSONL evidence expressed in corpus epochs and optimizer iterations."""
+
+    def __init__(self, path, *, train_batches, total_iterations):
+        if (type(train_batches) is not int or train_batches < 1
+                or type(total_iterations) is not int or total_iterations < 1):
+            raise ValueError("training log requires positive epoch dimensions")
+        self.path = Path(path)
+        self.train_batches = train_batches
+        self.total_iterations = total_iterations
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            raise FileExistsError(f"training log already exists: {self.path}")
+
+    def _write(self, payload):
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def record_start(self, payload):
+        self._write({"event": "start", "total_iterations": self.total_iterations,
+                     "train_batches_per_epoch": self.train_batches,
+                     "maximum_epochs": self.total_iterations / self.train_batches,
+                     **payload})
+
+    def record_training(self, report):
+        self._write({"event": "training", **report})
+
+    def record_validation_started(self, report):
+        self._write({"event": "validation_started", **report})
+
+    def record_validation(self, report):
+        self._write({"event": "validation", **report})
+
+    def record_complete(self, summary):
+        best = summary.get("best_iteration")
+        self._write({"event": "complete", **summary,
+                     "best_epoch": None if best is None else best / self.train_batches})
+
+    def record_failure(self, error):
+        self._write({"event": "failed", "error_type": type(error).__name__,
+                     "message": str(error)})
 
 
 class ValidationLossGuard:
@@ -53,6 +99,7 @@ class ValidationLossGuard:
         self.stopped_early = False
         self.stop_iteration = None
         self.history = []
+        self.last_decision = None
 
     def on_train_loss_report(self, train_info):
         return None
@@ -70,7 +117,8 @@ class ValidationLossGuard:
             raise ValueError("invalid early stopping monitor report")
         self.evaluations += 1
         if not self.settings["enabled"]:
-            return
+            self.last_decision = self._decision(False, float(metric))
+            return self.last_decision
         improved = (float(metric) < self.best_metric - self.settings["min_delta"]
                     if self.mode == "min" else
                     float(metric) > self.best_metric + self.settings["min_delta"])
@@ -87,12 +135,29 @@ class ValidationLossGuard:
             self.stale_evaluations = 0
             if self.settings["restore_best"]:
                 self.on_improvement(dict(val_info))
-            return
+            self.last_decision = self._decision(True, float(metric))
+            return self.last_decision
         self.stale_evaluations += 1
         if self.stale_evaluations >= self.settings["patience_evaluations"]:
             self.stopped_early = True
             self.stop_iteration = iteration
+            self.last_decision = self._decision(False, float(metric))
             raise EarlyStopTraining("validation loss stopped improving")
+        self.last_decision = self._decision(False, float(metric))
+        return self.last_decision
+
+    def _decision(self, checkpoint_selected, monitor_value):
+        return {
+            "checkpoint_selected": checkpoint_selected,
+            "monitor": self.monitor,
+            "monitor_value": monitor_value,
+            "best_metric": None if self.best_iteration is None else self.best_metric,
+            "best_iteration": self.best_iteration,
+            "stale_evaluations": self.stale_evaluations,
+            "patience_evaluations": self.settings["patience_evaluations"],
+            "min_delta": float(self.settings["min_delta"]),
+            "stopped_early": self.stopped_early,
+        }
 
     def summary(self):
         return {
@@ -113,20 +178,32 @@ class PostUpdateValidation:
     """Run fixed validation only after completed optimizer updates."""
 
     def __init__(self, guard, *, every, total_iterations, evaluate_loss, progress=print,
+                 train_batches=None, record_training=lambda report: None,
+                 record_validation_started=lambda report: None,
                  record_validation=lambda report: None):
+        if train_batches is None:
+            train_batches = total_iterations
         if (not isinstance(guard, ValidationLossGuard) or type(every) is not int
                 or every < 1 or type(total_iterations) is not int
                 or total_iterations < 1 or not callable(evaluate_loss)
-                or not callable(progress) or not callable(record_validation)):
+                or type(train_batches) is not int or train_batches < 1
+                or not callable(progress) or not callable(record_training)
+                or not callable(record_validation_started)
+                or not callable(record_validation)):
             raise ValueError("invalid post-update validation settings")
         self.guard = guard
         self.every = every
         self.total_iterations = total_iterations
         self.evaluate_loss = evaluate_loss
         self.progress = progress
+        self.train_batches = train_batches
+        self.record_training = record_training
+        self.record_validation_started = record_validation_started
         self.record_validation = record_validation
 
     def evaluate(self, iteration):
+        epoch = iteration / self.train_batches
+        self.record_validation_started({"iteration": iteration, "epoch": epoch})
         started = time.perf_counter()
         result = self.evaluate_loss()
         report = dict(result) if isinstance(result, dict) else {"val_loss": float(result)}
@@ -135,15 +212,32 @@ class PostUpdateValidation:
         boundary = ("" if "worst_action_advantage" not in report else
                     f", Worst action advantage {report['worst_action_advantage']:+.3f}, "
                     f"Macro accuracy {report['macro_accuracy']:.1%}")
-        self.progress(f"Iter {iteration}: Val loss {loss:.3f}{boundary}, Val took {elapsed:.3f}s")
-        completed = {"iteration": iteration, "val_time": elapsed, **report}
+        completed = {"iteration": iteration, "epoch": epoch,
+                     "val_time": elapsed, **report}
+        stopping = None
+        try:
+            decision = self.guard.on_val_loss_report(completed)
+        except EarlyStopTraining as error:
+            decision, stopping = self.guard.last_decision, error
+        completed.update(decision)
+        patience = (f"{completed['stale_evaluations']}/"
+                    f"{completed['patience_evaluations']}")
+        self.progress(
+            f"Epoch {epoch:.3f} (iteration {iteration}/{self.total_iterations}): "
+            f"Val loss {loss:.3f}{boundary}, Best {completed['best_metric']}, "
+            f"Patience {patience}, Val took {elapsed:.3f}s")
         self.record_validation(dict(completed))
-        self.guard.on_val_loss_report(completed)
+        if stopping is not None:
+            raise stopping
 
     def on_train_loss_report(self, train_info):
         iteration = train_info.get("iteration")
         if type(iteration) is not int or iteration < 1:
             raise ValueError("invalid training iteration report")
+        completed = dict(train_info)
+        completed["epoch"] = iteration / self.train_batches
+        self.record_training(completed)
+        self.guard.on_train_loss_report(completed)
         if iteration % self.every == 0 or iteration == self.total_iterations:
             self.evaluate(iteration)
 
@@ -493,6 +587,21 @@ def train_supervised(config, view):
     validate_balanced_optimizer_windows(config, datasets["train"])
     destination.mkdir(parents=True)
     (destination / "adapter_config.json").write_text(json.dumps(config, indent=2))
+    train_batches = len(datasets["train"]) // config["batch_size"]
+    event_log = TrainingEventLog(
+        destination / config["training_log_filename"],
+        train_batches=train_batches,
+        total_iterations=config["iters"],
+    )
+    event_log.record_start({
+        "train_rows": len(datasets["train"]),
+        "valid_rows": len(datasets["valid"]),
+        "evaluation_every_iterations": config["steps_per_eval"],
+        "evaluation_every_epochs": config["steps_per_eval"] / train_batches,
+        "report_every_iterations": config["steps_per_report"],
+        "report_every_epochs": config["steps_per_report"] / train_batches,
+        "early_stopping": dict(config["early_stopping"]),
+    })
     best = destination / ".best-validation"
     guard = ValidationLossGuard(config["early_stopping"],
         on_improvement=lambda report: (
@@ -516,8 +625,11 @@ def train_supervised(config, view):
         with Path(metrics_path).open("a") as stream:
             stream.write(json.dumps(report, sort_keys=True, allow_nan=False) + "\n")
     validation = PostUpdateValidation(guard, every=config["steps_per_eval"],
-        total_iterations=config["iters"], evaluate_loss=evaluate_loss,
-        record_validation=record_validation)
+        total_iterations=config["iters"], train_batches=train_batches,
+        evaluate_loss=evaluate_loss, record_training=event_log.record_training,
+        record_validation_started=event_log.record_validation_started,
+        record_validation=lambda report: (
+            event_log.record_validation(report), record_validation(report)))
     args = TrainingArgs(batch_size=config["batch_size"], iters=config["iters"],
         val_batches=config["val_batches"], steps_per_report=config["steps_per_report"],
         steps_per_eval=config["steps_per_eval"], steps_per_save=config["save_every"],
@@ -525,20 +637,26 @@ def train_supervised(config, view):
         grad_checkpoint=config["grad_checkpoint"], grad_accumulation_steps=config["grad_accumulation_steps"],
         clear_cache_threshold=config["clear_cache_threshold"])
     try:
-        validation.evaluate(0)
-        train(model, optimizer, datasets["train"], None, args=args,
-            loss=partial(batch_loss, config=config),
-            iterate_batches=iterator, training_callback=validation)
-    except EarlyStopTraining:
-        print(f"Early stopping at validation iteration {guard.stop_iteration}; "
-              f"best iteration was {guard.best_iteration}.", flush=True)
-    if config["early_stopping"]["restore_best"]:
-        if guard.best_iteration is None or not (best / "adapters.safetensors").is_file():
-            raise ValueError("early stopping did not produce a best validation checkpoint")
-        model.load_weights(str(best / "adapters.safetensors"), strict=False)
-        if config["input_mode"] == "embeddings":
-            restore_projector(model, best)
-    export_policy_weights(model, destination)
-    (destination / "training_selection.json").write_text(json.dumps(guard.summary(), indent=2))
-    if best.exists():
-        shutil.rmtree(best)
+        try:
+            validation.evaluate(0)
+            train(model, optimizer, datasets["train"], None, args=args,
+                loss=partial(batch_loss, config=config),
+                iterate_batches=iterator, training_callback=validation)
+        except EarlyStopTraining:
+            print(f"Early stopping at validation iteration {guard.stop_iteration}; "
+                  f"best iteration was {guard.best_iteration}.", flush=True)
+        if config["early_stopping"]["restore_best"]:
+            if guard.best_iteration is None or not (best / "adapters.safetensors").is_file():
+                raise ValueError("early stopping did not produce a best validation checkpoint")
+            model.load_weights(str(best / "adapters.safetensors"), strict=False)
+            if config["input_mode"] == "embeddings":
+                restore_projector(model, best)
+        export_policy_weights(model, destination)
+        summary = guard.summary()
+        (destination / "training_selection.json").write_text(json.dumps(summary, indent=2))
+        event_log.record_complete(summary)
+        if best.exists():
+            shutil.rmtree(best)
+    except BaseException as error:
+        event_log.record_failure(error)
+        raise

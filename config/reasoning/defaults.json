@@ -11,6 +11,7 @@
   "projector": null,
   "clear_cache_threshold": 0,
   "validation_metrics_path": null,
+  "training_log_filename": "training.log",
   "seed": 17,
   "val_batches": 4,
   "steps_per_report": 1,

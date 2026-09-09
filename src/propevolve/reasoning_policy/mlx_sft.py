@@ -68,6 +68,10 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if metrics_path is not None and (not isinstance(metrics_path, str)
                                      or not metrics_path.strip()):
         raise ValueError("validation_metrics_path must be a nonempty path or null")
+    log_filename = payload.get("training_log_filename")
+    if (not isinstance(log_filename, str) or not log_filename.strip()
+            or Path(log_filename).name != log_filename):
+        raise ValueError("training_log_filename must be a nonempty filename")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
             or payload["mask_prompt"] is not True or payload.get("trust_remote_code") is not False):
         raise ValueError("challenger requires prompt-masked LoRA and no remote code")

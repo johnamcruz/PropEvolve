@@ -4,6 +4,7 @@
   "adapter_path": "runs/reasoning-challenger/market-full-history-adapters",
   "iters": 60000,
   "val_batches": 6000,
+  "steps_per_report": 3000,
   "steps_per_eval": 6000,
   "save_every": 12000,
   "grad_accumulation_steps": 8
