@@ -1,0 +1,11 @@
+{
+  "required_actions": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"],
+  "minimum_examples_per_action": 20,
+  "minimum_accuracy_per_action": 0.5,
+  "minimum_mean_action_advantage": 0.0,
+  "minimum_win_rate": 0.4,
+  "minimum_average_win_r": 3.0,
+  "minimum_expectancy_r": 0.0,
+  "minimum_two_r_mfe_capture_ratio": 0.5,
+  "require_teacher_free": true
+}

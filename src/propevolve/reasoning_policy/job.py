@@ -443,6 +443,27 @@ def collection_factory(config, root):
     return factory
 
 
+def action_collection_plan(config, expected_action):
+    """Resolve one config-declared flat or full-trade supervision path."""
+    action = Action(expected_action)
+    scope = config.get("action_supervision_scope", "entry")
+    if scope not in {"entry", "trade_mastery"}:
+        raise ValueError("unknown action supervision scope")
+    maximum = config["maximum_examples_per_episode"]
+    if scope == "trade_mastery" and action in {
+            Action.ENTER_LONG_1, Action.ENTER_SHORT_1}:
+        return {
+            "mode": "trade_mastery_grid",
+            "maximum_examples": maximum,
+            "initial_entry_action": action,
+        }
+    return {
+        "mode": "market_barrier_grid",
+        "maximum_examples": 1 if scope == "trade_mastery" else maximum,
+        "initial_entry_action": None,
+    }
+
+
 def collect_job(path):
     from .collector import collect_examples
     from .context import ContextConfig
@@ -474,7 +495,9 @@ def collect_job(path):
     dataset_splits = {role: role_sources[role][1] for role in role_sources}
     output = resolve(root, config["dataset_output"])
     lineage = {"source_identity": identity, "specialist_identities": source["teachers"],
-               "economic_contract": source["challenge"], "split_audit": audit,
+               "economic_contract": config.get("opportunity_contract", source["challenge"]),
+               "supervision_scope": config.get("action_supervision_scope", kind),
+               "split_audit": audit,
                "context_config_sha256": file_digest(resolve(root, config["context_config"])),
                "job_config_sha256": file_digest(path)}
     if config.get("volume_source") is not None:
@@ -512,18 +535,23 @@ def collect_job(path):
                     # Consume each ticker completely before loading the next.
                     for selected in groups[ticker]:
                         episode = {key: selected[key] for key in ("ticker", "start")}
+                        plan = (action_collection_plan(config, selected["expected_action"])
+                                if kind == "action" else None)
                         for pair in collect_examples(
                             ticker_env, reset_options=episode, context_config=context,
                             sources=ticker_sources, behavior_factory=factory,
                             continuation_factory=factory,
                             source_id=identity + ":" + json.dumps(episode, sort_keys=True),
                             continuation_id=continuation_id,
-                            maximum_examples=config["maximum_examples_per_episode"],
+                            maximum_examples=(config["maximum_examples_per_episode"]
+                                              if plan is None else plan["maximum_examples"]),
                             sample_stride=config["sample_stride"],
                             rollout_max_steps=config["rollout_max_steps"],
                             target_temperature=config["target_temperature"],
                             opportunity_contract=config["opportunity_contract"],
-                            action_label_mode=action_label_mode,
+                            action_label_mode=(action_label_mode if plan is None else plan["mode"]),
+                            initial_entry_action=(None if plan is None else
+                                                  plan["initial_entry_action"]),
                             collection_warmup_steps=config.get("collection_warmup_steps", 0),
                             collect_action_targets=kind == "action",
                             collect_market_targets=kind == "market",
@@ -531,7 +559,9 @@ def collect_job(path):
                         ):
                             if pair[kind] is not None:
                                 expected = Action(selected["expected_action"]).name
-                                if pair[kind]["messages"][-1]["content"] != expected:
+                                legal = pair[kind]["targets"].get("action_order", ())
+                                if (expected in legal
+                                        and pair[kind]["messages"][-1]["content"] != expected):
                                     raise ValueError("selected economic action changed during collection")
                                 yield pair[kind]
                     del ticker_env, ticker_sources
@@ -697,9 +727,10 @@ def main(argv=None):
         output = resolve(root, rl_config["output_adapter"])
         if output.exists():
             raise FileExistsError("RL output exists; choose a new configured path")
-        from .model_config import read_model_settings
+        from .model_config import read_model_settings, validate_trade_mastery_parent
         policy_config = resolve(root, rl_config["input_policy_config"])
         model_settings = read_model_settings(policy_config, root=root)
+        validate_trade_mastery_parent(model_settings)
         if model_settings["adapter_path"] is None:
             raise ValueError("RL requires the supervised adapter as its parent")
         context = ContextConfig.load(resolve(root, config["context_config"]))
@@ -757,7 +788,7 @@ def main(argv=None):
         result = {"adapter": str(output), "groups": metrics}
     else:
         from .context import ContextConfig
-        from .evaluation import evaluate_policy
+        from .evaluation import evaluate_responsibilities
         from .policy import MLXActionPolicy
         source, _, splits, _, identity = load_source_contract(config, root)
         destination = resolve(root, config["evaluation_output"])
@@ -775,18 +806,33 @@ def main(argv=None):
         env, sources = load_role(config, root, source, "valid",
             include_specialists=policy.requires_specialists)
         criteria = json.loads(resolve(root, config["evaluation_metrics_config"]).read_text())
+        trade_criteria = json.loads(resolve(
+            root, config["trade_mastery_metrics_config"]).read_text())
+        trade_audit = config.get("trade_mastery_audit")
+        if not isinstance(trade_audit, dict):
+            raise ValueError(
+                "evaluation requires a configured frozen trade-mastery audit")
+        from .frozen_audit import load_frozen_records
+        trade_records = load_frozen_records(trade_audit, root=root)
         decision_path.parent.mkdir(parents=True, exist_ok=True)
         with decision_path.open("x") as decisions:
             def log_decision(row):
                 decisions.write(json.dumps(row, allow_nan=False) + "\n")
-            result = evaluate_policy(policy, env, episodes=configured_episodes(
+            result = evaluate_responsibilities(policy, env,
+                trade_mastery_records=trade_records, episodes=configured_episodes(
                 config, env, "valid", evaluation=True),
                 context_config=ContextConfig.load(resolve(root, config["context_config"])),
                 sources=sources, max_steps=config["rollout_max_steps"],
                 near_blow_headroom_fraction=criteria["near_blow_headroom_fraction"], on_decision=log_decision)
-        from .selection import assess_candidate
-        result.update(source_identity=identity, temporal_splits=splits, criteria=criteria,
-                      selection=assess_candidate(result, criteria),
+        from .selection import assess_candidate, assess_trade_mastery
+        challenge = result["challenge_mastery"]
+        result.update(source_identity=identity, temporal_splits=splits,
+                      criteria={"trade_mastery": trade_criteria,
+                                "challenge_mastery": criteria},
+                      selection={"trade_mastery": assess_trade_mastery(
+                                     result["trade_mastery"], trade_criteria),
+                                 "challenge_mastery": assess_candidate(
+                                     challenge, criteria)},
                       context_config_sha256=file_digest(resolve(root, config["context_config"])),
                       policy_config_sha256=file_digest(resolve(root,
                           config.get("policy_config") or config["evaluation_policy_config"])))

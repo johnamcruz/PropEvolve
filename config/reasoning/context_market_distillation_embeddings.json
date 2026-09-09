@@ -1,0 +1,6 @@
+{
+  "context_steps": 20,
+  "text_steps": 1,
+  "input_mode": "embeddings",
+  "fields": ["trade.open"]
+}

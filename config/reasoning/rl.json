@@ -1,5 +1,5 @@
 {
-  "input_policy_config": "config/reasoning/policy_sft.json",
+  "input_policy_config": "config/reasoning/action_full_history_sft.json",
   "output_adapter": "runs/reasoning-challenger/rl-adapters",
   "resume_checkpoint": null,
   "frozen_audit": null,

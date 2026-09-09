@@ -11,12 +11,16 @@ def load_frozen_records(config, *, root):
     limit = config["maximum_records"]
     if type(limit) is not int or limit < 1:
         raise ValueError("frozen diagnostic limit must be positive")
+    lower = config.get("role_start_ns", config.get("train_start_ns"))
+    upper = config.get("role_end_ns", config.get("train_end_ns"))
+    if type(lower) is not int or type(upper) is not int or lower >= upper:
+        raise ValueError("frozen diagnostic temporal role is invalid")
     records = []
     with path.open() as stream:
         for line in stream:
             record = json.loads(line)
-            if not config["train_start_ns"] <= record["completed_at_ns"] < record["label_end_ns"] < config["train_end_ns"]:
-                raise ValueError("frozen diagnostic must remain inside training role")
+            if not lower <= record["completed_at_ns"] < record["label_end_ns"] < upper:
+                raise ValueError("frozen diagnostic must remain inside its declared role")
             records.append(record)
             if len(records) == limit:
                 break

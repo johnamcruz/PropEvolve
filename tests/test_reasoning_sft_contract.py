@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from propevolve.reasoning_policy.context import ContextConfig, RollingContext
-from propevolve.reasoning_policy.dataset import write_supervised_dataset
+from propevolve.reasoning_policy.dataset import context_messages, write_supervised_dataset
+from propevolve.decision import Action
 from propevolve.reasoning_policy.mlx_sft import (
     read_sft_config,
     verify_dataset,
@@ -90,11 +91,60 @@ def test_mastery_dataset_contract_rejects_tiny_golden_corpus(tmp_path):
         })
 
 
+def test_trade_mastery_dataset_contract_requires_every_declared_action(tmp_path):
+    root = tmp_path / "trade-mastery"
+    root.mkdir()
+    from propevolve.reasoning_policy.integrity import file_digest
+    for role in ("train", "valid"):
+        (root / f"{role}.jsonl").write_text("{}\n")
+    manifest = {
+        "schema": "propevolve_reasoning_dataset_v1",
+        "splits": {"train": [0, 100], "valid": [100, 200]},
+        "counts": {"train": 1, "valid": 1},
+        "sealed_start_ns": 200,
+        "files": {role: file_digest(root / f"{role}.jsonl")
+                  for role in ("train", "valid")},
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    (root / "audit.json").write_text(json.dumps({
+        "status": "PASS", "manifest_sha256": file_digest(root / "manifest.json"),
+        "specialist_score_mode": "out_of_fold", "sealed_touched": False,
+        "actions_by_role": {
+            role: {"WAIT": 10, "ENTER_LONG_1": 10, "ENTER_SHORT_1": 10}
+            for role in ("train", "valid")
+        },
+    }))
+    requirements = {
+        "minimum_rows_per_action": {
+            role: {
+                "WAIT": 1, "ENTER_LONG_1": 1, "ENTER_SHORT_1": 1,
+                "HOLD": 1, "CLOSE": 1,
+            } for role in ("train", "valid")
+        },
+        "expected_splits": {"train": [0, 100], "valid": [100, 200]},
+        "sealed_start_ns": 200,
+    }
+
+    with pytest.raises(ValueError, match="minimum rows per action"):
+        verify_dataset(root, requirements=requirements)
+
+
 def test_context_snapshot_cannot_be_mutated_by_dataset_consumer():
     context = RollingContext(ContextConfig(20, ("balance",)))
     context.append(1, {"balance": 0})
     with pytest.raises(ValueError):
         context.snapshot().values[-1, 0] = 1
+
+
+def test_sft_prompt_teaches_trade_mastery_without_challenge_objectives():
+    context = RollingContext(ContextConfig(2, ("balance",)))
+    context.append(1, {"balance": 0})
+    prompt = " ".join(message["content"] for message in context_messages(
+        context.snapshot(), (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)))
+
+    assert "trade quality" in prompt.lower()
+    for forbidden in ("pass the challenge", "profit target", "mll", "blow", "timeout"):
+        assert forbidden not in prompt.lower()
 
 
 def test_every_sft_routes_through_shared_guarded_trainer(tmp_path, monkeypatch):

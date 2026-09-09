@@ -63,6 +63,45 @@ def validate_model_settings(payload):
     return payload
 
 
+def validate_trade_mastery_settings(payload):
+    """Reject RL parents that have not learned the complete trading task."""
+    required_actions = {action.name for action in Action}
+    requirements = payload.get("dataset_requirements")
+    minimums = (requirements.get("minimum_rows_per_action")
+                if isinstance(requirements, dict) else None)
+    complete = (isinstance(minimums, dict)
+                and set(minimums) == {"train", "valid"}
+                and all(isinstance(minimums[role], dict)
+                        and set(minimums[role]) == required_actions
+                        for role in ("train", "valid")))
+    if (payload.get("adapter_path") is None
+            or payload.get("input_mode") != "embeddings"
+            or payload.get("action_supervision", {}).get("enabled") is not True
+            or not complete):
+        raise ValueError(
+            "RL requires a complete teacher-free five-action trade-mastery parent")
+    return payload
+
+
+def validate_trade_mastery_parent(payload):
+    """Bind an RL parent declaration to the adapter's saved SFT contract."""
+    validate_trade_mastery_settings(payload)
+    adapter = Path(payload["adapter_path"])
+    metadata_path = adapter / "adapter_config.json"
+    if not metadata_path.is_file():
+        raise ValueError("trade-mastery parent artifact lacks SFT metadata")
+    metadata = json.loads(metadata_path.read_text())
+    try:
+        validate_trade_mastery_settings(metadata)
+    except ValueError as error:
+        raise ValueError("trade-mastery parent artifact is not complete five-action SFT") from error
+    for key in ("model", "input_mode", "projector", "action_verbalizers",
+                "action_supervision", "dataset_requirements"):
+        if metadata.get(key) != payload.get(key):
+            raise ValueError(f"trade-mastery parent artifact differs at {key}")
+    return payload
+
+
 def resolve_model_resources(payload, *, root=None):
     """An explicit workspace wins; preserve legacy CWD semantics when omitted.
 

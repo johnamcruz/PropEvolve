@@ -3,7 +3,10 @@ import json
 import numpy as np
 
 from propevolve.reasoning_policy.context import ContextConfig
-from propevolve.reasoning_policy.learning_audit import score_labeled_examples
+from propevolve.reasoning_policy.learning_audit import (
+    score_labeled_examples,
+    summarize_trade_mastery,
+)
 from propevolve.reasoning_policy.rl import train_rl
 from test_reasoning_challenger_e2e import environment
 from test_reasoning_collection_evaluation_e2e import sources
@@ -17,6 +20,24 @@ def test_frozen_audit_respects_actual_legal_actions_instead_of_inventing_alterna
     report = score_labeled_examples(ScriptedRuntime("WAIT"), [record])[0]
     assert report["scores"] == {"WAIT": 0.0}
     assert report["target_advantage"] is None
+
+
+def test_trade_mastery_report_is_separate_from_challenge_economics():
+    scored = [
+        {"target": name, "correct": correct, "target_advantage": advantage}
+        for name, correct, advantage in (
+            ("WAIT", True, 0.4), ("ENTER_LONG_1", True, 0.3),
+            ("ENTER_SHORT_1", False, -0.2), ("HOLD", True, 0.1),
+            ("CLOSE", True, 0.2),
+        )
+    ]
+    report = summarize_trade_mastery(scored)
+
+    assert set(report["per_action"]) == {
+        "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"}
+    assert report["macro_accuracy"] == 0.8
+    assert report["worst_action_advantage"] == -0.2
+    assert not ({"pass_rate", "blow_rate", "near_blow_rate"} & report.keys())
 
 
 def test_real_rollout_reports_frozen_ranking_before_and_after_update():

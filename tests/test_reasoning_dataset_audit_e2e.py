@@ -53,6 +53,23 @@ def _record(timestamp, *, best, ticker="NQ", source_id=None):
     return record
 
 
+def _position_record(timestamp, *, best=Action.HOLD, ticker="NQ"):
+    rewards = {Action.HOLD: 1.0 if best is Action.HOLD else 0.0,
+               Action.CLOSE: 1.0 if best is Action.CLOSE else 0.0}
+    record = supervised_record(
+        _window(timestamp),
+        ActionLabels(np.zeros(1, dtype=np.float32), {
+            action: ActionOutcome(
+                reward_to_go=reward, outcome="managed", terminal_pnl=reward * 300,
+                minimum_mll_headroom=1000.0, steps=1, outcome_end_ns=timestamp + 10,
+            ) for action, reward in rewards.items()
+        }), source_id=f"position-{timestamp}", continuation_id="trade-mastery",
+        target_temperature=1.0,
+    )
+    record["ticker"] = ticker
+    return record
+
+
 def _dataset(tmp_path):
     root = tmp_path / "dataset"
     write_supervised_dataset(
@@ -96,6 +113,36 @@ def test_audit_publishes_hash_bound_pass_for_causal_teacher_free_records(tmp_pat
     assert audit["tickers_by_role"] == {"train": {"NQ": 3}, "valid": {"NQ": 3}}
     assert audit["teacher_free_prompt_records"] == 6
     assert (root / "audit.json").is_file()
+
+
+def test_trade_mastery_audit_rejects_challenge_outcomes(tmp_path):
+    root = _dataset(tmp_path)
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["lineage"]["supervision_scope"] = "trade_mastery"
+    (root / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="challenge objective"):
+        audit_supervised_dataset(root, specialist_score_mode="out_of_fold")
+    assert not (root / "audit.json").exists()
+
+
+def test_trade_mastery_audit_rejects_account_or_challenge_prompt_state(tmp_path):
+    root = _dataset(tmp_path)
+    for role in ("train", "valid"):
+        path = root / f"{role}.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for record in rows:
+            for outcome in record["targets"]["outcomes"].values():
+                outcome["outcome"] = "failed_target"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["lineage"]["supervision_scope"] = "trade_mastery"
+    manifest["files"] = {
+        role: file_digest(root / f"{role}.jsonl") for role in ("train", "valid")}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="account state"):
+        audit_supervised_dataset(root, specialist_score_mode="out_of_fold")
 
 
 @pytest.mark.parametrize("mutation, message", [
@@ -166,6 +213,27 @@ def test_writer_rejects_overlapping_episode_duplicates_for_the_same_market(tmp_p
             },
             sealed_start_ns=500,
         )
+
+
+def test_writer_and_audit_distinguish_flat_and_positioned_states_at_same_market_bar(tmp_path):
+    root = tmp_path / "same-bar-different-state"
+    write_supervised_dataset(
+        [_record(100, best=Action.ENTER_LONG_1), _position_record(100),
+         _record(300, best=Action.WAIT), _position_record(300, best=Action.CLOSE)],
+        root,
+        splits={"train": [0, 200], "valid": [200, 400]},
+        lineage={
+            "source_identity": "source", "specialist_identities": ["expansion"],
+            "economic_contract": {"profit_target": 6000},
+            "split_audit": {"status": "PASS"},
+        },
+        sealed_start_ns=500,
+    )
+    audit = audit_supervised_dataset(root, specialist_score_mode="out_of_fold")
+    assert audit["status"] == "PASS"
+    assert audit["actions"] == {
+        "CLOSE": 1, "ENTER_LONG_1": 1, "HOLD": 1, "WAIT": 1,
+    }
 
 
 def test_writer_uses_compact_embedding_sidecars(tmp_path):

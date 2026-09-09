@@ -5,6 +5,8 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
+
 from .decision_schema import legal_completion_names
 from .policy import MLXActionPolicy
 
@@ -41,6 +43,40 @@ def score_labeled_examples(policy, records):
     if not output:
         raise ValueError("learning audit needs labeled examples")
     return output
+
+
+def summarize_trade_mastery(scored):
+    """Aggregate action-boundary evidence without challenge reward metrics."""
+    required = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE")
+    groups = {name: [] for name in required}
+    for row in scored:
+        target = row.get("target")
+        advantage = row.get("target_advantage")
+        if target not in groups or type(row.get("correct")) is not bool:
+            raise ValueError("invalid trade-mastery audit row")
+        if advantage is None or not math.isfinite(advantage):
+            raise ValueError("trade-mastery audit requires competing legal actions")
+        groups[target].append(row)
+    if any(not rows for rows in groups.values()):
+        raise ValueError("trade-mastery audit requires all five legal actions")
+    per_action = {
+        name: {
+            "count": len(rows),
+            "accuracy": float(np.mean([row["correct"] for row in rows])),
+            "mean_target_advantage": float(np.mean(
+                [row["target_advantage"] for row in rows])),
+            "minimum_target_advantage": float(min(
+                row["target_advantage"] for row in rows)),
+        }
+        for name, rows in groups.items()
+    }
+    return {
+        "per_action": per_action,
+        "macro_accuracy": float(np.mean(
+            [row["accuracy"] for row in per_action.values()])),
+        "worst_action_advantage": float(min(
+            row["minimum_target_advantage"] for row in per_action.values())),
+    }
 
 
 def main(argv=None):

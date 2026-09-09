@@ -65,3 +65,27 @@ def test_indexed_sampler_balances_actions_inside_cache_local_ticker_blocks():
         for index in range(1, len(ordered))
     )
     assert switches == 1
+
+
+def test_indexed_trade_mastery_repeats_sparse_hold_close_without_diluting_them():
+    rows = []
+    counts = {
+        "WAIT": 4, "ENTER_LONG_1": 4, "ENTER_SHORT_1": 4,
+        "HOLD": 1, "CLOSE": 2,
+    }
+    for target, count in counts.items():
+        rows.extend({
+            "target_name": target,
+            "market_embedding_reference": {
+                "ticker": "NQ", "row": row, "available_count": 20,
+            },
+        } for row in range(count))
+    order = balanced_action_order(rows, count=len(rows), rng=np.random.default_rng(29))
+    labels = [rows[index]["target_name"] for index in order]
+    assert len(labels) == 15
+    assert Counter(labels) == {
+        "WAIT": 3, "ENTER_LONG_1": 3, "ENTER_SHORT_1": 3,
+        "HOLD": 3, "CLOSE": 3,
+    }
+    for start in range(0, len(labels), 5):
+        assert set(labels[start:start + 5]) == set(counts)

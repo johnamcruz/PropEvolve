@@ -11,6 +11,7 @@ from .labels import (
     label_entry_opportunity,
     label_future_excursions,
     label_market_actions,
+    label_position_actions,
 )
 
 
@@ -20,7 +21,7 @@ def collect_examples(
     maximum_examples, sample_stride, rollout_max_steps, target_temperature,
     opportunity_contract, collect_action_targets=True, collect_market_targets=True,
     action_label_mode="continuation", collection_warmup_steps=0,
-    augment_action_targets=False,
+    augment_action_targets=False, initial_entry_action=None,
 ):
     """Yield market/action records from one declared chronological episode.
 
@@ -42,8 +43,21 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
         raise ValueError("action target augmentation must be boolean")
     if augment_action_targets and not collect_action_targets:
         raise ValueError("action target augmentation requires action records")
-    if action_label_mode not in {"continuation", "market_barrier_grid"}:
+    if action_label_mode not in {
+            "continuation", "market_barrier_grid", "trade_mastery_grid"}:
         raise ValueError("unknown action label mode")
+    if action_label_mode == "trade_mastery_grid":
+        try:
+            initial_entry_action = Action(initial_entry_action)
+        except (TypeError, ValueError) as error:
+            raise ValueError("trade mastery requires one Long or Short entry") from error
+        if initial_entry_action not in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}:
+            raise ValueError("trade mastery requires one Long or Short entry")
+        position_improvement = opportunity_contract.get("position_minimum_improvement_r")
+        if (isinstance(position_improvement, bool)
+                or not isinstance(position_improvement, (int, float))
+                or not np.isfinite(position_improvement) or position_improvement < 0):
+            raise ValueError("trade mastery requires a position improvement margin")
     if "ticker" not in reset_options or "start" not in reset_options:
         raise ValueError("collection requires explicit episode identity")
     ticker = reset_options["ticker"]
@@ -56,8 +70,15 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
     prefix = []
     row = int(reset_options["start"])
     emitted = 0
+    emitted_trade_targets = set()
+    entry_action = None
+    entry_index = None
     for step in range(rollout_max_steps):
         observe_context(history, environment, observation, ticker=ticker, row=row, sources=sources)
+        legal = {Action(value) for value in info["valid_actions"]}
+        if (action_label_mode == "trade_mastery_grid" and entry_action is not None
+                and legal == {Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1}):
+            return
         # Match inference, including initially partial context with its mask.
         sample_due = (step >= collection_warmup_steps
                       and (step - collection_warmup_steps) % sample_stride == 0)
@@ -69,8 +90,8 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
             window = history.snapshot()
             action_record = None
             if collect_action_targets:
-                if action_label_mode == "market_barrier_grid":
-                    legal = {Action(value) for value in info["valid_actions"]}
+                if (action_label_mode in {"market_barrier_grid", "trade_mastery_grid"}
+                        and entry_action is None):
                     expected = {Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1}
                     if legal != expected:
                         raise ValueError("market barrier labels require one flat decision state")
@@ -81,7 +102,26 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                         point_value=environment.tick_values[ticker],
                         round_trip_fee=environment.round_trip_fees[ticker],
                         minimum_mll_headroom=info["minimum_mll_headroom"],
-                        **opportunity_contract,
+                        horizon=opportunity_contract["horizon"],
+                        target_rs=opportunity_contract["target_rs"],
+                        stop_r=opportunity_contract["stop_r"],
+                        utilities=opportunity_contract["utilities"],
+                    )
+                elif action_label_mode == "trade_mastery_grid":
+                    if (legal != {Action.HOLD, Action.CLOSE} or entry_index is None
+                            or entry_action is None):
+                        raise ValueError("trade mastery requires one positioned decision state")
+                    labels = label_position_actions(
+                        market, decision=row, role_end=len(market.close),
+                        entry_index=entry_index, side=entry_action,
+                        observation=observation,
+                        risk_dollars=environment.spec.per_trade_risk_dollars,
+                        point_value=environment.tick_values[ticker],
+                        round_trip_fee=environment.round_trip_fees[ticker],
+                        minimum_mll_headroom=info["minimum_mll_headroom"],
+                        horizon=opportunity_contract["horizon"],
+                        stop_r=opportunity_contract["stop_r"],
+                        minimum_improvement_r=position_improvement,
                     )
                 else:
                     labels = label_actions(
@@ -158,14 +198,27 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                     market_record["targets"]["specialist_targets"] = specialist_targets
                     market_record["messages"][-1]["content"] = json.dumps(market_record["targets"], allow_nan=False)
                     market_record["messages"][0]["content"] += " Also estimate the labeled specialist market state."
-            yield {"action": action_record, "market": market_record}
-            emitted += 1
-            if emitted >= maximum_examples:
-                return
-        action = behavior(observation, info)
+            target_name = (None if action_record is None else
+                           action_record["messages"][-1]["content"])
+            emit_record = (action_label_mode != "trade_mastery_grid"
+                           or target_name not in emitted_trade_targets)
+            if emit_record:
+                yield {"action": action_record, "market": market_record}
+                emitted += 1
+                if target_name is not None:
+                    emitted_trade_targets.add(target_name)
+                if emitted >= maximum_examples:
+                    return
+        action = (initial_entry_action
+                  if (action_label_mode == "trade_mastery_grid"
+                      and entry_action is None and sample_due)
+                  else behavior(observation, info))
         observation, _, terminated, truncated, info = environment.step(action)
         prefix.append(action)
         row = int(info["fill_index"])
+        if Action(action) in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}:
+            entry_action = Action(action)
+            entry_index = row
         if terminated or truncated:
             return
     raise ValueError("collection episode incomplete within budget")

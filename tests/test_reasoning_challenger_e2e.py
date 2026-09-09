@@ -5,7 +5,7 @@ import pytest
 
 from propevolve.decision import Action
 from propevolve.environment import ChallengeSpec, HistoricalChallengeEnv, MarketSeries
-from propevolve.reasoning_policy.labels import label_actions
+from propevolve.reasoning_policy.labels import label_actions, label_position_actions
 
 
 def environment(direction=1):
@@ -51,8 +51,11 @@ def test_reasoning_excursions_only_use_completed_open_trade_bars(side):
     )
     env.reset(options={"ticker": "NQ", "start": 0})
     assert env.causal_trade_context()["trade.open"] == 0
+    assert env.causal_trade_context()["trade.position_side"] == 0
     env.step(side)
     snapshot = env.causal_trade_context()
+    assert snapshot["trade.position_side"] == (
+        1 if side == Action.ENTER_LONG_1 else -1)
     assert snapshot["trade.open"] == 1
     assert snapshot["trade.risk_available"] == 1
     favorable, adverse = (5, 2) if side == Action.ENTER_LONG_1 else (2, 5)
@@ -102,6 +105,50 @@ def test_positioned_labels_cover_hold_and_close_instead_of_new_entries():
     assert result.outcomes[Action.HOLD].outcome == "pass"
     assert result.outcomes[Action.CLOSE].outcome == "timeout"
     assert result.outcomes[Action.CLOSE].terminal_pnl == 1196
+
+
+@pytest.mark.parametrize("side,direction", [
+    (Action.ENTER_LONG_1, 1),
+    (Action.ENTER_SHORT_1, -1),
+])
+def test_trade_mastery_holds_valid_continuation_then_closes_after_reversal(side, direction):
+    from dataclasses import replace
+
+    env = environment()
+    path = 1000.0 + direction * np.array([0, 0, 10, 35, 30, 10, -10, -20])
+    market = env.markets["NQ"]
+    market.open[:] = path
+    market.close[:] = path
+    market.high[:] = path + 1
+    market.low[:] = path - 1
+    env = HistoricalChallengeEnv(
+        env.markets, tick_values=env.tick_values, round_trip_fees=env.round_trip_fees,
+        spec=replace(env.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7,
+    )
+    observation, info = env.reset(options={"ticker": "NQ", "start": 0})
+    observation, _, terminated, truncated, info = env.step(side)
+    assert not terminated and not truncated
+    early = label_position_actions(
+        market, decision=info["fill_index"], role_end=len(market.close),
+        entry_index=1, side=side, observation=observation,
+        risk_dollars=300, point_value=20, round_trip_fee=4,
+        minimum_mll_headroom=info["minimum_mll_headroom"], horizon=4,
+        stop_r=1.0, minimum_improvement_r=0.1,
+    )
+    assert set(early.outcomes) == {Action.HOLD, Action.CLOSE}
+    assert early.outcomes[Action.HOLD].reward_to_go > early.outcomes[Action.CLOSE].reward_to_go
+
+    observation, _, terminated, truncated, info = env.step(Action.HOLD)
+    assert not terminated and not truncated
+    after_peak = label_position_actions(
+        market, decision=info["fill_index"], role_end=len(market.close),
+        entry_index=1, side=side, observation=observation,
+        risk_dollars=300, point_value=20, round_trip_fee=4,
+        minimum_mll_headroom=info["minimum_mll_headroom"], horizon=4,
+        stop_r=1.0, minimum_improvement_r=0.1,
+    )
+    assert after_peak.outcomes[Action.CLOSE].reward_to_go > after_peak.outcomes[Action.HOLD].reward_to_go
 
 
 def test_incomplete_rollout_is_rejected_not_labeled_as_timeout():

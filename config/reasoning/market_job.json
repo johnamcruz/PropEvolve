@@ -1,6 +1,8 @@
 {
   "inherits": "development.json",
   "dataset_kind": "market",
+  "context_config": "config/reasoning/context_market_distillation_embeddings.json",
+  "temporal_split_audit": "runs/reasoning-challenger/full-history-source-audit.json",
   "dataset_temporal": {
     "train_start": "2021-01-01",
     "train_end": "2024-01-01",

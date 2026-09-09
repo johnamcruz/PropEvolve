@@ -1,21 +1,24 @@
 # Reasoning-policy challenger
 
-Optional, specialist-conditioned trading policy. The existing C51 training and
-environment remain unchanged. This is an implementation checkpoint, not a
-trained or economically validated replacement.
+Optional teacher-free trading-policy challenger. The existing C51 policy and
+challenge environment remain available and unchanged. This implementation is
+not an economically validated replacement until temporal SFT and RL gates pass.
 
 ## Current path
 
-1. `inputs.specialist_account_fields` reads aligned Expansion, Trend and Regime
-   scores plus the existing normalized account observation. An optional audited
-   Volume source joins this same interface without changing C51's teacher loader.
+1. A market-distillation stage teaches Expansion, Trend and Regime semantics
+   from aligned training-only targets. The deployed policy receives frozen FFM
+   embeddings plus normalized account/trade state, never teacher outputs.
 2. `context.RollingContext` supplies completed-bar history with an availability
    mask. `config/reasoning/context.json` starts with 20 bars; length is configurable.
-3. `labels.label_entry_opportunity` reuses the existing net target-before-stop
-   semantics, including next-open execution and adverse-first OHLC ambiguity.
-4. `labels.label_actions` reconstructs the same simulator state for every legal
-   action, then follows a declared continuation policy to pass/blow/timeout.
-   These are realized conditional outcomes, not oracle pass probabilities.
+3. Flat-state SFT labels rank WAIT/Long/Short using the configured minimum
+   target-before-stop contract (2R before -1R by default), including next-open
+   execution, costs and adverse-first OHLC ambiguity. Achieved 3R/4R levels add
+   value but are not forced exits.
+4. Positioned SFT labels rank HOLD/CLOSE from causal MFE, MAE, current R and
+   giveback state. HOLD remains correct while meaningful additional favorable
+   excursion is reachable; CLOSE becomes correct on deterioration. Pass/blow
+   rewards do not define these trade-mastery labels.
 5. `collector.collect_examples` produces separate market-understanding and action
    SFT records. Paths, policies, sources, economics and budgets are explicit inputs.
 6. `dataset.write_supervised_dataset` writes disjoint chronological roles with
@@ -27,19 +30,18 @@ trained or economically validated replacement.
    Inputs are loss-masked. Overlength samples fail rather than
    silently truncate. The first model candidate is quantized, so LoRA is QLoRA.
 8. `policy.MLXActionPolicy` scores only legal action completions. These scores
-   are log likelihoods, not C51 Q values. `evaluation.evaluate_policy` returns
-   existing simulator outcomes and explicitly reports specialist dependence.
+   are log likelihoods, not C51 Q values. Evaluation reports five-action trade
+   mastery separately from existing simulator challenge outcomes and explicitly
+   reports specialist dependence.
 
-## Execution status
+## Responsibility boundary
 
-Do not launch yet. Work was paused at code-only implementation while another
-training task was active. The first eight challenger tests passed before that
-pause; subsequent additions and the full regression suite have NOT been run.
-No MLX-LM model load, adapter update, checkpoint parity test or economic evaluation
-has been executed. The selected model is provisional, not benchmark-selected.
-
-The optional runtime dependency is the `reasoning` extra. It has not been
-installed by this task. There is no model download at import time.
+SFT owns trade mastery: WAIT/Long/Short setup selection, entry timing, HOLD
+through valid continuation, and CLOSE on weakening, reversal or deteriorating
+economics. RL starts only from an audited five-action SFT adapter and owns
+challenge mastery: maximize pass rate under the unchanged profit target, MLL,
+costs, fills and 30-day timeout. Evaluation reports action-boundary evidence
+separately from pass/blow/near-blow economics.
 
 ## Configurable backbone and causal trade context
 
@@ -69,8 +71,9 @@ account equity and economic labels retain the simulator's fees. Final future
 excursions are NOT inference inputs. These inputs can support learning exits,
 but their presence is not evidence that the model has learned profitable exits.
 
-The new config and excursion tests are written but unexecuted, including
-Long/Short symmetry, future-price mutation, flat reset and model/adapter mismatch.
+The config and excursion regressions cover Long/Short symmetry, future-price
+isolation, flat reset, and model/adapter mismatch. The explicit real-MLX smoke
+also covers five-action updates, unseen-row learning, and save/reload parity.
 
 When execution is authorized and the source dataset audit passes, the preparation
 entry point is:
@@ -99,12 +102,10 @@ python -m propevolve.reasoning_policy.job --config config/reasoning/development.
 ```
 
 Run from the declared workspace root. Source recipes reuse existing market/cache
-loaders and challenge configuration, not the C51 campaign runner. Collection uses
-a hash-verified local C51 checkpoint as a declared continuation; its weights are
-shared but each branch has independent recurrent state. This is a label generator,
-not the reasoning learner. Dataset audit is a separate required stage of review:
-collection never authors its own passing causality receipt. Both initial partial
-and full rolling contexts can enter collection, matching inference.
+loaders and challenge configuration, not the C51 campaign runner. Scratch
+trade-mastery collection uses economic barrier and position-path labels; it does
+not inherit V21/C51 action rankings. Dataset audit is a separate required stage:
+collection never authors its own passing causality receipt.
 
 Preparation is reusable only when its rendered data, audited source and effective
 recipe still match. Model and adapter outputs are never silently overwritten.
@@ -167,25 +168,11 @@ No missing value is fabricated. This loader does not export scores from the
 unfinished sibling model. Its eventual export still needs verified channel and
 artifact mapping; no sibling code is modified by this implementation.
 
-## Explicit staged execution and screening
-
-`python -m propevolve.reasoning_policy.workflow --config config/reasoning/workflow.json`
-is an explicit future launch command, not an import-time or training-completion
-listener. It has not been run. The initial plan begins with verification of an
-already generated and reviewed market dataset, then market SFT, action-dataset
-audit, action SFT, RL, and evaluation in separate
-processes. Missing data/audits stop the flow; it never authors its own PASS audit.
-Collection can be declared as a prior stage, but source and dataset reviews remain
-required. Each stage declares its inputs, output receipts, log and timeout.
-Completed stages are reused only when those recorded files match. A failed stage
-remains BLOCKED; partial model outputs are never silently accepted or overwritten.
-SFT native weight warm-start is not exact optimizer resume. The workflow does not
-automatically recover a half-written SFT adapter; use a new declared output and
-an explicitly reviewed warm-start if needed.
-
 Evaluation records action counts, headroom, positive timeouts, pass/blow/timeout,
-and decision logs. `evaluation_metrics.json` declares the near-blow definition and
-screening limits. `REVIEW_CANDIDATE` is not promotion or sealed confirmation.
+and decision logs. `trade_mastery_metrics.json` independently declares action,
+win-rate, expectancy, 3R-average-winner and MFE-capture gates;
+`evaluation_metrics.json` declares challenge pass/blow/near-blow limits.
+`REVIEW_CANDIDATE` is not promotion or sealed confirmation.
 The initial 60%/zero-blow/10%-near-blow criteria are a research target, not evidence.
 Teacher-dependent candidates fail a teacher-free requirement rather than being
 misreported. Automatic live promotion is deliberately absent.
@@ -194,33 +181,19 @@ Evaluation inherits the SFT model/template JSON via `inherits`, overriding only
 the adapter. Inheritance is filename-independent and cycles fail. Changing the
 base model still requires compatible adapters and renewed parity evidence.
 
-CPU reference/simulator tests and explicit-opt-in real MLX update/reload tests
-are written. They have not been executed in this implementation session.
+CPU reference/simulator tests, MLX numeric tests, and the explicit real-MLX
+five-action update/reload smoke have been executed in this implementation session.
 
 ## Remaining before launch acceptance
 
-- Resolve the source recipe and audited temporal roles from teacher manifests.
-  Same source data does not mean in-sample teacher predictions are OOF inputs.
-- Keep 2026 sealed; all development labels must resolve before that boundary.
-- Fill reviewed source/continuation identities and explicit episode starts in
-  the job JSON. Null placeholders are intentional blockers, not implicit defaults.
-- Exercise all new tests and the existing environment/replay/campaign regression.
-- Benchmark real tokenizer/model SFT and reload on the target 16 GB machine.
-- Verify natural-frequency Long/Short/failure learning and chronological economics.
-- Verify the RL draft with the real adapter, including update direction, frozen
-  base, legal actions and save/reload parity, before any long RL campaign.
-- Bind the completed Volume export to the interchange contract and test its
-  alignment. The source model/export is not yet authenticated or available here.
-- Implement and verify the selected teacher-free input path before claiming a
-  replacement. The continuous-projector interface has been proposed for approval;
-  the current specialist-conditioned path does not silently pretend to be it.
-
-The first format uses named numeric specialist/account context, not thousands of
-serialized FFM latent coordinates. Generated reasoning traces, continuous market
-token projection, distillation to teacher-free inputs, and campaign promotion are
-not claimed by this implementation checkpoint. The Stanford course note informs
-the verified-feedback/offline-improvement workflow, not a guaranteed trading edge
-or an automatically validated optimizer.
+- Require positive WAIT/Long/Short/HOLD/CLOSE margins after save/reload on the
+  inner temporal split, then repeat on unseen 2025.
+- Confirm action SFT preserves the preceding Expansion/Trend/Regime distillation.
+- Run full 2021-2024 SFT with best-checkpoint restoration and no 2025 tuning.
+- Verify bounded RL updates preserve trade mastery while improving challenge
+  economics in the unchanged simulator.
+- Require the declared pass, blow and near-blow gates on unseen 2025. Keep 2026
+  sealed for the final frozen confirmation.
 
 ## Conditional retirement of R2D2
 
@@ -260,10 +233,10 @@ demonstrates selection while inheriting the existing job. Existing recipes
 without `policy_config` retain their prior evaluation loading path.
 
 Both adapters use the same challenge evaluator. R2D2 skips specialist context
-construction; the current reasoning adapter still requires specialist inputs
-and is explicitly reported as **not teacher-free**. This interface does not
-implement the pending teacher-free embedding projector. C51 and LoRA/RL learning
-algorithms remain separate, and the existing R2D2 campaign is unchanged.
+construction. The reasoning adapter uses the implemented frozen-embedding
+projector and is teacher-free at inference; Expansion/Trend/Regime targets are
+training-only. C51 and LoRA/RL learning algorithms remain separate, and the
+existing R2D2 campaign is unchanged.
 
-Interface/E2E tests have been authored; execution is deferred while Volume
-training is active. No runtime compatibility or learning result is claimed yet.
+Passing mechanics tests are necessary but not an economic claim. The challenger
+remains unpromoted until the temporal SFT and challenge-economics gates above pass.

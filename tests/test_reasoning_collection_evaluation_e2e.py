@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from propevolve.decision import Action
 from propevolve.environment import HistoricalChallengeEnv
@@ -207,6 +208,62 @@ def test_scratch_action_collection_uses_market_economics_without_a_continuation(
     assert values["ENTER_LONG_1"] > values["WAIT"] > values["ENTER_SHORT_1"]
 
 
+@pytest.mark.parametrize("direction,entry", [
+    (1, Action.ENTER_LONG_1),
+    (-1, Action.ENTER_SHORT_1),
+])
+def test_trade_mastery_collection_teaches_entry_hold_and_close_on_one_causal_path(
+    direction, entry,
+):
+    base = environment()
+    # Several continuation bars precede the reversal. A bounded three-row
+    # corpus must retain one entry, one HOLD and one CLOSE rather than spend
+    # both positioned slots on redundant early HOLD examples.
+    path = 1000 + direction * np.array([0, 0, 5, 20, 40, 60, 45, 0], dtype=float)
+    market = base.markets["NQ"]
+    market.open[:] = path
+    market.close[:] = path
+    market.high[:] = path + 1
+    market.low[:] = path - 1
+    env = HistoricalChallengeEnv(
+        base.markets, tick_values=base.tick_values, round_trip_fees=base.round_trip_fees,
+        spec=replace(base.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7,
+    )
+    records = [pair["action"] for pair in collect_examples(
+        env, reset_options={"ticker": "NQ", "start": 0},
+        context_config=ContextConfig(2, ("account.realized_pnl_norm",
+                                         "trade.mfe_r_so_far", "trade.mae_r_so_far"),
+                                     input_mode="embeddings"),
+        sources=(), behavior_factory=passive_factory,
+        continuation_factory=passive_factory, source_id="fixture",
+        continuation_id="trade-mastery-grid", maximum_examples=3, sample_stride=1,
+        rollout_max_steps=8, target_temperature=0.5, collection_warmup_steps=1,
+        action_label_mode="trade_mastery_grid",
+        initial_entry_action=entry,
+        opportunity_contract={
+            "horizon": 4, "target_rs": [2.0, 3.0, 4.0], "stop_r": 1.0,
+            "position_minimum_improvement_r": 0.1,
+            "utilities": {"winner": 2.0, "failure": -1.0, "wait": 0.0,
+                          "missed_opportunity": -0.25, "conflict_margin": 0.25},
+        }, collect_market_targets=False,
+    )]
+    assert [record["messages"][-1]["content"] for record in records] == [
+        entry.name, "HOLD", "CLOSE",
+    ]
+    assert records[0]["targets"]["action_order"] == [
+        "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1",
+    ]
+    assert records[1]["targets"]["action_order"] == ["HOLD", "CLOSE"]
+    assert records[2]["targets"]["action_order"] == ["HOLD", "CLOSE"]
+    for record in records:
+        prompt = record["messages"][1]["content"]
+        assert "future_excursions" not in prompt
+        assert "outcomes" not in prompt
+        outcomes = {value["outcome"] for value in record["targets"]["outcomes"].values()}
+        assert outcomes.isdisjoint({"pass", "blow", "timeout"})
+
+
 def test_policy_evaluation_can_pass_in_unchanged_simulator_from_reset():
     class LongAndHold:
         def decide(self, context, legal_actions):
@@ -221,3 +278,35 @@ def test_policy_evaluation_can_pass_in_unchanged_simulator_from_reset():
     assert result["blow_rate"] == 0.0
     assert result["mean_terminal_pnl"] >= 6000
     assert result["teacher_free"] is False
+
+
+def test_responsibility_evaluation_does_not_mix_trade_and_challenge_metrics(monkeypatch):
+    from propevolve.reasoning_policy import evaluation
+    scored = [
+        {"target": action, "correct": True, "target_advantage": 0.25}
+        for action in ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE")
+    ]
+    monkeypatch.setattr(
+        "propevolve.reasoning_policy.learning_audit.score_labeled_examples",
+        lambda policy, records: scored,
+    )
+    monkeypatch.setattr(evaluation, "evaluate_policy", lambda *args, **kwargs: {
+        "pass_rate": 0.6, "blow_rate": 0.0, "near_blow_rate": 0.1,
+        "teacher_free": True, "episodes": [
+            {"trade_count": 4, "win_count": 2, "expectancy_r": 0.25,
+             "avg_win_r": 1.5, "avg_mfe_r": 2.0, "avg_mae_r": 0.5,
+             "retention_eligible_count": 2, "mfe_capture_ratio": 0.75,
+             "two_r_eligible_count": 1, "two_r_mfe_capture_ratio": 0.6},
+        ],
+    })
+    policy = type("Policy", (), {"requires_specialists": False})()
+    report = evaluation.evaluate_responsibilities(
+        policy, object(), trade_mastery_records=[object()], episodes=[],
+        context_config=None, sources=(), max_steps=1)
+
+    assert report["challenge_mastery"]["pass_rate"] == 0.6
+    assert report["trade_mastery"]["macro_accuracy"] == 1.0
+    assert report["trade_mastery"]["execution"]["win_rate"] == 0.5
+    assert report["trade_mastery"]["execution"]["expectancy_r"] == 0.25
+    assert "pass_rate" not in report["trade_mastery"]
+    assert "macro_accuracy" not in report["challenge_mastery"]

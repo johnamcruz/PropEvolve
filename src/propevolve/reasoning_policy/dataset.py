@@ -16,6 +16,21 @@ _TEACHER_PREFIXES = ("expansion.", "trend.", "regime.", "volume.")
 _FUTURE_PROMPT_PREFIXES = ("future_", "label_", "outcome_")
 
 
+def _supervised_state_identity(record):
+    """Identify the causal policy state, including flat/positioned context."""
+    messages = record.get("messages")
+    prompt = (messages[1].get("content") if isinstance(messages, list)
+              and len(messages) > 1 and isinstance(messages[1], dict) else None)
+    owner = record.get("ticker", record.get("source_id"))
+    if not owner:
+        raise ValueError("supervised state lacks an identity")
+    # The writer is also used by a metadata-only workflow seam before the
+    # independent audit. Production records always carry a prompt; preserve the
+    # lightweight seam while making real causal-state identity account-aware.
+    discriminator = prompt if isinstance(prompt, str) and prompt else record.get("source_id")
+    return owner, int(record["completed_at_ns"]), discriminator
+
+
 def _contains_future_target(value):
     if isinstance(value, dict):
         return any((str(key).lower().startswith(_FUTURE_PROMPT_PREFIXES)
@@ -44,9 +59,10 @@ serialize thousands of FFM latent coordinates as decimal tokens.
         raise ValueError("no legal action")
     return [
         {"role": "system", "content": (
-            "Choose one legal trading action from completed-bar evidence and account state. "
-            "The objective is to pass the challenge without breaching its effective trailing "
-            "MLL. Return only the action name. Future prices are unknown."
+            "Choose one legal trading action from completed-bar evidence and current trade state. "
+            "Optimize trade quality: enter only a valid directional setup, hold while its "
+            "economics remain favorable, and close when continuation deteriorates. "
+            "Return only the action name. Future prices are unknown."
         )},
         {"role": "user", "content": json.dumps({
             "fields": context.fields, "history_oldest_first": values.tolist(),
@@ -212,7 +228,7 @@ Incomplete/overlapping rows fail instead of silently becoming WAIT examples.
                 roles = [key for key, (lower, upper) in bounds.items() if lower <= start < end < upper]
                 if len(roles) != 1:
                     raise ValueError("label crosses temporal role or is outside declared data")
-                identity = (record.get("ticker", record["source_id"]), start)
+                identity = _supervised_state_identity(record)
                 if identity in seen:
                     raise ValueError("duplicate supervised state")
                 seen.add(identity)
@@ -333,6 +349,7 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
         raise ValueError("unsupported reasoning dataset schema")
     if set(manifest.get("splits", {})) != {"train", "valid"}:
         raise ValueError("dataset audit requires train and valid roles")
+    supervision_scope = manifest.get("lineage", {}).get("supervision_scope")
     sealed = manifest.get("sealed_start_ns")
     if type(sealed) is not int:
         raise ValueError("dataset sealed boundary is invalid")
@@ -393,7 +410,7 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                 if (type(start) is not int or type(end) is not int
                         or not lower <= start < end < upper):
                     raise ValueError("record crosses its chronological role")
-                identity = (record.get("ticker", record.get("source_id")), start)
+                identity = _supervised_state_identity(record)
                 if not identity[0] or identity in seen:
                     raise ValueError("missing or duplicate supervised state")
                 seen.add(identity)
@@ -406,6 +423,15 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                 if (not isinstance(messages, list)
                         or [item.get("role") for item in messages] != ["system", "user", "assistant"]):
                     raise ValueError("unexpected supervised conversation schema")
+                targets = record.get("targets", {})
+                if supervision_scope == "trade_mastery" and "action_order" in targets:
+                    outcomes = targets.get("outcomes")
+                    if (not isinstance(outcomes, dict)
+                            or any(not isinstance(value, dict)
+                                   or value.get("outcome") in {"pass", "blow", "timeout"}
+                                   for value in outcomes.values())):
+                        raise ValueError(
+                            "trade-mastery labels contain a challenge objective")
                 prompt = json.loads(messages[1]["content"])
                 if _contains_future_target(prompt):
                     raise ValueError("future target leaked into causal prompt")
@@ -414,6 +440,13 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                 if (not isinstance(fields, list) or not fields or history.ndim != 2
                         or history.shape[1] != len(fields) or not np.isfinite(history).all()):
                     raise ValueError("invalid causal prompt history")
+                if (supervision_scope in {"trade_mastery", "market"}
+                        and any(field.startswith(("account.", "challenge."))
+                                for field in fields)):
+                    raise ValueError("SFT prompt contains challenge or account state")
+                if (supervision_scope == "trade_mastery"
+                        and any(not field.startswith("trade.") for field in fields)):
+                    raise ValueError("trade-mastery prompt contains non-trade text state")
                 embeddings = record.get("market_embeddings")
                 available = record.get("market_available")
                 if side_embeddings is not None:
@@ -450,7 +483,6 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                     if any(field.startswith(_TEACHER_PREFIXES) for field in fields):
                         raise ValueError("specialist field leaked into teacher-free prompt")
                     teacher_free += 1
-                targets = record.get("targets", {})
                 specialist_targets = targets.get("specialist_targets")
                 if specialist_targets is not None:
                     if (not isinstance(specialist_targets, dict) or not specialist_targets

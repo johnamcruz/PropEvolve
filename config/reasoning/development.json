@@ -22,6 +22,8 @@
   "evaluation_output": "runs/reasoning-challenger/evaluation.json",
   "evaluation_decisions": "runs/reasoning-challenger/evaluation-decisions.jsonl",
   "evaluation_metrics_config": "config/reasoning/evaluation_metrics.json",
+  "trade_mastery_metrics_config": "config/reasoning/trade_mastery_metrics.json",
+  "trade_mastery_audit": null,
   "seed": 17,
   "tickers": {"train": ["NQ"], "valid": ["NQ"]},
   "episodes": {"train": [], "valid": []},
@@ -44,6 +46,7 @@
     "horizon": 150,
     "target_rs": [2.0, 3.0, 4.0],
     "stop_r": 1.0,
+    "position_minimum_improvement_r": 0.1,
     "utilities": {
       "winner": 2.0,
       "failure": -1.0,

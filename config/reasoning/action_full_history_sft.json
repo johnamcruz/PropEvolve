@@ -1,5 +1,5 @@
 {
-  "inherits": "policy_sft.json",
+  "inherits": "action_mastery_selection_sft.json",
   "data": "runs/reasoning-challenger/action-full-history-index",
   "adapter_path": "runs/reasoning-challenger/action-full-history-index-adapters",
   "resume_adapter_file": "runs/reasoning-challenger/market-full-history-adapters/adapters.safetensors",
@@ -8,5 +8,28 @@
   "steps_per_eval": 9000,
   "save_every": 18000,
   "grad_accumulation_steps": 3,
-  "batch_sampling": "balanced_actions"
+  "batch_sampling": "balanced_actions",
+  "dataset_requirements": {
+    "minimum_rows_per_action": {
+      "train": {
+        "WAIT": 1,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+        "HOLD": 1,
+        "CLOSE": 1
+      },
+      "valid": {
+        "WAIT": 1,
+        "ENTER_LONG_1": 1,
+        "ENTER_SHORT_1": 1,
+        "HOLD": 1,
+        "CLOSE": 1
+      }
+    },
+    "expected_splits": {
+      "train": [1609459200000000000, 1704067200000000000],
+      "valid": [1704067200000000000, 1735689600000000000]
+    },
+    "sealed_start_ns": 1767225600000000000
+  }
 }

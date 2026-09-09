@@ -3,7 +3,7 @@ import pytest
 from propevolve.decision import Action
 from propevolve.reasoning_policy.context import ContextConfig
 from propevolve.reasoning_policy.evaluation import evaluate_policy
-from propevolve.reasoning_policy.selection import assess_candidate
+from propevolve.reasoning_policy.selection import assess_candidate, assess_trade_mastery
 from test_reasoning_challenger_e2e import environment
 from test_reasoning_collection_evaluation_e2e import sources
 
@@ -32,3 +32,28 @@ def test_screening_uses_simulator_results_and_reports_specialist_dependence(entr
         assert "blow_rate" in decision["failures"]
     if outcome == "timeout":
         assert "pass_rate" in decision["failures"]
+
+
+def test_trade_mastery_gate_requires_three_r_winners_without_using_pass_rate():
+    actions = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE")
+    report = {
+        "teacher_free": True,
+        "per_action": {name: {"count": 20, "accuracy": 0.8,
+                               "mean_target_advantage": 0.25}
+                       for name in actions},
+        "execution": {"win_rate": 0.45, "average_win_r": 2.9,
+                      "expectancy_r": 0.2, "two_r_mfe_capture_ratio": 0.6},
+    }
+    criteria = {"required_actions": list(actions), "minimum_examples_per_action": 20,
+                "minimum_accuracy_per_action": 0.5,
+                "minimum_mean_action_advantage": 0.0,
+                "minimum_win_rate": 0.4, "minimum_average_win_r": 3.0,
+                "minimum_expectancy_r": 0.0,
+                "minimum_two_r_mfe_capture_ratio": 0.5,
+                "require_teacher_free": True}
+
+    rejected = assess_trade_mastery(report, criteria)
+    assert rejected["failures"] == ["average_win_r"]
+    report["execution"]["average_win_r"] = 3.1
+    assert assess_trade_mastery(report, criteria)["verdict"] == "REVIEW_CANDIDATE"
+    assert "pass_rate" not in report

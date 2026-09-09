@@ -1,6 +1,0 @@
-{
-  "enabled": true,
-  "horizons": [5, 20, 80, 320],
-  "volatility_window": 128,
-  "volatility_floor": 0.000001
-}

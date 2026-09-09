@@ -5,6 +5,8 @@ pass probabilities. Reconstructing a bounded causal prefix through reset/step
 avoids an incomplete snapshot implementation and shares immutable market data.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
@@ -42,6 +44,93 @@ cross a stop before its MFE: target-before-stop remains a separate label.
         "terminal_r_net": (sign * (close - entry) * point_value - round_trip_fee) / risk_dollars,
     } for side, sign, favorable, adverse in (
         ("long", 1, high - entry, entry - low), ("short", -1, entry - low, high - entry))}
+
+
+def label_position_actions(
+    market, *, decision: int, role_end: int, entry_index: int, side: Action,
+    observation, risk_dollars: float, point_value: float, round_trip_fee: float,
+    minimum_mll_headroom: float, horizon: int, stop_r: float,
+    minimum_improvement_r: float,
+) -> ActionLabels:
+    """Rank HOLD versus next-open CLOSE from one causal positioned state.
+
+    The prompt receives only the completed-bar observation, including MFE/MAE
+    accumulated so far. Future opens and adverse excursions are label-only. HOLD
+    receives the best later executable net R that remains reachable before the
+    declared stop; the configurable improvement margin prevents immaterial extra
+    exposure from beating CLOSE. This is trade-exit supervision, not a challenge
+    pass/blow objective.
+    """
+    if (type(decision) is not int or type(role_end) is not int
+            or type(entry_index) is not int or type(horizon) is not int
+            or not 0 <= entry_index <= decision < role_end <= len(market.close)
+            or horizon < 2):
+        raise ValueError("invalid positioned label timeline")
+    try:
+        side = Action(side)
+    except (TypeError, ValueError) as error:
+        raise ValueError("position side must be a Long or Short entry") from error
+    if side not in {Action.ENTER_LONG_1, Action.ENTER_SHORT_1}:
+        raise ValueError("position side must be a Long or Short entry")
+    numbers = np.asarray([
+        risk_dollars, point_value, round_trip_fee, minimum_mll_headroom,
+        stop_r, minimum_improvement_r,
+    ], dtype=float)
+    if (not np.isfinite(numbers).all() or risk_dollars <= 0 or point_value <= 0
+            or round_trip_fee < 0 or minimum_mll_headroom < 0 or stop_r <= 0
+            or minimum_improvement_r < 0
+            or round_trip_fee >= risk_dollars * stop_r):
+        raise ValueError("invalid positioned label economics")
+    immediate_exit = decision + 1
+    final_exit = min(role_end - 1, decision + horizon)
+    if immediate_exit >= role_end or immediate_exit + 1 > final_exit:
+        raise ValueError("positioned label is censored by its temporal role")
+    entry = float(market.open[entry_index])
+    sign = 1.0 if side is Action.ENTER_LONG_1 else -1.0
+    fee_r = round_trip_fee / risk_dollars
+
+    def exit_r(index):
+        return sign * (float(market.open[index]) - entry) * point_value / risk_dollars - fee_r
+
+    close_r = exit_r(immediate_exit)
+    adverse_points = (stop_r * risk_dollars - round_trip_fee) / point_value
+    bars = np.arange(immediate_exit, final_exit, dtype=int)
+    adverse = (entry - np.asarray(market.low[bars], dtype=float)
+               if sign > 0 else np.asarray(market.high[bars], dtype=float) - entry)
+    if (not np.isfinite([entry, close_r]).all() or not np.isfinite(adverse).all()
+            or adverse_points <= 0):
+        raise ValueError("nonfinite positioned label source")
+    stop_hits = np.flatnonzero(adverse >= adverse_points)
+    first_stop = final_exit if not len(stop_hits) else immediate_exit + int(stop_hits[0])
+    reachable_exits = range(immediate_exit + 1, min(final_exit, first_stop) + 1)
+    candidates = [(index, exit_r(index)) for index in reachable_exits]
+    if candidates:
+        hold_end, hold_r = max(candidates, key=lambda item: item[1])
+        hold_outcome = "continued_to_better_exit"
+    else:
+        hold_end, hold_r = first_stop, -float(stop_r)
+        hold_outcome = "stopped_before_later_exit"
+    if not np.isfinite(hold_r):
+        raise ValueError("nonfinite positioned action value")
+    outcomes = {
+        Action.HOLD: ActionOutcome(
+            outcome=hold_outcome,
+            terminal_pnl=float(hold_r * risk_dollars),
+            reward_to_go=float(hold_r - minimum_improvement_r),
+            minimum_mll_headroom=float(minimum_mll_headroom),
+            steps=int(hold_end - decision),
+            outcome_end_ns=int(market.timestamps[hold_end].astype("datetime64[ns]").astype(np.int64)),
+        ),
+        Action.CLOSE: ActionOutcome(
+            outcome="close_next_open",
+            terminal_pnl=float(close_r * risk_dollars),
+            reward_to_go=float(close_r),
+            minimum_mll_headroom=float(minimum_mll_headroom),
+            steps=1,
+            outcome_end_ns=int(market.timestamps[immediate_exit].astype("datetime64[ns]").astype(np.int64)),
+        ),
+    }
+    return ActionLabels(np.asarray(observation).copy(), outcomes)
 
 
 def label_entry_opportunity(
@@ -154,9 +243,11 @@ def label_market_actions(
 ):
     """Scratch-policy flat action ordering from one future economic barrier.
 
-    Future paths are labels only.  They never enter the causal prompt.  This is
-    an entry warm start; the unchanged challenge environment teaches sequential
-    Hold/Close and account-aware behavior during RL.
+    Future paths are labels only and never enter the causal prompt. This is the
+    SFT entry boundary: the smallest configured target (normally 2R) establishes
+    a valid setup, while larger achieved targets increase its economic value.
+    Positioned HOLD/CLOSE labels are produced separately by
+    ``label_position_actions``; challenge pass/blow behavior belongs to RL.
     """
     required = {"winner", "failure", "wait", "missed_opportunity", "conflict_margin"}
     if set(utilities) != required or not np.isfinite(list(utilities.values())).all():

@@ -7,6 +7,33 @@ from .context import RollingContext
 from .inputs import observe_context
 
 
+def summarize_trade_execution(receipts):
+    """Aggregate trade economics independently of episode pass/blow outcomes."""
+    trades = sum(int(row.get("trade_count", 0)) for row in receipts)
+    wins = sum(int(row.get("win_count", 0)) for row in receipts)
+    retention = sum(int(row.get("retention_eligible_count", 0)) for row in receipts)
+    two_r = sum(int(row.get("two_r_eligible_count", 0)) for row in receipts)
+
+    def weighted(name, weight_name, total):
+        if not total:
+            return 0.0
+        return float(sum(float(row.get(name, 0.0)) * int(row.get(weight_name, 0))
+                         for row in receipts) / total)
+
+    return {
+        "trade_count": trades,
+        "win_rate": wins / trades if trades else 0.0,
+        "average_win_r": weighted("avg_win_r", "win_count", wins),
+        "expectancy_r": weighted("expectancy_r", "trade_count", trades),
+        "average_mfe_r": weighted("avg_mfe_r", "trade_count", trades),
+        "average_mae_r": weighted("avg_mae_r", "trade_count", trades),
+        "mfe_capture_ratio": weighted(
+            "mfe_capture_ratio", "retention_eligible_count", retention),
+        "two_r_mfe_capture_ratio": weighted(
+            "two_r_mfe_capture_ratio", "two_r_eligible_count", two_r),
+    }
+
+
 def evaluate_policy(policy, environment, *, episodes, context_config, sources, max_steps,
                     near_blow_headroom_fraction=None, on_decision=None):
     """Evaluate explicit episode starts, with no teacher-free claim.
@@ -89,3 +116,15 @@ resource cap is an error, never a fabricated economic timeout.
                           for name in {key for row in receipts for key in row["action_counts"]}},
         "teacher_free": not uses_specialists,
     }
+
+
+def evaluate_responsibilities(policy, environment, *, trade_mastery_records, **kwargs):
+    """Report trade decisions and prop-challenge economics as separate gates."""
+    from .learning_audit import score_labeled_examples, summarize_trade_mastery
+
+    challenge = evaluate_policy(policy, environment, **kwargs)
+    trade = summarize_trade_mastery(
+        score_labeled_examples(policy, trade_mastery_records))
+    trade["teacher_free"] = not getattr(policy, "requires_specialists", True)
+    trade["execution"] = summarize_trade_execution(challenge["episodes"])
+    return {"trade_mastery": trade, "challenge_mastery": challenge}

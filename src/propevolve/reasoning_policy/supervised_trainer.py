@@ -179,21 +179,19 @@ def balanced_action_order(rows, *, count, rng):
             raise ValueError("indexed balanced sampling requires every action per ticker")
         order = []
         ticker_order = list(rng.permutation(sorted(by_ticker)))
-        remaining = count
-        for ticker in ticker_order:
+        windows, remainder = divmod(count // len(names), len(ticker_order))
+        for ticker_index, ticker in enumerate(ticker_order):
             local = by_ticker[ticker]
-            capacity = min(len(local[name]) for name in names) * len(names)
-            take = min(capacity, remaining)
-            take -= take % len(names)
             queues = {name: list(rng.permutation(local[name])) for name in names}
             cursors = {name: 0 for name in names}
-            for position in range(take):
-                name = names[position % len(names)]
-                order.append(int(queues[name][cursors[name]]))
-                cursors[name] += 1
-            remaining -= take
-        if remaining:
-            raise ValueError("indexed action corpus cannot satisfy balanced sample count")
+            local_windows = windows + (1 if ticker_index < remainder else 0)
+            for _ in range(local_windows):
+                for name in names:
+                    if cursors[name] == len(queues[name]):
+                        queues[name] = list(rng.permutation(local[name]))
+                        cursors[name] = 0
+                    order.append(int(queues[name][cursors[name]]))
+                    cursors[name] += 1
         return np.asarray(order, dtype=np.int64)
     queues = {name: list(rng.permutation(groups[name])) for name in names}
     cursors = {name: 0 for name in names}

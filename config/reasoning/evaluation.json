@@ -1,4 +1,4 @@
 {
-  "inherits": "policy_sft.json",
+  "inherits": "action_full_history_sft.json",
   "adapter_path": "runs/reasoning-challenger/rl-adapters"
 }

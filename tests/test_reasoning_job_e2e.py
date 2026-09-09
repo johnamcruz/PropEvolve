@@ -3,7 +3,7 @@
 import json
 
 from propevolve.decision import Action
-from propevolve.reasoning_policy.job import collection_factory, readiness
+from propevolve.reasoning_policy.job import action_collection_plan, collection_factory, readiness
 
 
 def test_readiness_reports_missing_sources_without_loading_a_model(tmp_path):
@@ -41,3 +41,25 @@ def test_reset_state_collection_needs_no_prior_policy_artifact(tmp_path):
     assert "collection_policy.checkpoint" not in result["blockers"]
     decide = collection_factory(json.loads(config.read_text()), tmp_path)()
     assert decide(None, {"valid_actions": [Action.WAIT]}) is Action.WAIT
+
+
+def test_trade_mastery_job_config_expands_only_winning_entries_into_position_labels():
+    config = {
+        "action_supervision_scope": "trade_mastery",
+        "maximum_examples_per_episode": 3,
+    }
+    assert action_collection_plan(config, Action.ENTER_LONG_1) == {
+        "mode": "trade_mastery_grid",
+        "maximum_examples": 3,
+        "initial_entry_action": Action.ENTER_LONG_1,
+    }
+    assert action_collection_plan(config, Action.ENTER_SHORT_1) == {
+        "mode": "trade_mastery_grid",
+        "maximum_examples": 3,
+        "initial_entry_action": Action.ENTER_SHORT_1,
+    }
+    assert action_collection_plan(config, Action.WAIT) == {
+        "mode": "market_barrier_grid",
+        "maximum_examples": 1,
+        "initial_entry_action": None,
+    }

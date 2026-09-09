@@ -104,13 +104,29 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
                 "both trainable components, and no shared schedule")
     requirements = payload.get("dataset_requirements")
     if requirements is not None:
+        minimums = (requirements.get("minimum_rows_per_action", {})
+                    if isinstance(requirements, dict) else {})
+        valid_minimums = (
+            isinstance(minimums, dict)
+            and set(minimums) == {"train", "valid"}
+            and all(
+                (type(value) is int and value >= 1)
+                or (
+                    isinstance(value, dict) and bool(value)
+                    and all(
+                        isinstance(action, str) and bool(action)
+                        and type(count) is int and count >= 1
+                        for action, count in value.items()
+                    )
+                )
+                for value in minimums.values()
+            )
+        )
         if (not isinstance(requirements, dict)
                 or set(requirements) != {
                     "minimum_rows_per_action", "expected_splits", "sealed_start_ns"}
-                or set(requirements["minimum_rows_per_action"]) != {"train", "valid"}
+                or not valid_minimums
                 or set(requirements["expected_splits"]) != {"train", "valid"}
-                or any(type(value) is not int or value < 1
-                       for value in requirements["minimum_rows_per_action"].values())
                 or any(not isinstance(bounds, list) or len(bounds) != 2
                        or any(type(value) is not int for value in bounds)
                        or bounds[0] >= bounds[1]
@@ -148,10 +164,13 @@ def verify_dataset(path: str | Path, *, requirements=None) -> dict:
         action_counts = audit.get("actions_by_role")
         for role, minimum in requirements["minimum_rows_per_action"].items():
             counts = None if not isinstance(action_counts, dict) else action_counts.get(role)
-            if (not isinstance(counts, dict) or set(counts) != {
-                    "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
-                    or any(type(count) is not int or count < minimum
-                           for count in counts.values())):
+            required = ({action: minimum for action in (
+                "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")}
+                if type(minimum) is int else minimum)
+            if (not isinstance(counts, dict)
+                    or any(type(counts.get(action)) is not int
+                           or counts[action] < threshold
+                           for action, threshold in required.items())):
                 raise ValueError(f"{role} dataset lacks minimum rows per action")
     storage = manifest.get("embedding_storage")
     if storage is not None:

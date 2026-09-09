@@ -1326,6 +1326,8 @@ class HistoricalChallengeEnv:
             "challenge.mll_floor_dollars": float(self._account.mll_floor_pnl),
             "challenge.headroom_dollars": float(self._account.mll_headroom(equity)),
             "trade.open": float(position is not None),
+            "trade.position_side": float(
+                PositionSide.FLAT if position is None else position.side),
             "trade.risk_available": 0.0,
             "trade.mfe_r_so_far": 0.0, "trade.mae_r_so_far": 0.0,
             "trade.current_r": 0.0, "trade.giveback_r": 0.0,
