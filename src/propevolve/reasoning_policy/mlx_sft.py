@@ -91,6 +91,17 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if (isinstance(payload["learning_rate"], bool)
             or not math.isfinite(float(payload["learning_rate"])) or payload["learning_rate"] <= 0):
         raise ValueError("learning_rate must be finite and positive")
+    component_rates = payload.get("component_learning_rates")
+    if component_rates is not None:
+        if (not isinstance(component_rates, dict)
+                or set(component_rates) != {"lora", "projector"}
+                or set(components) != {"lora", "projector"}
+                or schedule is not None
+                or any(isinstance(value, bool) or not math.isfinite(float(value))
+                       or value <= 0 for value in component_rates.values())):
+            raise ValueError(
+                "component learning rates require positive LoRA/projector rates, "
+                "both trainable components, and no shared schedule")
     return payload
 
 

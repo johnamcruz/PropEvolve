@@ -10,7 +10,7 @@ from propevolve.reasoning_policy.projector import (
     attach_projector, export_policy_weights, restore_projector, temporal_features,
 )
 from propevolve.reasoning_policy.supervised_trainer import (
-    batch_loss, configure_trainable_components, pack_examples,
+    batch_loss, build_optimizer, configure_trainable_components, pack_examples,
 )
 from propevolve.reasoning_policy.policy import sequence_scores
 
@@ -114,6 +114,41 @@ def test_component_selection_can_train_projector_without_lora_and_preserve_both(
     assert set(dict(tree_flatten(model.trainable_parameters()))) == {
         "adapter.lora_a", "adapter.lora_b", "market_projector.projection.weight"
     }
+
+
+def test_component_optimizer_routes_distinct_learning_rates_by_public_parameter_name():
+    from mlx.utils import tree_flatten
+
+    class TwoComponents(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.market_projector = nn.Linear(1, 1, bias=False)
+            self.adapter = nn.Linear(1, 1, bias=False)
+            self.adapter.lora_a = mx.ones((1, 1))
+            self.adapter.lora_b = mx.ones((1, 1))
+
+    model = TwoComponents()
+    model.freeze()
+    model.market_projector.unfreeze()
+    model.adapter.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+    before = dict(tree_flatten(model.trainable_parameters()))
+    optimizer = build_optimizer({
+        "optimizer": "adam",
+        "optimizer_config": {"adam": {}},
+        "learning_rate": 3e-6,
+        "lr_schedule": None,
+        "component_learning_rates": {"lora": 1e-6, "projector": 1e-5},
+    })
+    gradients = {"market_projector": {"weight": mx.ones((1, 1))},
+                 "adapter": {"lora_a": mx.ones((1, 1)),
+                             "lora_b": mx.ones((1, 1))}}
+    optimizer.update(model, gradients)
+    mx.eval(model.parameters(), optimizer.state)
+    after = dict(tree_flatten(model.trainable_parameters()))
+    projector_delta = float(mx.abs(
+        before["market_projector.weight"] - after["market_projector.weight"]).item())
+    lora_delta = float(mx.abs(before["adapter.lora_a"] - after["adapter.lora_a"]).item())
+    assert projector_delta == pytest.approx(10 * lora_delta, rel=1e-2)
 
 
 def test_masked_history_cannot_affect_projected_scores():

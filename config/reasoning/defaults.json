@@ -1,6 +1,7 @@
 {
   "optimizer": "adam",
   "optimizer_config": {"adam": {}},
+  "component_learning_rates": null,
   "lr_schedule": null,
   "trainable_components": ["lora"],
   "resume_adapter_file": null,

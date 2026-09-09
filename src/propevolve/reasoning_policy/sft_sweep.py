@@ -98,9 +98,13 @@ def load_sft_sweep(path: str | Path) -> SFTSweep:
         raise ValueError("reasoning SFT sweep resources are missing")
 
     study = payload["study"]
-    if (not isinstance(study, dict) or set(study) != {
-            "seed", "n_trials", "n_jobs", "n_startup_trials", "multivariate", "pruner",
-            "convergence_patience_trials", "convergence_min_improvement"}
+    study_keys = {
+        "seed", "n_trials", "n_jobs", "n_startup_trials", "multivariate", "pruner",
+        "convergence_patience_trials", "convergence_min_improvement",
+    }
+    if (not isinstance(study, dict) or not study_keys.issubset(study)
+            or set(study) - study_keys - {"sampler"}
+            or study.get("sampler", "tpe") not in {"tpe", "grid"}
             or type(study["seed"]) is not int or type(study["n_trials"]) is not int
             or type(study["n_jobs"]) is not int or study["n_jobs"] < 1
             or type(study["n_startup_trials"]) is not int
@@ -144,6 +148,11 @@ def load_sft_sweep(path: str | Path) -> SFTSweep:
         for choice in dimension["choices"]:
             candidate = deepcopy(base_payload)
             _set_path(candidate, dimension["path"], choice)
+    if study.get("sampler", "tpe") == "grid":
+        combinations = math.prod(len(dimension["choices"])
+                                 for dimension in search.values())
+        if study["n_trials"] != combinations:
+            raise ValueError("grid study budget must equal its configured combinations")
 
     selection = payload["selection"]
     if (not isinstance(selection, dict) or set(selection) != {
@@ -291,13 +300,18 @@ def run_sft_sweep(path: str | Path, *, target_trials: int | None = None,
     if target < 1 or target > configured_trials:
         raise ValueError("target trials must be within the JSON-configured study budget")
     sweep.study_root.mkdir(parents=True, exist_ok=True)
-    study = optuna.create_study(
-        study_name=sweep.name, direction="maximize",
-        sampler=optuna.samplers.TPESampler(
+    sampler = (optuna.samplers.GridSampler(
+        {name: dimension["choices"] for name, dimension in sweep.search_space.items()},
+        seed=sweep.study["seed"])
+        if sweep.study.get("sampler", "tpe") == "grid" else
+        optuna.samplers.TPESampler(
             seed=sweep.study["seed"],
             n_startup_trials=min(sweep.study["n_startup_trials"], target),
             multivariate=sweep.study["multivariate"],
-        ),
+        ))
+    study = optuna.create_study(
+        study_name=sweep.name, direction="maximize",
+        sampler=sampler,
         pruner=optuna.pruners.MedianPruner(
             n_startup_trials=sweep.study["pruner"]["n_startup_trials"],
             n_warmup_steps=sweep.study["pruner"]["n_warmup_evaluations"],
@@ -312,7 +326,7 @@ def run_sft_sweep(path: str | Path, *, target_trials: int | None = None,
     if authority is None:
         study.set_user_attr("sweep_identity", sweep.identity)
     runner = _default_trial_runner if trial_runner is None else trial_runner
-    if not study.trials:
+    if not study.trials and sweep.study.get("sampler", "tpe") != "grid":
         base = read_recipe(sweep.base_sft_config)
         baseline = {name: _get_path(base, dimension["path"])
                     for name, dimension in sweep.search_space.items()}

@@ -107,6 +107,46 @@ def test_sft_learning_rate_schedule_is_config_driven(tmp_path):
         read_sft_config(recipe)
 
 
+def test_sft_component_learning_rates_are_config_driven_and_fail_closed(tmp_path):
+    recipe = tmp_path / "component-rates.json"
+    payload = {
+        "model": "fixture-model", "data": "fixture-data", "adapter_path": "new-adapter",
+        "train": True, "fine_tune_type": "lora", "mask_prompt": True,
+        "num_layers": 1, "batch_size": 1, "iters": 1, "learning_rate": 3e-6,
+        "max_seq_length": 1024, "grad_checkpoint": True,
+        "grad_accumulation_steps": 1,
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+        "trust_remote_code": False, "input_mode": "embeddings",
+        "projector": {"embedding_dim": 2, "context_steps": 3,
+                      "market_tokens": 2, "temporal_encoding": "pooled_levels"},
+        "trainable_components": ["lora", "projector"],
+        "component_learning_rates": {"lora": 1e-6, "projector": 3e-5},
+    }
+    recipe.write_text(json.dumps(payload))
+    assert read_sft_config(recipe)["component_learning_rates"] == {
+        "lora": 1e-6, "projector": 3e-5,
+    }
+
+    for invalid in (
+            {"lora": 1e-6},
+            {"lora": 1e-6, "projector": 3e-5, "other": 1e-5},
+            {"lora": 0., "projector": 3e-5},
+            {"lora": 1e-6, "projector": float("nan")}):
+        recipe.write_text(json.dumps({**payload, "component_learning_rates": invalid}))
+        with pytest.raises(ValueError, match="component learning rates"):
+            read_sft_config(recipe)
+
+    recipe.write_text(json.dumps({**payload, "trainable_components": ["projector"]}))
+    with pytest.raises(ValueError, match="component learning rates"):
+        read_sft_config(recipe)
+
+    recipe.write_text(json.dumps({**payload,
+        "lr_schedule": {"kind": "cosine_decay", "end": 1e-6,
+                        "decay_updates": 32}}))
+    with pytest.raises(ValueError, match="component learning rates"):
+        read_sft_config(recipe)
+
+
 def test_sft_trainable_components_are_config_driven_and_fail_closed(tmp_path):
     recipe = tmp_path / "components.json"
     payload = {

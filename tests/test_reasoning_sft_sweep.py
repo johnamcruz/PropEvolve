@@ -155,6 +155,34 @@ def test_optuna_sweep_resumes_and_ranks_the_worst_action_not_average(tmp_path):
     assert json.loads((tmp_path / "study" / "study.result.json").read_text()) == resumed
 
 
+def test_grid_sweep_evaluates_each_configured_pair_once(tmp_path):
+    path = _sweep(tmp_path, trials=4)
+    payload = json.loads(path.read_text())
+    payload["study"]["sampler"] = "grid"
+    payload["study"]["n_startup_trials"] = 1
+    payload["study"]["convergence_patience_trials"] = 4
+    payload["search_space"] = {
+        "lora_learning_rate": {
+            "path": "component_learning_rates.lora", "choices": [1e-6, 3e-6]},
+        "projector_learning_rate": {
+            "path": "component_learning_rates.projector", "choices": [3e-6, 1e-5]},
+    }
+    base = json.loads(Path(payload["base_sft_config"]).read_text())
+    base["component_learning_rates"] = {"lora": 3e-6, "projector": 3e-6}
+    Path(payload["base_sft_config"]).write_text(json.dumps(base))
+    path.write_text(json.dumps(payload))
+    observed = []
+
+    def runner(config_path, view, trial_number):
+        config = json.loads(Path(config_path).read_text())
+        observed.append(tuple(config["component_learning_rates"].values()))
+        return _selection(.3, .3, .3)
+
+    result = run_sft_sweep(path, trial_runner=runner)
+    assert result["terminal_trials"] == 4
+    assert len(observed) == len(set(observed)) == 4
+
+
 def test_sweep_rejects_validation_that_touches_unseen_evaluation(tmp_path):
     path = _sweep(tmp_path)
     payload = json.loads(path.read_text())

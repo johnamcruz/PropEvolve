@@ -318,6 +318,33 @@ def configure_trainable_components(model, components):
     return tuple(sorted(leaves))
 
 
+def build_optimizer(config):
+    """Build the configured MLX optimizer without coupling LoRA and projector rates."""
+    import mlx.optimizers as optim
+
+    optimizer_kind = config["optimizer"]
+    constructors = {"adam": optim.Adam, "adamw": optim.AdamW}
+    if optimizer_kind not in constructors:
+        raise ValueError("configured optimizer/schedule unsupported by tensor SFT adapter")
+    constructor = constructors[optimizer_kind]
+    options = config["optimizer_config"].get(optimizer_kind, {})
+    component_rates = config.get("component_learning_rates")
+    if component_rates is not None:
+        projector = constructor(
+            learning_rate=component_rates["projector"], **options)
+        lora = constructor(learning_rate=component_rates["lora"], **options)
+        return optim.MultiOptimizer(
+            [projector, lora],
+            filters=[lambda name, _: name.startswith("market_projector.")],
+        )
+    learning_rate = config["learning_rate"]
+    if config["lr_schedule"] is not None:
+        schedule = config["lr_schedule"]
+        learning_rate = optim.cosine_decay(
+            learning_rate, schedule["decay_updates"], end=schedule["end"])
+    return constructor(learning_rate=learning_rate, **options)
+
+
 def pack_examples(rows, *, max_seq_length):
     alternatives = [row.get("alternatives", [(row["tokens"], row["offset"])]) for row in rows]
     actions = max(map(len, alternatives))
@@ -430,7 +457,6 @@ def evaluate_action_validation(model, dataset, config):
 
 def train_supervised(config, view):
     import mlx.core as mx
-    import mlx.optimizers as optim
     from mlx_lm import load
     from mlx_lm.tuner.utils import linear_to_lora_layers
     from mlx_lm.tuner.trainer import evaluate, train, TrainingArgs
@@ -462,17 +488,7 @@ def train_supervised(config, view):
         if parent is not None:
             restore_projector(model, Path(parent).parent)
     configure_trainable_components(model, config["trainable_components"])
-    optimizer_kind = config["optimizer"]
-    constructors = {"adam": optim.Adam, "adamw": optim.AdamW}
-    if optimizer_kind not in constructors:
-        raise ValueError("configured optimizer/schedule unsupported by tensor SFT adapter")
-    learning_rate = config["learning_rate"]
-    if config["lr_schedule"] is not None:
-        schedule = config["lr_schedule"]
-        learning_rate = optim.cosine_decay(
-            learning_rate, schedule["decay_updates"], end=schedule["end"])
-    optimizer = constructors[optimizer_kind](learning_rate=learning_rate,
-        **config["optimizer_config"].get(optimizer_kind, {}))
+    optimizer = build_optimizer(config)
     from .mlx_sft import PreparedDataset
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
     validate_early_stopping_coverage(config, datasets)

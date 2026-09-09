@@ -133,6 +133,8 @@ def test_local_quantized_embedding_policy_evaluates_without_teacher_lookups(tmp_
     config.update(seed=11, learning_rate=1e-3, max_seq_length=4096,
         val_batches=1, steps_per_report=1, steps_per_eval=1, save_every=1,
         optimizer="adam", optimizer_config={"adam": {}}, lr_schedule=None,
+        trainable_components=["lora", "projector"],
+        component_learning_rates={"lora": 1e-4, "projector": 1e-3},
         clear_cache_threshold=0, chat_template_kwargs={"enable_thinking": False})
     recipe = tmp_path / "recipe.json"
     recipe.write_text(json.dumps(config))
