@@ -58,6 +58,38 @@ def test_unreviewed_specialist_dataset_cannot_start_finetuning(tmp_path):
         verify_dataset(tmp_path)
 
 
+def test_mastery_dataset_contract_rejects_tiny_golden_corpus(tmp_path):
+    root = tmp_path / "golden"
+    root.mkdir()
+    from propevolve.reasoning_policy.integrity import file_digest
+    for role in ("train", "valid"):
+        (root / f"{role}.jsonl").write_text("{}\n{}\n{}\n")
+    manifest = {
+        "schema": "propevolve_reasoning_dataset_v1",
+        "splits": {"train": [0, 100], "valid": [100, 200]},
+        "counts": {"train": 3, "valid": 3},
+        "sealed_start_ns": 200,
+        "files": {role: file_digest(root / f"{role}.jsonl")
+                  for role in ("train", "valid")},
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    (root / "audit.json").write_text(json.dumps({
+        "status": "PASS", "manifest_sha256": file_digest(root / "manifest.json"),
+        "specialist_score_mode": "out_of_fold", "sealed_touched": False,
+        "actions_by_role": {
+            role: {"WAIT": 1, "ENTER_LONG_1": 1, "ENTER_SHORT_1": 1}
+            for role in ("train", "valid")
+        },
+    }))
+
+    with pytest.raises(ValueError, match="minimum rows per action"):
+        verify_dataset(root, requirements={
+            "minimum_rows_per_action": {"train": 2, "valid": 2},
+            "expected_splits": {"train": [0, 100], "valid": [100, 200]},
+            "sealed_start_ns": 200,
+        })
+
+
 def test_context_snapshot_cannot_be_mutated_by_dataset_consumer():
     context = RollingContext(ContextConfig(20, ("balance",)))
     context.append(1, {"balance": 0})
@@ -209,7 +241,7 @@ def test_prepared_view_can_be_reused_across_learning_hyperparameters(tmp_path):
     }))
     from propevolve.reasoning_policy import mlx_sft
     original = mlx_sft.verify_dataset
-    mlx_sft.verify_dataset = lambda path: manifest
+    mlx_sft.verify_dataset = lambda path, **kwargs: manifest
     try:
         assert verify_mlx_view(second, view) == view / "sft.json"
         incompatible = {**changed, "max_seq_length": 2048}

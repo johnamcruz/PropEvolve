@@ -2,6 +2,7 @@
   "model": "Qwen/Qwen3-4B-MLX-4bit",
   "input_mode": "embeddings",
   "trainable_components": ["lora", "projector"],
+  "dataset_requirements": null,
   "projector": {
     "embedding_dim": 2560,
     "context_steps": 20,
