@@ -1,0 +1,20 @@
+{
+  "inherits": "action_mastery_multioptimizer_sft.json",
+  "adapter_path": "runs/reasoning-challenger/action-mastery-multioptimizer-trial2-40ep-adapter",
+  "validation_metrics_path": "runs/reasoning-challenger/action-mastery-multioptimizer-trial2-40ep-validation.jsonl",
+  "iters": 1080,
+  "steps_per_eval": 54,
+  "save_every": 54,
+  "component_learning_rates": {
+    "lora": 0.000001,
+    "projector": 0.000003
+  },
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 8,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "worst_action_advantage",
+    "mode": "max"
+  }
+}
