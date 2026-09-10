@@ -625,6 +625,14 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             return
 
 
+def selected_token_scores(logits, targets):
+    """Preserve target scores without allocating full-vocabulary log probabilities."""
+    import mlx.core as mx
+    logits = logits.astype(mx.float32)
+    selected = mx.take_along_axis(logits, targets[..., None], axis=-1).squeeze(-1)
+    return selected - mx.logsumexp(logits, axis=-1)
+
+
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
                    causal_states, embeddings, available, *, config):
     import mlx.core as mx
@@ -651,12 +659,9 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             model, flat_inputs, flat_embeddings, flat_available, flat_causal_states)
     else:
         logits = model(flat_inputs)
-    logits = logits.astype(mx.float32)
-    log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-    targets = tokens[:, :, 1:, None].reshape(
-        batch_size * actions, sequence_length - 1, 1)
-    token_scores = mx.take_along_axis(
-        log_probs, targets, axis=-1).squeeze(-1).reshape(
+    targets = tokens[:, :, 1:].reshape(
+        batch_size * actions, sequence_length - 1)
+    token_scores = selected_token_scores(logits, targets).reshape(
             batch_size, actions, sequence_length - 1)
     steps = mx.arange(1, sequence_length)
     mask = ((steps[None, None, :] >= offsets[:, :, None])

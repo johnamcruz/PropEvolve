@@ -176,6 +176,29 @@ def test_mlx_batch_vectorizes_rows_without_changing_loss():
     assert float(batched.item()) == pytest.approx(float(np.mean(individual)), abs=1e-6)
 
 
+def test_market_sft_batch_preserves_each_row_loss_and_projector_gradient():
+    from mlx.utils import tree_flatten
+    model = tiny_backbone()
+    first = {k: v for k, v in example().items()
+             if k not in {"alternatives", "action_targets"}}
+    second = {**first, "tokens": [1, 2, 5, 6, 4], "offset": 3,
+              "market_embeddings": [[0., 0.], [2., 1.], [4., 3.]]}
+    config = {"input_mode": "embeddings", "action_supervision": {"enabled": False}}
+    def evaluate(rows):
+        tensors = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=8))
+        fn = nn.value_and_grad(model, lambda m, *b: batch_loss(m, *b, config=config)[0])
+        loss, grads = fn(model, *tensors)
+        return float(loss.item()), {k: np.array(v) for k, v in tree_flatten(grads)}
+    left, lg = evaluate([first])
+    right, rg = evaluate([second])
+    together, bg = evaluate([first, second])
+    assert together == pytest.approx((left + right) / 2, abs=1e-6)
+    assert any(np.any(value != 0) for value in bg.values())
+    for key in bg:
+        np.testing.assert_allclose(bg[key], (lg[key] + rg[key]) / 2,
+                                   atol=1e-6, rtol=1e-6)
+
+
 def test_real_mlx_hierarchical_update_learns_entry_and_direction_together():
     import mlx.optimizers as optim
 
