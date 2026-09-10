@@ -724,7 +724,7 @@ def train_supervised(config, view):
     from mlx_lm.tuner.utils import linear_to_lora_layers
     from mlx_lm.tuner.trainer import evaluate, train, TrainingArgs
     from functools import partial
-    from .model_config import verify_adapter_base
+    from .model_config import verify_adapter_base, validate_sft_parent_contract
     from .projector import attach_projector, export_policy_weights, restore_projector
     destination = Path(config["adapter_path"])
     if destination.exists():
@@ -742,6 +742,7 @@ def train_supervised(config, view):
         directory = Path(parent).parent
         verify_adapter_base(config["model"], directory)
         metadata = json.loads((directory / "adapter_config.json").read_text())
+        validate_sft_parent_contract(config, metadata)
         for key in ("lora_parameters", "num_layers", "chat_template_kwargs", "input_mode"):
             if metadata.get(key) != config.get(key):
                 raise ValueError(f"SFT warm-start contract differs at {key}")

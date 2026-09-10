@@ -102,6 +102,22 @@ def validate_trade_mastery_parent(payload):
     return payload
 
 
+def validate_sft_parent_contract(child, parent):
+    """Require an SFT warm start to advertise every configured parent capability."""
+    requirements = child.get("resume_adapter_requirements")
+    if requirements is None:
+        return
+    if not isinstance(requirements, dict) or not requirements:
+        raise ValueError("resume adapter requirements must be a nonempty object or null")
+    for key, expected in requirements.items():
+        actual = parent.get(key)
+        matches = (set(actual) == set(expected)
+                   if isinstance(expected, list) and isinstance(actual, list)
+                   else actual == expected)
+        if not matches:
+            raise ValueError(f"SFT parent contract differs at {key}")
+
+
 def resolve_model_resources(payload, *, root=None):
     """An explicit workspace wins; preserve legacy CWD semantics when omitted.
 

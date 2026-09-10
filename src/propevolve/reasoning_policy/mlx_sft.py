@@ -25,6 +25,20 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if not required.issubset(payload):
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
     validate_model_settings(payload)
+    stage_role = payload.get("stage_role")
+    if stage_role is not None and (not isinstance(stage_role, str) or not stage_role.strip()):
+        raise ValueError("SFT stage role must be a nonempty string or null")
+    distillation_targets = payload.get("distillation_targets")
+    if distillation_targets is not None and (
+            not isinstance(distillation_targets, list) or not distillation_targets
+            or len(distillation_targets) != len(set(distillation_targets))
+            or any(not isinstance(name, str) or not name.strip()
+                   for name in distillation_targets)):
+        raise ValueError("distillation targets must be unique nonempty names or null")
+    parent_requirements = payload.get("resume_adapter_requirements")
+    if parent_requirements is not None and (
+            not isinstance(parent_requirements, dict) or not parent_requirements):
+        raise ValueError("resume adapter requirements must be a nonempty object or null")
     supervision = payload["action_supervision"]
     if payload.get("decision_objective") not in {"full_action", "hierarchical_binary"}:
         raise ValueError("unknown reasoning decision objective")
@@ -151,7 +165,8 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     return payload
 
 
-def verify_dataset(path: str | Path, *, requirements=None) -> dict:
+def verify_dataset(path: str | Path, *, requirements=None,
+                   required_target_groups=None) -> dict:
     """Reject unreviewed or changed data before loading any large model."""
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text())
@@ -172,6 +187,24 @@ def verify_dataset(path: str | Path, *, requirements=None) -> dict:
         digest = file_digest(filename)
         if digest != manifest["files"][role]:
             raise ValueError(f"{role} dataset changed after audit")
+    if required_target_groups is not None:
+        if (not isinstance(required_target_groups, list) or not required_target_groups
+                or len(required_target_groups) != len(set(required_target_groups))
+                or any(not isinstance(group, str) or not group.strip()
+                       for group in required_target_groups)):
+            raise ValueError("required target groups must be unique nonempty names")
+        required = set(required_target_groups)
+        for role in ("train", "valid"):
+            with (root / f"{role}.jsonl").open() as stream:
+                for row_number, line in enumerate(stream, 1):
+                    targets = json.loads(line).get("targets", {}).get(
+                        "specialist_targets", {})
+                    present = {name.split(".", 1)[0] for name in targets}
+                    missing = required - present
+                    if missing:
+                        raise ValueError(
+                            f"{role} row {row_number} lacks required target groups: "
+                            f"{sorted(missing)}")
     if requirements is not None:
         if (manifest.get("splits") != requirements["expected_splits"]
                 or manifest.get("sealed_start_ns") != requirements["sealed_start_ns"]):
@@ -214,7 +247,7 @@ def view_contract(config: dict) -> dict:
     keys = (
         "model", "data", "input_mode", "projector", "max_seq_length",
         "chat_template_kwargs", "action_verbalizers", "action_supervision",
-        "trust_remote_code", "dataset_requirements",
+        "trust_remote_code", "dataset_requirements", "distillation_targets",
     )
     contract = {key: config.get(key) for key in keys}
     # Loss weights and margin affect optimization, never prepared alternatives.
@@ -237,7 +270,9 @@ system boundary for tests; the production caller loads it with MLX-LM.
 
     config = read_sft_config(config_path, root=root)
     source = Path(config["data"])
-    manifest = verify_dataset(source, requirements=config.get("dataset_requirements"))
+    manifest = verify_dataset(
+        source, requirements=config.get("dataset_requirements"),
+        required_target_groups=config.get("distillation_targets"))
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"MLX view already exists: {output}")
@@ -348,7 +383,8 @@ def verify_mlx_view(config_path, output, *, root=None):
     """Reuse preparation only if its source, recipe and rendered files match."""
     config = read_sft_config(config_path, root=root)
     manifest = verify_dataset(
-        config["data"], requirements=config.get("dataset_requirements"))
+        config["data"], requirements=config.get("dataset_requirements"),
+        required_target_groups=config.get("distillation_targets"))
     output = Path(output)
     receipt = json.loads((output / "view_manifest.json").read_text())
     recorded_contract = receipt.get("view_contract")
@@ -482,7 +518,9 @@ def main(argv=None):
     parser.add_argument("--train", action="store_true", help="Explicitly launch native MLX-LM QLoRA")
     args = parser.parse_args(argv)
     config = read_sft_config(args.config, root=args.root)
-    verify_dataset(config["data"], requirements=config.get("dataset_requirements"))
+    verify_dataset(
+        config["data"], requirements=config.get("dataset_requirements"),
+        required_target_groups=config.get("distillation_targets"))
     if Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path to preserve checkpoints")
     if Path(args.view).exists():

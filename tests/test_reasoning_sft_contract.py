@@ -59,6 +59,71 @@ def test_unreviewed_specialist_dataset_cannot_start_finetuning(tmp_path):
         verify_dataset(tmp_path)
 
 
+def test_market_distillation_requires_every_declared_teacher_group(tmp_path):
+    root = tmp_path / "market"
+    root.mkdir()
+    from propevolve.reasoning_policy.integrity import file_digest
+    record = {
+        "targets": {"specialist_targets": {
+            "expansion.long_probability": 0.8,
+            "regime.chop_probability": 0.1,
+        }}
+    }
+    for role in ("train", "valid"):
+        (root / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
+    manifest = {
+        "schema": "propevolve_reasoning_dataset_v1",
+        "splits": {"train": [0, 100], "valid": [100, 200]},
+        "sealed_start_ns": 200,
+        "files": {role: file_digest(root / f"{role}.jsonl")
+                  for role in ("train", "valid")},
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    (root / "audit.json").write_text(json.dumps({
+        "status": "PASS", "manifest_sha256": file_digest(root / "manifest.json"),
+        "specialist_score_mode": "out_of_fold", "sealed_touched": False,
+    }))
+
+    with pytest.raises(ValueError, match="trend"):
+        verify_dataset(root, required_target_groups=["expansion", "trend", "regime"])
+
+    record["targets"]["specialist_targets"]["trend.long_probability"] = 0.7
+    for role in ("train", "valid"):
+        (root / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
+    manifest["files"] = {role: file_digest(root / f"{role}.jsonl")
+                         for role in ("train", "valid")}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    audit = json.loads((root / "audit.json").read_text())
+    audit["manifest_sha256"] = file_digest(root / "manifest.json")
+    (root / "audit.json").write_text(json.dumps(audit))
+    assert verify_dataset(
+        root, required_target_groups=["expansion", "trend", "regime"]
+    )["schema"] == "propevolve_reasoning_dataset_v1"
+
+
+def test_action_sft_rejects_parent_without_declared_market_distillation():
+    from propevolve.reasoning_policy.model_config import validate_sft_parent_contract
+    child = {
+        "resume_adapter_requirements": {
+            "stage_role": "market_distillation",
+            "distillation_targets": ["expansion", "trend", "regime"],
+        }
+    }
+    smoke = {"stage_role": "smoke", "distillation_targets": ["expansion"]}
+    with pytest.raises(ValueError, match="stage_role"):
+        validate_sft_parent_contract(child, smoke)
+    incomplete = {
+        "stage_role": "market_distillation",
+        "distillation_targets": ["expansion", "regime"],
+    }
+    with pytest.raises(ValueError, match="distillation_targets"):
+        validate_sft_parent_contract(child, incomplete)
+    assert validate_sft_parent_contract(child, {
+        "stage_role": "market_distillation",
+        "distillation_targets": ["regime", "expansion", "trend"],
+    }) is None
+
+
 def test_mastery_dataset_contract_rejects_tiny_golden_corpus(tmp_path):
     root = tmp_path / "golden"
     root.mkdir()

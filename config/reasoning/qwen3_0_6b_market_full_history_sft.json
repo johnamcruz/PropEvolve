@@ -1,0 +1,20 @@
+{
+  "inherits": "market_full_history_sft.json",
+  "model": "mlx-community/Qwen3-0.6B-4bit",
+  "adapter_path": "runs/reasoning-challenger/qwen3-0.6b-market-full-history-adapters",
+  "stage_role": "market_distillation",
+  "distillation_targets": ["expansion", "trend", "regime"],
+  "batch_size": 4,
+  "validation_batch_size": 4,
+  "component_learning_rates": {
+    "lora": 0.00001,
+    "projector": 0.00001
+  },
+  "iters": 300000,
+  "val_batches": 1500,
+  "steps_per_report": 750,
+  "steps_per_eval": 15000,
+  "save_every": 15000,
+  "grad_accumulation_steps": 2,
+  "training_log_prefix": "qwen3-0.6b-market-full-history"
+}
