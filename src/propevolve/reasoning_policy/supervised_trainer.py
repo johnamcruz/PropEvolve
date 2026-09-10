@@ -21,6 +21,19 @@ class EarlyStopTraining(RuntimeError):
     """Private control signal raised only at a completed validation boundary."""
 
 
+def resolve_training_budget(config, *, train_rows, valid_rows):
+    """Resolve an optional epoch ceiling against the actual prepared corpus."""
+    result = dict(config)
+    epochs = config.get("epochs")
+    if epochs is not None:
+        if type(epochs) is not int or epochs < 1:
+            raise ValueError("epochs must be a positive integer or null")
+        batches = math.ceil(train_rows / config["batch_size"])
+        accumulation = config["grad_accumulation_steps"]
+        result["iters"] = math.ceil(epochs * batches / accumulation) * accumulation
+    return result
+
+
 class TrainingEventLog:
     """Human training progress plus durable JSONL machine evidence."""
 
@@ -604,7 +617,7 @@ def pack_examples(rows, *, max_seq_length):
 
 
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
-                   sampling_strategy="random"):
+                   sampling_strategy="random", include_partial=False, skip_batches=0):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
@@ -618,7 +631,11 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             order = balanced_validation_order(dataset, rng=rng)
         else:
             order = rng.permutation(len(dataset)) if loop else np.arange(len(dataset))
-        for start in range(0, len(order) - batch_size + 1, batch_size):
+        stop = len(order) if include_partial else len(order) - batch_size + 1
+        for start in range(0, stop, batch_size):
+            if loop and skip_batches:
+                skip_batches -= 1
+                continue
             rows = [dataset[int(i)] for i in order[start:start + batch_size]]
             yield tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
         if not loop:
@@ -765,11 +782,15 @@ def train_supervised(config, view):
     optimizer = build_optimizer(config)
     from .mlx_sft import PreparedDataset
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
+    config = resolve_training_budget(config, train_rows=len(datasets["train"]),
+                                     valid_rows=len(datasets["valid"]))
     validate_early_stopping_coverage(config, datasets)
     validate_balanced_optimizer_windows(config, datasets["train"])
     destination.mkdir(parents=True)
     (destination / "adapter_config.json").write_text(json.dumps(config, indent=2))
-    train_batches = len(datasets["train"]) // config["batch_size"]
+    train_batches = (math.ceil(len(datasets["train"]) / config["batch_size"])
+                     if config.get("include_partial_batch") else
+                     len(datasets["train"]) // config["batch_size"])
     event_log = TrainingEventLog(
         destination / config["training_log_filename"],
         events_path=destination / config["training_events_filename"],
@@ -790,8 +811,55 @@ def train_supervised(config, view):
     guard = ValidationLossGuard(config["early_stopping"],
         on_improvement=lambda report: (
             best.mkdir(exist_ok=True), export_policy_weights(model, best)))
+    from .training_checkpoint import load_training_state, save_training_state
+    from .integrity import file_digest
+    import tempfile
+    resume = config.get("resume_training_state")
+    resume_iteration = 0
+    # Paths/budget may change for continuation; all learning/data settings must agree.
+    mutable = {"adapter_path", "resume_training_state", "epochs", "iters",
+               "validation_metrics_path", "save_training_state"}
+    identity = {"view_sha256": file_digest(Path(view) / "view_manifest.json"),
+                "config": {key: value for key, value in config.items() if key not in mutable}}
+    if resume is not None:
+        receipt = json.loads((Path(resume) / "receipt.json").read_text())["receipt"]
+        if receipt["identity"] != identity:
+            raise ValueError("training resume data or learner configuration differs")
+        resume_iteration = receipt["iteration"]
+        if (resume_iteration % config["grad_accumulation_steps"]
+                or resume_iteration % config["steps_per_report"]
+                or not 0 <= resume_iteration < config["iters"]):
+            raise ValueError("training resume must be an earlier completed optimizer boundary")
+        load_training_state(resume, model, optimizer)
+        for key, value in receipt["guard"].items():
+            setattr(guard, key, value)
+        if guard.stopped_early:
+            raise ValueError("cannot resume a run already stopped for overfitting")
+        if (Path(resume) / "best").exists():
+            shutil.copytree(Path(resume) / "best", best)
+
+    def snapshot(iteration):
+        if not config.get("save_training_state"):
+            return
+        if not config["early_stopping"]["enabled"]:
+            raise ValueError("resumable SFT requires the validation guard")
+        stage = Path(tempfile.mkdtemp(prefix=".resume-", dir=destination))
+        guard_state = {key: value for key, value in vars(guard).items()
+                       if key not in {"on_improvement"}}
+        save_training_state(stage / "state", model, optimizer,
+                            {"iteration": iteration, "identity": identity, "guard": guard_state})
+        if best.exists():
+            shutil.copytree(best, stage / "state" / "best")
+        latest = destination / "training-state"
+        old = stage / "old"
+        if latest.exists():
+            latest.rename(old)
+        (stage / "state").rename(latest)
+        shutil.rmtree(stage)
     iterator = partial(tensor_batches, seed=config["seed"],
-                       sampling_strategy=config.get("batch_sampling", "random"))
+                       sampling_strategy=config.get("batch_sampling", "random"),
+                       include_partial=config.get("include_partial_batch", False),
+                       skip_batches=resume_iteration)
     def evaluate_loss():
         if config["action_supervision"]["enabled"]:
             value = evaluate_action_validation(model, datasets["valid"], config)
@@ -821,12 +889,25 @@ def train_supervised(config, view):
         adapter_file=str(destination / "adapters.safetensors"), max_seq_length=config["max_seq_length"],
         grad_checkpoint=config["grad_checkpoint"], grad_accumulation_steps=config["grad_accumulation_steps"],
         clear_cache_threshold=config["clear_cache_threshold"])
+    args.iters = config["iters"] - resume_iteration
+    class ResumeCallback:
+        def on_train_loss_report(self, report):
+            report = {**report, "iteration": report["iteration"] + resume_iteration}
+            try:
+                validation.on_train_loss_report(report)
+            finally:
+                if (report["iteration"] % config["save_every"] == 0
+                        or report["iteration"] == config["iters"]):
+                    snapshot(report["iteration"])
+        def on_val_loss_report(self, report):
+            validation.on_val_loss_report(report)
     try:
         try:
-            validation.evaluate(0)
+            if not resume_iteration:
+                validation.evaluate(0)
             train(model, optimizer, datasets["train"], None, args=args,
                 loss=partial(batch_loss, config=config),
-                iterate_batches=iterator, training_callback=validation)
+                iterate_batches=iterator, training_callback=ResumeCallback())
         except EarlyStopTraining:
             print(f"Early stopping at validation iteration {guard.stop_iteration}; "
                   f"best iteration was {guard.best_iteration}.", flush=True)

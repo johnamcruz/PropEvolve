@@ -249,3 +249,5 @@ models/*
 
 # Generated local runtime-audit configs contain resolved artifact locations.
 /config/diagnostics/memory-*-trial-*.json
+
+.tmp/

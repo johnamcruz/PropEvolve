@@ -1,6 +1,6 @@
 {
   "inherits": "market_sft.json",
-  "data": "runs/reasoning-challenger/market-full-history-corpus",
+  "data": "runs/reasoning-challenger/market-all-eligible-corpus",
   "adapter_path": "runs/reasoning-challenger/market-full-history-adapters",
   "training_log_prefix": "market-sft",
   "iters": 1200000,

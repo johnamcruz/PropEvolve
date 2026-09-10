@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--batch-size", required=True, type=int)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--gradients", action="store_true")
-    parser.add_argument("--candidate", choices=("native_ce", "native_prefix", "target_gather"), default="target_gather")
+    parser.add_argument("--candidate", choices=("native_ce", "native_prefix", "target_gather", "compiled_validation"), default="target_gather")
     args = parser.parse_args()
     if args.batch_size < 1 or args.repeats < 1:
         parser.error("batch size and repeats must be positive")
@@ -70,12 +70,13 @@ def main():
         return m(tokens, input_embeddings=joined)[:, prefix.shape[1]:, :]
     def native_ce(logits, targets):
         return -nn.losses.cross_entropy(logits.astype(mx.float32), targets)
-    candidates = {"native_ce": native_ce, "target_gather": original,
+    candidates = {"native_ce": native_ce, "target_gather": original, "compiled_validation": original,
                   "native_prefix": legacy}
     reference_loss = reference_grads = None
     try:
         for name, scoring, compiled in (
-                ("legacy_compiled", legacy, True),
+                ("baseline", original if args.candidate == "compiled_validation" else legacy,
+                 args.candidate != "compiled_validation"),
                 (args.candidate + "_compiled",
                  candidates[args.candidate], True)):
             if name == "native_prefix_compiled":

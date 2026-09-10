@@ -25,6 +25,20 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if not required.issubset(payload):
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
     validate_model_settings(payload)
+    if payload.get("epochs") is not None and (
+            type(payload["epochs"]) is not int or payload["epochs"] < 1):
+        raise ValueError("epochs must be a positive integer or null")
+    for key in ("include_partial_batch", "save_training_state"):
+        if type(payload[key]) is not bool:
+            raise ValueError(f"{key} must be boolean")
+    if payload["epochs"] is not None and not payload["include_partial_batch"]:
+        raise ValueError("epoch training requires complete partial-batch coverage")
+    if payload["include_partial_batch"] and payload["batch_sampling"] != "random":
+        raise ValueError("partial batches require non-oversampled random coverage")
+    if payload["resume_training_state"] is not None and (
+            not isinstance(payload["resume_training_state"], str)
+            or not payload["resume_training_state"].strip()):
+        raise ValueError("resume_training_state must be a path or null")
     stage_role = payload.get("stage_role")
     if stage_role is not None and (not isinstance(stage_role, str) or not stage_role.strip()):
         raise ValueError("SFT stage role must be a nonempty string or null")
@@ -107,6 +121,10 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError("SFT iterations must complete gradient accumulation groups")
     if payload["steps_per_eval"] % payload["steps_per_report"]:
         raise ValueError("SFT evaluation cadence must align with reported optimizer steps")
+    if payload["save_training_state"] and (
+            payload["save_every"] % payload["steps_per_report"]
+            or payload["steps_per_report"] % payload["grad_accumulation_steps"]):
+        raise ValueError("training checkpoints must align with reported optimizer updates")
     lora = payload["lora_parameters"]
     if set(lora) != {"rank", "scale", "dropout"}:
         raise ValueError("LoRA settings require exactly rank, scale and dropout")
@@ -432,13 +450,47 @@ class EncodedDataset:
         return list(row.tokens), row.offset
 
 
+class IndexedJsonRows:
+    """Random-access JSONL with only byte offsets resident in Python memory."""
+
+    def __init__(self, path):
+        from array import array
+        self.path = Path(path)
+        self.offsets = array("Q")
+        with self.path.open("rb") as stream:
+            while True:
+                position = stream.tell()
+                line = stream.readline()
+                if not line:
+                    break
+                if line.strip():
+                    self.offsets.append(position)
+
+    def __len__(self):
+        return len(self.offsets)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        offset = self.offsets[index]
+        with self.path.open("rb") as stream:
+            stream.seek(offset)
+            return json.loads(stream.readline())
+
+    def __iter__(self):
+        with self.path.open("rb") as stream:
+            for line in stream:
+                if line.strip():
+                    yield json.loads(line)
+
+
 class PreparedDataset:
     """Lightweight encoded rows with mmap-backed market context."""
 
     def __init__(self, view, role):
         import numpy as np
         view = Path(view)
-        self.rows = [json.loads(line) for line in (view / f"{role}.jsonl").read_text().splitlines()]
+        self.rows = IndexedJsonRows(view / f"{role}.jsonl")
         receipt = json.loads((view / "view_manifest.json").read_text())
         source = Path(receipt["config"]["data"])
         storage = receipt["source_manifest"].get("embedding_storage", {})

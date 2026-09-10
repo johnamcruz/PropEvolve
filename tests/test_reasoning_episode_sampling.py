@@ -7,6 +7,16 @@ from propevolve.reasoning_policy.job import (
 )
 
 
+def test_uncapped_selection_visits_every_eligible_row_without_class_downsampling():
+    candidates = {"NQ": {
+        "labels": np.asarray([0, 0, 0, 1, 2, -1, 1]),
+        "eligible": np.asarray([True, True, True, True, True, False, False]),
+        "years": np.asarray(["2021"] * 7),
+    }}
+    assert stratified_action_rows(candidates, per_action=None, seed=7) == [
+        ("NQ", 0, 0), ("NQ", 1, 0), ("NQ", 2, 0), ("NQ", 3, 1), ("NQ", 4, 2)]
+
+
 def test_episode_sampling_is_explicit_balanced_and_deterministic():
     first = sample_episode_specs(environment(), tickers=("NQ",), count=4, seed=19)
     second = sample_episode_specs(environment(), tickers=("NQ",), count=4, seed=19)

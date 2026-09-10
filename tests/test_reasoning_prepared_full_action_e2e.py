@@ -108,6 +108,27 @@ def test_prepared_dataset_lazily_resolves_compact_embedding_sidecars(tmp_path):
     assert "market_embeddings" not in prepared
 
 
+def test_prepared_rows_stream_without_reading_whole_file_and_preserve_batch_values(tmp_path, monkeypatch):
+    prepared, _, _ = prepared_action_view(tmp_path, embeddings=True)
+    view = tmp_path / "view"
+    # Filesystem boundary: prohibit whole-file text reads of the row corpus.
+    original = Path.read_text
+    def bounded_read(path, *args, **kwargs):
+        if path.suffix == ".jsonl":
+            raise AssertionError("row corpus must not be read into RAM")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", bounded_read)
+    dataset = PreparedDataset(view, "train")
+    assert len(dataset) == 1
+    expected = pack_examples([prepared], max_seq_length=2048)
+    actual = pack_examples([dataset[0]], max_seq_length=2048)
+    for before, after in zip(expected, actual):
+        np.testing.assert_array_equal(before, after)
+    assert list(dataset.sampling_rows()) == [prepared]
+    with pytest.raises(IndexError):
+        dataset[1]
+
+
 def test_prepared_dataset_reconstructs_exact_window_from_frozen_source_reference(tmp_path):
     cache, embeddings, timestamps, digest = _embedding_cache(tmp_path)
     prepared, original, config = prepared_action_view(tmp_path, embeddings=True)

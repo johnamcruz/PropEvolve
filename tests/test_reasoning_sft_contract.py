@@ -6,6 +6,17 @@ from pathlib import Path
 
 import pytest
 
+
+def test_epoch_budget_scales_to_actual_corpus_and_finishes_optimizer_updates():
+    from propevolve.reasoning_policy.supervised_trainer import resolve_training_budget
+    config = {"epochs": 20, "batch_size": 4, "grad_accumulation_steps": 2,
+              "iters": 10, "val_batches": 2, "validation_batch_size": 4}
+    result = resolve_training_budget(config, train_rows=101, valid_rows=9)
+    assert result["iters"] == 520
+    assert config["iters"] == 10
+    assert resolve_training_budget({**config, "epochs": None},
+                                   train_rows=101, valid_rows=9)["iters"] == 10
+
 from propevolve.reasoning_policy.context import ContextConfig, RollingContext
 from propevolve.reasoning_policy.dataset import context_messages, write_supervised_dataset
 from propevolve.decision import Action

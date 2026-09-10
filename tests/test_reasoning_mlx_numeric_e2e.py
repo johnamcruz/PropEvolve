@@ -56,6 +56,48 @@ def example():
         "market_embeddings": [[0., 0.], [1., 2.], [3., 4.]], "market_available": [False, True, True]}
 
 
+def test_full_coverage_batches_include_partial_tail_and_preserve_rows():
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    rows = [example() for _ in range(5)]
+    for i, row in enumerate(rows):
+        row["market_embeddings"][-1][0] = float(i)
+    batches = list(tensor_batches(rows, 2, 8, include_partial=True))
+    assert [batch[0].shape[0] for batch in batches] == [2, 2, 1]
+    assert [float(value) for batch in batches for value in batch[-2][:, -1, 0].tolist()] == [0., 1., 2., 3., 4.]
+
+
+def test_training_checkpoint_restores_optimizer_rng_and_next_update(tmp_path):
+    from propevolve.reasoning_policy.training_checkpoint import save_training_state, load_training_state
+    from mlx.utils import tree_flatten
+    import mlx.optimizers as optim
+    model = tiny_backbone()
+    optimizer = optim.Adam(learning_rate=1e-4)
+    packed = tuple(mx.array(x) for x in pack_examples([example()], max_seq_length=8))
+    config = {"input_mode": "embeddings", "action_supervision":
+              {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
+    loss = lambda m: batch_loss(m, *packed, config=config)[0]
+    def update(m, opt):
+        _, gradients = nn.value_and_grad(m, loss)(m)
+        opt.update(m, gradients)
+        mx.eval(m.parameters(), opt.state)
+    update(model, optimizer)
+    save_training_state(tmp_path / "state", model, optimizer,
+                        {"iteration": 1, "identity": "same-data"})
+    expected_random = mx.random.uniform(shape=(4,))
+    mx.eval(expected_random)
+    update(model, optimizer)
+    expected = dict(tree_flatten(model.trainable_parameters()))
+    mx.random.seed(7)  # Identical frozen base, as loading the same Qwen checkpoint.
+    restored = tiny_backbone()
+    restored_optimizer = optim.Adam(learning_rate=1e-4)
+    receipt = load_training_state(tmp_path / "state", restored, restored_optimizer)
+    assert receipt == {"iteration": 1, "identity": "same-data"}
+    np.testing.assert_array_equal(mx.random.uniform(shape=(4,)), expected_random)
+    update(restored, restored_optimizer)
+    for name, value in tree_flatten(restored.trainable_parameters()):
+        np.testing.assert_array_equal(value, expected[name])
+
+
 def test_latest_state_plus_causal_deltas_exposes_lifecycle_without_future_rows():
     pooled = np.asarray([[[1., 10.], [3., 14.], [8., 12.]]], np.float32)
     actual = temporal_features(pooled, "latest_plus_deltas", xp=np)

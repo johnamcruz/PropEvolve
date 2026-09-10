@@ -71,9 +71,22 @@ def sample_episode_specs(
 
 
 def stratified_action_rows(candidates, *, per_action, seed):
-    """Choose equal action mass while spreading rows over market and year."""
-    if type(per_action) is not int or per_action < 1 or type(seed) is not int:
+    """Select balanced samples, or all eligible rows when the cap is null."""
+    if ((per_action is not None and (type(per_action) is not int or per_action < 1))
+            or type(seed) is not int):
         raise ValueError("invalid economic action sampling contract")
+    if per_action is None:
+        selected = []
+        for ticker, payload in sorted(candidates.items()):
+            labels = np.asarray(payload["labels"])
+            eligible = np.asarray(payload["eligible"], dtype=bool)
+            if labels.ndim != 1 or labels.shape != eligible.shape:
+                raise ValueError("economic candidates are not aligned")
+            if not np.isin(labels[eligible], [0, 1, 2]).all():
+                raise ValueError("eligible economic row has invalid action")
+            selected.extend((ticker, int(row), int(labels[row]))
+                            for row in np.flatnonzero(eligible))
+        return selected
     rng = np.random.default_rng(seed)
     selected = []
     for action in (int(Action.WAIT), int(Action.ENTER_LONG_1), int(Action.ENTER_SHORT_1)):

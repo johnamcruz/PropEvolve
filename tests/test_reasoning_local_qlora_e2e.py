@@ -153,3 +153,38 @@ def test_local_quantized_embedding_policy_evaluates_without_teacher_lookups(tmp_
         sources=ForbiddenSources(), max_steps=8)
     assert result["teacher_free"] is True
     assert result["episodes"][0]["outcome"] in {"pass", "blow", "timeout"}
+
+
+def test_production_sft_resume_matches_uninterrupted_optimizer_path(tmp_path):
+    from mlx_lm import load
+    from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view, train_prepared
+    from test_reasoning_prepared_full_action_e2e import prepared_action_view
+    import shutil
+    model_path = tiny_quantized_qwen(tmp_path / "model")
+    _, tokenizer = load(model_path)
+    _, _, config = prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer,
+                                        model=model_path, iters=2)
+    config.update(seed=11, val_batches=1, steps_per_report=1, steps_per_eval=1,
+                  save_every=1, trainable_components=["lora", "projector"],
+                  component_learning_rates={"lora": 1e-4, "projector": 1e-3},
+                  save_training_state=True,
+                  early_stopping={"enabled": True, "patience_evaluations": 8,
+                                  "min_delta": 0., "restore_best": True})
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text(json.dumps(config))
+    shutil.rmtree(tmp_path / "view")
+    prepare_mlx_view(recipe, tmp_path / "view", tokenizer=tokenizer)
+    train_prepared(recipe, tmp_path / "view")
+    expected = mx.load(str(Path(config["adapter_path"]) / "training-state" / "weights.safetensors"))
+    # Same prepared data, model and learner; stop after one completed update.
+    first = {**config, "iters": 1, "adapter_path": str(tmp_path / "first")}
+    recipe.write_text(json.dumps(first))
+    train_prepared(recipe, tmp_path / "view")
+    resumed = {**config, "adapter_path": str(tmp_path / "resumed"),
+               "resume_training_state": str(tmp_path / "first" / "training-state")}
+    recipe.write_text(json.dumps(resumed))
+    train_prepared(recipe, tmp_path / "view")
+    actual = mx.load(str(tmp_path / "resumed" / "training-state" / "weights.safetensors"))
+    assert actual.keys() == expected.keys()
+    for name in actual:
+        np.testing.assert_allclose(actual[name], expected[name], atol=1e-6, rtol=1e-6)

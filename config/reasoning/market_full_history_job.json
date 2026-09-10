@@ -10,12 +10,12 @@
   "label_census_output": ".private/research/reasoning-market-label-census.json",
   "label_census_chunk_size": 16384,
   "economic_action_sampling": {
-    "train": {"per_action": 10000, "seed": 4001},
+    "train": {"per_action": null, "seed": 4001},
     "valid": {"per_action": 2000, "seed": 4002}
   },
   "maximum_examples_per_episode": 1,
   "sample_stride": 1,
-  "dataset_output": "runs/reasoning-challenger/market-full-history-corpus",
+  "dataset_output": "runs/reasoning-challenger/market-all-eligible-corpus",
   "mlx_view": "runs/reasoning-challenger/market-full-history-mlx-view",
   "sft_config": "config/reasoning/market_full_history_sft.json",
   "embedding_storage": "source_embedding_reference_v1"
