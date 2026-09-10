@@ -12,6 +12,7 @@
   "market_distillation": null,
   "coverage_sampling": null,
   "prepared_sampling": null,
+  "targeted_sampling": null,
   "include_partial_batch": false,
   "resume_adapter_requirements": null,
   "stage_role": null,

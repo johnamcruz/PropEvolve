@@ -626,16 +626,20 @@ def pack_examples(rows, *, max_seq_length):
 
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
                    sampling_strategy="random", include_partial=False, skip_batches=0,
-                   coverage_sampler=None):
+                   coverage_sampler=None, targeted_sampler=None):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
     if len(dataset) < batch_size:
         raise ValueError("not enough supervised rows for a batch")
+    if coverage_sampler is not None and targeted_sampler is not None:
+        raise ValueError("training batches require one rotating sampler")
     rng = np.random.default_rng(seed)
     round_index = 0
     while True:
-        if loop and coverage_sampler is not None:
+        if loop and targeted_sampler is not None:
+            order = targeted_sampler.order(round_index)
+        elif loop and coverage_sampler is not None:
             order = coverage_sampler.order(round_index)
         elif loop and sampling_strategy == "balanced_actions":
             order = balanced_action_order(dataset, count=len(dataset), rng=rng)
@@ -816,12 +820,25 @@ def train_supervised(config, view):
     from .mlx_sft import PreparedDataset
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
     coverage_sampler = None
+    targeted_sampler = None
     round_rows = len(datasets["train"])
     if config.get("coverage_sampling") is not None:
         from .coverage_sampling import CoverageSampler
         coverage_sampler = CoverageSampler(datasets["train"].sampling_rows(),
             config["coverage_sampling"], seed=config["seed"])
         round_rows = coverage_sampler.round_rows
+    if config.get("targeted_sampling") is not None:
+        from .targeted_subset import TargetedSampler
+        view_manifest_path = Path(view) / "view_manifest.json"
+        view_receipt = json.loads(view_manifest_path.read_text())
+        train_bounds = view_receipt["source_manifest"]["splits"]["train"]
+        targeted_sampler = TargetedSampler.from_assessment(
+            config["targeted_sampling"], view_manifest_path=view_manifest_path,
+            train_bounds=train_bounds, expected_rows=len(datasets["train"]))
+        expected_actions = {row.get("target_name") for row in datasets["train"].sampling_rows()}
+        if set(targeted_sampler.action_names) != expected_actions or None in expected_actions:
+            raise ValueError("targeted assessment does not preserve every training action")
+        round_rows = targeted_sampler.round_rows
     config = resolve_training_budget(config, train_rows=round_rows,
                                      valid_rows=len(datasets["valid"]))
     validate_early_stopping_coverage(config, datasets)
@@ -830,7 +847,7 @@ def train_supervised(config, view):
     (destination / "adapter_config.json").write_text(json.dumps(config, indent=2))
     train_batches = (math.ceil(round_rows / config["batch_size"])
                      if config.get("include_partial_batch") else
-                     len(datasets["train"]) // config["batch_size"])
+                     round_rows // config["batch_size"])
     event_log = TrainingEventLog(
         destination / config["training_log_filename"],
         events_path=destination / config["training_events_filename"],
@@ -841,7 +858,12 @@ def train_supervised(config, view):
     event_log.record_start({
         "train_rows": len(datasets["train"]),
         "training_rows_per_round": round_rows,
-        "training_strata": None if coverage_sampler is None else len(coverage_sampler.groups),
+        "training_pool_rows": (len(datasets["train"]) if targeted_sampler is None
+                               else targeted_sampler.pool_rows),
+        "training_strata": (len(coverage_sampler.groups) if coverage_sampler is not None
+                            else len(targeted_sampler.groups)
+                            if targeted_sampler is not None else None),
+        "targeted_sampling": targeted_sampler is not None,
         "valid_rows": len(datasets["valid"]),
         "evaluation_every_iterations": config["steps_per_eval"],
         "evaluation_every_epochs": config["steps_per_eval"] / train_batches,
@@ -902,6 +924,7 @@ def train_supervised(config, view):
                        sampling_strategy=config.get("batch_sampling", "random"),
                        include_partial=config.get("include_partial_batch", False),
                        coverage_sampler=coverage_sampler,
+                       targeted_sampler=targeted_sampler,
                        skip_batches=resume_iteration)
     def evaluate_loss():
         if config.get("market_distillation") is not None:

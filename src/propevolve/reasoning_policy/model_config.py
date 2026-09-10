@@ -131,6 +131,12 @@ Hub IDs are not paths. Local relative models must use model_source='local'.
         for key in ("adapter_path", "data", "resume_adapter_file"):
             if payload.get(key) is not None:
                 payload[key] = str((root / payload[key]).resolve())
+        if payload.get("targeted_sampling") is not None:
+            targeted = dict(payload["targeted_sampling"])
+            if targeted.get("assessment_path") is not None:
+                targeted["assessment_path"] = str(
+                    (root / targeted["assessment_path"]).resolve())
+            payload["targeted_sampling"] = targeted
         if payload.get("model_source") == "local":
             payload["model"] = str((root / payload["model"]).resolve())
         payload["workspace_root"] = str(root)

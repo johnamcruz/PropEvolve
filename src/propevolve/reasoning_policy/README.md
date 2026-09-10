@@ -57,6 +57,15 @@ correct examples. Validation used to select training is development evidence;
 never relabel it as untouched evaluation. A completed assessment does not prove
 trade mastery or economic generalization.
 
+Action SFT may consume a completed assessment through `targeted_sampling` in
+JSON. The setting pins the assessment directory plus the SHA-256 identities of
+`scores.jsonl` and `summary.json`, a per-ticker/action/year row budget, the
+mistake fraction and a seed. Training fails closed unless the scores cover the
+entire prepared training role and the summary names the same prepared-view
+manifest. Each round rotates unresolved rows while retaining already-correct
+rows, then balances all legal action classes. Validation remains the complete,
+fixed chronological selection role; its errors never enter this sampler.
+
 SFT owns trade mastery: WAIT/Long/Short setup selection, entry timing, HOLD
 through valid continuation, and CLOSE on weakening, reversal or deteriorating
 economics. RL starts only from an audited five-action SFT adapter and owns

@@ -58,10 +58,20 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     validate_coverage(payload["coverage_sampling"])
     from .coverage_sampling import validate_prepared_sampling
     validate_prepared_sampling(payload["prepared_sampling"])
+    from .targeted_subset import validate_targeted_sampling
+    validate_targeted_sampling(payload["targeted_sampling"])
     if payload["coverage_sampling"] is not None and (
             payload["batch_sampling"] != "random" or not payload["include_partial_batch"]
             or supervision["enabled"]):
         raise ValueError("coverage sampling requires partial-batch market training")
+    if payload["targeted_sampling"] is not None and (
+            payload["coverage_sampling"] is not None
+            or payload["prepared_sampling"] is not None
+            or payload["batch_sampling"] != "balanced_actions"
+            or payload["include_partial_batch"]
+            or not supervision["enabled"]):
+        raise ValueError(
+            "targeted sampling requires full-view balanced action training")
     from .market_distillation import validate_market_distillation
     distillation = payload["market_distillation"]
     validate_market_distillation(distillation)
