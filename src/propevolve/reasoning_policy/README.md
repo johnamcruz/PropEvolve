@@ -66,6 +66,34 @@ manifest. Each round rotates unresolved rows while retaining already-correct
 rows, then balances all legal action classes. Validation remains the complete,
 fixed chronological selection role; its errors never enter this sampler.
 
+### Corrective trade-mastery campaign
+
+The reasoning-policy replacement for recurrent replay is a resumable sequence
+of frozen assessment and short corrective SFT rounds:
+
+```sh
+python -m propevolve.reasoning_policy.corrective_campaign \
+  --config config/reasoning/corrective_trade_mastery_campaign.json
+```
+
+Each round assesses the accepted parent over the complete development role,
+selects unresolved mistakes plus previously mastered anchors with balanced
+action/ticker/year mass, fine-tunes a new immutable candidate, and reassesses
+the parent and candidate over the same fixed chronological validation rows. A
+candidate becomes the next parent only when mistake margins improve while every
+WAIT/Long/Short/HOLD/CLOSE boundary retains its mastered rows and no task
+regresses beyond the configured tolerance. A rejected candidate never becomes
+the parent.
+
+The state file receipts every assessment and adapter artifact by SHA-256. An
+interrupted run resumes the incomplete round and skips only authenticated
+completed phases. Training selection uses only the development assessment;
+validation rows are acceptance evidence and never corrective examples. The
+campaign does not use 2025 or sealed 2026, does not contain challenge rewards,
+and does not change the R2D2 campaign. After five-action trade mastery passes,
+the accepted SFT adapter is the mandatory parent for the separate reasoning RL
+stage that learns pass/blow/near-blow economics.
+
 SFT owns trade mastery: WAIT/Long/Short setup selection, entry timing, HOLD
 through valid continuation, and CLOSE on weakening, reversal or deteriorating
 economics. RL starts only from an audited five-action SFT adapter and owns

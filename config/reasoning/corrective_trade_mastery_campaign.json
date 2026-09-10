@@ -1,0 +1,31 @@
+{
+  "schema": "propevolve_reasoning_corrective_campaign_v1",
+  "workspace_root": ".",
+  "state_file": "runs/reasoning-challenger/corrective-trade-mastery/campaign-state.json",
+  "output_root": "runs/reasoning-challenger/corrective-trade-mastery",
+  "initial_policy_config": "config/diagnostics/trade_inference_assessment_sft.json",
+  "sft_template_config": "config/diagnostics/trade_inference_assessment_sft.json",
+  "prepared_view": "runs/reasoning-challenger/trade-inference-assessment/view",
+  "rounds": 5,
+  "initial_assessments": {
+    "train": null,
+    "valid": null
+  },
+  "subset": {
+    "rows_per_group": 16,
+    "mistake_fraction": 0.75,
+    "seed": 17
+  },
+  "acceptance": {
+    "primary_metric": "worst_task_advantage",
+    "minimum_primary_improvement": 0.01,
+    "minimum_mean_mistake_advantage_delta": 0.01,
+    "minimum_retained_mastery_rate": 0.98,
+    "maximum_per_action_mistake_regression": 0.0,
+    "maximum_per_task_advantage_regression": 0.0
+  },
+  "timeouts": {
+    "assessment_seconds": 21600,
+    "training_seconds": 21600
+  }
+}
