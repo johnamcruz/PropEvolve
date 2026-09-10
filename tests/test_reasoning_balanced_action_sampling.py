@@ -89,3 +89,31 @@ def test_indexed_trade_mastery_repeats_sparse_hold_close_without_diluting_them()
     }
     for start in range(0, len(labels), 5):
         assert set(labels[start:start + 5]) == set(counts)
+
+
+def test_indexed_trade_mastery_balances_globally_when_one_ticker_lacks_close():
+    """Natural sparse management labels must not block five-action training."""
+    rows = []
+    for ticker, actions in {
+        "NQ": ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"),
+        "YM": ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD"),
+    }.items():
+        for target in actions:
+            rows.append({
+                "target_name": target,
+                "market_embedding_reference": {
+                    "ticker": ticker, "row": len(rows), "available_count": 20,
+                },
+            })
+
+    order = balanced_action_order(rows, count=20, rng=np.random.default_rng(31))
+    labels = [rows[index]["target_name"] for index in order]
+
+    assert Counter(labels) == {
+        "WAIT": 4, "ENTER_LONG_1": 4, "ENTER_SHORT_1": 4,
+        "HOLD": 4, "CLOSE": 4,
+    }
+    for start in range(0, len(labels), 5):
+        assert set(labels[start:start + 5]) == {
+            "WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE",
+        }

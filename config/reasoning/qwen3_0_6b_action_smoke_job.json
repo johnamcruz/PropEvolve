@@ -1,0 +1,6 @@
+{
+  "inherits": "action_mastery_selection_job.json",
+  "status": "qwen3_0_6b_five_action_learnability_smoke",
+  "mlx_view": "runs/reasoning-challenger/qwen3-0.6b-action-smoke-mlx-view",
+  "sft_config": "config/reasoning/qwen3_0_6b_action_smoke_sft.json"
+}

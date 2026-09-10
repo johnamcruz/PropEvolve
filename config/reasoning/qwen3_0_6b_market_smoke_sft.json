@@ -1,0 +1,6 @@
+{
+  "inherits": "market_sft.json",
+  "model": "mlx-community/Qwen3-0.6B-4bit",
+  "adapter_path": "runs/reasoning-challenger/qwen3-0.6b-market-smoke-adapters",
+  "training_log_prefix": "qwen3-0.6b-market-smoke"
+}

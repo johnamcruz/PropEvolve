@@ -333,24 +333,23 @@ def balanced_action_order(rows, *, count, rng):
         for index, row in enumerate(sampling_rows):
             by_ticker.setdefault(references[index]["ticker"], {}).setdefault(
                 row["target_name"], []).append(index)
-        if any(set(group) != set(names) for group in by_ticker.values()):
-            raise ValueError("indexed balanced sampling requires every action per ticker")
-        order = []
-        ticker_order = list(rng.permutation(sorted(by_ticker)))
-        windows, remainder = divmod(count // len(names), len(ticker_order))
-        for ticker_index, ticker in enumerate(ticker_order):
-            local = by_ticker[ticker]
-            queues = {name: list(rng.permutation(local[name])) for name in names}
-            cursors = {name: 0 for name in names}
-            local_windows = windows + (1 if ticker_index < remainder else 0)
-            for _ in range(local_windows):
-                for name in names:
-                    if cursors[name] == len(queues[name]):
-                        queues[name] = list(rng.permutation(local[name]))
-                        cursors[name] = 0
-                    order.append(int(queues[name][cursors[name]]))
-                    cursors[name] += 1
-        return np.asarray(order, dtype=np.int64)
+        if all(set(group) == set(names) for group in by_ticker.values()):
+            order = []
+            ticker_order = list(rng.permutation(sorted(by_ticker)))
+            windows, remainder = divmod(count // len(names), len(ticker_order))
+            for ticker_index, ticker in enumerate(ticker_order):
+                local = by_ticker[ticker]
+                queues = {name: list(rng.permutation(local[name])) for name in names}
+                cursors = {name: 0 for name in names}
+                local_windows = windows + (1 if ticker_index < remainder else 0)
+                for _ in range(local_windows):
+                    for name in names:
+                        if cursors[name] == len(queues[name]):
+                            queues[name] = list(rng.permutation(local[name]))
+                            cursors[name] = 0
+                        order.append(int(queues[name][cursors[name]]))
+                        cursors[name] += 1
+            return np.asarray(order, dtype=np.int64)
     queues = {name: list(rng.permutation(groups[name])) for name in names}
     cursors = {name: 0 for name in names}
     order = []
