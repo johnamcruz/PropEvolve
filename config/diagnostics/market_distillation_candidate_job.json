@@ -1,0 +1,5 @@
+{
+  "workspace_root": ".",
+  "sft_config": "config/diagnostics/market_distillation_candidate_sft.json",
+  "mlx_view": "runs/reasoning-challenger/market-distillation-candidate/market-view"
+}

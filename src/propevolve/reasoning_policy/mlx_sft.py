@@ -54,6 +54,27 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
             not isinstance(parent_requirements, dict) or not parent_requirements):
         raise ValueError("resume adapter requirements must be a nonempty object or null")
     supervision = payload["action_supervision"]
+    from .coverage_sampling import validate_coverage
+    validate_coverage(payload["coverage_sampling"])
+    from .coverage_sampling import validate_prepared_sampling
+    validate_prepared_sampling(payload["prepared_sampling"])
+    if payload["coverage_sampling"] is not None and (
+            payload["batch_sampling"] != "random" or not payload["include_partial_batch"]
+            or supervision["enabled"]):
+        raise ValueError("coverage sampling requires partial-batch market training")
+    from .market_distillation import validate_market_distillation
+    distillation = payload["market_distillation"]
+    validate_market_distillation(distillation)
+    if distillation is not None and (
+            supervision["enabled"] or payload["input_mode"] != "embeddings"
+            or payload["stage_role"] != "market_distillation"
+            or payload["market_loss_chunk_size"] is not None):
+        raise ValueError("direct market distillation requires embedding market SFT only")
+    chunk_size = payload["market_loss_chunk_size"]
+    if chunk_size is not None and (
+            type(chunk_size) is not int or chunk_size < 1
+            or supervision["enabled"] or payload["input_mode"] != "embeddings"):
+        raise ValueError("chunked loss requires a positive chunk size and embedding market SFT")
     if payload.get("decision_objective") not in {"full_action", "hierarchical_binary"}:
         raise ValueError("unknown reasoning decision objective")
     if (type(supervision["enabled"]) is not bool or any(
@@ -268,6 +289,12 @@ def view_contract(config: dict) -> dict:
         "trust_remote_code", "dataset_requirements", "distillation_targets",
     )
     contract = {key: config.get(key) for key in keys}
+    if config.get("market_distillation") is not None:
+        contract["market_distillation"] = config["market_distillation"]
+    if config.get("coverage_sampling") is not None:
+        contract["coverage_sampling"] = config["coverage_sampling"]
+    if config.get("prepared_sampling") is not None:
+        contract["prepared_sampling"] = config["prepared_sampling"]
     # Loss weights and margin affect optimization, never prepared alternatives.
     supervision = contract["action_supervision"]
     contract["action_supervision"] = {
@@ -297,10 +324,18 @@ system boundary for tests; the production caller loads it with MLX-LM.
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".mlx-sft-view-", dir=output.parent))
     try:
+        prepared_counts = {}
         for role in ("train", "valid"):
             count = 0
+            selected = None
+            if config.get("prepared_sampling") is not None:
+                from .coverage_sampling import select_prepared_rows
+                selected = select_prepared_rows(source / f"{role}.jsonl",
+                    config["prepared_sampling"], role=role)
             with (source / f"{role}.jsonl").open() as raw, (temporary / f"{role}.jsonl").open("x") as target:
-                for line in raw:
+                for source_index, line in enumerate(raw):
+                    if selected is not None and source_index not in selected:
+                        continue
                     record = json.loads(line)
                     messages = record["messages"]
                     if [item["role"] for item in messages] != ["system", "user", "assistant"]:
@@ -312,10 +347,16 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         reserved = projector_prefix_tokens(config["projector"])
                     else:
                         reserved = 0
-                    tokens, offset = encode_completion(tokenizer, messages[:-1], verbalizer,
-                        max_seq_length=config["max_seq_length"] - reserved,
-                        chat_template_kwargs=config["chat_template_kwargs"])
-                    encoded = {"tokens": tokens, "offset": offset}
+                    if config.get("market_distillation") is not None:
+                        from .market_distillation import encode_market_targets
+                        encoded = encode_market_targets(record, config["market_distillation"],
+                            tokenizer, max_seq_length=config["max_seq_length"] - reserved,
+                            chat_template_kwargs=config["chat_template_kwargs"])
+                    else:
+                        tokens, offset = encode_completion(tokenizer, messages[:-1], verbalizer,
+                            max_seq_length=config["max_seq_length"] - reserved,
+                            chat_template_kwargs=config["chat_template_kwargs"])
+                        encoded = {"tokens": tokens, "offset": offset}
                     if config["action_supervision"]["enabled"]:
                         from .supervision import action_targets
                         alternatives = action_targets(record)
@@ -349,7 +390,7 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         elif "market_embedding_index" in record:
                             index = record["market_embedding_index"]
                             storage = manifest.get("embedding_storage", {}).get("roles", {}).get(role)
-                            if (type(index) is not int or index != count or storage is None
+                            if (type(index) is not int or index != source_index or storage is None
                                     or storage["shape"][1:] != [projector["context_steps"],
                                                                projector["embedding_dim"]]):
                                 raise ValueError("supervised record lacks matching compact embedding window")
@@ -378,15 +419,21 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             encoded["causal_state"] = [
                                 float(history[-1, fields.index(field)]) for field in state_fields
                             ]
+                    if config.get("coverage_sampling") is not None:
+                        from .coverage_sampling import coverage_metadata
+                        encoded["coverage"] = coverage_metadata(record, config["coverage_sampling"])
                     target.write(json.dumps(encoded) + "\n")
                     count += 1
-            if count != manifest["counts"][role] or count < config["batch_size"]:
+            expected_count = manifest["counts"][role] if selected is None else len(selected)
+            if count != expected_count or count < config["batch_size"]:
                 raise ValueError(f"{role} sample count mismatch or incomplete batch")
+            prepared_counts[role] = count
         effective = {**config, "data": str(output.resolve())}
         (temporary / "sft.json").write_text(json.dumps(effective, indent=2))
         (temporary / "source_manifest.json").write_text(json.dumps(manifest, indent=2))
         (temporary / "view_manifest.json").write_text(json.dumps({
             "config": config, "view_contract": view_contract(config),
+            "prepared_counts": prepared_counts,
             "source_manifest": manifest,
             "files": {role: file_digest(temporary / f"{role}.jsonl") for role in ("train", "valid")},
         }, indent=2))

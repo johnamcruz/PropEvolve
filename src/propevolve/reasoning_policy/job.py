@@ -639,6 +639,7 @@ def label_census_job(path):
     action_names = {int(action): action.name for action in (
         Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)}
     for role in ("train", "valid"):
+        role_source, role_bounds = collection_source_for_role(config, source, role, splits)
         role_counts = {name: 0 for name in action_names.values()}
         role_years = {}
         ticker_reports = {}
@@ -646,7 +647,7 @@ def label_census_job(path):
             single = dict(config)
             single["tickers"] = {**config["tickers"], role: [ticker]}
             include_specialists = role in tuple(config.get("specialist_supervision_roles", ("train",)))
-            env, sources = load_role(single, root, source, role,
+            env, sources = load_role(single, root, role_source, role,
                                      include_specialists=include_specialists)
             market = env.markets[ticker]
             labels = classify_market_action_rows(
@@ -680,7 +681,7 @@ def label_census_job(path):
             for name, value in counts.items():
                 role_counts[name] += value
         report["roles"][role] = {
-            "bounds_ns": splits[role], "eligible_rows": sum(role_counts.values()),
+            "bounds_ns": role_bounds, "eligible_rows": sum(role_counts.values()),
             "actions": role_counts, "years": role_years, "tickers": ticker_reports,
         }
     destination.parent.mkdir(parents=True, exist_ok=True)

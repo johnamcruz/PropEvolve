@@ -240,3 +240,34 @@ existing R2D2 campaign is unchanged.
 
 Passing mechanics tests are necessary but not an economic claim. The challenger
 remains unpromoted until the temporal SFT and challenge-economics gates above pass.
+## Optional direct market distillation
+
+`market_distillation` replaces verbose teacher-answer JSON with fixed query
+positions and independent soft-probability losses. It keeps the same causal FFM
+embedding projector, Qwen backbone, LoRA optimizer, and teacher-free policy.
+All declared specialist channels must match the dataset exactly. No extra model
+or prediction head is introduced. A null setting preserves token SFT.
+
+Use `config/reasoning/qwen3_0_6b_market_probability_sft.json` for this objective.
+The coverage variant adds deterministic rotating ticker/year/teacher-context
+sampling. Its bins control training coverage, not legal actions or entry gates.
+An epoch with coverage enabled is one sampled round, not a complete pool pass.
+Validation remains fixed and is not selected by training errors.
+
+Market distillation teaches Expansion/Trend/Regime. Existing action SFT retains
+entry, direction, HOLD/CLOSE and economic supervision; RL retains challenge
+objectives. Better teacher Brier scores do not establish better trading.
+
+For the bounded direct-market-to-trade path:
+
+```sh
+python -m propevolve.reasoning_policy.workflow \
+  --config config/diagnostics/market_distillation_candidate_workflow.json
+```
+
+This runs direct market distillation followed by trade SFT through the existing
+workflow; it does not run old-model comparisons. Stage logs and immutable receipts
+are written under the configured output directory. `prepared_sampling` explicitly
+selects a fixed diagnostic slice; leave it null for full-pool training. Original
+datasets are not modified. Software tests and teacher fit are not trade-mastery
+or promotion evidence. 2026 remains sealed.

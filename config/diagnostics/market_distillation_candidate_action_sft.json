@@ -1,0 +1,7 @@
+{
+  "inherits": "market_distillation_action_sft.json",
+  "adapter_path": "runs/reasoning-challenger/market-distillation-candidate/action",
+  "resume_adapter_file": "runs/reasoning-challenger/market-distillation-candidate/market/adapters.safetensors",
+  "resume_adapter_requirements": {"stage_role": "market_distillation", "distillation_targets": ["expansion", "trend", "regime"]},
+  "training_log_prefix": "trade-sft"
+}

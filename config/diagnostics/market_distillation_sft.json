@@ -1,0 +1,13 @@
+{
+  "inherits": "../reasoning/qwen3_0_6b_market_probability_sft.json",
+  "data": "runs/reasoning-challenger/market-full-history-corpus",
+  "adapter_path": "runs/reasoning-challenger/market-distillation-diagnostic",
+  "epochs": null,
+  "iters": 8,
+  "steps_per_report": 2,
+  "steps_per_eval": 8,
+  "save_every": 8,
+  "save_training_state": false,
+  "prepared_sampling": {"fields": ["ticker", "year"], "rows_per_stratum": {"train": 4, "valid": 4}, "seed": 17},
+  "early_stopping": {"enabled": true, "monitor": "val_loss", "mode": "min", "patience_evaluations": 2, "min_delta": 0.0, "restore_best": true}
+}

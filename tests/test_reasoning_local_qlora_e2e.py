@@ -47,6 +47,106 @@ def tiny_quantized_qwen(path, *, tied=False):
     return path
 
 
+def test_short_query_market_training_reloads_without_teacher_inputs(tmp_path):
+    from mlx_lm import load
+    from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view, train_prepared, PreparedDataset, read_sft_config
+    from propevolve.reasoning_policy.integrity import file_digest
+    from propevolve.reasoning_policy.market_distillation import evaluate_market_validation
+    from propevolve.reasoning_policy.policy import MLXActionPolicy
+    from test_reasoning_prepared_full_action_e2e import prepared_action_view
+    from test_reasoning_market_distillation import settings
+    model_path = tiny_quantized_qwen(tmp_path / "model")
+    _, tokenizer = load(model_path)
+    _, _, config = prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer,
+        model=model_path, iters=4)
+    data = tmp_path / "data"
+    for role in ("train", "valid"):
+        record = json.loads((data / f"{role}.jsonl").read_text())
+        record["targets"]["specialist_targets"] = {"expansion.long": .85, "expansion.short": .15}
+        (data / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
+    manifest = json.loads((data / "manifest.json").read_text())
+    manifest["files"] = {role: file_digest(data / f"{role}.jsonl") for role in ("train", "valid")}
+    (data / "manifest.json").write_text(json.dumps(manifest))
+    audit = json.loads((data / "audit.json").read_text())
+    audit["manifest_sha256"] = file_digest(data / "manifest.json")
+    (data / "audit.json").write_text(json.dumps(audit))
+    config.update(stage_role="market_distillation", market_distillation=settings(),
+        action_supervision={"enabled": False, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25},
+        seed=11, val_batches=1, validation_batch_size=1, steps_per_report=1,
+        steps_per_eval=1, save_every=4, trainable_components=["lora", "projector"],
+        component_learning_rates={"lora": 1e-3, "projector": 1e-3})
+    recipe = tmp_path / "direct.json"
+    recipe.write_text(json.dumps(config))
+    view = tmp_path / "direct-view"
+    prepare_mlx_view(recipe, view, tokenizer=tokenizer)
+    train_prepared(recipe, view)
+    events = [json.loads(line) for line in (tmp_path / "adapter" / "training.events.jsonl").read_text().splitlines()]
+    # The production validation receipt, not a separate toy loss loop.
+    reports = [event for event in events if "market_brier" in event]
+    assert reports[-1]["market_brier"] < reports[0]["market_brier"]
+    policy = MLXActionPolicy.load(model_path, adapter_path=tmp_path / "adapter",
+        input_mode="embeddings", projector=config["projector"], max_seq_length=2048)
+    restored = evaluate_market_validation(policy.model, PreparedDataset(view, "valid"), read_sft_config(recipe))
+    assert restored["market_brier"] == pytest.approx(min(r["market_brier"] for r in reports), abs=1e-5)
+
+
+def test_direct_market_adapter_feeds_trade_sft_in_existing_workflow(tmp_path):
+    from mlx_lm import load
+    from propevolve.reasoning_policy.workflow import run_workflow
+    from propevolve.reasoning_policy.integrity import file_digest
+    from test_reasoning_prepared_full_action_e2e import prepared_action_view
+    from test_reasoning_market_distillation import settings
+    import shutil
+    model_path = tiny_quantized_qwen(tmp_path / "model")
+    _, tokenizer = load(model_path)
+    _, _, action = prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer,
+        model=model_path, iters=2)
+    action.update(seed=11, validation_batch_size=1, val_batches=1, steps_per_report=1,
+        steps_per_eval=1, save_every=2, trainable_components=["lora", "projector"],
+        component_learning_rates={"lora": 1e-3, "projector": 1e-3})
+    data = tmp_path / "market-data"
+    shutil.copytree(tmp_path / "data", data)
+    for role in ("train", "valid"):
+        record = json.loads((data / f"{role}.jsonl").read_text())
+        target = {"expansion.long": .85, "expansion.short": .15}
+        record["targets"]["specialist_targets"] = target
+        record["messages"][-1]["content"] = json.dumps(target)
+        (data / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
+    manifest = json.loads((data / "manifest.json").read_text())
+    manifest["files"] = {role: file_digest(data / f"{role}.jsonl") for role in ("train", "valid")}
+    (data / "manifest.json").write_text(json.dumps(manifest))
+    audit = json.loads((data / "audit.json").read_text())
+    audit["manifest_sha256"] = file_digest(data / "manifest.json")
+    (data / "audit.json").write_text(json.dumps(audit))
+    market = {**action, "data": str(data), "stage_role": "market_distillation",
+        "distillation_targets": ["expansion"],
+        "market_distillation": settings(), "adapter_path": str(tmp_path / "market-adapter"),
+        "action_supervision": {"enabled": False, "margin": .25, "soft_target_weight": 1., "ranking_weight": 1.}}
+    action.update(resume_adapter_file=str(tmp_path / "market-adapter/adapters.safetensors"),
+                  resume_adapter_requirements={"stage_role": "market_distillation",
+                                               "distillation_targets": ["expansion"]})
+    (tmp_path / "market.json").write_text(json.dumps(market))
+    (tmp_path / "action.json").write_text(json.dumps(action))
+    steps = []
+    for name, adapter in (("market", "market-adapter"), ("action", "adapter")):
+        job = {"workspace_root": str(tmp_path), "sft_config": f"{name}.json",
+               "mlx_view": f"{name}-workflow-view"}
+        (tmp_path / f"{name}-job.json").write_text(json.dumps(job))
+        steps.append({"id": name, "stage": "train", "job_config": f"{name}-job.json",
+            "inputs": [f"{name}.json"], "outputs": [f"{adapter}/training_selection.json",
+                f"{adapter}/adapters.safetensors", f"{adapter}/projector.safetensors"],
+            "log": f"{name}.log", "timeout_seconds": 120})
+    plan = {"workspace_root": str(tmp_path), "state_file": "state.json", "steps": steps}
+    path = tmp_path / "workflow.json"
+    path.write_text(json.dumps(plan))
+    result = run_workflow(path)
+    assert result["status"] == "COMPLETE"
+    assert set(result["completed"]) == {"market", "action"}
+    saved = json.loads((tmp_path / "adapter/adapter_config.json").read_text())
+    assert saved["resume_adapter_file"] == action["resume_adapter_file"]
+    assert "status=complete" in (tmp_path / "adapter/training.log").read_text()
+
+
 def test_local_quantized_model_learns_full_action_labels_and_reloads(tmp_path):
     from mlx_lm import load
     from propevolve.reasoning_policy.mlx_sft import train_prepared
@@ -192,7 +292,6 @@ def test_production_sft_resume_matches_uninterrupted_optimizer_path(tmp_path):
 
 @pytest.mark.parametrize("tied", [False, True])
 def test_chunked_market_head_preserves_unequal_completion_gradients(tmp_path, tied):
-    from scripts.benchmark_reasoning_sft import chunked_market_outputs
     from mlx_lm import load
     from mlx_lm.tuner.utils import linear_to_lora_layers
     from mlx.utils import tree_flatten
@@ -211,9 +310,12 @@ def test_chunked_market_head_preserves_unequal_completion_gradients(tmp_path, ti
              "market_available": [True, True, True]}]
     packed = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=8))
     config = {"input_mode": "embeddings", "action_supervision": {"enabled": False}}
+    with pytest.raises(ValueError, match="market SFT"):
+        batch_loss(model, *packed, config={**config, "market_loss_chunk_size": 3,
+                   "action_supervision": {"enabled": True}})
     expected, gradients = nn.value_and_grad(model, lambda m: batch_loss(m, *packed, config=config)[0])(model)
     actual, chunk_gradients = nn.value_and_grad(model, lambda m:
-        chunked_market_outputs(m, *packed, config=config, chunk_size=3)[0])(model)
+        batch_loss(m, *packed, config={**config, "market_loss_chunk_size": 3})[0])(model)
     np.testing.assert_allclose(actual, expected, atol=1e-5, rtol=1e-5)
     reference = dict(tree_flatten(gradients))
     for name, gradient in tree_flatten(chunk_gradients):

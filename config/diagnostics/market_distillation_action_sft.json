@@ -1,0 +1,13 @@
+{
+  "inherits": "../reasoning/qwen3_0_6b_action_hierarchical_sft.json",
+  "adapter_path": "runs/reasoning-challenger/market-distillation-action-diagnostic",
+  "epochs": null,
+  "iters": 10,
+  "steps_per_report": 5,
+  "steps_per_eval": 10,
+  "save_every": 10,
+  "validation_batch_size": 1,
+  "resume_adapter_file": null,
+  "resume_adapter_requirements": null,
+  "validation_metrics_path": null
+}

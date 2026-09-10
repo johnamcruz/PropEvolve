@@ -611,21 +611,33 @@ def pack_examples(rows, *, max_seq_length):
     if len({np.asarray(x).shape for x in embeddings}) != 1:
         raise ValueError("embedding windows must share one configured shape")
     available = [row.get("market_available", [True]) for row in rows]
-    return (tokens, offsets, lengths, valid, probabilities, values, task_codes,
+    packed = (tokens, offsets, lengths, valid, probabilities, values, task_codes,
             np.asarray(causal_states, np.float32),
             np.asarray(embeddings, np.float32), np.asarray(available, bool))
+    market = [row.get("market_targets") for row in rows]
+    if any(item is not None for item in market):
+        if not all(item is not None for item in market):
+            raise ValueError("cannot mix market distillation and token training rows")
+        return packed + tuple(np.asarray([item[key] for item in market], dtype=dtype)
+            for key, dtype in (("positions", np.int32), ("probabilities", np.float32),
+                               ("weights", np.float32), ("label_ids", np.int32)))
+    return packed
 
 
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
-                   sampling_strategy="random", include_partial=False, skip_batches=0):
+                   sampling_strategy="random", include_partial=False, skip_batches=0,
+                   coverage_sampler=None):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
     if len(dataset) < batch_size:
         raise ValueError("not enough supervised rows for a batch")
     rng = np.random.default_rng(seed)
+    round_index = 0
     while True:
-        if loop and sampling_strategy == "balanced_actions":
+        if loop and coverage_sampler is not None:
+            order = coverage_sampler.order(round_index)
+        elif loop and sampling_strategy == "balanced_actions":
             order = balanced_action_order(dataset, count=len(dataset), rng=rng)
         elif not loop and sampling_strategy == "balanced_actions":
             order = balanced_validation_order(dataset, rng=rng)
@@ -640,6 +652,7 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             yield tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
         if not loop:
             return
+        round_index += 1
 
 
 def selected_token_scores(logits, targets):
@@ -651,7 +664,21 @@ def selected_token_scores(logits, targets):
 
 
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-                   causal_states, embeddings, available, *, config):
+                   causal_states, embeddings, available, query_positions=None,
+                   teacher_probabilities=None, teacher_weights=None, label_ids=None, *, config):
+    if config.get("market_distillation") is not None:
+        if query_positions is None:
+            raise ValueError("market distillation requires an authenticated short-query view")
+        from .market_distillation import market_outputs
+        return market_outputs(model, tokens, embeddings, available, causal_states,
+            query_positions, teacher_probabilities, teacher_weights, label_ids)
+    if query_positions is not None:
+        raise ValueError("short-query view cannot be trained with token loss")
+    if config.get("market_loss_chunk_size") is not None:
+        from .chunked_loss import chunked_market_outputs
+        return chunked_market_outputs(model, tokens, offsets, lengths, valid, probabilities,
+            values, task_codes, causal_states, embeddings, available, config=config,
+            chunk_size=config["market_loss_chunk_size"])
     import mlx.core as mx
     from .projector import market_logits
     batch_size, actions, sequence_length = tokens.shape
@@ -708,10 +735,12 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
 
 
 def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-               causal_states, embeddings, available, *, config):
+               causal_states, embeddings, available, query_positions=None,
+               teacher_probabilities=None, teacher_weights=None, label_ids=None, *, config):
     loss, tokens_count, _ = _batch_outputs(
         model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-        causal_states, embeddings, available, config=config)
+        causal_states, embeddings, available, query_positions, teacher_probabilities,
+        teacher_weights, label_ids, config=config)
     return loss, tokens_count
 
 
@@ -782,13 +811,20 @@ def train_supervised(config, view):
     optimizer = build_optimizer(config)
     from .mlx_sft import PreparedDataset
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
-    config = resolve_training_budget(config, train_rows=len(datasets["train"]),
+    coverage_sampler = None
+    round_rows = len(datasets["train"])
+    if config.get("coverage_sampling") is not None:
+        from .coverage_sampling import CoverageSampler
+        coverage_sampler = CoverageSampler(datasets["train"].sampling_rows(),
+            config["coverage_sampling"], seed=config["seed"])
+        round_rows = coverage_sampler.round_rows
+    config = resolve_training_budget(config, train_rows=round_rows,
                                      valid_rows=len(datasets["valid"]))
     validate_early_stopping_coverage(config, datasets)
     validate_balanced_optimizer_windows(config, datasets["train"])
     destination.mkdir(parents=True)
     (destination / "adapter_config.json").write_text(json.dumps(config, indent=2))
-    train_batches = (math.ceil(len(datasets["train"]) / config["batch_size"])
+    train_batches = (math.ceil(round_rows / config["batch_size"])
                      if config.get("include_partial_batch") else
                      len(datasets["train"]) // config["batch_size"])
     event_log = TrainingEventLog(
@@ -800,6 +836,8 @@ def train_supervised(config, view):
     )
     event_log.record_start({
         "train_rows": len(datasets["train"]),
+        "training_rows_per_round": round_rows,
+        "training_strata": None if coverage_sampler is None else len(coverage_sampler.groups),
         "valid_rows": len(datasets["valid"]),
         "evaluation_every_iterations": config["steps_per_eval"],
         "evaluation_every_epochs": config["steps_per_eval"] / train_batches,
@@ -859,9 +897,13 @@ def train_supervised(config, view):
     iterator = partial(tensor_batches, seed=config["seed"],
                        sampling_strategy=config.get("batch_sampling", "random"),
                        include_partial=config.get("include_partial_batch", False),
+                       coverage_sampler=coverage_sampler,
                        skip_batches=resume_iteration)
     def evaluate_loss():
-        if config["action_supervision"]["enabled"]:
+        if config.get("market_distillation") is not None:
+            from .market_distillation import evaluate_market_validation
+            value = evaluate_market_validation(model, datasets["valid"], config)
+        elif config["action_supervision"]["enabled"]:
             value = evaluate_action_validation(model, datasets["valid"], config)
         else:
             value = evaluate(model, datasets["valid"],

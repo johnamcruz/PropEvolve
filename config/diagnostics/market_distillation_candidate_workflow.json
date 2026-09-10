@@ -1,0 +1,22 @@
+{
+  "workspace_root": ".",
+  "state_file": "runs/reasoning-challenger/market-distillation-candidate/state.json",
+  "steps": [
+    {
+      "id": "market", "stage": "train",
+      "job_config": "config/diagnostics/market_distillation_candidate_job.json",
+      "inputs": ["runs/reasoning-challenger/market-full-history-corpus/manifest.json", "runs/reasoning-challenger/market-full-history-corpus/audit.json"],
+      "outputs": ["runs/reasoning-challenger/market-distillation-candidate/market/adapters.safetensors", "runs/reasoning-challenger/market-distillation-candidate/market/projector.safetensors", "runs/reasoning-challenger/market-distillation-candidate/market/training_selection.json"],
+      "log": "runs/reasoning-challenger/market-distillation-candidate/market.log",
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "trade", "stage": "train",
+      "job_config": "config/diagnostics/market_distillation_candidate_action_job.json",
+      "inputs": ["runs/reasoning-challenger/market-distillation-candidate/market/adapters.safetensors", "runs/reasoning-challenger/market-distillation-candidate/market/projector.safetensors", "runs/reasoning-challenger/action-mastery-inner-corpus/manifest.json", "runs/reasoning-challenger/action-mastery-inner-corpus/audit.json"],
+      "outputs": ["runs/reasoning-challenger/market-distillation-candidate/action/adapters.safetensors", "runs/reasoning-challenger/market-distillation-candidate/action/projector.safetensors", "runs/reasoning-challenger/market-distillation-candidate/action/training_selection.json"],
+      "log": "runs/reasoning-challenger/market-distillation-candidate/action.log",
+      "timeout_seconds": 1800
+    }
+  ]
+}

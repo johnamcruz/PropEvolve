@@ -251,3 +251,6 @@ models/*
 /config/diagnostics/memory-*-trial-*.json
 
 .tmp/
+
+# Generated local recipes contain resolved private artifact locations.
+/config/generated/

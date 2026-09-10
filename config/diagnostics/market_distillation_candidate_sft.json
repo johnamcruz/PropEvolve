@@ -1,0 +1,8 @@
+{
+  "inherits": "market_distillation_sft.json",
+  "adapter_path": "runs/reasoning-challenger/market-distillation-candidate/market",
+  "epochs": 3,
+  "steps_per_eval": 28,
+  "save_every": 28,
+  "training_log_prefix": "market-distillation"
+}
