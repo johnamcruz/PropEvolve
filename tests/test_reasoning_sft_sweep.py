@@ -183,6 +183,25 @@ def test_grid_sweep_evaluates_each_configured_pair_once(tmp_path):
     assert len(observed) == len(set(observed)) == 4
 
 
+def test_sweep_rounds_epoch_budget_to_complete_optimizer_group(tmp_path):
+    path = _sweep(tmp_path, trials=4)
+    payload = json.loads(path.read_text())
+    manifest = Path(payload["view"]) / "view_manifest.json"
+    receipt = json.loads(manifest.read_text())
+    receipt["source_manifest"]["counts"]["train"] = 19
+    manifest.write_text(json.dumps(receipt))
+    output = tmp_path / "trial.json"
+
+    config = materialize_trial_config(load_sft_sweep(path), {
+        "learning_rate": 3e-5, "soft_weight": 0.25,
+        "ranking_weight": 2.0, "margin": 0.4,
+    }, trial_number=7, output=output)
+
+    assert config["iters"] == 39
+    assert config["iters"] % config["grad_accumulation_steps"] == 0
+    assert config["steps_per_eval"] == 19
+
+
 def test_sweep_rejects_validation_that_touches_unseen_evaluation(tmp_path):
     path = _sweep(tmp_path)
     payload = json.loads(path.read_text())

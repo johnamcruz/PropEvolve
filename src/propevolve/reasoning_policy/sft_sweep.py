@@ -217,7 +217,9 @@ def materialize_trial_config(sweep: SFTSweep, parameters: dict, *,
     valid_batches = counts["valid"] // config["batch_size"]
     if (train_batches < 1 or valid_batches * config["batch_size"] != counts["valid"]):
         raise ValueError("SFT sweep corpus does not form complete batches")
-    config["iters"] = sweep.trial["epochs"] * train_batches
+    requested_iterations = sweep.trial["epochs"] * train_batches
+    accumulation = config["grad_accumulation_steps"]
+    config["iters"] = math.ceil(requested_iterations / accumulation) * accumulation
     config["steps_per_eval"] = sweep.trial["evaluation_every_epochs"] * train_batches
     config["save_every"] = sweep.trial["save_every_epochs"] * train_batches
     config["val_batches"] = valid_batches
@@ -226,8 +228,6 @@ def materialize_trial_config(sweep: SFTSweep, parameters: dict, *,
         "patience_evaluations": sweep.trial["patience_evaluations"],
         "restore_best": True, "monitor": "worst_action_advantage", "mode": "max",
     }
-    if config["iters"] % config["grad_accumulation_steps"]:
-        raise ValueError("configured epoch budget bisects an optimizer accumulation group")
     trial_root = sweep.study_root / "trials" / f"trial-{trial_number:03d}"
     config["adapter_path"] = str(trial_root / "adapter")
     config["validation_metrics_path"] = str(trial_root / "validation-metrics.jsonl")
