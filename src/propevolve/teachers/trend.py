@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 from torch import nn
 
-from ..agent import resolve_device
+from ..hardware import resolve_device
 from ..cache import EmbeddingCache
 from .base import BaseTeacher
 from .expansion import _flush_scores, _validate_source_receipt

@@ -35,8 +35,7 @@ floor.
 
 ## Architecture
 
-PropEvolve exposes one deterministic trading-policy interface with two
-configurable implementations:
+PropEvolve exposes one deterministic reasoning-policy interface:
 
 ```text
 causal completed bars
@@ -45,15 +44,10 @@ frozen FFM/Chronos2 embeddings ── normalized account, MLL and execution stat
         │                                      │
         └──────────────────┬───────────────────┘
                            │
-                  TradingPolicy interface
-                           │
-             ┌─────────────┴─────────────┐
-             │                           │
-       C51 / R2D2 policy          reasoning-model policy
-     recurrent Q distributions    quantized local backbone
-      and bounded replay          + causal market projector
-             │                    + 20-bar rolling context
-             └─────────────┬─────────────┘
+                  reasoning-model policy
+                  quantized local backbone
+                  + causal market projector
+                  + 20-bar rolling context
                            │
                legal Wait / Long / Short
                  or Hold / Close action
@@ -67,12 +61,9 @@ frozen FFM/Chronos2 embeddings ── normalized account, MLL and execution stat
 Expansion / Trend / Regime teachers ──► training labels and losses only
 ```
 
-The C51/R2D2 implementation is the established recurrent baseline and remains
-available as a fallback. The reasoning-model implementation is a challenger:
-it uses a configurable MLX-LM backbone on Apple silicon, scores only legal
-action completions, and can be selected without changing the environment or
-execution contract. C51 Q values and reasoning-model log likelihoods share an
-action interface but are not treated as interchangeable scores.
+The reasoning model uses a configurable MLX-LM backbone on Apple silicon and
+scores only legal action completions. Model and adapter selection is JSON-driven;
+changing either does not change the environment or execution contract.
 
 The policy uses one state-dependent discrete action set:
 
@@ -93,16 +84,8 @@ model learns when and how to trade; it cannot override those invariants.
 
 Authenticated teacher outputs are training-only supervision. They never enter
 the deployed policy observation and are never required during teacher-free
-validation or inference. Both implementations consume the same causal market,
-account, execution, and legal-action contracts.
-
-The recurrent curriculum teaches the policy to:
-
-- enter Long when Long Expansion is strong, the Expansion-anchored Regime is
-  ready/non-chop, and Short evidence does not dominate;
-- mirror the rule for Short;
-- wait when Expansion is weak, directions conflict, the exact economic setup
-  failed, or persistent chop dominates.
+validation or inference. The deployed policy consumes causal FFM embeddings,
+trade-management state, and legal actions.
 
 Training results do not promote a model. Candidates are evaluated greedily and
 teacher-free using pass rate, blow rate, near-blow incidence, expectancy,
@@ -127,10 +110,10 @@ actions to generalize, positive trade expectancy, at least the configured
 40% win-rate floor, and a configured 3R average winner. RL may start only from
 that saved five-action SFT parent and alone optimizes challenge economics.
 
-The challenger is not promoted merely because supervised loss improves. It
+The policy is not promoted merely because supervised loss improves. It
 must master all action boundaries, survive save/reload, generalize to unseen
 2025 data, and improve teacher-free economics. The year 2026 remains sealed for
-final confirmation. Until those gates pass, C51/R2D2 remains the fallback.
+final confirmation.
 
 ## Causal inputs and evidence
 

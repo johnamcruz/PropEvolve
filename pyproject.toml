@@ -5,12 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "propevolve"
 version = "0.1.0"
-description = "A self-improving recurrent RL trading agent driven by frozen FFM embeddings."
+description = "A reasoning trading policy trained from frozen FFM embeddings and prop-challenge RL."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = [
-  "ml-training-loop @ git+https://github.com/johnamcruz/ML-training-loop.git@9150279a179598484ff284b116ef990e6c206a37",
   "numpy>=1.26",
   "optuna>=4.8,<5",
   "pandas>=2.1",
@@ -25,14 +24,10 @@ ffm = [
   "futures-foundation-model[foundation] @ git+https://github.com/johnamcruz/Futures-Foundation-Model.git@fbb96c3",
 ]
 
-[project.scripts]
-propevolve = "propevolve.cli:main"
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/propevolve"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"config/defaults.json" = "propevolve/defaults.json"
 "config/reasoning/defaults.json" = "propevolve/reasoning_policy/defaults.json"
 
 [tool.hatch.metadata]

@@ -1307,7 +1307,7 @@ class HistoricalChallengeEnv:
         )
 
     def causal_trade_context(self) -> dict[str, float]:
-        """Optional reasoning inputs, separate from the frozen C51 observation.
+        """Optional causal trade-management inputs for the reasoning policy.
 
         Excursions include only completed bars while the current position was
         open. R uses the original trade risk; values are gross price excursions,

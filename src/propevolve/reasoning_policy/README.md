@@ -1,8 +1,8 @@
-# Reasoning-policy challenger
+# Reasoning trading policy
 
-Optional teacher-free trading-policy challenger. The existing C51 policy and
-challenge environment remain available and unchanged. This implementation is
-not an economically validated replacement until temporal SFT and RL gates pass.
+Teacher-free reasoning-model policy built on the unchanged shared challenge
+environment. It is not economically validated until temporal SFT and RL gates
+pass.
 
 ## Current path
 
@@ -30,7 +30,7 @@ not an economically validated replacement until temporal SFT and RL gates pass.
    Inputs are loss-masked. Overlength samples fail rather than
    silently truncate. The first model candidate is quantized, so LoRA is QLoRA.
 8. `policy.MLXActionPolicy` scores only legal action completions. These scores
-   are log likelihoods, not C51 Q values. Evaluation reports five-action trade
+   are log likelihoods, not action values. Evaluation reports five-action trade
    mastery separately from existing simulator challenge outcomes and explicitly
    reports specialist dependence.
 
@@ -68,8 +68,8 @@ fixed chronological selection role; its errors never enter this sampler.
 
 ### Corrective trade-mastery campaign
 
-The reasoning-policy replacement for recurrent replay is a resumable sequence
-of frozen assessment and short corrective SFT rounds:
+The corrective reasoning workflow is a resumable sequence of frozen assessment
+and short SFT rounds:
 
 ```sh
 python -m propevolve.reasoning_policy.corrective_campaign \
@@ -89,8 +89,8 @@ The state file receipts every assessment and adapter artifact by SHA-256. An
 interrupted run resumes the incomplete round and skips only authenticated
 completed phases. Training selection uses only the development assessment;
 validation rows are acceptance evidence and never corrective examples. The
-campaign does not use 2025 or sealed 2026, does not contain challenge rewards,
-and does not change the R2D2 campaign. After five-action trade mastery passes,
+campaign does not use 2025 or sealed 2026 and does not contain challenge rewards.
+After five-action trade mastery passes,
 the accepted SFT adapter is the mandatory parent for the separate reasoning RL
 stage that learns pass/blow/near-blow economics.
 
@@ -124,7 +124,7 @@ The reasoning context also selects completed-trade-history fields by name:
 current open-trade MFE/MAE in original-risk units, current R, giveback from MFE,
 holding bars, and explicit open-position/risk-availability masks. They come from
 one shared simulator snapshot used by collection and evaluation. They do not
-extend or reorder the C51 observation. MFE/MAE are gross price excursions;
+alter the core market embedding. MFE/MAE are gross price excursions;
 account equity and economic labels retain the simulator's fees. Final future
 excursions are NOT inference inputs. These inputs can support learning exits,
 but their presence is not evidence that the model has learned profitable exits.
@@ -160,9 +160,8 @@ python -m propevolve.reasoning_policy.job --config config/reasoning/development.
 ```
 
 Run from the declared workspace root. Source recipes reuse existing market/cache
-loaders and challenge configuration, not the C51 campaign runner. Scratch
-trade-mastery collection uses economic barrier and position-path labels; it does
-not inherit V21/C51 action rankings. Dataset audit is a separate required stage:
+loaders and challenge configuration. Scratch trade-mastery collection uses
+economic barrier and position-path labels. Dataset audit is a separate required stage:
 collection never authors its own passing causality receipt.
 
 Preparation is reusable only when its rendered data, audited source and effective
@@ -253,24 +252,12 @@ five-action update/reload smoke have been executed in this implementation sessio
 - Require the declared pass, blow and near-blow gates on unseen 2025. Keep 2026
   sealed for the final frozen confirmation.
 
-## Conditional retirement of R2D2
+## Policy selection
 
-Do not delete the incumbent because this branch builds or its tests pass. Keep
-the accepted checkpoint and a reproducible baseline until matched chronological
-evaluation establishes challenger economic lift without unacceptable blow or
-near-blow regression. Then archive the accepted baseline's recipe and evidence,
-identify callers of C51-only learner/replay/teacher-loss code, and remove only
-those obsolete paths in a separate reviewed change. Preserve the shared market
-data, simulator, execution, prop-risk, label and evaluation modules. No such
-retirement or old-run deletion is performed by the challenger implementation.
-# Shared policy selection
-
-`propevolve.policy.TradingPolicy` is the shared deterministic decision interface.
-`R2D2Policy` and `ReasoningPolicy` inherit it and expose `reset()` and
-`decide(PolicyInput)`. The R2D2 adapter owns recurrent state and its configured
-reset horizon. The reasoning adapter consumes an episode-local rolling context.
-Both return a legal action and scores tagged as Q-values or log likelihoods;
-these scores are not equivalent or calibrated pass probabilities.
+`propevolve.policy.TradingPolicy` is the deterministic decision interface.
+`ReasoningPolicy` consumes an episode-local rolling context and exposes
+`reset()` and `decide(PolicyInput)`. It returns a legal action and sequence
+log-likelihood scores; these are not calibrated pass probabilities.
 
 Set a job's `policy_config` to an arbitrary JSON path. For reasoning:
 
@@ -278,25 +265,13 @@ Set a job's `policy_config` to an arbitrary JSON path. For reasoning:
 {"kind": "reasoning", "model_config": "config/reasoning/evaluation.json"}
 ```
 
-For R2D2, supply the actual existing checkpoint and its recurrent horizon:
-
-```json
-{"kind": "r2d2", "checkpoint": "runs/your-checkpoint.pt",
- "device": "cpu", "learner_backend": "pytorch", "recurrent_horizon": 150}
-```
-
 Paths resolve against the job's workspace root. The numbers/paths above are
 examples, not Python defaults. `config/reasoning/shared_evaluation_job.json`
-demonstrates selection while inheriting the existing job. Existing recipes
-without `policy_config` retain their prior evaluation loading path.
+demonstrates selection while inheriting the existing job. The reasoning adapter
+uses the frozen-embedding projector and is teacher-free at inference;
+Expansion/Trend/Regime targets are training-only.
 
-Both adapters use the same challenge evaluator. R2D2 skips specialist context
-construction. The reasoning adapter uses the implemented frozen-embedding
-projector and is teacher-free at inference; Expansion/Trend/Regime targets are
-training-only. C51 and LoRA/RL learning algorithms remain separate, and the
-existing R2D2 campaign is unchanged.
-
-Passing mechanics tests are necessary but not an economic claim. The challenger
+Passing mechanics tests are necessary but not an economic claim. The policy
 remains unpromoted until the temporal SFT and challenge-economics gates above pass.
 ## Optional direct market distillation
 

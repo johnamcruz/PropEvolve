@@ -1,7 +1,7 @@
 """Audited, prompt-masked QLoRA through MLX-LM's native trainer.
 
 Importing this module loads neither MLX nor a model. Preparing/launching are
-explicit operations, never side effects of importing the C51 application.
+explicit operations, never side effects of importing the application package.
 """
 
 import argparse

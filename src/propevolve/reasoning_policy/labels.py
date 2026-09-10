@@ -137,14 +137,12 @@ def label_entry_opportunity(
     market, *, decision: int, role_end: int, horizon: int, risk_dollars: float,
     point_value: float, round_trip_fee: float, target_r: float, stop_r: float,
 ) -> tuple[bool, bool] | None:
-    """Reuse the accepted next-open barrier semantics without changing C51.
+    """Apply the reasoning policy's next-open economic barrier semantics.
 
 None is censored, never a failed setup. True means net target before adverse;
 False means adverse first or target not reached within the complete horizon.
 These are setup labels, not account-aware action prescriptions.
     """
-    from ..entry_supervision import _target_before_adverse
-
     if (type(decision) is not int or type(role_end) is not int
             or type(horizon) is not int or decision < 0 or horizon < 1
             or not decision < role_end <= len(market.close)):
@@ -163,6 +161,52 @@ These are setup labels, not account-aware action prescriptions.
     ) for side in ("long", "short"))
 
 
+def _target_before_adverse(
+    open_: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    *,
+    decision: int,
+    role_end: int,
+    side: str,
+    risk_dollars: float,
+    point_value: float,
+    round_trip_fee: float,
+    target_r: float,
+    adverse_r: float,
+    horizon: int,
+) -> bool:
+    """Return whether a net target is reached before the adverse barrier.
+
+    Entries fill at the next open. Because OHLC bars do not expose intrabar
+    ordering, an adverse and favorable touch on the same bar is conservatively
+    classified as a failure.
+    """
+    fill_index = decision + 1
+    stop = fill_index + horizon
+    if fill_index >= role_end or stop > role_end:
+        return False
+    favorable_points = (target_r * risk_dollars + round_trip_fee) / point_value
+    adverse_points = (adverse_r * risk_dollars - round_trip_fee) / point_value
+    if not adverse_points > 0.0:
+        raise ValueError("entry supervision adverse distance must be positive")
+    entry = float(open_[fill_index])
+    for index in range(fill_index, stop):
+        if side == "long":
+            favorable = float(high[index]) - entry
+            adverse = entry - float(low[index])
+        elif side == "short":
+            favorable = entry - float(low[index])
+            adverse = float(high[index]) - entry
+        else:
+            raise ValueError("side must be long or short")
+        if adverse >= adverse_points:
+            return False
+        if favorable >= favorable_points:
+            return True
+    return False
+
+
 def classify_market_action_rows(
     market, *, role_end, risk_dollars, point_value, round_trip_fee,
     horizon, target_rs, stop_r, chunk_size=16384,
@@ -171,7 +215,7 @@ def classify_market_action_rows(
 
     This is the exhaustive-corpus counterpart of ``label_market_actions``.
     It returns Action integer values and -1 for the censored tail. OHLC ties
-    remain adverse-first, exactly like ``_target_before_adverse``.
+    remain adverse-first, exactly like the scalar barrier implementation.
     """
     if (type(role_end) is not int or type(horizon) is not int or type(chunk_size) is not int
             or not 1 <= role_end <= len(market.close) or horizon < 1 or chunk_size < 1):

@@ -1,6 +1,6 @@
 """Bounded on-policy adapter learning from complete simulator episodes.
 
-Actor-only clipped policy gradient, not C51 and not a claim of full PPO/GRPO.
+Actor-only clipped policy gradient; not a claim of full PPO/GRPO.
 Repeated identical episode starts supply independent sampled trajectories and
 a leave-one-out return baseline. No critic or second large reference model.
 """

@@ -1,6 +1,6 @@
 """Sequential, explicit challenger stages in isolated processes.
 
-This is not the C51 promotion campaign. It runs the existing challenger commands
+It runs the reasoning-policy commands
 and stops on the first failing stage. Resume skips only receipts whose configured
 inputs and outputs still match. It never generates a passing scientific audit.
 """

@@ -16,7 +16,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from ..agent import resolve_device
+from ..hardware import resolve_device
 from ..cache import EmbeddingCache
 from .base import BaseTeacher
 

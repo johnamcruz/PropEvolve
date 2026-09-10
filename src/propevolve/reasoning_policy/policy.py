@@ -15,7 +15,7 @@ class MLXActionPolicy:
 
 This first policy is action-only, using a reasoning-capable backbone. It does
 not claim that free-form generated chain-of-thought has been trained or tested.
-Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
+Scores are sequence log likelihoods, not calibrated pass probabilities.
     """
 
     requires_specialists = True

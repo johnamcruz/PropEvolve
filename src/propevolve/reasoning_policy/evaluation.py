@@ -38,7 +38,7 @@ def evaluate_policy(policy, environment, *, episodes, context_config, sources, m
                     near_blow_headroom_fraction=None, on_decision=None):
     """Evaluate explicit episode starts, with no teacher-free claim.
 
-Returns economic receipts, not C51-specific action-value diagnostics. The caller
+Returns economic receipts, not action-value diagnostics. The caller
 must use exactly the same starts/environment settings for the baseline. A
 resource cap is an error, never a fabricated economic timeout.
     """

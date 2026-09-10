@@ -52,34 +52,6 @@ def _decision(action, scores, kind, legal):
     return PolicyDecision(action, scores, kind)
 
 
-class R2D2Policy(TradingPolicy):
-    requires_specialists = False
-    requires_context = False
-
-    def __init__(self, agent, *, recurrent_horizon):
-        if type(recurrent_horizon) is not int or recurrent_horizon < 1:
-            raise ValueError("recurrent_horizon must be positive")
-        self.agent = agent
-        self.recurrent_horizon = recurrent_horizon
-        self.reset()
-
-    def reset(self):
-        self._hidden = None
-        self._steps = 0
-
-    def decide(self, inputs):
-        if not inputs.legal_actions:
-            raise ValueError("policy requires legal actions")
-        if self._steps % self.recurrent_horizon == 0:
-            self._hidden = None
-        action, self._hidden, values = self.agent.select_action(inputs.observation,
-            hidden=self._hidden, valid_actions=inputs.legal_actions, epsilon=0,
-            return_action_values=True)
-        self._steps += 1
-        return _decision(action, {item.name: float(values[int(item)])
-            for item in inputs.legal_actions}, "q_value", inputs.legal_actions)
-
-
 class ReasoningPolicy(TradingPolicy):
     @property
     def requires_specialists(self):
@@ -105,11 +77,6 @@ def load_policy(path, *, root):
     config = read_recipe(path)
     root = Path(root)
     kind = config.get("kind")
-    if kind == "r2d2":
-        from .agent import RecurrentC51Agent
-        agent, _ = RecurrentC51Agent.load(root / config["checkpoint"],
-            device=config["device"], learner_backend_override=config["learner_backend"])
-        return R2D2Policy(agent, recurrent_horizon=config["recurrent_horizon"])
     if kind == "reasoning":
         from .reasoning_policy.policy import MLXActionPolicy
         return ReasoningPolicy(MLXActionPolicy.from_config(root / config["model_config"], root=root))

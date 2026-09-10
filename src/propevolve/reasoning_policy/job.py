@@ -226,12 +226,7 @@ def readiness(path):
         if not config.get(key) or not resolve(root, config[key]).is_file():
             blockers.append(key)
     policy = config.get("collection_policy", {})
-    if policy.get("kind") in {None, "frozen_c51"}:
-        if not policy.get("checkpoint") or not resolve(root, policy["checkpoint"]).is_file():
-            blockers.append("collection_policy.checkpoint")
-        if not policy.get("sha256"):
-            blockers.append("collection_policy.sha256")
-    elif policy.get("kind") != "reset_states":
+    if policy != {"kind": "reset_states"}:
         blockers.append("collection_policy.kind")
     if importlib.util.find_spec("mlx_lm") is None:
         blockers.append("mlx_lm")
@@ -252,10 +247,10 @@ def readiness(path):
 
 
 def load_source_contract(config, root):
-    """Reuse source recipe defaults, not the C51 campaign runner or its gates."""
-    from ..config import materialize_effective_config
+    """Authenticate the reasoning-only market and simulator source."""
+    from .source_config import load_source_recipe
     source_path = resolve(root, config["source_recipe"])
-    source = materialize_effective_config(json.loads(source_path.read_text()))
+    source = load_source_recipe(source_path)
     audit = json.loads(resolve(root, config["temporal_split_audit"]).read_text())
     if (audit.get("status") != "PASS"
             or audit.get("source_recipe_sha256") != file_digest(source_path)
@@ -282,14 +277,14 @@ def load_source_contract(config, root):
 
 
 def publish_source_audit(path):
-    """Authenticate the exact local source, teachers and continuation policy.
+    """Authenticate the exact local source and training-only teachers.
 
     Specialist caches are inspected only for the declared supervision roles.
     The unseen action-validation role needs embeddings and prices, never teacher
     scores.  The receipt is atomic and cannot overwrite reviewed evidence.
     """
-    from ..config import materialize_effective_config
     from .context import ContextConfig
+    from .source_config import load_source_recipe
     import hashlib
 
     config, root = read_job(path)
@@ -297,7 +292,7 @@ def publish_source_audit(path):
     if destination.exists():
         raise FileExistsError(f"source audit already exists: {destination}")
     source_path = resolve(root, config["source_recipe"])
-    source = materialize_effective_config(json.loads(source_path.read_text()))
+    source = load_source_recipe(source_path)
     temporal = source["temporal"]
     ns = lambda value: int(np.datetime64(value, "ns").astype(np.int64))
     splits = {role: [ns(temporal[f"{prefix}_start"]), ns(temporal[f"{prefix}_end"])]
@@ -330,23 +325,7 @@ def publish_source_audit(path):
             "specialists": list(kinds),
             "dataset_bounds": dataset_bounds,
         }
-    policy = config["collection_policy"]
-    if policy.get("kind") == "frozen_c51":
-        checkpoint = resolve(root, policy["checkpoint"])
-        if file_digest(checkpoint) != policy["sha256"]:
-            raise ValueError("collection checkpoint identity mismatch")
-        recipe_path = resolve(root, policy["recipe"])
-        if file_digest(recipe_path) != policy["recipe_sha256"]:
-            raise ValueError("collection policy recipe identity mismatch")
-        continuation_recipe = json.loads(recipe_path.read_text())
-        fit_end = ns(continuation_recipe["temporal"]["train_end"])
-        if fit_end > splits["valid"][0]:
-            raise ValueError("collection policy was fitted through unseen validation")
-        continuation = {"kind": "frozen_c51", "checkpoint_sha256": policy["sha256"],
-                        "recipe_sha256": policy["recipe_sha256"], "fit_end_ns": fit_end}
-    elif policy.get("kind") == "reset_states" and set(policy) == {"kind"}:
-        continuation = {"kind": "reset_states"}
-    else:
+    if config["collection_policy"] != {"kind": "reset_states"}:
         raise ValueError("invalid collection policy contract")
     effective_identity = hashlib.sha256(
         json.dumps(source, sort_keys=True, allow_nan=False).encode()).hexdigest()
@@ -357,7 +336,7 @@ def publish_source_audit(path):
         "specialist_score_mode": config["specialist_score_mode"],
         "specialist_supervision_roles": list(specialist_roles),
         "sealed_touched": False, "splits": splits, "roles": role_receipts,
-        "continuation": continuation,
+        "continuation": {"kind": "reset_states"},
     }
     if audit["specialist_score_mode"] not in {"out_of_fold", "post_fit"}:
         raise ValueError("unknown specialist score mode")
@@ -414,44 +393,17 @@ def load_role(config, root, source, role, *, include_specialists=True):
 
 
 def collection_factory(config, root):
-    """Load one frozen baseline, sharing weights but never recurrent state."""
+    """Build the passive causal collector used for scratch trade labels."""
     policy = config["collection_policy"]
-    if policy.get("kind") == "reset_states":
-        if set(policy) != {"kind"}:
-            raise ValueError("reset-state collection accepts no prior-policy settings")
-        def factory():
-            def decide(observation, info):
-                legal = tuple(Action(value) for value in info["valid_actions"])
-                for candidate in (Action.WAIT, Action.HOLD):
-                    if candidate in legal:
-                        return candidate
-                raise ValueError("reset-state collector has no passive legal action")
-            return decide
-        return factory
-    if policy["kind"] != "frozen_c51":
-        raise ValueError("collection currently requires a declared frozen C51 continuation")
-    path = resolve(root, policy["checkpoint"])
-    if file_digest(path) != policy["sha256"]:
-        raise ValueError("collection checkpoint identity mismatch")
-    horizon = policy["recurrent_horizon"]
-    if type(horizon) is not int or horizon < 1:
-        raise ValueError("continuation recurrent horizon must be positive")
-    from ..agent import RecurrentC51Agent
-    agent, _ = RecurrentC51Agent.load(path, device=policy["device"],
-                                    learner_backend_override=policy["learner_backend"])
-
+    if policy != {"kind": "reset_states"}:
+        raise ValueError("reasoning collection requires reset states")
     def factory():
-        hidden, steps = None, 0
         def decide(observation, info):
-            nonlocal hidden, steps
-            if steps % horizon == 0:
-                hidden = None
-            action, hidden, _ = agent.select_action(
-                observation, hidden=hidden, valid_actions=tuple(info["valid_actions"]),
-                epsilon=0.0,
-            )
-            steps += 1
-            return action
+            legal = tuple(Action(value) for value in info["valid_actions"])
+            for candidate in (Action.WAIT, Action.HOLD):
+                if candidate in legal:
+                    return candidate
+            raise ValueError("reset-state collector has no passive legal action")
         return decide
     return factory
 
@@ -488,21 +440,11 @@ def collect_job(path):
     kind = config["dataset_kind"]
     if kind not in {"action", "market"}:
         raise ValueError("dataset_kind must be action or market")
-    continuation = audit.get("continuation", {})
-    policy = config["collection_policy"]
-    if policy["kind"] == "frozen_c51":
-        if (continuation.get("kind") not in {None, "frozen_c51"}
-                or continuation.get("checkpoint_sha256") != policy["sha256"]
-                or type(continuation.get("fit_end_ns")) is not int
-                or (kind == "action" and continuation["fit_end_ns"] > splits["valid"][0])):
-            raise ValueError("continuation checkpoint must predate unseen action validation")
-        continuation_id = policy["sha256"]
-        action_label_mode = "continuation"
-    elif policy["kind"] == "reset_states" and continuation == {"kind": "reset_states"}:
-        continuation_id = "market-barrier-grid"
-        action_label_mode = "market_barrier_grid"
-    else:
+    if (config["collection_policy"] != {"kind": "reset_states"}
+            or audit.get("continuation") != {"kind": "reset_states"}):
         raise ValueError("source audit does not match collection policy")
+    continuation_id = "market-barrier-grid"
+    action_label_mode = "market_barrier_grid"
     role_sources = {role: collection_source_for_role(config, source, role, splits)
                     for role in ("train", "valid")}
     dataset_splits = {role: role_sources[role][1] for role in role_sources}
