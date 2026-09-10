@@ -49,7 +49,8 @@ def tiny_backbone(vocabulary=16):
 def example():
     return {"tokens": [1, 2, 3, 4], "offset": 2,
         "alternatives": [([1, 2, 3, 4], 2), ([1, 2, 5, 4], 2), ([1, 2, 6, 4], 2)],
-        "action_targets": {"probabilities": [.1, .8, .1], "values": [0., 10., -10.]},
+        "action_targets": {"names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+                           "probabilities": [.1, .8, .1], "values": [0., 10., -10.]},
         "market_embeddings": [[0., 0.], [1., 2.], [3., 4.]], "market_available": [False, True, True]}
 
 
@@ -103,6 +104,7 @@ def test_mlx_batch_vectorizes_rows_without_changing_loss():
     second = {**example(),
         "market_embeddings": [[0., 0.], [2., 1.], [4., 3.]],
         "action_targets": {
+            "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
             "probabilities": [.7, .2, .1], "values": [5., 1., -4.],
         },
     }
@@ -121,6 +123,30 @@ def test_mlx_batch_vectorizes_rows_without_changing_loss():
         mx.eval(loss)
         individual.append(float(loss.item()))
     assert float(batched.item()) == pytest.approx(float(np.mean(individual)), abs=1e-6)
+
+
+def test_real_mlx_hierarchical_update_learns_entry_and_direction_together():
+    import mlx.optimizers as optim
+
+    model = tiny_backbone()
+    row = example()
+    packed = tuple(mx.array(value) for value in pack_examples([row], max_seq_length=8))
+    config = {
+        "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {
+            "enabled": True, "soft_target_weight": 1.,
+            "ranking_weight": 2., "margin": .25,
+        },
+    }
+
+    def loss(m, *batch):
+        return batch_loss(m, *batch, config=config)[0]
+
+    before, gradients = nn.value_and_grad(model, loss)(model, *packed)
+    optim.SGD(learning_rate=1e-5).update(model, gradients)
+    after = loss(model, *packed)
+    mx.eval(before, after)
+    assert float(after.item()) < float(before.item())
 
 
 def test_component_selection_can_train_projector_without_lora_and_preserve_both():

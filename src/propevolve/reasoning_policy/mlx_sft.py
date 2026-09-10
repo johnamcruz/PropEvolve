@@ -26,6 +26,8 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
     validate_model_settings(payload)
     supervision = payload["action_supervision"]
+    if payload.get("decision_objective") not in {"full_action", "hierarchical_binary"}:
+        raise ValueError("unknown reasoning decision objective")
     if (type(supervision["enabled"]) is not bool or any(
             isinstance(supervision[key], bool) or not math.isfinite(supervision[key]) or supervision[key] < 0
             for key in ("soft_target_weight", "ranking_weight", "margin"))):
@@ -58,10 +60,14 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     valid_action_monitors = {
         ("worst_action_boundary_loss", "min"),
         ("worst_action_advantage", "max"),
+        ("worst_task_boundary_loss", "min"),
+        ("worst_task_advantage", "max"),
     }
     if (supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions"
             and (guard.monitor, guard.mode) not in valid_action_monitors):
         raise ValueError("balanced action SFT must select checkpoints by a worst-action boundary")
+    if payload["decision_objective"] == "hierarchical_binary" and not supervision["enabled"]:
+        raise ValueError("hierarchical decision objective requires action supervision")
     if payload["adapter_path"] is None:
         raise ValueError("SFT requires an adapter output path")
     metrics_path = payload.get("validation_metrics_path")

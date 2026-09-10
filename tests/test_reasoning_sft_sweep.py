@@ -129,6 +129,26 @@ def test_objective_fails_closed_if_any_action_boundary_is_missing_or_negative():
             required_actions=("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"))
 
 
+def test_hierarchical_objective_ranks_the_worst_binary_task():
+    margins = {
+        "entry.WAIT": .4, "entry.ENTER": .3,
+        "direction.LONG": .2, "direction.SHORT": .1,
+        "management.HOLD": .5, "management.CLOSE": .6,
+    }
+    selection = {"best_report": {
+        "task_macro_accuracy": .75,
+        "per_task": {name: {"mean_target_advantage": value}
+                     for name, value in margins.items()},
+    }}
+
+    value, observed, macro = selection_objective(
+        selection, required_boundaries=tuple(margins))
+
+    assert value == .1
+    assert observed == margins
+    assert macro == .75
+
+
 def test_optuna_sweep_resumes_and_ranks_the_worst_action_not_average(tmp_path):
     path = _sweep(tmp_path, trials=5)
     calls = []

@@ -1,0 +1,17 @@
+{
+  "inherits": "action_mastery_selection_sft.json",
+  "adapter_path": "runs/reasoning-challenger/action-mastery-hierarchical-adapters",
+  "decision_objective": "hierarchical_binary",
+  "component_learning_rates": {
+    "lora": 0.00001,
+    "projector": 0.000003
+  },
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 4,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "worst_task_advantage",
+    "mode": "max"
+  }
+}

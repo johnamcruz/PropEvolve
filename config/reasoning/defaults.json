@@ -6,6 +6,7 @@
   "trainable_components": ["lora"],
   "resume_adapter_file": null,
   "action_supervision": {"enabled": false, "soft_target_weight": 1.0, "ranking_weight": 1.0, "margin": 0.25},
+  "decision_objective": "full_action",
   "input_mode": "specialists",
   "batch_sampling": "random",
   "projector": null,

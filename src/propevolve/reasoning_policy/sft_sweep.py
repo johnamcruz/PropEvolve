@@ -155,12 +155,19 @@ def load_sft_sweep(path: str | Path) -> SFTSweep:
             raise ValueError("grid study budget must equal its configured combinations")
 
     selection = payload["selection"]
-    if (not isinstance(selection, dict) or set(selection) != {
-            "required_actions", "minimum_action_advantage", "minimum_macro_accuracy"}
-            or not isinstance(selection["required_actions"], list)
-            or len(selection["required_actions"]) < 3
-            or len(set(selection["required_actions"])) != len(selection["required_actions"])
-            or not _finite_number(selection["minimum_action_advantage"])
+    action_contract = {
+        "required_actions", "minimum_action_advantage", "minimum_macro_accuracy"}
+    task_contract = {
+        "required_boundaries", "minimum_boundary_advantage", "minimum_macro_accuracy"}
+    contract = set(selection) if isinstance(selection, dict) else set()
+    required_key = "required_actions" if contract == action_contract else "required_boundaries"
+    minimum_key = ("minimum_action_advantage" if contract == action_contract
+                   else "minimum_boundary_advantage")
+    if (contract not in {frozenset(action_contract), frozenset(task_contract)}
+            or not isinstance(selection[required_key], list)
+            or len(selection[required_key]) < 3
+            or len(set(selection[required_key])) != len(selection[required_key])
+            or not _finite_number(selection[minimum_key])
             or not _finite_number(selection["minimum_macro_accuracy"], minimum=0)
             or selection["minimum_macro_accuracy"] > 1):
         raise ValueError("reasoning SFT selection contract is invalid")
@@ -223,10 +230,13 @@ def materialize_trial_config(sweep: SFTSweep, parameters: dict, *,
     config["steps_per_eval"] = sweep.trial["evaluation_every_epochs"] * train_batches
     config["save_every"] = sweep.trial["save_every_epochs"] * train_batches
     config["val_batches"] = valid_batches
+    hierarchical = "required_boundaries" in sweep.selection
     config["early_stopping"] = {
         **config["early_stopping"], "enabled": True,
         "patience_evaluations": sweep.trial["patience_evaluations"],
-        "restore_best": True, "monitor": "worst_action_advantage", "mode": "max",
+        "restore_best": True,
+        "monitor": "worst_task_advantage" if hierarchical else "worst_action_advantage",
+        "mode": "max",
     }
     trial_root = sweep.study_root / "trials" / f"trial-{trial_number:03d}"
     config["adapter_path"] = str(trial_root / "adapter")
@@ -236,18 +246,25 @@ def materialize_trial_config(sweep: SFTSweep, parameters: dict, *,
     return config
 
 
-def selection_objective(selection: dict, *, required_actions: tuple[str, ...]):
+def selection_objective(selection: dict, *, required_actions: tuple[str, ...] | None = None,
+                        required_boundaries: tuple[str, ...] | None = None):
     report = selection.get("best_report")
-    per_action = None if not isinstance(report, dict) else report.get("per_action")
-    if not isinstance(per_action, dict) or set(required_actions) - set(per_action):
-        raise ValueError("SFT selection is missing a required action boundary")
+    if (required_actions is None) == (required_boundaries is None):
+        raise ValueError("SFT selection requires exactly one boundary family")
+    required = required_actions if required_actions is not None else required_boundaries
+    source_key = "per_action" if required_actions is not None else "per_task"
+    macro_key = "macro_accuracy" if required_actions is not None else "task_macro_accuracy"
+    boundaries = None if not isinstance(report, dict) else report.get(source_key)
+    if not isinstance(boundaries, dict) or set(required) - set(boundaries):
+        family = "action" if required_actions is not None else "task"
+        raise ValueError(f"SFT selection is missing a required {family} boundary")
     margins = {}
-    for name in required_actions:
-        value = per_action[name].get("mean_target_advantage")
+    for name in required:
+        value = boundaries[name].get("mean_target_advantage")
         if not _finite_number(value):
-            raise ValueError("SFT action boundary is non-finite")
+            raise ValueError("SFT decision boundary is non-finite")
         margins[name] = float(value)
-    macro = report.get("macro_accuracy")
+    macro = report.get(macro_key)
     if not _finite_number(macro, minimum=0) or macro > 1:
         raise ValueError("SFT macro accuracy is invalid")
     return min(margins.values()), margins, float(macro)
@@ -259,6 +276,7 @@ def _default_trial_runner(config_path: Path, view: Path, trial_number: int,
     trial_root = Path(config["adapter_path"]).parent
     trial_root.mkdir(parents=True, exist_ok=True)
     metrics_path = Path(config["validation_metrics_path"])
+    monitor = config["early_stopping"]["monitor"]
     with (trial_root / "train.log").open("w") as stream:
         process = subprocess.Popen(
             [sys.executable, "-m", "propevolve.reasoning_policy.mlx_sft",
@@ -273,13 +291,13 @@ def _default_trial_runner(config_path: Path, view: Path, trial_number: int,
                 rows = metrics_path.read_text().splitlines()
                 for raw in rows[reported:]:
                     report = json.loads(raw)
-                    trial.report(float(report["worst_action_advantage"]), step=reported)
+                    trial.report(float(report[monitor]), step=reported)
                     reported += 1
                     if trial.should_prune():
                         process.terminate()
                         process.wait(timeout=30)
                         raise optuna.TrialPruned(
-                            f"worst action margin pruned after evaluation {reported}")
+                            f"worst decision margin pruned after evaluation {reported}")
             time.sleep(1)
         returncode = process.returncode
     if returncode:
@@ -346,15 +364,19 @@ def run_sft_sweep(path: str | Path, *, target_trials: int | None = None,
             selection = (runner(config_path, sweep.view, trial.number, trial)
                          if trial_runner is None else
                          runner(config_path, sweep.view, trial.number))
-            value, margins, macro = selection_objective(
-                selection, required_actions=tuple(sweep.selection["required_actions"]))
+            kwargs = ({"required_actions": tuple(sweep.selection["required_actions"])}
+                      if "required_actions" in sweep.selection else
+                      {"required_boundaries": tuple(sweep.selection["required_boundaries"])})
+            value, margins, macro = selection_objective(selection, **kwargs)
         except Exception:
             if sweep.artifacts["delete_failed_trials"] and trial_root.exists():
                 shutil.rmtree(trial_root)
             raise
-        mastered = (value >= sweep.selection["minimum_action_advantage"]
+        minimum = sweep.selection.get(
+            "minimum_action_advantage", sweep.selection.get("minimum_boundary_advantage"))
+        mastered = (value >= minimum
                     and macro >= sweep.selection["minimum_macro_accuracy"])
-        trial.set_user_attr("action_margins", margins)
+        trial.set_user_attr("decision_margins", margins)
         trial.set_user_attr("macro_accuracy", macro)
         trial.set_user_attr("mastered", mastered)
         print(f"[reasoning-sft-optuna] trial={trial.number} COMPLETE "

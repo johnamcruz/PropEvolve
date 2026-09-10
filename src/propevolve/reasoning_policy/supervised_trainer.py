@@ -13,7 +13,7 @@ import numpy as np
 
 from .supervision import (
     action_completion_scores, action_objective, completion_objective,
-    mean_completion_scores,
+    hierarchical_action_objective, mean_completion_scores,
 )
 
 
@@ -270,9 +270,16 @@ class PostUpdateValidation:
         report = dict(result) if isinstance(result, dict) else {"val_loss": float(result)}
         loss = float(report["val_loss"])
         elapsed = time.perf_counter() - started
-        boundary = ("" if "worst_action_advantage" not in report else
-                    f", Worst action advantage {report['worst_action_advantage']:+.3f}, "
-                    f"Macro accuracy {report['macro_accuracy']:.1%}")
+        if "worst_task_advantage" in report:
+            boundary = (
+                f", Worst task advantage {report['worst_task_advantage']:+.3f}, "
+                f"Task macro accuracy {report['task_macro_accuracy']:.1%}")
+        elif "worst_action_advantage" in report:
+            boundary = (
+                f", Worst action advantage {report['worst_action_advantage']:+.3f}, "
+                f"Macro accuracy {report['macro_accuracy']:.1%}")
+        else:
+            boundary = ""
         completed = {"iteration": iteration, "epoch": epoch,
                      "val_time": elapsed, **report}
         if self.latest_training is not None:
@@ -430,6 +437,60 @@ def action_boundary_metrics(rows, score_rows, *, margin=0.0):
     }
 
 
+def hierarchical_boundary_metrics(rows, score_rows, *, margin=0.0):
+    """Measure each binary trade decision and reconstructed legal actions."""
+    action_metrics = action_boundary_metrics(rows, score_rows, margin=margin)
+    evidence = {}
+    for row, raw_scores in zip(rows, score_rows):
+        names = row.get("action_targets", {}).get("names")
+        values = np.asarray(row.get("action_targets", {}).get("values"), dtype=float)
+        scores = np.asarray(raw_scores, dtype=float)
+        if set(names or ()) == {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}:
+            by_name = dict(zip(names, zip(values, scores)))
+            wait_value, wait_score = by_name["WAIT"]
+            long_value, long_score = by_name["ENTER_LONG_1"]
+            short_value, short_score = by_name["ENTER_SHORT_1"]
+            best_value = max(long_value, short_value)
+            directional = long_value != short_value
+            enter = best_value > wait_value and directional
+            best_side_score = (long_score if long_value > short_value else short_score)
+            if not enter:
+                best_side_score = max(long_score, short_score)
+            target = "entry.ENTER" if enter else "entry.WAIT"
+            advantage = (best_side_score - wait_score) if enter else (wait_score - best_side_score)
+            evidence.setdefault(target, []).append(advantage)
+            if enter:
+                target = "direction.LONG" if long_value > short_value else "direction.SHORT"
+                advantage = (long_score - short_score) if long_value > short_value else (short_score - long_score)
+                evidence.setdefault(target, []).append(advantage)
+        elif set(names or ()) == {"HOLD", "CLOSE"}:
+            by_name = dict(zip(names, zip(values, scores)))
+            hold_value, hold_score = by_name["HOLD"]
+            close_value, close_score = by_name["CLOSE"]
+            hold = hold_value >= close_value
+            target = "management.HOLD" if hold else "management.CLOSE"
+            advantage = (hold_score - close_score) if hold else (close_score - hold_score)
+            evidence.setdefault(target, []).append(advantage)
+        else:
+            raise ValueError("invalid hierarchical boundary evidence")
+    per_task = {name: {
+        "count": len(advantages),
+        "mean_target_advantage": float(np.mean(advantages)),
+        "mean_boundary_loss": float(np.mean([
+            np.logaddexp(0.0, float(margin) - advantage) for advantage in advantages])),
+        "accuracy": float(np.mean([advantage >= 0 for advantage in advantages])),
+    } for name, advantages in sorted(evidence.items())}
+    if not per_task:
+        raise ValueError("hierarchical metrics require decision evidence")
+    return {
+        **action_metrics,
+        "worst_task_advantage": min(row["mean_target_advantage"] for row in per_task.values()),
+        "worst_task_boundary_loss": max(row["mean_boundary_loss"] for row in per_task.values()),
+        "task_macro_accuracy": float(np.mean([row["accuracy"] for row in per_task.values()])),
+        "per_task": per_task,
+    }
+
+
 def validate_early_stopping_coverage(config, datasets):
     """Fail closed when checkpoint selection sees partial or missing action evidence."""
     if not config["early_stopping"]["enabled"]:
@@ -512,6 +573,7 @@ def pack_examples(rows, *, max_seq_length):
     valid = np.zeros_like(offsets, dtype=bool)
     probabilities = np.zeros_like(offsets, dtype=np.float32)
     values = np.zeros_like(probabilities)
+    task_codes = np.full(len(rows), -1, dtype=np.int32)
     for i, (row, group) in enumerate(zip(rows, alternatives)):
         for j, (sequence, offset) in enumerate(group):
             if not 0 < offset < len(sequence):
@@ -521,11 +583,19 @@ def pack_examples(rows, *, max_seq_length):
         target = row.get("action_targets")
         probabilities[i, :len(group)] = [1.] if target is None else target["probabilities"]
         values[i, :len(group)] = [0.] if target is None else target["values"]
+        if target is not None:
+            names = target["names"]
+            if names == ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]:
+                task_codes[i] = 0
+            elif names == ["HOLD", "CLOSE"]:
+                task_codes[i] = 1
+            else:
+                raise ValueError("unsupported legal-action state")
     embeddings = [row.get("market_embeddings", [[0.]]) for row in rows]
     if len({np.asarray(x).shape for x in embeddings}) != 1:
         raise ValueError("embedding windows must share one configured shape")
     available = [row.get("market_available", [True]) for row in rows]
-    return (tokens, offsets, lengths, valid, probabilities, values,
+    return (tokens, offsets, lengths, valid, probabilities, values, task_codes,
             np.asarray(embeddings, np.float32), np.asarray(available, bool))
 
 
@@ -551,7 +621,7 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             return
 
 
-def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values,
+def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
                    embeddings, available, *, config):
     import mlx.core as mx
     from .projector import market_logits
@@ -593,18 +663,23 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
     losses = []
     for index in range(batch_size):
         if config["action_supervision"]["enabled"]:
-            losses.append(action_objective(scores[index], probabilities[index], values[index],
-                config["action_supervision"], xp=mx, valid=valid[index]))
+            if config.get("decision_objective", "full_action") == "hierarchical_binary":
+                losses.append(hierarchical_action_objective(
+                    scores[index], probabilities[index], values[index],
+                    config["action_supervision"], task_code=task_codes[index], xp=mx))
+            else:
+                losses.append(action_objective(scores[index], probabilities[index], values[index],
+                    config["action_supervision"], xp=mx, valid=valid[index]))
         else:
             losses.append(completion_objective(scores[index], valid[index], xp=mx))
     return (mx.stack(losses).mean(), mx.array(tokens.shape[0]),
             scores)
 
 
-def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values,
+def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
                embeddings, available, *, config):
     loss, tokens_count, _ = _batch_outputs(
-        model, tokens, offsets, lengths, valid, probabilities, values,
+        model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
         embeddings, available, config=config)
     return loss, tokens_count
 
@@ -627,8 +702,10 @@ def evaluate_action_validation(model, dataset, config):
         weighted_loss += float(loss.item()) * len(rows)
         rows_seen.extend(rows)
         score_rows.extend(scores.tolist())
-    metrics = action_boundary_metrics(
-        rows_seen, score_rows, margin=config["action_supervision"]["margin"])
+    metric = (hierarchical_boundary_metrics
+              if config.get("decision_objective", "full_action") == "hierarchical_binary"
+              else action_boundary_metrics)
+    metrics = metric(rows_seen, score_rows, margin=config["action_supervision"]["margin"])
     return {"val_loss": weighted_loss / len(rows_seen), **metrics}
 
 
