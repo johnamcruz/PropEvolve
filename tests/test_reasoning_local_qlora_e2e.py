@@ -18,7 +18,7 @@ def deterministic_mlx():
     mx.clear_cache()
 
 
-def tiny_quantized_qwen(path):
+def tiny_quantized_qwen(path, *, tied=False):
     from mlx_lm.models.qwen3 import Model, ModelArgs
     from mlx_lm.utils import save_config, save_model
     from tokenizers import Tokenizer, models, pre_tokenizers
@@ -28,7 +28,7 @@ def tiny_quantized_qwen(path):
     args = ModelArgs(model_type="qwen3", hidden_size=64, num_hidden_layers=1,
         intermediate_size=128, num_attention_heads=4, rms_norm_eps=1e-6,
         vocab_size=128, num_key_value_heads=2, max_position_embeddings=4096,
-        rope_theta=10000., head_dim=16, tie_word_embeddings=False)
+        rope_theta=10000., head_dim=16, tie_word_embeddings=tied)
     model = Model(args)
     nn.quantize(model, group_size=32, bits=4)
     save_model(path, model)
@@ -188,3 +188,33 @@ def test_production_sft_resume_matches_uninterrupted_optimizer_path(tmp_path):
     assert actual.keys() == expected.keys()
     for name in actual:
         np.testing.assert_allclose(actual[name], expected[name], atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("tied", [False, True])
+def test_chunked_market_head_preserves_unequal_completion_gradients(tmp_path, tied):
+    from scripts.benchmark_reasoning_sft import chunked_market_outputs
+    from mlx_lm import load
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+    from mlx.utils import tree_flatten
+    from propevolve.reasoning_policy.projector import attach_projector
+    from propevolve.reasoning_policy.supervised_trainer import batch_loss, pack_examples
+    model, _ = load(tiny_quantized_qwen(tmp_path / "model", tied=tied))
+    model.freeze()
+    linear_to_lora_layers(model, 1, {"rank": 2, "scale": 4., "dropout": 0.})
+    attach_projector(model, {"embedding_dim": 2, "context_steps": 3,
+                             "market_tokens": 2, "temporal_encoding": "pooled_levels"})
+    rows = [{"tokens": [1, 2, 3, 4, 5], "offset": 2,
+             "market_embeddings": [[1., 2.], [2., 3.], [3., 4.]],
+             "market_available": [True, True, True]},
+            {"tokens": [2, 3, 4], "offset": 1,
+             "market_embeddings": [[2., 1.], [3., 2.], [4., 3.]],
+             "market_available": [True, True, True]}]
+    packed = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=8))
+    config = {"input_mode": "embeddings", "action_supervision": {"enabled": False}}
+    expected, gradients = nn.value_and_grad(model, lambda m: batch_loss(m, *packed, config=config)[0])(model)
+    actual, chunk_gradients = nn.value_and_grad(model, lambda m:
+        chunked_market_outputs(m, *packed, config=config, chunk_size=3)[0])(model)
+    np.testing.assert_allclose(actual, expected, atol=1e-5, rtol=1e-5)
+    reference = dict(tree_flatten(gradients))
+    for name, gradient in tree_flatten(chunk_gradients):
+        np.testing.assert_allclose(gradient, reference[name], atol=1e-5, rtol=1e-5)
