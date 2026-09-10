@@ -170,6 +170,8 @@ def test_optuna_sweep_resumes_and_ranks_the_worst_action_not_average(tmp_path):
     resumed = run_sft_sweep(path, target_trials=5, trial_runner=runner)
     assert resumed["terminal_trials"] == 5
     assert resumed["best_trial_number"] == 4
+    assert resumed["best_action_margins"] == {
+        "WAIT": .5, "ENTER_LONG_1": .5, "ENTER_SHORT_1": .5}
     assert len(calls) == 5
     assert all(call[1] == tmp_path / "view" for call in calls)
     assert json.loads((tmp_path / "study" / "study.result.json").read_text()) == resumed

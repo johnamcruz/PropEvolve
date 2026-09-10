@@ -376,6 +376,9 @@ def run_sft_sweep(path: str | Path, *, target_trials: int | None = None,
             "minimum_action_advantage", sweep.selection.get("minimum_boundary_advantage"))
         mastered = (value >= minimum
                     and macro >= sweep.selection["minimum_macro_accuracy"])
+        # Preserve the v1 result key for existing readers while exposing the
+        # more precise task/action-neutral name to new diagnostics.
+        trial.set_user_attr("action_margins", margins)
         trial.set_user_attr("decision_margins", margins)
         trial.set_user_attr("macro_accuracy", macro)
         trial.set_user_attr("mastered", mastered)
