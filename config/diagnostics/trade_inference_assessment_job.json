@@ -1,0 +1,12 @@
+{
+  "inherits": "../reasoning/direct_market_trade_learning_job.json",
+  "status": "development_inference_assessment",
+  "sft_config": "config/diagnostics/trade_inference_assessment_sft.json",
+  "mlx_view": "runs/reasoning-challenger/trade-inference-assessment/view",
+  "economic_action_sampling": {
+    "train": {"per_action": 3000, "seed": 3801},
+    "valid": {"per_action": 1000, "seed": 3802}
+  },
+  "dataset_output": "runs/reasoning-challenger/trade-inference-assessment/dataset",
+  "label_census_output": "runs/reasoning-challenger/trade-inference-assessment/label-census.json"
+}

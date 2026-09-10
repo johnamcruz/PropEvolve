@@ -1,0 +1,5 @@
+{
+  "inherits": "market_distillation_candidate_action_sft.json",
+  "data": "runs/reasoning-challenger/trade-inference-assessment/dataset",
+  "training_log_prefix": "trade-inference-assessment"
+}

@@ -47,6 +47,31 @@ def tiny_quantized_qwen(path, *, tied=False):
     return path
 
 
+def test_inference_assessment_exports_indexed_scores_without_changing_metrics(tmp_path):
+    from mlx_lm import load
+    from propevolve.reasoning_policy.mlx_sft import PreparedDataset, read_sft_config
+    from propevolve.reasoning_policy.projector import attach_projector
+    from propevolve.reasoning_policy.supervised_trainer import evaluate_action_validation
+    from test_reasoning_prepared_full_action_e2e import prepared_action_view
+
+    model_path = tiny_quantized_qwen(tmp_path / "model")
+    model, tokenizer = load(model_path)
+    prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer, model=model_path)
+    config = read_sft_config(tmp_path / "recipe.json")
+    config["validation_batch_size"] = 1
+    attach_projector(model, config["projector"])
+    model.eval()
+    data = PreparedDataset(tmp_path / "view", "train")
+    observed = []
+    result = evaluate_action_validation(model, data, config,
+        on_scored=lambda index, scores: observed.append((index, scores)))
+    assert len(observed) == 1
+    assert observed[0][0] == 0
+    assert len(observed[0][1]) == 3
+    assert np.isfinite(observed[0][1]).all()
+    assert result == evaluate_action_validation(model, data, config)
+
+
 def test_short_query_market_training_reloads_without_teacher_inputs(tmp_path):
     from mlx_lm import load
     from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view, train_prepared, PreparedDataset, read_sft_config
@@ -181,6 +206,15 @@ def test_local_quantized_model_learns_full_action_labels_and_reloads(tmp_path):
     repeat = score_labeled_examples(reloaded, [record])[0]
     assert after["target_log_likelihood"] > before["target_log_likelihood"]
     np.testing.assert_allclose(list(after["scores"].values()), list(repeat["scores"].values()), atol=1e-5)
+
+    from propevolve.reasoning_policy.learning_audit import assess_prepared
+    assessment = tmp_path / "assessment"
+    report = assess_prepared(recipe, tmp_path / "view", role="train", output=assessment)
+    evidence = [json.loads(line) for line in (assessment / "scores.jsonl").read_text().splitlines()]
+    assert report["rows"] == 1
+    assert evidence[0]["source_id"] == "train"
+    assert evidence[0]["target"] == record["messages"][-1]["content"]
+    assert report["weights_updated"] is False
 
     from propevolve.reasoning_policy.rl import MLXAdapterLearner, RLDecision
     names = tuple(record["targets"]["action_order"])

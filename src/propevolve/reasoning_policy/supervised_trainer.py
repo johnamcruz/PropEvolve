@@ -744,7 +744,7 @@ def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, ta
     return loss, tokens_count
 
 
-def evaluate_action_validation(model, dataset, config):
+def evaluate_action_validation(model, dataset, config, *, on_scored=None):
     """Evaluate every fixed validation row once and expose balanced boundaries."""
     import mlx.core as mx
     order = balanced_validation_order(dataset, rng=np.random.default_rng(config["seed"]))
@@ -761,7 +761,11 @@ def evaluate_action_validation(model, dataset, config):
         mx.eval(loss, scores)
         weighted_loss += float(loss.item()) * len(rows)
         rows_seen.extend(rows)
-        score_rows.extend(scores.tolist())
+        batch_scores = scores.tolist()
+        score_rows.extend(batch_scores)
+        if on_scored is not None:
+            for index, values in zip(indices, batch_scores):
+                on_scored(int(index), list(values))
     metric = (hierarchical_boundary_metrics
               if config.get("decision_objective", "full_action") == "hierarchical_binary"
               else action_boundary_metrics)

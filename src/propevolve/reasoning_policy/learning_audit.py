@@ -79,6 +79,62 @@ def summarize_trade_mastery(scored):
     }
 
 
+def assess_prepared(config_path, view, *, role, output, root=None):
+    """Score an authenticated prepared role without updating model weights."""
+    from .mlx_sft import read_sft_config, verify_mlx_view, PreparedDataset, IndexedJsonRows
+    from .supervised_trainer import evaluate_action_validation, hierarchical_boundary_metrics, action_boundary_metrics
+    from .supervision import action_targets
+    from .integrity import file_digest
+    if role not in {"train", "valid"}:
+        raise ValueError("assessment role must be train or valid")
+    config = read_sft_config(config_path, root=root)
+    if config.get("prepared_sampling") is not None:
+        raise ValueError("assessment requires a full prepared role for exact source alignment")
+    verify_mlx_view(config_path, view, root=root)
+    dataset = PreparedDataset(view, role)
+    source = IndexedJsonRows(Path(config["data"]) / f"{role}.jsonl")
+    if len(source) != len(dataset):
+        raise ValueError("assessment source and prepared rows differ")
+    destination = Path(output)
+    destination.mkdir(parents=True, exist_ok=False)
+    policy = MLXActionPolicy.from_config(config_path, root=root)
+    groups = {}
+    with (destination / "scores.jsonl").open("x") as stream:
+        def record_score(index, scores):
+            original = source[index]
+            prepared = dataset.rows[index]
+            if action_targets(original) != prepared["action_targets"]:
+                raise ValueError("assessment economic targets differ from source")
+            names = prepared["action_targets"]["names"]
+            target = original["messages"][-1]["content"]
+            values = dict(zip(names, scores))
+            predicted = max(values, key=values.get)
+            row = {"index": index, "source_id": original["source_id"],
+                "completed_at_ns": original["completed_at_ns"],
+                "ticker": original.get("ticker", "unknown"), "target": target,
+                "predicted": predicted, "correct": predicted == target,
+                "scores": values, "target_advantage": values[target] - max(
+                    value for name, value in values.items() if name != target),
+                "specialist_targets": original["targets"].get("specialist_targets", {})}
+            stream.write(json.dumps(row, allow_nan=False) + "\n")
+            grouped = groups.setdefault(row["ticker"], ([], []))
+            grouped[0].append({"action_targets": prepared["action_targets"], "target_name": target})
+            grouped[1].append(scores)
+            if sum(len(items[0]) for items in groups.values()) % 100 == 0:
+                stream.flush()
+                print(f"[assessment] scored={sum(len(items[0]) for items in groups.values())}/{len(dataset)}", flush=True)
+        metrics = evaluate_action_validation(policy.model, dataset, config, on_scored=record_score)
+    metric = (hierarchical_boundary_metrics if config.get("decision_objective") == "hierarchical_binary"
+              else action_boundary_metrics)
+    report = {"role": role, "rows": len(dataset), "weights_updated": False,
+        "config_sha256": file_digest(config_path),
+        "view_manifest_sha256": file_digest(Path(view) / "view_manifest.json"),
+        "metrics": metrics, "per_ticker": {ticker: metric(rows, scores,
+            margin=config["action_supervision"]["margin"]) for ticker, (rows, scores) in groups.items()}}
+    (destination / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False))
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     selection = parser.add_mutually_exclusive_group(required=True)

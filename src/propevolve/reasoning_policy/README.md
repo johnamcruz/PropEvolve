@@ -36,6 +36,27 @@ not an economically validated replacement until temporal SFT and RL gates pass.
 
 ## Responsibility boundary
 
+### Development-data inference assessment
+
+Before selecting a targeted trade-training subset, assess a frozen adapter on
+an audited, prepared development pool:
+
+```sh
+python scripts/assess_reasoning_trade.py --config CONFIG.json --view PREPARED_VIEW --role train --output NEW_ASSESSMENT_DIRECTORY --root .
+```
+
+This uses the production batched evaluator and resolved embedding references.
+It writes indexed `scores.jsonl` with action targets, prediction margins, ticker,
+timestamps and available specialist metadata, plus `summary.json` with separate
+entry/direction/management metrics for hierarchical policies and per-ticker
+results. It does not update weights. Source targets and prepared targets must
+match; sampled prepared views are rejected to prevent incorrect row joins.
+
+Use training/development mistakes for future subset selection, alongside diverse
+correct examples. Validation used to select training is development evidence;
+never relabel it as untouched evaluation. A completed assessment does not prove
+trade mastery or economic generalization.
+
 SFT owns trade mastery: WAIT/Long/Short setup selection, entry timing, HOLD
 through valid continuation, and CLOSE on weakening, reversal or deteriorating
 economics. RL starts only from an audited five-action SFT adapter and owns
