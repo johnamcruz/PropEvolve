@@ -17,6 +17,53 @@ from .dataset import context_messages, embedding_payload
 from .inputs import observe_context
 
 
+# The trade-mastery adapter deliberately excludes challenge objectives during
+# SFT.  RL must receive the complete causal challenge state so it can learn how
+# to use that trading skill inside the prop rules.
+CHALLENGE_MASTERY_FIELDS = (
+    "account.realized_pnl_norm",
+    "account.equity_pnl_norm",
+    "account.peak_equity_pnl_norm",
+    "account.mll_headroom_norm",
+    "account.drawdown_norm",
+    "account.position_side",
+    "account.position_size_norm",
+    "account.unrealized_pnl_norm",
+    "account.session_remaining",
+    "account.challenge_remaining",
+    "account.point_value_norm",
+    "account.round_trip_fee_norm",
+    "trade.open",
+    "trade.position_side",
+    "trade.risk_available",
+    "trade.mfe_r_so_far",
+    "trade.mae_r_so_far",
+    "trade.current_r",
+    "trade.giveback_r",
+    "trade.hold_bars",
+    "challenge.profit_target_dollars",
+    "challenge.max_loss_dollars",
+    "challenge.realized_pnl_dollars",
+    "challenge.equity_pnl_dollars",
+    "challenge.target_remaining_dollars",
+    "challenge.mll_floor_dollars",
+    "challenge.headroom_dollars",
+)
+
+
+def require_challenge_mastery_context(context_config):
+    """Fail before RL when the policy cannot observe the prop objective."""
+    fields = tuple(getattr(context_config, "fields", ()))
+    missing = tuple(field for field in CHALLENGE_MASTERY_FIELDS if field not in fields)
+    if missing:
+        raise ValueError(
+            "challenge-mastery context is missing: " + ", ".join(missing)
+        )
+    if getattr(context_config, "input_mode", None) != "embeddings":
+        raise ValueError("challenge-mastery RL requires teacher-free embeddings")
+    return context_config
+
+
 @dataclass(frozen=True)
 class RLDecision:
     messages: list

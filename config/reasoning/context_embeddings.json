@@ -16,6 +16,7 @@
     "account.point_value_norm",
     "account.round_trip_fee_norm",
     "trade.open",
+    "trade.position_side",
     "trade.risk_available",
     "trade.mfe_r_so_far",
     "trade.mae_r_so_far",

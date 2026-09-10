@@ -733,7 +733,10 @@ def main(argv=None):
         validate_trade_mastery_parent(model_settings)
         if model_settings["adapter_path"] is None:
             raise ValueError("RL requires the supervised adapter as its parent")
-        context = ContextConfig.load(resolve(root, config["context_config"]))
+        from .rl import require_challenge_mastery_context
+        context = require_challenge_mastery_context(ContextConfig.load(resolve(
+            root, config.get("rl_context_config", config["context_config"])
+        )))
         if context.input_mode != model_settings["input_mode"]:
             raise ValueError("RL context and policy input modes differ")
         env, sources = load_role(config, root, source, "train",
@@ -815,13 +818,21 @@ def main(argv=None):
         from .frozen_audit import load_frozen_records
         trade_records = load_frozen_records(trade_audit, root=root)
         decision_path.parent.mkdir(parents=True, exist_ok=True)
+        from .rl import require_challenge_mastery_context
+        evaluation_context_path = config.get(
+            "evaluation_context_config",
+            config.get("rl_context_config", config["context_config"]),
+        )
+        evaluation_context = require_challenge_mastery_context(
+            ContextConfig.load(resolve(root, evaluation_context_path))
+        )
         with decision_path.open("x") as decisions:
             def log_decision(row):
                 decisions.write(json.dumps(row, allow_nan=False) + "\n")
             result = evaluate_responsibilities(policy, env,
                 trade_mastery_records=trade_records, episodes=configured_episodes(
                 config, env, "valid", evaluation=True),
-                context_config=ContextConfig.load(resolve(root, config["context_config"])),
+                context_config=evaluation_context,
                 sources=sources, max_steps=config["rollout_max_steps"],
                 near_blow_headroom_fraction=criteria["near_blow_headroom_fraction"], on_decision=log_decision)
         from .selection import assess_candidate, assess_trade_mastery
@@ -833,7 +844,7 @@ def main(argv=None):
                                      result["trade_mastery"], trade_criteria),
                                  "challenge_mastery": assess_candidate(
                                      challenge, criteria)},
-                      context_config_sha256=file_digest(resolve(root, config["context_config"])),
+                      context_config_sha256=file_digest(resolve(root, evaluation_context_path)),
                       policy_config_sha256=file_digest(resolve(root,
                           config.get("policy_config") or config["evaluation_policy_config"])))
         destination.parent.mkdir(parents=True, exist_ok=True)

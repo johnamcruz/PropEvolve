@@ -13,6 +13,8 @@
   "specialist_supervision_roles": ["train"],
   "embedding_dim": 2560,
   "context_config": "config/reasoning/context_embeddings.json",
+  "rl_context_config": "config/reasoning/context_embeddings.json",
+  "evaluation_context_config": "config/reasoning/context_embeddings.json",
   "sft_config": "config/reasoning/policy_sft.json",
   "rl_config": "config/reasoning/rl.json",
   "evaluation_policy_config": "config/reasoning/evaluation.json",
