@@ -2,10 +2,20 @@
   "inherits": "market_sft.json",
   "data": "runs/reasoning-challenger/market-full-history-corpus",
   "adapter_path": "runs/reasoning-challenger/market-full-history-adapters",
-  "iters": 60000,
-  "val_batches": 6000,
-  "steps_per_report": 3000,
-  "steps_per_eval": 6000,
-  "save_every": 12000,
-  "grad_accumulation_steps": 8
+  "training_log_prefix": "market-sft",
+  "iters": 1200000,
+  "val_batches": 3000,
+  "validation_batch_size": 2,
+  "steps_per_report": 30000,
+  "steps_per_eval": 60000,
+  "save_every": 60000,
+  "grad_accumulation_steps": 8,
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 8,
+    "min_delta": 0.0,
+    "restore_best": true,
+    "monitor": "val_loss",
+    "mode": "min"
+  }
 }

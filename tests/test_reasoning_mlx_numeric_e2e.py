@@ -34,7 +34,9 @@ def tiny_backbone(vocabulary=16):
             super().__init__()
             self.model = Core()
             self.output = nn.Linear(8, vocabulary)
+            self.forward_calls = 0
         def __call__(self, inputs, input_embeddings=None):
+            self.forward_calls += 1
             x = self.model.embed_tokens(inputs) if input_embeddings is None else input_embeddings
             return self.output(mx.cumsum(x, axis=1))
     model = Backbone()
@@ -93,6 +95,32 @@ def test_real_mlx_projector_gradient_update_and_save_reload_preserve_scores(tmp_
     restored.output = model.output
     restore_projector(restored, tmp_path)
     np.testing.assert_allclose(np.asarray(sequence_scores(restored, tokens)), np.asarray(expected), atol=1e-6)
+
+
+def test_mlx_batch_vectorizes_rows_without_changing_loss():
+    model = tiny_backbone()
+    first = example()
+    second = {**example(),
+        "market_embeddings": [[0., 0.], [2., 1.], [4., 3.]],
+        "action_targets": {
+            "probabilities": [.7, .2, .1], "values": [5., 1., -4.],
+        },
+    }
+    config = {"input_mode": "embeddings", "action_supervision":
+        {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
+    packed = tuple(mx.array(value) for value in pack_examples(
+        [first, second], max_seq_length=8))
+    batched = batch_loss(model, *packed, config=config)[0]
+    mx.eval(batched)
+    assert model.forward_calls == 1
+
+    individual = []
+    for row in (first, second):
+        one = tuple(mx.array(value) for value in pack_examples([row], max_seq_length=8))
+        loss = batch_loss(model, *one, config=config)[0]
+        mx.eval(loss)
+        individual.append(float(loss.item()))
+    assert float(batched.item()) == pytest.approx(float(np.mean(individual)), abs=1e-6)
 
 
 def test_component_selection_can_train_projector_without_lora_and_preserve_both():

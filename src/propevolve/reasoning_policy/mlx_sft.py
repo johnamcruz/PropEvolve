@@ -68,14 +68,19 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if metrics_path is not None and (not isinstance(metrics_path, str)
                                      or not metrics_path.strip()):
         raise ValueError("validation_metrics_path must be a nonempty path or null")
-    log_filename = payload.get("training_log_filename")
-    if (not isinstance(log_filename, str) or not log_filename.strip()
-            or Path(log_filename).name != log_filename):
-        raise ValueError("training_log_filename must be a nonempty filename")
+    log_names = [payload.get(key) for key in (
+        "training_log_filename", "training_events_filename")]
+    log_prefix = payload.get("training_log_prefix")
+    if (any(not isinstance(value, str) or not value.strip()
+            or Path(value).name != value for value in log_names)
+            or len(set(log_names)) != len(log_names)
+            or not isinstance(log_prefix, str) or not log_prefix.strip()):
+        raise ValueError("invalid training log settings")
     if (payload["fine_tune_type"] != "lora" or payload["train"] is not True
             or payload["mask_prompt"] is not True or payload.get("trust_remote_code") is not False):
         raise ValueError("challenger requires prompt-masked LoRA and no remote code")
-    for name in ("num_layers", "batch_size", "iters", "max_seq_length", "grad_accumulation_steps"):
+    for name in ("num_layers", "batch_size", "validation_batch_size", "iters",
+                 "max_seq_length", "grad_accumulation_steps"):
         if type(payload[name]) is not int or payload[name] < 1:
             raise ValueError(f"{name} must be a positive integer")
     if payload["iters"] % payload["grad_accumulation_steps"]:

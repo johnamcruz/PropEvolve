@@ -22,48 +22,108 @@ class EarlyStopTraining(RuntimeError):
 
 
 class TrainingEventLog:
-    """Durable JSONL evidence expressed in corpus epochs and optimizer iterations."""
+    """Human training progress plus durable JSONL machine evidence."""
 
-    def __init__(self, path, *, train_batches, total_iterations):
+    def __init__(self, path, *, events_path, prefix, train_batches, total_iterations):
         if (type(train_batches) is not int or train_batches < 1
-                or type(total_iterations) is not int or total_iterations < 1):
+                or type(total_iterations) is not int or total_iterations < 1
+                or not isinstance(prefix, str) or not prefix.strip()):
             raise ValueError("training log requires positive epoch dimensions")
         self.path = Path(path)
+        self.events_path = Path(events_path)
+        self.prefix = prefix.strip()
         self.train_batches = train_batches
         self.total_iterations = total_iterations
+        self.maximum_epochs = total_iterations / train_batches
+        self.restore_best = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            raise FileExistsError(f"training log already exists: {self.path}")
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = [path for path in (self.path, self.events_path) if path.exists()]
+        if existing:
+            raise FileExistsError(f"training log already exists: {existing[0]}")
 
-    def _write(self, payload):
-        with self.path.open("a", encoding="utf-8") as stream:
+    @staticmethod
+    def _epoch(value):
+        return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+    def _write_event(self, payload):
+        with self.events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
 
+    def _write_line(self, value):
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(value + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
     def record_start(self, payload):
-        self._write({"event": "start", "total_iterations": self.total_iterations,
-                     "train_batches_per_epoch": self.train_batches,
-                     "maximum_epochs": self.total_iterations / self.train_batches,
-                     **payload})
+        event = {"event": "start", "total_iterations": self.total_iterations,
+                 "train_batches_per_epoch": self.train_batches,
+                 "maximum_epochs": self.maximum_epochs, **payload}
+        self.restore_best = bool(payload.get("early_stopping", {}).get("restore_best"))
+        self._write_event(event)
+        self._write_line(
+            f"[{self.prefix}] status=started epochs={self._epoch(self.maximum_epochs)} "
+            f"train_rows={payload['train_rows']} valid_rows={payload['valid_rows']} "
+            f"eval_every={self._epoch(payload['evaluation_every_epochs'])} "
+            f"patience={payload['early_stopping']['patience_evaluations']} "
+            f"min_delta={payload['early_stopping']['min_delta']}")
 
     def record_training(self, report):
-        self._write({"event": "training", **report})
+        self._write_event({"event": "training", **report})
+        fields = [
+            f"[{self.prefix}] epoch={self._epoch(report['epoch'])}/"
+            f"{self._epoch(self.maximum_epochs)}",
+            f"train_loss={float(report['train_loss']):.4f}",
+        ]
+        if "learning_rate" in report:
+            fields.append(f"lr={float(report['learning_rate']):.3e}")
+        if "iterations_per_second" in report:
+            fields.append(f"iter_sec={float(report['iterations_per_second']):.3f}")
+        if "tokens_per_second" in report:
+            fields.append(f"tokens_sec={float(report['tokens_per_second']):.1f}")
+        if "peak_memory" in report:
+            fields.append(f"peak_mem_gb={float(report['peak_memory']):.3f}")
+        self._write_line(" ".join(fields))
 
     def record_validation_started(self, report):
-        self._write({"event": "validation_started", **report})
+        self._write_event({"event": "validation_started", **report})
+        self._write_line(
+            f"[{self.prefix}] epoch={self._epoch(report['epoch'])}/"
+            f"{self._epoch(self.maximum_epochs)} validation=started")
 
     def record_validation(self, report):
-        self._write({"event": "validation", **report})
+        self._write_event({"event": "validation", **report})
+        train_loss = ("NA" if report.get("train_loss") is None else
+                      f"{float(report['train_loss']):.4f}")
+        marker = "  *" if report["checkpoint_selected"] else ""
+        self._write_line(
+            f"[{self.prefix}] epoch={self._epoch(report['epoch'])}/"
+            f"{self._epoch(self.maximum_epochs)} train_loss={train_loss} "
+            f"val_loss={float(report['val_loss']):.4f} "
+            f"{report['monitor']}={float(report['monitor_value']):.4f} "
+            f"best={float(report['best_metric']):.4f} "
+            f"patience={report['stale_evaluations']}/"
+            f"{report['patience_evaluations']}{marker}")
 
     def record_complete(self, summary):
         best = summary.get("best_iteration")
-        self._write({"event": "complete", **summary,
-                     "best_epoch": None if best is None else best / self.train_batches})
+        best_epoch = None if best is None else best / self.train_batches
+        self._write_event({"event": "complete", **summary, "best_epoch": best_epoch})
+        self._write_line(
+            f"[{self.prefix}] status=complete "
+            f"best_epoch={'NA' if best_epoch is None else self._epoch(best_epoch)} "
+            f"restored_best={str(self.restore_best).lower()} "
+            f"stopped_early={str(bool(summary.get('stopped_early'))).lower()}")
 
     def record_failure(self, error):
-        self._write({"event": "failed", "error_type": type(error).__name__,
-                     "message": str(error)})
+        self._write_event({"event": "failed", "error_type": type(error).__name__,
+                           "message": str(error)})
+        self._write_line(
+            f"[{self.prefix}] status=failed error={type(error).__name__} "
+            f"message={str(error)}")
 
 
 class ValidationLossGuard:
@@ -200,6 +260,7 @@ class PostUpdateValidation:
         self.record_training = record_training
         self.record_validation_started = record_validation_started
         self.record_validation = record_validation
+        self.latest_training = None
 
     def evaluate(self, iteration):
         epoch = iteration / self.train_batches
@@ -214,6 +275,8 @@ class PostUpdateValidation:
                     f"Macro accuracy {report['macro_accuracy']:.1%}")
         completed = {"iteration": iteration, "epoch": epoch,
                      "val_time": elapsed, **report}
+        if self.latest_training is not None:
+            completed["train_loss"] = self.latest_training.get("train_loss")
         stopping = None
         try:
             decision = self.guard.on_val_loss_report(completed)
@@ -236,6 +299,7 @@ class PostUpdateValidation:
             raise ValueError("invalid training iteration report")
         completed = dict(train_info)
         completed["epoch"] = iteration / self.train_batches
+        self.latest_training = completed
         self.record_training(completed)
         self.guard.on_train_loss_report(completed)
         if iteration % self.every == 0 or iteration == self.total_iterations:
@@ -372,7 +436,7 @@ def validate_early_stopping_coverage(config, datasets):
     if not config["early_stopping"]["enabled"]:
         return
     valid = datasets["valid"]
-    if config["val_batches"] * config["batch_size"] < len(valid):
+    if config["val_batches"] * config["validation_batch_size"] < len(valid):
         raise ValueError("early stopping requires complete validation coverage")
     if config["action_supervision"]["enabled"]:
         train_classes = {row.get("target_name") for row in datasets["train"]}
@@ -492,28 +556,50 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
                    embeddings, available, *, config):
     import mlx.core as mx
     from .projector import market_logits
+    batch_size, actions, sequence_length = tokens.shape
+    flat_inputs = tokens[:, :, :-1].reshape(
+        batch_size * actions, sequence_length - 1)
+    if config["input_mode"] == "embeddings":
+        context_steps, embedding_dim = embeddings.shape[1:]
+        flat_embeddings = mx.broadcast_to(
+            embeddings[:, None, :, :],
+            (batch_size, actions, context_steps, embedding_dim),
+        ).reshape(batch_size * actions, context_steps, embedding_dim)
+        flat_available = mx.broadcast_to(
+            available[:, None, :],
+            (batch_size, actions, context_steps),
+        ).reshape(batch_size * actions, context_steps)
+        logits = market_logits(
+            model, flat_inputs, flat_embeddings, flat_available)
+    else:
+        logits = model(flat_inputs)
+    logits = logits.astype(mx.float32)
+    log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    targets = tokens[:, :, 1:, None].reshape(
+        batch_size * actions, sequence_length - 1, 1)
+    token_scores = mx.take_along_axis(
+        log_probs, targets, axis=-1).squeeze(-1).reshape(
+            batch_size, actions, sequence_length - 1)
+    steps = mx.arange(1, sequence_length)
+    mask = ((steps[None, None, :] >= offsets[:, :, None])
+            & (steps[None, None, :] < lengths[:, :, None])
+            & valid[:, :, None])
+    if config["action_supervision"]["enabled"]:
+        scores = action_completion_scores(
+            token_scores.reshape(batch_size * actions, sequence_length - 1),
+            mask.reshape(batch_size * actions, sequence_length - 1), xp=mx,
+        ).reshape(batch_size, actions)
+    else:
+        scores = mean_completion_scores(token_scores, mask, xp=mx)
     losses = []
-    action_scores = []
-    for index in range(tokens.shape[0]):
-        inputs = tokens[index, :, :-1]
-        logits = (market_logits(model, inputs, embeddings[index:index+1], available[index:index+1])
-                  if config["input_mode"] == "embeddings" else model(inputs)).astype(mx.float32)
-        log_probs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        targets = tokens[index, :, 1:, None]
-        token_scores = mx.take_along_axis(log_probs, targets, axis=-1).squeeze(-1)
-        steps = mx.arange(1, tokens.shape[-1])
-        mask = (steps >= offsets[index, :, None]) & (steps < lengths[index, :, None]) & valid[index, :, None]
-        scores = (action_completion_scores(token_scores, mask, xp=mx)
-                  if config["action_supervision"]["enabled"] else
-                  mean_completion_scores(token_scores, mask, xp=mx))
-        action_scores.append(scores)
+    for index in range(batch_size):
         if config["action_supervision"]["enabled"]:
-            losses.append(action_objective(scores, probabilities[index], values[index],
+            losses.append(action_objective(scores[index], probabilities[index], values[index],
                 config["action_supervision"], xp=mx, valid=valid[index]))
         else:
-            losses.append(completion_objective(scores, valid[index], xp=mx))
+            losses.append(completion_objective(scores[index], valid[index], xp=mx))
     return (mx.stack(losses).mean(), mx.array(tokens.shape[0]),
-            mx.stack(action_scores))
+            scores)
 
 
 def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values,
@@ -528,7 +614,7 @@ def evaluate_action_validation(model, dataset, config):
     """Evaluate every fixed validation row once and expose balanced boundaries."""
     import mlx.core as mx
     order = balanced_validation_order(dataset, rng=np.random.default_rng(config["seed"]))
-    batch_size = config["batch_size"]
+    batch_size = config["validation_batch_size"]
     rows_seen, score_rows, weighted_loss = [], [], 0.0
     for start in range(0, len(order), batch_size):
         indices = order[start:start + batch_size]
@@ -590,6 +676,8 @@ def train_supervised(config, view):
     train_batches = len(datasets["train"]) // config["batch_size"]
     event_log = TrainingEventLog(
         destination / config["training_log_filename"],
+        events_path=destination / config["training_events_filename"],
+        prefix=config["training_log_prefix"],
         train_batches=train_batches,
         total_iterations=config["iters"],
     )
@@ -612,7 +700,8 @@ def train_supervised(config, view):
         if config["action_supervision"]["enabled"]:
             value = evaluate_action_validation(model, datasets["valid"], config)
         else:
-            value = evaluate(model, datasets["valid"], batch_size=config["batch_size"],
+            value = evaluate(model, datasets["valid"],
+                batch_size=config["validation_batch_size"],
                 num_batches=config["val_batches"], max_seq_length=config["max_seq_length"],
                 loss=partial(batch_loss, config=config), iterate_batches=iterator,
                 clear_cache_threshold=config["clear_cache_threshold"])

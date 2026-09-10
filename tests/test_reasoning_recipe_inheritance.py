@@ -68,9 +68,12 @@ def test_sft_applies_json_declared_runtime_defaults_before_loading_model(tmp_pat
     selected = read_sft_config(recipe)
     assert selected["seed"] == 17
     assert selected["val_batches"] == 4
+    assert selected["validation_batch_size"] == 1
     assert selected["steps_per_report"] == 1
     assert selected["steps_per_eval"] == 5
     assert selected["training_log_filename"] == "training.log"
+    assert selected["training_events_filename"] == "training.events.jsonl"
+    assert selected["training_log_prefix"] == "reasoning-sft"
     assert selected["save_every"] == 10
     assert selected["early_stopping"] == {
         "enabled": True,
@@ -82,7 +85,12 @@ def test_sft_applies_json_declared_runtime_defaults_before_loading_model(tmp_pat
     }
 
 
-def test_sft_rejects_training_log_paths_outside_adapter_directory(tmp_path):
+@pytest.mark.parametrize(("key", "value"), [
+    ("training_log_filename", "../training.log"),
+    ("training_events_filename", "../training.events.jsonl"),
+    ("training_log_prefix", ""),
+])
+def test_sft_rejects_invalid_training_log_settings(tmp_path, key, value):
     from propevolve.reasoning_policy.mlx_sft import read_sft_config
     recipe = tmp_path / "training.json"
     recipe.write_text(json.dumps({
@@ -91,8 +99,8 @@ def test_sft_rejects_training_log_paths_outside_adapter_directory(tmp_path):
         "trust_remote_code": False, "num_layers": 1, "batch_size": 1,
         "iters": 2, "grad_accumulation_steps": 1, "learning_rate": 1e-5,
         "max_seq_length": 64, "grad_checkpoint": False,
-        "training_log_filename": "../training.log",
+        key: value,
         "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
     }))
-    with pytest.raises(ValueError, match="training_log_filename"):
+    with pytest.raises(ValueError, match="training log"):
         read_sft_config(recipe)

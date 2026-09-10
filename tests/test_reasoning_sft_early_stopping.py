@@ -84,7 +84,7 @@ def test_validation_order_is_fixed_balanced_and_uses_each_row_once():
 
 
 def test_early_stopping_requires_complete_matching_validation_evidence():
-    config = {"batch_size": 1, "val_batches": 2,
+    config = {"batch_size": 1, "validation_batch_size": 1, "val_batches": 2,
               "early_stopping": {"enabled": True},
               "action_supervision": {"enabled": True}}
     train = [{"target_name": name} for name in ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")]
@@ -95,6 +95,14 @@ def test_early_stopping_requires_complete_matching_validation_evidence():
     validate_early_stopping_coverage(config, {"train": train, "valid": valid})
     with pytest.raises(ValueError, match="action classes"):
         validate_early_stopping_coverage(config, {"train": train, "valid": valid[:-1]})
+
+
+def test_early_stopping_coverage_uses_configured_validation_batch_size():
+    config = {"batch_size": 1, "validation_batch_size": 3, "val_batches": 1,
+              "early_stopping": {"enabled": True},
+              "action_supervision": {"enabled": False}}
+    validate_early_stopping_coverage(
+        config, {"train": [{}, {}, {}], "valid": [{}, {}, {}]})
 
 
 def test_validation_runs_only_after_reported_optimizer_updates():
@@ -141,7 +149,8 @@ def test_post_update_validation_exposes_pruner_metrics_at_same_boundary():
 
 def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
     log = TrainingEventLog(
-        tmp_path / "training.log", train_batches=10, total_iterations=40)
+        tmp_path / "training.log", events_path=tmp_path / "training.events.jsonl",
+        prefix="market-sft", train_batches=10, total_iterations=40)
     guard = ValidationLossGuard(
         {"enabled": True, "patience_evaluations": 2, "min_delta": 0.1,
          "restore_best": True, "monitor": "val_loss", "mode": "min"},
@@ -155,12 +164,20 @@ def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
         record_validation=log.record_validation,
     )
 
-    log.record_start({"train_rows": 10, "valid_rows": 3})
+    log.record_start({
+        "train_rows": 10, "valid_rows": 3,
+        "evaluation_every_epochs": 1.0,
+        "early_stopping": {
+            "enabled": True, "patience_evaluations": 2, "min_delta": 0.1,
+            "restore_best": True, "monitor": "val_loss", "mode": "min",
+        },
+    })
     callback.evaluate(0)
     callback.on_train_loss_report({"iteration": 10, "train_loss": 1.5})
     log.record_complete(guard.summary())
 
-    rows = [json.loads(line) for line in (tmp_path / "training.log").read_text().splitlines()]
+    rows = [json.loads(line) for line in (
+        tmp_path / "training.events.jsonl").read_text().splitlines()]
     assert [row["event"] for row in rows] == [
         "start", "validation_started", "validation", "training",
         "validation_started", "validation", "complete"]
@@ -177,6 +194,16 @@ def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
     assert rows[3]["iteration"] == 10
     assert rows[3]["train_loss"] == 1.5
     assert rows[-1]["best_epoch"] == 0.0
+    lines = (tmp_path / "training.log").read_text().splitlines()
+    assert lines[0].startswith("[market-sft] status=started epochs=4")
+    assert lines[1] == "[market-sft] epoch=0/4 validation=started"
+    assert lines[2].startswith(
+        "[market-sft] epoch=0/4 train_loss=NA val_loss=2.0000")
+    assert lines[2].endswith("patience=0/2  *")
+    assert lines[3].startswith(
+        "[market-sft] epoch=1/4 train_loss=1.5000")
+    assert lines[-1].startswith(
+        "[market-sft] status=complete best_epoch=0 restored_best=true")
 
 
 def test_epoch_progress_message_uses_epoch_not_only_iteration():
