@@ -36,7 +36,7 @@ def _embedding_cache(tmp_path, *, ticker="NQ", rows=8, width=2):
 
 
 def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="external-runtime",
-                         iters=1, embedding_storage="json"):
+                         iters=1, embedding_storage="json", causal_state=False):
     env = environment()
     labels = label_actions(env, reset_options={"ticker": "NQ", "start": 0}, prefix=(),
         continuation_factory=passive_factory, max_steps=8)
@@ -63,8 +63,11 @@ def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="e
         "grad_checkpoint": False, "grad_accumulation_steps": 1,
         "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
         "trust_remote_code": False, "input_mode": "embeddings" if embeddings else "specialists",
-        "projector": {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
-                      "temporal_encoding": "pooled_levels"} if embeddings else None,
+        "projector": ({"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
+                       "temporal_encoding": "pooled_levels",
+                       **({"state_fields": ["account.realized_pnl_norm"],
+                           "state_scales": [1.0]} if causal_state else {})}
+                      if embeddings else None),
         "action_verbalizers": ACTION_VERBALIZERS,
         "action_supervision": {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
     path = tmp_path / "recipe.json"
@@ -83,6 +86,15 @@ def test_all_same_state_outcomes_survive_real_preparation(tmp_path):
     assert batch[5][0, 1] > batch[5][0, 0] > batch[5][0, 2]
     np.testing.assert_array_equal(batch[-1], [[False, False, True]])
     assert "market_embeddings" not in original["messages"][1]["content"]
+
+
+def test_prepared_embedding_view_carries_configured_causal_state_as_numeric_input(tmp_path):
+    prepared, _, _ = prepared_action_view(tmp_path, embeddings=True, causal_state=True)
+    batch = pack_examples([prepared], max_seq_length=2048)
+
+    assert prepared["causal_state"] == [0.0]
+    np.testing.assert_array_equal(batch[-3], [[0.0]])
+    np.testing.assert_array_equal(batch[-1], [[False, False, True]])
 
 
 def test_prepared_dataset_lazily_resolves_compact_embedding_sidecars(tmp_path):

@@ -254,7 +254,11 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         raise ValueError("unexpected SFT conversation schema")
                     completion = messages[-1]["content"]
                     verbalizer = config["action_verbalizers"].get(completion, completion)
-                    reserved = config["projector"]["market_tokens"] if config["input_mode"] == "embeddings" else 0
+                    if config["input_mode"] == "embeddings":
+                        from .projector import projector_prefix_tokens
+                        reserved = projector_prefix_tokens(config["projector"])
+                    else:
+                        reserved = 0
                     tokens, offset = encode_completion(tokenizer, messages[:-1], verbalizer,
                         max_seq_length=config["max_seq_length"] - reserved,
                         chat_template_kwargs=config["chat_template_kwargs"])
@@ -309,6 +313,18 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         prompt = json.loads(messages[-2]["content"])
                         if any(not field.startswith(("account.", "trade.", "challenge.")) for field in prompt["fields"]):
                             raise ValueError("teacher fields leaked into teacher-free SFT prompt")
+                        state_fields = config["projector"].get("state_fields", [])
+                        if state_fields:
+                            fields = prompt.get("fields")
+                            history = np.asarray(prompt.get("history_oldest_first"), dtype=np.float32)
+                            if (not isinstance(fields, list) or len(set(fields)) != len(fields)
+                                    or history.ndim != 2 or history.shape[1] != len(fields)
+                                    or not len(history) or not np.isfinite(history).all()
+                                    or any(field not in fields for field in state_fields)):
+                                raise ValueError("prepared causal state differs from projector contract")
+                            encoded["causal_state"] = [
+                                float(history[-1, fields.index(field)]) for field in state_fields
+                            ]
                     target.write(json.dumps(encoded) + "\n")
                     count += 1
             if count != manifest["counts"][role] or count < config["batch_size"]:

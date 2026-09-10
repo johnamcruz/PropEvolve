@@ -222,11 +222,52 @@ def test_sft_component_learning_rates_are_config_driven_and_fail_closed(tmp_path
     with pytest.raises(ValueError, match="component learning rates"):
         read_sft_config(recipe)
 
+def test_sft_causal_state_projector_is_config_driven_and_fail_closed(tmp_path):
+    recipe = tmp_path / "causal-state.json"
+    payload = {
+        "model": "fixture-model", "data": "fixture-data", "adapter_path": "new-adapter",
+        "train": True, "fine_tune_type": "lora", "mask_prompt": True,
+        "num_layers": 1, "batch_size": 1, "iters": 1, "learning_rate": 3e-6,
+        "max_seq_length": 1024, "grad_checkpoint": True,
+        "grad_accumulation_steps": 1,
+        "lora_parameters": {"rank": 2, "scale": 4., "dropout": 0.},
+        "trust_remote_code": False, "input_mode": "embeddings",
+        "projector": {"embedding_dim": 2, "context_steps": 3,
+                      "market_tokens": 2, "temporal_encoding": "pooled_levels",
+                      "state_fields": ["trade.current_r", "trade.hold_bars"],
+                      "state_scales": [4.0, 150.0]},
+        "trainable_components": ["lora", "projector"],
+        "component_learning_rates": {"lora": 1e-6, "projector": 3e-5},
+    }
+    recipe.write_text(json.dumps(payload))
+    assert read_sft_config(recipe)["projector"]["state_fields"] == [
+        "trade.current_r", "trade.hold_bars"]
+
+    for invalid in ([1.0], [4.0, 0.0], [4.0, "bad"]):
+        broken = json.loads(json.dumps(payload))
+        broken["projector"]["state_scales"] = invalid
+        recipe.write_text(json.dumps(broken))
+        with pytest.raises(ValueError, match="causal state contract"):
+            read_sft_config(recipe)
+
     recipe.write_text(json.dumps({**payload,
         "lr_schedule": {"kind": "cosine_decay", "end": 1e-6,
                         "decay_updates": 32}}))
     with pytest.raises(ValueError, match="component learning rates"):
         read_sft_config(recipe)
+
+
+def test_production_trade_mastery_projector_uses_only_causal_trade_state():
+    recipe = (Path(__file__).resolve().parents[1]
+              / "config/reasoning/action_mastery_hierarchical_sft.json")
+    state_fields = read_sft_config(recipe)["projector"]["state_fields"]
+    assert state_fields == [
+        "trade.open", "trade.position_side", "trade.risk_available",
+        "trade.mfe_r_so_far", "trade.mae_r_so_far", "trade.current_r",
+        "trade.giveback_r", "trade.hold_bars",
+    ]
+    assert not any(field.startswith(("account.", "challenge."))
+                   for field in state_fields)
 
 
 def test_sft_trainable_components_are_config_driven_and_fail_closed(tmp_path):

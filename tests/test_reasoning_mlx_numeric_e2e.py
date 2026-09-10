@@ -24,7 +24,7 @@ def cpu_only():
     mx.set_default_device(previous)
 
 
-def tiny_backbone(vocabulary=16):
+def tiny_backbone(vocabulary=16, *, state=False):
     class Core(nn.Module):
         def __init__(self):
             super().__init__()
@@ -42,7 +42,9 @@ def tiny_backbone(vocabulary=16):
     model = Backbone()
     model.freeze()
     attach_projector(model, {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
-                             "temporal_encoding": "pooled_levels"})
+                             "temporal_encoding": "pooled_levels",
+                             **({"state_fields": ["trade.current_r", "trade.hold_bars"],
+                                 "state_scales": [4.0, 150.0]} if state else {})})
     return model
 
 
@@ -98,6 +100,55 @@ def test_real_mlx_projector_gradient_update_and_save_reload_preserve_scores(tmp_
     np.testing.assert_allclose(np.asarray(sequence_scores(restored, tokens)), np.asarray(expected), atol=1e-6)
 
 
+def test_real_mlx_causal_state_projector_changes_scores_and_survives_reload(tmp_path):
+    model = tiny_backbone(128, state=True)
+    embeddings = np.asarray(example()["market_embeddings"], np.float32)
+    available = np.asarray(example()["market_available"], bool)
+    tokens = ([1, 2, 3, 4], 2, np.asarray([2.0, 75.0], np.float32),
+              embeddings, available)
+    baseline = ([1, 2, 3, 4], 2, np.asarray([0.0, 0.0], np.float32),
+                embeddings, available)
+    expected = sequence_scores(model, [tokens, baseline])
+    assert float(expected[0].item()) != float(expected[1].item())
+
+    model.market_projector.freeze()
+    export_policy_weights(model, tmp_path)
+    restored = tiny_backbone(128, state=True)
+    restored.model = model.model
+    restored.output = model.output
+    restore_projector(restored, tmp_path)
+    actual = sequence_scores(restored, [tokens, baseline])
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-6)
+
+
+def test_existing_market_projector_can_warm_start_causal_state_extension(tmp_path):
+    from mlx.utils import tree_flatten
+
+    parent = tiny_backbone(128)
+    export_policy_weights(parent, tmp_path)
+    child = tiny_backbone(128, state=True)
+    before = dict(tree_flatten(child.parameters()))[
+        "market_projector.state_projection.weight"]
+    before = np.asarray(before)
+
+    with pytest.raises(ValueError, match="saved projector does not match"):
+        restore_projector(child, tmp_path)
+    restore_projector(child, tmp_path, allow_state_extension=True)
+
+    parent_weights = dict(tree_flatten(parent.parameters()))
+    child_weights = dict(tree_flatten(child.parameters()))
+    np.testing.assert_allclose(
+        np.asarray(child_weights["market_projector.projection.weight"]),
+        np.asarray(parent_weights["market_projector.projection.weight"]),
+        atol=0.,
+    )
+    np.testing.assert_allclose(
+        np.asarray(child_weights["market_projector.state_projection.weight"]),
+        before,
+        atol=0.,
+    )
+
+
 def test_mlx_batch_vectorizes_rows_without_changing_loss():
     model = tiny_backbone()
     first = example()
@@ -147,6 +198,52 @@ def test_real_mlx_hierarchical_update_learns_entry_and_direction_together():
     after = loss(model, *packed)
     mx.eval(before, after)
     assert float(after.item()) < float(before.item())
+
+
+def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():
+    import mlx.optimizers as optim
+
+    model = tiny_backbone(128, state=True)
+    base = example()
+    def management(target, state):
+        hold = target == "HOLD"
+        return {
+            **base,
+            "alternatives": [([1, 2, 7, 4], 2), ([1, 2, 8, 4], 2)],
+            "action_targets": {
+                "names": ["HOLD", "CLOSE"],
+                "probabilities": [.9, .1] if hold else [.1, .9],
+                "values": [2., 0.] if hold else [0., 2.],
+            },
+            "causal_state": state,
+        }
+    rows = [management("HOLD", [-2., 0.]), management("CLOSE", [2., 150.])]
+    packed = tuple(mx.array(value) for value in pack_examples(rows, max_seq_length=8))
+    config = {
+        "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {
+            "enabled": True, "soft_target_weight": 1.,
+            "ranking_weight": 2., "margin": .25,
+        },
+    }
+    def loss(m, *batch):
+        return batch_loss(m, *batch, config=config)[0]
+    optimizer = optim.Adam(learning_rate=1e-2)
+    value_and_grad = nn.value_and_grad(model, loss)
+    before = float(loss(model, *packed).item())
+    for _ in range(50):
+        _, gradients = value_and_grad(model, *packed)
+        optimizer.update(model, gradients)
+        mx.eval(model.parameters(), optimizer.state)
+    after = float(loss(model, *packed).item())
+    assert after < before
+
+    from propevolve.reasoning_policy.supervised_trainer import _batch_outputs
+    _, _, scores = _batch_outputs(model, *packed, config=config)
+    mx.eval(scores)
+    margins = np.asarray(scores)[:, 0] - np.asarray(scores)[:, 1]
+    assert margins[0] > 0
+    assert margins[1] < 0
 
 
 def test_component_selection_can_train_projector_without_lora_and_preserve_both():

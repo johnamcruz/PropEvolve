@@ -1,7 +1,8 @@
 {
   "inherits": "action_mastery_hierarchical_sft.json",
   "model": "mlx-community/Qwen3-0.6B-4bit",
-  "adapter_path": "runs/reasoning-challenger/qwen3-0.6b-action-hierarchical-adapters",
+  "adapter_path": "runs/reasoning-challenger/qwen3-0.6b-action-hierarchical-state-adapters",
   "resume_adapter_file": "runs/reasoning-challenger/qwen3-0.6b-market-smoke-adapters/adapters.safetensors",
-  "training_log_prefix": "qwen3-0.6b-action-hierarchical"
+  "validation_metrics_path": "runs/reasoning-challenger/qwen3-0.6b-action-hierarchical-state-adapters/validation-metrics.jsonl",
+  "training_log_prefix": "qwen3-0.6b-action-hierarchical-state"
 }

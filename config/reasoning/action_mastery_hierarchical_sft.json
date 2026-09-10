@@ -2,6 +2,19 @@
   "inherits": "action_mastery_selection_sft.json",
   "adapter_path": "runs/reasoning-challenger/action-mastery-hierarchical-adapters",
   "decision_objective": "hierarchical_binary",
+  "projector": {
+    "state_fields": [
+      "trade.open",
+      "trade.position_side",
+      "trade.risk_available",
+      "trade.mfe_r_so_far",
+      "trade.mae_r_so_far",
+      "trade.current_r",
+      "trade.giveback_r",
+      "trade.hold_bars"
+    ],
+    "state_scales": [1.0, 1.0, 1.0, 4.0, 4.0, 4.0, 4.0, 150.0]
+  },
   "component_learning_rates": {
     "lora": 0.00001,
     "projector": 0.000003

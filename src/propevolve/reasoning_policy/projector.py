@@ -12,6 +12,33 @@ def validate_projector(config):
         raise ValueError("market token count exceeds context window")
     if config.get("temporal_encoding") not in {"pooled_levels", "latest_plus_deltas"}:
         raise ValueError("projector requires a configured temporal encoding")
+    fields = config.get("state_fields", [])
+    scales = config.get("state_scales", [])
+    if (not isinstance(fields, list) or not isinstance(scales, list)
+            or len(fields) != len(scales) or len(set(fields)) != len(fields)
+            or any(not isinstance(field, str) or not field for field in fields)
+            or any(isinstance(scale, bool) or not isinstance(scale, (int, float))
+                   or not np.isfinite(scale) or scale <= 0
+                   for scale in scales)):
+        raise ValueError("projector causal state contract is invalid")
+
+
+def projector_prefix_tokens(config):
+    """Number of continuous prefix tokens reserved by one projector contract."""
+    validate_projector(config)
+    return config["market_tokens"] + bool(config.get("state_fields"))
+
+
+def state_extension_of(parent, child):
+    """Whether a child adds only causal state to an existing market projector."""
+    if not isinstance(parent, dict) or not isinstance(child, dict):
+        return False
+    parent_base = {key: value for key, value in parent.items()
+                   if key not in {"state_fields", "state_scales"}}
+    child_base = {key: value for key, value in child.items()
+                  if key not in {"state_fields", "state_scales"}}
+    return (parent_base == child_base and not parent.get("state_fields")
+            and bool(child.get("state_fields")))
 
 
 def pooling_weights(available, market_tokens):
@@ -48,9 +75,12 @@ def attach_projector(model, config):
         def __init__(self):
             super().__init__()
             self.projection = nn.Linear(config["embedding_dim"], width, bias=False)
+            self.state_projection = (nn.Linear(len(config.get("state_fields", [])), width,
+                                               bias=False)
+                                     if config.get("state_fields") else None)
             self.context_steps = config["context_steps"]
             self.market_tokens = config["market_tokens"]
-        def __call__(self, embeddings, available):
+        def __call__(self, embeddings, available, causal_state=None):
             if embeddings.shape[1:] != (config["context_steps"], config["embedding_dim"]):
                 raise ValueError("projector embedding contract mismatch")
             membership = np.zeros((config["market_tokens"], config["context_steps"]), np.float32)
@@ -61,15 +91,25 @@ def attach_projector(model, config):
             clean = mx.where(available[:, :, None], embeddings, 0.)
             pooled = weights @ clean
             features = temporal_features(pooled, config["temporal_encoding"], xp=mx)
-            return self.projection(features)
+            market = self.projection(features)
+            if self.state_projection is None:
+                if causal_state is not None and causal_state.shape[-1] != 0:
+                    raise ValueError("projector received undeclared causal state")
+                return market
+            expected = len(config["state_fields"])
+            if causal_state is None or causal_state.shape != (embeddings.shape[0], expected):
+                raise ValueError("projector causal state shape mismatch")
+            scales = mx.array(config["state_scales"], dtype=causal_state.dtype)
+            state = self.state_projection(causal_state / scales)
+            return mx.concatenate([market, state[:, None, :]], axis=1)
     model.market_projector = MarketProjector()
 
 
-def market_logits(model, tokens, embeddings, available):
+def market_logits(model, tokens, embeddings, available, causal_state=None):
     import mlx.core as mx
     if not hasattr(model, "market_projector"):
         raise ValueError("teacher-free policy is missing its trained projector")
-    prefix = model.market_projector(embeddings, available)
+    prefix = model.market_projector(embeddings, available, causal_state)
     if prefix.shape[0] == 1 and tokens.shape[0] != 1:
         prefix = mx.broadcast_to(prefix, (tokens.shape[0], *prefix.shape[1:]))
     joined = mx.concatenate([prefix, model.model.embed_tokens(tokens)], axis=1)
@@ -89,12 +129,17 @@ def export_policy_weights(model, destination):
         mx.save_safetensors(str(Path(destination) / "projector.safetensors"), projector)
 
 
-def restore_projector(model, directory):
+def restore_projector(model, directory, *, allow_state_extension=False):
     import mlx.core as mx
     from mlx.utils import tree_flatten
     path = Path(directory) / "projector.safetensors"
     weights = mx.load(str(path))
     expected = {key: value for key, value in tree_flatten(model.parameters()) if key.startswith("market_projector.")}
-    if set(weights) != set(expected) or any(weights[key].shape != expected[key].shape for key in weights):
+    missing = set(expected) - set(weights)
+    permitted = ({key for key in expected if key.startswith(
+                  "market_projector.state_projection.")}
+                 if allow_state_extension else set())
+    if (set(weights) - set(expected) or missing - permitted
+            or any(weights[key].shape != expected[key].shape for key in weights)):
         raise ValueError("saved projector does not match configured model/embedding dimensions")
     model.load_weights(list(weights.items()), strict=False)

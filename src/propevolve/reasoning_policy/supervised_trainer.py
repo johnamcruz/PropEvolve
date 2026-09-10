@@ -591,11 +591,15 @@ def pack_examples(rows, *, max_seq_length):
                 task_codes[i] = 1
             else:
                 raise ValueError("unsupported legal-action state")
+    causal_states = [row.get("causal_state", []) for row in rows]
+    if len({np.asarray(x).shape for x in causal_states}) != 1:
+        raise ValueError("causal states must share one configured shape")
     embeddings = [row.get("market_embeddings", [[0.]]) for row in rows]
     if len({np.asarray(x).shape for x in embeddings}) != 1:
         raise ValueError("embedding windows must share one configured shape")
     available = [row.get("market_available", [True]) for row in rows]
     return (tokens, offsets, lengths, valid, probabilities, values, task_codes,
+            np.asarray(causal_states, np.float32),
             np.asarray(embeddings, np.float32), np.asarray(available, bool))
 
 
@@ -622,7 +626,7 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
 
 
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-                   embeddings, available, *, config):
+                   causal_states, embeddings, available, *, config):
     import mlx.core as mx
     from .projector import market_logits
     batch_size, actions, sequence_length = tokens.shape
@@ -638,8 +642,13 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             available[:, None, :],
             (batch_size, actions, context_steps),
         ).reshape(batch_size * actions, context_steps)
+        state_dim = causal_states.shape[-1]
+        flat_causal_states = mx.broadcast_to(
+            causal_states[:, None, :],
+            (batch_size, actions, state_dim),
+        ).reshape(batch_size * actions, state_dim)
         logits = market_logits(
-            model, flat_inputs, flat_embeddings, flat_available)
+            model, flat_inputs, flat_embeddings, flat_available, flat_causal_states)
     else:
         logits = model(flat_inputs)
     logits = logits.astype(mx.float32)
@@ -677,10 +686,10 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
 
 
 def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-               embeddings, available, *, config):
+               causal_states, embeddings, available, *, config):
     loss, tokens_count, _ = _batch_outputs(
         model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-        embeddings, available, config=config)
+        causal_states, embeddings, available, config=config)
     return loss, tokens_count
 
 
@@ -733,14 +742,19 @@ def train_supervised(config, view):
         directory = Path(parent).parent
         verify_adapter_base(config["model"], directory)
         metadata = json.loads((directory / "adapter_config.json").read_text())
-        for key in ("lora_parameters", "num_layers", "chat_template_kwargs", "input_mode", "projector"):
+        for key in ("lora_parameters", "num_layers", "chat_template_kwargs", "input_mode"):
             if metadata.get(key) != config.get(key):
                 raise ValueError(f"SFT warm-start contract differs at {key}")
+        from .projector import state_extension_of
+        extends_state = state_extension_of(metadata.get("projector"), config.get("projector"))
+        if metadata.get("projector") != config.get("projector") and not extends_state:
+            raise ValueError("SFT warm-start contract differs at projector")
         model.load_weights(parent, strict=False)
     if config["input_mode"] == "embeddings":
         attach_projector(model, config["projector"])
         if parent is not None:
-            restore_projector(model, Path(parent).parent)
+            restore_projector(model, Path(parent).parent,
+                              allow_state_extension=extends_state)
     configure_trainable_components(model, config["trainable_components"])
     optimizer = build_optimizer(config)
     from .mlx_sft import PreparedDataset

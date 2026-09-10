@@ -82,8 +82,10 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
         if not actions:
             raise ValueError("cannot decide without legal actions")
         from .dataset import embedding_payload
+        state_fields = (() if self.projector_config is None else
+                        self.projector_config.get("state_fields", ()))
         scores = self.completion_scores(context_messages(context, actions), [a.name for a in actions],
-            market_context=embedding_payload(context) or None)
+            market_context=embedding_payload(context, state_fields=state_fields) or None)
         selected = actions[int(np.argmax(list(scores.values()))) ]
         return selected, scores
 
@@ -106,7 +108,11 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
             raise ValueError("completions must be nonempty and unique")
         if (market_context is not None) != (self.input_mode == "embeddings"):
             raise ValueError("policy input mode and causal embeddings disagree")
-        reserved = 0 if self.projector_config is None else self.projector_config["market_tokens"]
+        if self.projector_config is None:
+            reserved = 0
+        else:
+            from .projector import projector_prefix_tokens
+            reserved = projector_prefix_tokens(self.projector_config)
         encoded = tuple(encode_completion(self.tokenizer, messages, self.action_verbalizers[completion],
             max_seq_length=self.max_seq_length - reserved, chat_template_kwargs=self.chat_template_kwargs)
             for completion in completions)
@@ -114,11 +120,14 @@ Scores are sequence log likelihoods, not C51 Q values or pass probabilities.
             return encoded
         embeddings = np.asarray(market_context["market_embeddings"], np.float32)
         available = np.asarray(market_context["market_available"], bool)
+        causal_state = np.asarray(market_context.get("causal_state", []), np.float32)
+        state_fields = self.projector_config.get("state_fields", [])
         expected = (self.projector_config["context_steps"], self.projector_config["embedding_dim"])
         if (embeddings.shape != expected or available.shape != expected[:1] or not available.any()
-                or not np.isfinite(embeddings).all()):
+                or causal_state.shape != (len(state_fields),)
+                or not np.isfinite(embeddings).all() or not np.isfinite(causal_state).all()):
             raise ValueError("invalid causal market embedding window")
-        return tuple((*item, embeddings, available) for item in encoded)
+        return tuple((*item, causal_state, embeddings, available) for item in encoded)
 
 
 def sequence_scores(model, tokenized):
@@ -128,9 +137,16 @@ def sequence_scores(model, tokenized):
     for item in tokenized:
         full, prefix_length = item[:2]
         inputs = mx.array([full[:-1]])
-        if len(item) == 4:
+        if len(item) in {4, 5}:
             from .projector import market_logits
-            logits = market_logits(model, inputs, mx.array(item[2][None]), mx.array(item[3][None]))
+            if len(item) == 5:
+                causal_state, embeddings, available = item[2:]
+            else:
+                causal_state, embeddings, available = None, item[2], item[3]
+            logits = market_logits(model, inputs, mx.array(embeddings[None]),
+                                   mx.array(available[None]),
+                                   None if causal_state is None else
+                                   mx.array(causal_state[None]))
         else:
             logits = model(inputs)
         logits = logits[:, prefix_length - 1:prefix_length, :].astype(mx.float32)

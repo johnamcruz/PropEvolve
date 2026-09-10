@@ -71,11 +71,21 @@ serialize thousands of FFM latent coordinates as decimal tokens.
     ]
 
 
-def embedding_payload(context):
+def embedding_payload(context, *, state_fields=()):
     """Continuous arrays travel outside language-model messages/targets."""
     if context.embeddings is None:
         return {}
-    return {"market_embeddings": context.embeddings.tolist(), "market_available": context.available.tolist()}
+    payload = {"market_embeddings": context.embeddings.tolist(),
+               "market_available": context.available.tolist()}
+    if state_fields:
+        if len(set(state_fields)) != len(state_fields) or any(
+                field not in context.fields for field in state_fields):
+            raise ValueError("causal state fields differ from the context contract")
+        latest = context.values[context.available][-1]
+        payload["causal_state"] = [
+            float(latest[context.fields.index(field)]) for field in state_fields
+        ]
+    return payload
 
 
 def supervised_record(
