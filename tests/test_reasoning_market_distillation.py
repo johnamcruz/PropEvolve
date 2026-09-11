@@ -1,5 +1,7 @@
 """Public short-query dataset and learner contract, independent of JSON spelling."""
 import copy
+from collections import UserDict
+
 import pytest
 
 
@@ -107,10 +109,16 @@ def test_fixed_diagnostic_selection_covers_ticker_year_without_source_changes(tm
 
 def test_chat_template_mapping_preserves_actual_prompt_token_ids():
     from propevolve.reasoning_policy.market_distillation import encode_market_targets
-    from transformers.tokenization_utils_base import BatchEncoding
+
+    class TokenizerMapping(UserDict):
+        """Match the Mapping contract returned by production tokenizers."""
+
     class MappingTokenizer(Tokenizer):
         def apply_chat_template(self, messages, **kwargs):
-            return BatchEncoding({"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]})
+            return TokenizerMapping({
+                "input_ids": [1, 2, 3],
+                "attention_mask": [1, 1, 1],
+            })
     record = {"messages": [{}, {}, {}], "targets": {"specialist_targets": {
         "expansion.long": .73, "expansion.short": .82}}}
     result = encode_market_targets(record, settings(), MappingTokenizer(), max_seq_length=20,
