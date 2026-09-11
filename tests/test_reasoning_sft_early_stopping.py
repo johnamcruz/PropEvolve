@@ -167,6 +167,8 @@ def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
     log.record_start({
         "train_rows": 10, "valid_rows": 3,
         "evaluation_every_epochs": 1.0,
+        "targeted_sampling_summary": {
+            "rounds": 2, "mistake_draws": 15, "anchor_draws": 5},
         "early_stopping": {
             "enabled": True, "patience_evaluations": 2, "min_delta": 0.1,
             "restore_best": True, "monitor": "val_loss", "mode": "min",
@@ -196,6 +198,7 @@ def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
     assert rows[-1]["best_epoch"] == 0.0
     lines = (tmp_path / "training.log").read_text().splitlines()
     assert lines[0].startswith("[market-sft] status=started epochs=4")
+    assert "mistake_draws=15 anchor_draws=5 selection_rounds=2" in lines[0]
     assert lines[1] == "[market-sft] epoch=0/4 validation=started"
     assert lines[2].startswith(
         "[market-sft] epoch=0/4 train_loss=NA val_loss=2.0000")

@@ -79,6 +79,20 @@ def test_targeted_rounds_refresh_examples_and_reject_incomplete_assessment():
     second = set(map(int, sampler.order(1)))
     assert first != second
     assert len(first) == len(second) == 4
+    receipt = sampler.selection_receipt(0)
+    assert receipt["draw_count"] == receipt["unique_rows"] == 4
+    assert receipt["mistake_draws"] == receipt["anchor_draws"] == 2
+    assert receipt["per_action"]["ENTER_LONG_1"] == {
+        "mistake_draws": 1, "anchor_draws": 1}
+    assert receipt["per_ticker"]["NQ"] == {
+        "mistake_draws": 2, "anchor_draws": 2}
+    assert {row["kind"] for row in receipt["draws"]} == {"mistake", "anchor"}
+    assert {row["feedback"] for row in receipt["draws"]} == {
+        "incorrect: predicted None; target is ENTER_LONG_1",
+        "incorrect: predicted None; target is ENTER_SHORT_1",
+        "correct: retain ENTER_LONG_1 above alternatives",
+        "correct: retain ENTER_SHORT_1 above alternatives",
+    }
     with pytest.raises(ValueError, match="exactly"):
         TargetedSampler(rows[:-1], settings(), train_bounds=(100, 200),
                         expected_rows=12)

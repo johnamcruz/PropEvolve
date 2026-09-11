@@ -435,7 +435,8 @@ def run_campaign(path, *, phases=None):
                     child_config = Path(round_state["candidate_policy_config"])
                 candidate_adapter = round_root / "candidate-adapter"
                 required = ("adapters.safetensors", "projector.safetensors",
-                            "training_selection.json", "adapter_config.json")
+                            "training_selection.json", "adapter_config.json",
+                            "targeted_sampling_receipt.json")
                 if round_state["candidate_artifacts"] is None:
                     if candidate_adapter.exists():
                         raise ValueError("unreceipted candidate adapter already exists")

@@ -76,6 +76,15 @@ class TargetedSampler:
     def __init__(self, scored, settings, *, train_bounds, expected_rows=None):
         groups = _validated_groups(
             scored, settings, train_bounds=train_bounds, expected_rows=expected_rows)
+        self.evidence = {int(row["index"]): {
+            "source_id": row.get("source_id"),
+            "completed_at_ns": int(row["completed_at_ns"]),
+            "ticker": row["ticker"],
+            "target": row["target"],
+            "predicted": row.get("predicted"),
+            "target_advantage": float(row["target_advantage"]),
+            "scores": row.get("scores"),
+        } for row in scored}
         self.seed = settings["seed"]
         self.quota = settings["rows_per_group"]
         self.mistake_fraction = float(settings["mistake_fraction"])
@@ -158,6 +167,47 @@ class TargetedSampler:
                 queue = queues[name]
                 order.append(int(queue[position % len(queue)]))
         return np.asarray(order, dtype=np.int64)
+
+    def selection_receipt(self, round_index):
+        """Describe exact mistake corrections and retained anchors for one round."""
+        order = tuple(map(int, self.order(round_index)))
+        kinds = {}
+        years = {}
+        for (_, _, year), (mistakes, retained) in self.groups.items():
+            for index in map(int, mistakes):
+                kinds[index], years[index] = "mistake", year
+            for index in map(int, retained):
+                kinds[index], years[index] = "anchor", year
+        per_action = defaultdict(lambda: {"mistake_draws": 0, "anchor_draws": 0})
+        per_ticker = defaultdict(lambda: {"mistake_draws": 0, "anchor_draws": 0})
+        draws = []
+        for index in order:
+            evidence = self.evidence[index]
+            kind = kinds[index]
+            field = f"{kind}_draws"
+            per_action[evidence["target"]][field] += 1
+            per_ticker[evidence["ticker"]][field] += 1
+            predicted = evidence["predicted"]
+            target = evidence["target"]
+            feedback = (
+                f"incorrect: predicted {predicted}; target is {target}"
+                if kind == "mistake" else
+                f"correct: retain {target} above alternatives"
+            )
+            draws.append({**evidence, "index": index, "year": years[index],
+                          "kind": kind, "feedback": feedback})
+        mistake_draws = sum(row["mistake_draws"] for row in per_action.values())
+        anchor_draws = sum(row["anchor_draws"] for row in per_action.values())
+        return {
+            "round": round_index,
+            "draw_count": len(order),
+            "unique_rows": len(set(order)),
+            "mistake_draws": mistake_draws,
+            "anchor_draws": anchor_draws,
+            "per_action": dict(sorted(per_action.items())),
+            "per_ticker": dict(sorted(per_ticker.items())),
+            "draws": draws,
+        }
 
 
 def select_training_indices(scored, settings, *, train_bounds):

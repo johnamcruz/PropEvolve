@@ -139,6 +139,7 @@ class FakePhases:
         (adapter / "adapters.safetensors").write_text("weights")
         (adapter / "projector.safetensors").write_text("projector")
         (adapter / "training_selection.json").write_text("{}")
+        (adapter / "targeted_sampling_receipt.json").write_text("{}")
         (adapter / "adapter_config.json").write_text(json.dumps(config))
 
 

@@ -77,12 +77,18 @@ class TrainingEventLog:
                  "maximum_epochs": self.maximum_epochs, **payload}
         self.restore_best = bool(payload.get("early_stopping", {}).get("restore_best"))
         self._write_event(event)
+        targeted = payload.get("targeted_sampling_summary")
+        targeted_text = ("" if targeted is None else
+            f" mistake_draws={targeted['mistake_draws']}"
+            f" anchor_draws={targeted['anchor_draws']}"
+            f" selection_rounds={targeted['rounds']}")
         self._write_line(
             f"[{self.prefix}] status=started epochs={self._epoch(self.maximum_epochs)} "
             f"train_rows={payload['train_rows']} valid_rows={payload['valid_rows']} "
             f"eval_every={self._epoch(payload['evaluation_every_epochs'])} "
             f"patience={payload['early_stopping']['patience_evaluations']} "
-            f"min_delta={payload['early_stopping']['min_delta']}")
+            f"min_delta={payload['early_stopping']['min_delta']}"
+            f"{targeted_text}")
 
     def record_training(self, report):
         self._write_event({"event": "training", **report})
@@ -848,6 +854,18 @@ def train_supervised(config, view):
     train_batches = (math.ceil(round_rows / config["batch_size"])
                      if config.get("include_partial_batch") else
                      round_rows // config["batch_size"])
+    targeted_receipt = None
+    if targeted_sampler is not None:
+        selection_rounds = max(1, math.ceil(config["iters"] / train_batches))
+        targeted_receipt = {
+            "schema": "propevolve_targeted_sampling_receipt_v1",
+            "assessment": dict(config["targeted_sampling"]),
+            "pool_rows": targeted_sampler.pool_rows,
+            "rounds": [targeted_sampler.selection_receipt(index)
+                       for index in range(selection_rounds)],
+        }
+        (destination / "targeted_sampling_receipt.json").write_text(
+            json.dumps(targeted_receipt, indent=2, allow_nan=False))
     event_log = TrainingEventLog(
         destination / config["training_log_filename"],
         events_path=destination / config["training_events_filename"],
@@ -864,6 +882,13 @@ def train_supervised(config, view):
                             else len(targeted_sampler.groups)
                             if targeted_sampler is not None else None),
         "targeted_sampling": targeted_sampler is not None,
+        "targeted_sampling_summary": (None if targeted_receipt is None else {
+            "rounds": len(targeted_receipt["rounds"]),
+            "mistake_draws": sum(row["mistake_draws"]
+                for row in targeted_receipt["rounds"]),
+            "anchor_draws": sum(row["anchor_draws"]
+                for row in targeted_receipt["rounds"]),
+        }),
         "valid_rows": len(datasets["valid"]),
         "evaluation_every_iterations": config["steps_per_eval"],
         "evaluation_every_epochs": config["steps_per_eval"] / train_batches,
