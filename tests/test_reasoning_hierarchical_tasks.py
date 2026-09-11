@@ -3,6 +3,7 @@
 from propevolve.decision import Action
 from propevolve.reasoning_policy.dataset import supervised_record
 from propevolve.reasoning_policy.decision_tasks import hierarchical_task_records
+from propevolve.reasoning_policy.decision_schema import legal_completion_names
 from propevolve.reasoning_policy.supervision import hierarchical_action_objective
 from propevolve.reasoning_policy.labels import ActionLabels, ActionOutcome
 from test_reasoning_challenger_e2e import environment
@@ -179,3 +180,10 @@ def test_hierarchical_metrics_report_each_binary_boundary_and_reconstructed_acti
     }
     assert metrics["worst_task_advantage"] == 2.0
     assert metrics["task_macro_accuracy"] == 1.0
+
+
+def test_action_completion_schema_rejects_nontrading_answers():
+    import pytest
+
+    with pytest.raises(ValueError, match="not an action-supervision answer"):
+        legal_completion_names("PASS")

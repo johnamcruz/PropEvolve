@@ -6,7 +6,7 @@ import pytest
 
 from propevolve.reasoning_policy.dataset import write_supervised_dataset
 from propevolve.reasoning_policy.integrity import file_digest
-from propevolve.reasoning_policy.workflow import run_workflow
+from propevolve.reasoning_policy.workflow import run_workflow, stage_inputs
 
 
 def test_workflow_runs_stages_resumes_and_rejects_changed_evidence(tmp_path):
@@ -40,3 +40,43 @@ def test_workflow_runs_stages_resumes_and_rejects_changed_evidence(tmp_path):
     with pytest.raises(ValueError, match="artifacts changed"):
         run_workflow(plan)
     assert json.loads(state.read_text())["status"] == "BLOCKED"
+
+
+def test_reasoning_workflow_rejects_removed_policy_kinds(tmp_path):
+    job = tmp_path / "job.json"
+    policy = tmp_path / "policy.json"
+    checkpoint = tmp_path / "legacy-checkpoint"
+    checkpoint.write_text("removed")
+    policy.write_text(json.dumps({"kind": "r2d2", "checkpoint": checkpoint.name}))
+    job.write_text(json.dumps({
+        "policy_config": policy.name,
+        "source_recipe": "source.json",
+        "temporal_split_audit": "audit.json",
+        "context_config": "context.json",
+        "evaluation_policy_config": "evaluation-policy.json",
+        "evaluation_metrics_config": "metrics.json",
+    }))
+    for name in ("source.json", "audit.json", "context.json",
+                 "evaluation-policy.json", "metrics.json"):
+        (tmp_path / name).write_text("{}")
+    step = {
+        "stage": "evaluate", "job_config": job.name,
+        "inputs": [job.name],
+    }
+
+    with pytest.raises(ValueError, match="reasoning policy"):
+        stage_inputs(tmp_path, step)
+
+
+@pytest.mark.parametrize("steps", [
+    [],
+    [{"id": "same", "stage": "audit", "inputs": ["in"], "outputs": ["out"],
+      "job_config": "job.json", "log": "log", "timeout_seconds": 1}] * 2,
+])
+def test_workflow_requires_nonempty_unique_stage_ids(tmp_path, steps):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "workspace_root": str(tmp_path), "state_file": "state.json", "steps": steps,
+    }))
+    with pytest.raises(ValueError, match="unique stage IDs"):
+        run_workflow(plan)

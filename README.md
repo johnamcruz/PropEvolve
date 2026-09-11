@@ -7,11 +7,12 @@ PropEvolve is a self-improving trading agent that **learns, remembers, adapts,
 and trades within prop-firm constraints**.
 
 The agent learns the complete trading decision directly from causal, frozen
-FFM/Chronos2 market-context embeddings plus normalized account and execution
-state. Authenticated Expansion, Trend, and Regime models can provide temporary
-training supervision. The final policy is native to PropEvolve: it does not
-require those teachers, an external trading policy, or handcrafted trend
-indicators at inference time.
+FFM/Chronos2 market-context embeddings. Authenticated Expansion, Trend, and
+Regime models provide temporary training supervision. The final policy is
+native to PropEvolve: it does not require those teachers, an external trading
+policy, or handcrafted trend indicators at inference time. Account and MLL
+state belong to the later RL challenge-mastery stage, not the supervised
+trade-mastery labels.
 
 The current objective is direct: build a system that learns to pass prop-firm
 challenges consistently without blowing the account.
@@ -92,7 +93,7 @@ teacher-free using pass rate, blow rate, near-blow incidence, expectancy,
 Long/Short participation, Entry precision, opportunity recall, and winner
 retention.
 
-The reasoning challenger is trained from scratch in two explicit phases before
+The reasoning policy is trained from scratch in two explicit phases before
 economic evaluation:
 
 - supervised fine-tuning distills market context and learns the complete legal
@@ -115,6 +116,20 @@ must master all action boundaries, survive save/reload, generalize to unseen
 2025 data, and improve teacher-free economics. The year 2026 remains sealed for
 final confirmation.
 
+When broad frozen assessment reveals mistakes, the corrective campaign repeats
+a bounded evidence loop:
+
+1. assess the frozen adapter on fixed development rows;
+2. select actual mistakes plus representative mastered-action anchors;
+3. fine-tune briefly and save a new adapter;
+4. reassess on the unchanged validation rows;
+5. retain the adapter only when mistakes improve without erasing mastered
+   Long, Short, Wait, Hold, or Close behavior.
+
+Each round writes score, selection, training, and acceptance receipts. These
+make the exact corrective examples and retained anchors auditable without
+feeding validation mistakes back into training.
+
 ## Causal inputs and evidence
 
 Historical development uses independent 3-minute streams for:
@@ -125,3 +140,25 @@ All inputs are causal and available at the completed decision bar. Training,
 selection, and sealed confirmation periods are chronological. No teacher,
 cache, replay row, threshold, or recipe revision may inspect the sealed period
 before the final contract is frozen.
+
+## Tests and coverage
+
+The normal suite exercises the reasoning path without downloading a model:
+
+```bash
+python -m pytest -p no:cacheprovider
+```
+
+It covers causal source authentication, temporal sealing, label generation,
+all five legal actions, cache-local dataset collection, targeted
+mistake-and-anchor sampling, checkpoint save/reload contracts, RL environment
+boundaries, teacher-free evaluation, and workflow resume behavior. Local MLX
+numeric tests run when MLX is available; full model-compute tests remain
+explicit opt-ins through their documented environment variables.
+
+CI runs the portable suite on Linux and the complete MLX suite on an Apple
+silicon runner. The MLX coverage job measures the complete `propevolve` package
+and fails below 85% statement coverage; Linux is not used to label Apple-only
+learner code as uncovered. Coverage is a regression guard, not the acceptance
+criterion: model selection still requires the separate trade-mastery and
+challenge-economics gates above.

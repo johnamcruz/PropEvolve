@@ -1,9 +1,11 @@
 """Fixed evidence -> real rollout runner -> before/after and coverage receipts."""
 import json
 import numpy as np
+import pytest
 
 from propevolve.reasoning_policy.context import ContextConfig
 from propevolve.reasoning_policy.learning_audit import (
+    main as learning_audit_main,
     score_labeled_examples,
     summarize_trade_mastery,
 )
@@ -65,3 +67,60 @@ def test_real_rollout_reports_frozen_ranking_before_and_after_update():
     assert report["available_action_mass"]["HOLD"] > 0
     assert report["update_coverage"]["HOLD"] == 0
     assert report["ranking_regressions"] == 1
+
+
+def test_learning_audit_rejects_corrupt_legal_actions_and_nonfinite_scores():
+    malformed = {"source_id": "bad", "completed_at_ns": 1,
+        "messages": [{"role": "user", "content": json.dumps({"legal_actions":
+            ["WAIT", "WAIT"]})}, {"role": "assistant", "content": "WAIT"}]}
+    with pytest.raises(ValueError, match="conflicts with legal actions"):
+        score_labeled_examples(ScriptedRuntime("WAIT"), [malformed])
+
+    class NonFinitePolicy:
+        def completion_scores(self, messages, choices, **kwargs):
+            return {choice: (float("nan") if choice == "WAIT" else 0.0)
+                    for choice in choices}
+    valid = {"source_id": "bad-score", "completed_at_ns": 1,
+        "messages": [{"role": "user", "content": "{}"},
+                     {"role": "assistant", "content": "WAIT"}]}
+    with pytest.raises(ValueError, match="invalid frozen audit scores"):
+        score_labeled_examples(NonFinitePolicy(), [valid])
+    with pytest.raises(ValueError, match="needs labeled examples"):
+        score_labeled_examples(ScriptedRuntime("WAIT"), [])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda rows: rows.pop(),
+    lambda rows: rows.__setitem__(0, {**rows[0], "target_advantage": None}),
+    lambda rows: rows.__setitem__(0, {**rows[0], "correct": 1}),
+])
+def test_trade_mastery_summary_requires_all_five_competing_action_boundaries(mutation):
+    rows = [{"target": name, "correct": True, "target_advantage": 0.1}
+            for name in ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE")]
+    mutation(rows)
+    with pytest.raises(ValueError, match="trade-mastery audit"):
+        summarize_trade_mastery(rows)
+
+
+def test_learning_audit_cli_scores_an_authenticated_record_without_training(
+        tmp_path, monkeypatch, capsys):
+    records = tmp_path / "records.jsonl"
+    records.write_text(json.dumps({
+        "source_id": "row-1", "completed_at_ns": 1,
+        "messages": [
+            {"role": "user", "content": json.dumps({"legal_actions": ["WAIT"]})},
+            {"role": "assistant", "content": "WAIT"},
+        ],
+    }) + "\n")
+    monkeypatch.setattr(
+        "propevolve.reasoning_policy.learning_audit.MLXActionPolicy.from_config",
+        lambda path: ScriptedRuntime("WAIT"),
+    )
+
+    learning_audit_main([
+        "--config", "model.json", "--records", str(records), "--limit", "1",
+    ])
+
+    report = json.loads(capsys.readouterr().out)
+    assert report[0]["source_id"] == "row-1"
+    assert report[0]["correct"] is True

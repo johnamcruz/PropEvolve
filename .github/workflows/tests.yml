@@ -32,15 +32,38 @@ jobs:
       - name: Install package and test dependencies
         run: >-
           python -m pip install --upgrade pip &&
-          python -m pip install -e '.[dev]' &&
+          python -m pip install -e '.[dev]'
+
+      - name: Run portable test suite
+        run: python -m pytest -p no:cacheprovider
+
+  mlx-coverage:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package, MLX, and test dependencies
+        run: >-
+          python -m pip install --upgrade pip &&
+          python -m pip install -e '.[dev,reasoning]' &&
           python -m pip install 'pytest-cov>=5.0'
 
-      - name: Run complete test suite
+      - name: Run complete Apple-silicon suite with coverage
         env:
           COVERAGE_FILE: ${{ runner.temp }}/.coverage
         run: >-
           python -m pytest -p no:cacheprovider
           --cov=propevolve
+          --cov-fail-under=85
           --cov-report=term-missing
           --cov-report=xml:${{ runner.temp }}/coverage.xml
 

@@ -64,9 +64,8 @@ def stage_inputs(root, step):
         policy = read_recipe(policy_path)
         if policy.get("kind") == "reasoning":
             recipe(root / policy["model_config"])
-        elif policy.get("kind") == "r2d2":
-            checkpoint = root / policy["checkpoint"]
-            result[str(checkpoint.resolve())] = file_digest(checkpoint)
+        else:
+            raise ValueError("evaluation workflow requires a reasoning policy")
     if step["stage"] in {"collect", "rl", "evaluate"} and job.get("volume_source") is not None:
         for value in job["volume_source"].values():
             recipe(root / value)
