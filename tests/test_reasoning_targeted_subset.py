@@ -6,9 +6,35 @@ import pytest
 def settings(**updates):
     value = dict(assessment_path="unused", scores_sha256="0" * 64,
                  summary_sha256="1" * 64, rows_per_group=2,
-                 mistake_fraction=.5, seed=17)
+                 mistake_fraction=.5, seed=17, priority_actions=[],
+                 priority_multiplier=1)
     value.update(updates)
     return value
+
+
+def test_subset_can_prioritize_declared_action_gaps_without_dropping_anchors():
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+    rows = [dict(index=i, ticker="NQ", target=target, completed_at_ns=100+i,
+                 target_advantage=(-1. if i % 2 == 0 else 1.))
+            for i, target in enumerate(
+                ["WAIT"] * 4 + ["ENTER_SHORT_1"] * 4 + ["ENTER_LONG_1"] * 4)]
+    sampler = TargetedSampler(rows, settings(priority_actions=["WAIT", "ENTER_SHORT_1"],
+        priority_multiplier=2), train_bounds=(100, 200), expected_rows=12)
+    receipt = sampler.selection_receipt(0)
+    assert receipt["per_action"]["WAIT"]["mistake_draws"] == 2
+    assert receipt["per_action"]["WAIT"]["anchor_draws"] == 2
+    assert receipt["per_action"]["ENTER_SHORT_1"]["mistake_draws"] == 2
+    assert receipt["per_action"]["ENTER_LONG_1"] == {
+        "mistake_draws": 1, "anchor_draws": 1}
+
+
+def test_targeted_sampling_rejects_implicit_action_priority_settings():
+    from propevolve.reasoning_policy.targeted_subset import validate_targeted_sampling
+    implicit = settings()
+    implicit.pop("priority_actions")
+    implicit.pop("priority_multiplier")
+    with pytest.raises(ValueError, match="targeted sampling"):
+        validate_targeted_sampling(implicit)
 
 
 def test_subset_keeps_mistakes_and_mastered_examples_without_crossing_training_role():

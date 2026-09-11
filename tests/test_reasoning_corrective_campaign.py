@@ -182,7 +182,7 @@ class ForgetShort(FakePhases):
         scores.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def campaign_config(tmp_path, *, rounds=2):
+def campaign_config(tmp_path, *, rounds=2, subset=None):
     initial = tmp_path / "initial.json"
     sft_config(initial, tmp_path / "initial-adapter")
     template = tmp_path / "template.json"
@@ -199,11 +199,27 @@ def campaign_config(tmp_path, *, rounds=2):
         "output_root": "run", "initial_policy_config": "initial.json",
         "sft_template_config": "template.json", "prepared_view": "view",
         "rounds": rounds, "initial_assessments": {"train": None, "valid": None},
-        "subset": {"rows_per_group": 2, "mistake_fraction": .5, "seed": 17},
+        "subset": subset or {"rows_per_group": 2, "mistake_fraction": .5,
+                              "seed": 17, "priority_actions": [],
+                              "priority_multiplier": 1},
         "acceptance": gate(minimum_retained_mastery_rate=.9),
         "timeouts": {"assessment_seconds": 60, "training_seconds": 60},
     }))
     return campaign
+
+
+def test_campaign_propagates_declared_action_priorities_to_the_real_child_config(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+    campaign = campaign_config(tmp_path, rounds=1, subset={
+        "rows_per_group": 2, "mistake_fraction": .5, "seed": 17,
+        "priority_actions": ["WAIT", "ENTER_SHORT_1"], "priority_multiplier": 2,
+    })
+    result = run_campaign(campaign, phases=FakePhases())
+    assert result["status"] == "COMPLETE"
+    child = json.loads((tmp_path / "run/round-01/candidate-policy.json").read_text())
+    assert child["targeted_sampling"]["priority_actions"] == [
+        "WAIT", "ENTER_SHORT_1"]
+    assert child["targeted_sampling"]["priority_multiplier"] == 2
 
 
 def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path):

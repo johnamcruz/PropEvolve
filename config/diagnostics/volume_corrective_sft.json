@@ -1,0 +1,17 @@
+{
+  "inherits": "volume_action_parent_sft.json",
+  "iters": 11340,
+  "steps_per_report": 100,
+  "steps_per_eval": 2200,
+  "save_every": 2200,
+  "save_training_state": true,
+  "early_stopping": {
+    "enabled": true,
+    "patience_evaluations": 3,
+    "min_delta": 0.001,
+    "restore_best": true,
+    "monitor": "worst_task_advantage",
+    "mode": "max"
+  },
+  "training_log_prefix": "volume-corrective-trade-mastery"
+}

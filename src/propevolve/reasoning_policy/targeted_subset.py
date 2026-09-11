@@ -14,12 +14,15 @@ _SETTING_KEYS = {
     "assessment_path", "scores_sha256", "summary_sha256",
     "rows_per_group", "mistake_fraction", "seed",
 }
+_PRIORITY_KEYS = {"priority_actions", "priority_multiplier"}
 
 
 def validate_targeted_sampling(settings):
     if settings is None:
         return
-    if (not isinstance(settings, dict) or set(settings) != _SETTING_KEYS
+    keys = set(settings) if isinstance(settings, dict) else set()
+    if (not isinstance(settings, dict)
+            or keys != _SETTING_KEYS | _PRIORITY_KEYS
             or not isinstance(settings["assessment_path"], str)
             or not settings["assessment_path"].strip()
             or any(not isinstance(settings[name], str) or len(settings[name]) != 64
@@ -32,7 +35,14 @@ def validate_targeted_sampling(settings):
             or isinstance(settings["mistake_fraction"], bool)
             or not isinstance(settings["mistake_fraction"], (int, float))
             or not math.isfinite(float(settings["mistake_fraction"]))
-            or not 0 < settings["mistake_fraction"] < 1):
+            or not 0 < settings["mistake_fraction"] < 1
+            or (not isinstance(settings["priority_actions"], list)
+                or any(not isinstance(name, str) or not name
+                       for name in settings["priority_actions"])
+                or len(set(settings["priority_actions"]))
+                    != len(settings["priority_actions"])
+                or type(settings["priority_multiplier"]) is not int
+                or settings["priority_multiplier"] < 1)):
         raise ValueError("invalid targeted sampling configuration")
 
 
@@ -88,6 +98,8 @@ class TargetedSampler:
         self.seed = settings["seed"]
         self.quota = settings["rows_per_group"]
         self.mistake_fraction = float(settings["mistake_fraction"])
+        self.priority_actions = frozenset(settings["priority_actions"])
+        self.priority_multiplier = settings["priority_multiplier"]
         rng = np.random.default_rng(self.seed)
         self.groups = {
             key: tuple(rng.permutation(np.asarray(part, dtype=np.int64)) for part in parts)
@@ -101,8 +113,15 @@ class TargetedSampler:
         if not counts:
             raise ValueError("targeted sampling produced no action classes")
         self.action_names = tuple(sorted(counts))
+        if not self.priority_actions <= set(self.action_names):
+            raise ValueError("targeted sampling priority action is absent")
         self.rows_per_action = max(counts.values())
-        self.round_rows = self.rows_per_action * len(self.action_names)
+        self.action_draws = {
+            name: self.rows_per_action * (
+                self.priority_multiplier if name in self.priority_actions else 1)
+            for name in self.action_names
+        }
+        self.round_rows = sum(self.action_draws.values())
 
     @classmethod
     def from_assessment(cls, settings, *, view_manifest_path, train_bounds,
@@ -162,8 +181,10 @@ class TargetedSampler:
         queues = {name: list(rng.permutation(by_action[name]))
                   for name in self.action_names}
         order = []
-        for position in range(self.rows_per_action):
+        for position in range(max(self.action_draws.values())):
             for name in self.action_names:
+                if position >= self.action_draws[name]:
+                    continue
                 queue = queues[name]
                 order.append(int(queue[position % len(queue)]))
         return np.asarray(order, dtype=np.int64)

@@ -25,6 +25,18 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
     if not required.issubset(payload):
         raise ValueError(f"missing SFT settings: {sorted(required - set(payload))}")
     validate_model_settings(payload)
+    state_defaults = payload["prepared_state_defaults"]
+    state_fields = (() if payload.get("projector") is None else
+                    payload["projector"].get("state_fields", ()))
+    if state_defaults is not None and (
+            payload.get("input_mode") != "embeddings"
+            or not isinstance(state_defaults, dict)
+            or set(state_defaults) != set(state_fields)
+            or any(isinstance(value, bool)
+                   or not isinstance(value, (int, float))
+                   or not math.isfinite(float(value))
+                   for value in state_defaults.values())):
+        raise ValueError("prepared state defaults differ from projector contract")
     if payload.get("epochs") is not None and (
             type(payload["epochs"]) is not int or payload["epochs"] < 1):
         raise ValueError("epochs must be a positive integer or null")
@@ -297,6 +309,7 @@ def view_contract(config: dict) -> dict:
         "model", "data", "input_mode", "projector", "max_seq_length",
         "chat_template_kwargs", "action_verbalizers", "action_supervision",
         "trust_remote_code", "dataset_requirements", "distillation_targets",
+        "prepared_state_defaults",
     )
     contract = {key: config.get(key) for key in keys}
     if config.get("market_distillation") is not None:
@@ -423,11 +436,15 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             history = np.asarray(prompt.get("history_oldest_first"), dtype=np.float32)
                             if (not isinstance(fields, list) or len(set(fields)) != len(fields)
                                     or history.ndim != 2 or history.shape[1] != len(fields)
-                                    or not len(history) or not np.isfinite(history).all()
-                                    or any(field not in fields for field in state_fields)):
+                                    or not len(history) or not np.isfinite(history).all()):
+                                raise ValueError("prepared causal state differs from projector contract")
+                            missing = [field for field in state_fields if field not in fields]
+                            defaults = config["prepared_state_defaults"]
+                            if missing and defaults is None:
                                 raise ValueError("prepared causal state differs from projector contract")
                             encoded["causal_state"] = [
-                                float(history[-1, fields.index(field)]) for field in state_fields
+                                (float(history[-1, fields.index(field)]) if field in fields
+                                 else float(defaults[field])) for field in state_fields
                             ]
                     if config.get("coverage_sampling") is not None:
                         from .coverage_sampling import coverage_metadata

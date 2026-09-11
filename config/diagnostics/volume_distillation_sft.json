@@ -13,6 +13,33 @@
       "margin": 0.1
     }
   },
+  "projector": {
+    "embedding_dim": 2560,
+    "context_steps": 20,
+    "market_tokens": 5,
+    "temporal_encoding": "latest_plus_deltas",
+    "state_fields": [
+      "trade.open",
+      "trade.position_side",
+      "trade.risk_available",
+      "trade.mfe_r_so_far",
+      "trade.mae_r_so_far",
+      "trade.current_r",
+      "trade.giveback_r",
+      "trade.hold_bars"
+    ],
+    "state_scales": [1.0, 1.0, 1.0, 4.0, 4.0, 4.0, 4.0, 150.0]
+  },
+  "prepared_state_defaults": {
+    "trade.open": 0.0,
+    "trade.position_side": 0.0,
+    "trade.risk_available": 0.0,
+    "trade.mfe_r_so_far": 0.0,
+    "trade.mae_r_so_far": 0.0,
+    "trade.current_r": 0.0,
+    "trade.giveback_r": 0.0,
+    "trade.hold_bars": 0.0
+  },
   "epochs": 3,
   "prepared_sampling": {
     "fields": ["ticker", "year"],

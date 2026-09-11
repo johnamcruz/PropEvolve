@@ -1,12 +1,12 @@
 {
   "schema": "propevolve_reasoning_corrective_campaign_v1",
   "workspace_root": ".",
-  "state_file": "runs/reasoning-challenger/corrective-trade-mastery-10k/campaign-state.json",
-  "output_root": "runs/reasoning-challenger/corrective-trade-mastery-10k",
-  "initial_policy_config": "config/diagnostics/trade_inference_assessment_sft.json",
-  "sft_template_config": "config/reasoning/corrective_trade_mastery_10k_sft.json",
+  "state_file": "runs/reasoning-challenger/volume-ab/corrective/campaign-state.json",
+  "output_root": "runs/reasoning-challenger/volume-ab/corrective",
+  "initial_policy_config": "config/diagnostics/volume_action_parent_sft.json",
+  "sft_template_config": "config/diagnostics/volume_corrective_sft.json",
   "prepared_view": "runs/reasoning-challenger/trade-inference-assessment/view",
-  "rounds": 1,
+  "rounds": 5,
   "initial_assessments": {
     "train": {
       "path": "runs/reasoning-challenger/trade-inference-assessment/train-assessment",
@@ -23,8 +23,8 @@
     "rows_per_group": 84,
     "mistake_fraction": 0.75,
     "seed": 17,
-    "priority_actions": [],
-    "priority_multiplier": 1
+    "priority_actions": ["WAIT", "ENTER_SHORT_1"],
+    "priority_multiplier": 2
   },
   "acceptance": {
     "primary_metric": "worst_task_advantage",
