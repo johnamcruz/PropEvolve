@@ -124,3 +124,12 @@ def test_learning_audit_cli_scores_an_authenticated_record_without_training(
     report = json.loads(capsys.readouterr().out)
     assert report[0]["source_id"] == "row-1"
     assert report[0]["correct"] is True
+def test_frozen_action_assessment_strips_teacher_training_queries_only():
+    from propevolve.reasoning_policy.learning_audit import TeacherFreeAssessmentRows
+
+    original = [{"tokens": [1, 2], "error_selected_distillation": {
+        "tokens": [3, 4], "market_targets": {"probabilities": [.8]}}}]
+    frozen = TeacherFreeAssessmentRows(original)
+
+    assert frozen[0] == {"tokens": [1, 2]}
+    assert "error_selected_distillation" in original[0]

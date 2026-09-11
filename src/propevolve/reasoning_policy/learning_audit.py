@@ -11,6 +11,21 @@ from .decision_schema import legal_completion_names
 from .policy import MLXActionPolicy
 
 
+class TeacherFreeAssessmentRows:
+    """Expose action tensors only; teacher targets remain source metadata."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        row = dict(self.dataset[index])
+        row.pop("error_selected_distillation", None)
+        return row
+
+
 def score_labeled_examples(policy, records):
     """Measure every action class independently; do not hide side collapse."""
     output = []
@@ -91,7 +106,8 @@ def assess_prepared(config_path, view, *, role, output, root=None):
     if config.get("prepared_sampling") is not None:
         raise ValueError("assessment requires a full prepared role for exact source alignment")
     verify_mlx_view(config_path, view, root=root)
-    dataset = PreparedDataset(view, role)
+    prepared = PreparedDataset(view, role)
+    dataset = TeacherFreeAssessmentRows(prepared)
     source = IndexedJsonRows(Path(config["data"]) / f"{role}.jsonl")
     if len(source) != len(dataset):
         raise ValueError("assessment source and prepared rows differ")
@@ -102,10 +118,10 @@ def assess_prepared(config_path, view, *, role, output, root=None):
     with (destination / "scores.jsonl").open("x") as stream:
         def record_score(index, scores):
             original = source[index]
-            prepared = dataset.rows[index]
-            if action_targets(original) != prepared["action_targets"]:
+            prepared_row = prepared.rows[index]
+            if action_targets(original) != prepared_row["action_targets"]:
                 raise ValueError("assessment economic targets differ from source")
-            names = prepared["action_targets"]["names"]
+            names = prepared_row["action_targets"]["names"]
             target = original["messages"][-1]["content"]
             values = dict(zip(names, scores))
             predicted = max(values, key=values.get)
@@ -118,7 +134,7 @@ def assess_prepared(config_path, view, *, role, output, root=None):
                 "specialist_targets": original["targets"].get("specialist_targets", {})}
             stream.write(json.dumps(row, allow_nan=False) + "\n")
             grouped = groups.setdefault(row["ticker"], ([], []))
-            grouped[0].append({"action_targets": prepared["action_targets"], "target_name": target})
+            grouped[0].append({"action_targets": prepared_row["action_targets"], "target_name": target})
             grouped[1].append(scores)
             if sum(len(items[0]) for items in groups.values()) % 100 == 0:
                 stream.flush()
