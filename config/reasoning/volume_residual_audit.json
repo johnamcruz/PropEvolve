@@ -1,0 +1,17 @@
+{
+  "schema": "volume_residual_audit_v1",
+  "scores": "runs/reasoning-challenger/corrective-trade-mastery-10k/round-01/candidate-valid-assessment/scores.jsonl",
+  "teacher_cache_roots": {
+    "expansion": "cache/expansion_teacher_9market_3min_pre2025_v1",
+    "regime": "cache/expansion_anchored_regime_teacher_9market_3min_pre2025_v1",
+    "trend": "cache/trend_teacher_9market_3min_pre2025_v1",
+    "volume": "cache/volume_teacher_9market_3min_pre2025_v1"
+  },
+  "actions": {
+    "ENTER_SHORT_1": "short_edge",
+    "WAIT": "quietness"
+  },
+  "minimum_auc": 0.55,
+  "minimum_matched_rate": 0.55,
+  "output": ".private/research/volume-residual-audit.json"
+}

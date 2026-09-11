@@ -67,3 +67,29 @@ def test_verified_matching_trend_teacher_is_packaged() -> None:
         "long_conditional_quality",
         "short_conditional_quality",
     )
+
+
+def test_verified_matching_volume_teacher_is_packaged_for_distillation() -> None:
+    root = Path("teachers")
+    manifest = json.loads((root / "manifest.json").read_text())
+    volume = manifest["volume"]
+    checkpoint = root / volume["checkpoint"]
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+
+    assert manifest["inference_dependency"] is False
+    assert _sha256(checkpoint) == volume["checkpoint_sha256"]
+    assert payload["schema"] == volume["artifact_schema"]
+    assert payload["training_schema"] == volume["training_schema"]
+    assert payload["model_metadata"]["schema"] == volume["model_schema"]
+    assert payload["lineage"]["encoder_identity_sha256"] == (
+        volume["encoder_identity_sha256"]
+    )
+    assert set(payload["lineage"]["cache_sha256s"]) == set(
+        volume["cache_sha256s"].values()
+    )
+    assert tuple(volume["channels"]) == (
+        "long_participation_probability",
+        "long_clean_given_participation_probability",
+        "short_participation_probability",
+        "short_clean_given_participation_probability",
+    )

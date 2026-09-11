@@ -5,7 +5,7 @@
   "resume_adapter_file": "runs/reasoning-challenger/qwen3-0.6b-market-full-history-adapters/adapters.safetensors",
   "resume_adapter_requirements": {
     "stage_role": "market_distillation",
-    "distillation_targets": ["expansion", "trend", "regime"]
+    "distillation_targets": ["expansion", "trend", "regime", "volume"]
   },
   "component_learning_rates": {
     "lora": 0.00001,

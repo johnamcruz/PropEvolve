@@ -23,7 +23,7 @@ class TeacherTargetSource:
 
     def __post_init__(self) -> None:
         if (
-            self.kind not in {"expansion", "regime", "trend"}
+            self.kind not in {"expansion", "regime", "trend", "volume"}
             or not self.channels
             or len(set(self.channels)) != len(self.channels)
             or self.loss_weight < 0
@@ -148,6 +148,10 @@ def load_teacher_targets(
             from .trend import TrendTeacherTargets
 
             targets = TrendTeacherTargets.load(root / spec["cache_root"], markets)
+        elif kind == "volume":
+            from .volume import VolumeTeacherTargets
+
+            targets = VolumeTeacherTargets.load(root / spec["cache_root"], markets)
         else:  # pragma: no cover - configuration validation owns this boundary
             raise ValueError(f"unsupported teacher kind: {kind}")
         sources.append(TeacherTargetSource(

@@ -111,13 +111,32 @@ def test_market_distillation_requires_every_declared_teacher_group(tmp_path):
         root, required_target_groups=["expansion", "trend", "regime"]
     )["schema"] == "propevolve_reasoning_dataset_v1"
 
+    with pytest.raises(ValueError, match="volume"):
+        verify_dataset(
+            root,
+            required_target_groups=["expansion", "trend", "regime", "volume"],
+        )
+
+    record["targets"]["specialist_targets"]["volume.long_probability"] = 0.6
+    for role in ("train", "valid"):
+        (root / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
+    manifest["files"] = {role: file_digest(root / f"{role}.jsonl")
+                         for role in ("train", "valid")}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    audit["manifest_sha256"] = file_digest(root / "manifest.json")
+    (root / "audit.json").write_text(json.dumps(audit))
+    assert verify_dataset(
+        root,
+        required_target_groups=["expansion", "trend", "regime", "volume"],
+    )["schema"] == "propevolve_reasoning_dataset_v1"
+
 
 def test_action_sft_rejects_parent_without_declared_market_distillation():
     from propevolve.reasoning_policy.model_config import validate_sft_parent_contract
     child = {
         "resume_adapter_requirements": {
             "stage_role": "market_distillation",
-            "distillation_targets": ["expansion", "trend", "regime"],
+            "distillation_targets": ["expansion", "trend", "regime", "volume"],
         }
     }
     smoke = {"stage_role": "smoke", "distillation_targets": ["expansion"]}
@@ -131,7 +150,7 @@ def test_action_sft_rejects_parent_without_declared_market_distillation():
         validate_sft_parent_contract(child, incomplete)
     assert validate_sft_parent_contract(child, {
         "stage_role": "market_distillation",
-        "distillation_targets": ["regime", "expansion", "trend"],
+        "distillation_targets": ["regime", "volume", "expansion", "trend"],
     }) is None
 
 

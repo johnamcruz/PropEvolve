@@ -58,3 +58,28 @@ def test_reasoning_source_rejects_missing_or_misaligned_market_economics(tmp_pat
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="market economics"):
         load_source_recipe(path)
+
+
+def test_reasoning_source_accepts_volume_only_as_fourth_training_teacher(tmp_path):
+    from propevolve.reasoning_policy.source_config import load_source_recipe
+    payload = source_payload()
+    payload["teachers"].append({
+        "kind": "volume",
+        "cache_root": "cache/volume",
+        "channels": ["long_participation", "short_participation"],
+        "loss_weight": 0.1,
+        "entry_search_loss_weight": 0.0,
+    })
+    path = tmp_path / "source.json"
+    path.write_text(json.dumps(payload))
+
+    assert [row["kind"] for row in load_source_recipe(path)["teachers"]] == [
+        "expansion", "regime", "trend", "volume"
+    ]
+
+    payload["teachers"][2], payload["teachers"][3] = (
+        payload["teachers"][3], payload["teachers"][2]
+    )
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="Expansion, Regime, Trend"):
+        load_source_recipe(path)

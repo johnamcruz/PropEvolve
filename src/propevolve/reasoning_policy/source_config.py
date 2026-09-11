@@ -52,9 +52,14 @@ def load_source_recipe(path):
                    for value in values.values())):
         raise ValueError("reasoning market economics do not match tickers")
     teachers = payload["teachers"]
-    if (not isinstance(teachers, list)
-            or [item.get("kind") for item in teachers] != ["expansion", "regime", "trend"]):
-        raise ValueError("reasoning source requires Expansion, Regime, and Trend")
+    kinds = [item.get("kind") for item in teachers] if isinstance(teachers, list) else []
+    if kinds not in (
+        ["expansion", "regime", "trend"],
+        ["expansion", "regime", "trend", "volume"],
+    ):
+        raise ValueError(
+            "reasoning source requires Expansion, Regime, Trend, and optional Volume"
+        )
     for teacher in teachers:
         expected = _COMMON_TEACHER_FIELDS | (
             {"entry_search_objective"} if teacher["kind"] == "expansion" else set())

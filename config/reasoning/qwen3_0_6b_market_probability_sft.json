@@ -18,7 +18,11 @@
       {"name": "trend.long_launch_probability", "query": "\nLong trend launch?", "weight": 1.0},
       {"name": "trend.short_launch_probability", "query": "\nShort trend launch?", "weight": 1.0},
       {"name": "trend.long_conditional_quality", "query": "\nLong trend conditional quality?", "weight": 1.0},
-      {"name": "trend.short_conditional_quality", "query": "\nShort trend conditional quality?", "weight": 1.0}
+      {"name": "trend.short_conditional_quality", "query": "\nShort trend conditional quality?", "weight": 1.0},
+      {"name": "volume.long_participation_probability", "query": "\nLong-side volume participation?", "weight": 1.0},
+      {"name": "volume.long_clean_given_participation_probability", "query": "\nLong-side volume quality conditional on participation?", "weight": 1.0},
+      {"name": "volume.short_participation_probability", "query": "\nShort-side volume participation?", "weight": 1.0},
+      {"name": "volume.short_clean_given_participation_probability", "query": "\nShort-side volume quality conditional on participation?", "weight": 1.0}
     ]
   },
   "early_stopping": {

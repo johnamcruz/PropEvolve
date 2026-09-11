@@ -6,7 +6,8 @@ pass.
 
 ## Current path
 
-1. A market-distillation stage teaches Expansion, Trend and Regime semantics
+1. A market-distillation stage teaches Expansion, Trend, Regime and Volume
+   semantics
    from aligned training-only targets. The deployed policy receives frozen FFM
    embeddings plus normalized account/trade state, never teacher outputs.
 2. `context.RollingContext` supplies completed-bar history with an availability
@@ -245,7 +246,8 @@ five-action update/reload smoke have been executed in this implementation sessio
 
 - Require positive WAIT/Long/Short/HOLD/CLOSE margins after save/reload on the
   inner temporal split, then repeat on unseen 2025.
-- Confirm action SFT preserves the preceding Expansion/Trend/Regime distillation.
+- Confirm action SFT preserves the preceding Expansion/Trend/Regime/Volume
+  distillation.
 - Run full 2021-2024 SFT with best-checkpoint restoration and no 2025 tuning.
 - Verify bounded RL updates preserve trade mastery while improving challenge
   economics in the unchanged simulator.
@@ -269,7 +271,7 @@ Paths resolve against the job's workspace root. The numbers/paths above are
 examples, not Python defaults. `config/reasoning/shared_evaluation_job.json`
 demonstrates selection while inheriting the existing job. The reasoning adapter
 uses the frozen-embedding projector and is teacher-free at inference;
-Expansion/Trend/Regime targets are training-only.
+Expansion/Trend/Regime/Volume targets are training-only.
 
 Passing mechanics tests are necessary but not an economic claim. The policy
 remains unpromoted until the temporal SFT and challenge-economics gates above pass.
@@ -287,9 +289,11 @@ sampling. Its bins control training coverage, not legal actions or entry gates.
 An epoch with coverage enabled is one sampled round, not a complete pool pass.
 Validation remains fixed and is not selected by training errors.
 
-Market distillation teaches Expansion/Trend/Regime. Existing action SFT retains
-entry, direction, HOLD/CLOSE and economic supervision; RL retains challenge
-objectives. Better teacher Brier scores do not establish better trading.
+Market distillation teaches Expansion/Trend/Regime/Volume. Volume contributes
+factorized Long/Short participation and conditional-quality context; it never
+selects or blocks an action directly. Existing action SFT retains entry,
+direction, HOLD/CLOSE and economic supervision; RL retains challenge objectives.
+Better teacher Brier scores do not establish better trading.
 
 For the bounded direct-market-to-trade path:
 

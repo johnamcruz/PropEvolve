@@ -7,8 +7,10 @@ PropEvolve is a self-improving trading agent that **learns, remembers, adapts,
 and trades within prop-firm constraints**.
 
 The agent learns the complete trading decision directly from causal, frozen
-FFM/Chronos2 market-context embeddings. Authenticated Expansion, Trend, and
-Regime models provide temporary training supervision. The final policy is
+FFM/Chronos2 market-context embeddings. Authenticated Expansion, Trend, Regime,
+and Volume models provide temporary training supervision. Volume describes
+participation and conditional participation quality; it is confluence, not an
+action gate. The final policy is
 native to PropEvolve: it does not require those teachers, an external trading
 policy, or handcrafted trend indicators at inference time. Account and MLL
 state belong to the later RL challenge-mastery stage, not the supervised
@@ -59,7 +61,7 @@ frozen FFM/Chronos2 embeddings ── normalized account, MLL and execution stat
                            │
                   pass / blow / timeout
 
-Expansion / Trend / Regime teachers ──► training labels and losses only
+Expansion / Trend / Regime / Volume teachers ──► training labels and losses only
 ```
 
 The reasoning model uses a configurable MLX-LM backbone on Apple silicon and

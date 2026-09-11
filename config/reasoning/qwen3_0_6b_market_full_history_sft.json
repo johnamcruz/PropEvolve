@@ -7,7 +7,7 @@
   "include_partial_batch": true,
   "save_training_state": true,
   "stage_role": "market_distillation",
-  "distillation_targets": ["expansion", "trend", "regime"],
+  "distillation_targets": ["expansion", "trend", "regime", "volume"],
   "batch_size": 4,
   "validation_batch_size": 4,
   "component_learning_rates": {

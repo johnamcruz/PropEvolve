@@ -21,6 +21,15 @@ def sources():
                  for kind in ("expansion", "trend", "regime"))
 
 
+def volume_sources():
+    return sources() + (
+        SimpleNamespace(
+            kind="volume", channels=("probability",),
+            targets=SimpleNamespace(target=lambda ticker, row: np.array([0.5])),
+        ),
+    )
+
+
 def test_collection_handles_reset_partial_context_and_preserves_future_isolation():
     original = environment()
     env = HistoricalChallengeEnv(original.markets, tick_values=original.tick_values,
@@ -48,7 +57,7 @@ def test_action_collection_in_embedding_mode_never_reads_specialists():
             raise AssertionError("action collection requested a training-only specialist")
 
     forbidden = tuple(SimpleNamespace(kind=kind, channels=("probability",), targets=ForbiddenTargets())
-                      for kind in ("expansion", "trend", "regime"))
+                      for kind in ("expansion", "regime", "trend", "volume"))
     base = environment()
     original = HistoricalChallengeEnv(base.markets, tick_values=base.tick_values,
         round_trip_fees=base.round_trip_fees,
@@ -77,7 +86,7 @@ def test_action_corpus_joins_existing_specialists_and_multi_r_economics_as_targe
     record = next(collect_examples(
         env, reset_options={"ticker": "NQ", "start": 0},
         context_config=ContextConfig(2, ("account.realized_pnl_norm",), input_mode="embeddings"),
-        sources=sources(), behavior_factory=passive_factory,
+        sources=volume_sources(), behavior_factory=passive_factory,
         continuation_factory=passive_factory, source_id="fixture",
         continuation_id="market-barrier-grid", maximum_examples=1, sample_stride=1,
         rollout_max_steps=8, target_temperature=1.0,
@@ -94,7 +103,8 @@ def test_action_corpus_joins_existing_specialists_and_multi_r_economics_as_targe
     }
     assert record["targets"]["future_excursions"]["long"]["mfe_r_gross"] >= 4.0
     assert set(record["targets"]["specialist_targets"]) == {
-        "expansion.probability", "trend.probability", "regime.probability",
+        "expansion.probability", "regime.probability", "trend.probability",
+        "volume.probability",
     }
     prompt = record["messages"][1]["content"]
     assert "specialist_targets" not in prompt

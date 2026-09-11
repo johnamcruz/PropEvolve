@@ -26,6 +26,13 @@
       "channels": ["long_launch_probability", "short_launch_probability", "long_conditional_quality", "short_conditional_quality"],
       "loss_weight": 0,
       "entry_search_loss_weight": 0
+    },
+    {
+      "kind": "volume",
+      "cache_root": "cache/volume_teacher_9market_3min_pre2025_v1",
+      "channels": ["long_participation_probability", "long_clean_given_participation_probability", "short_participation_probability", "short_clean_given_participation_probability"],
+      "loss_weight": 0.1,
+      "entry_search_loss_weight": 0
     }
   ],
   "observation": {
