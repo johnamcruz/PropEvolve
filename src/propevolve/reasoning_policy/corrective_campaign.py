@@ -248,7 +248,8 @@ def _campaign_identity(plan, root):
         payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
-def _write_child_config(plan, root, round_root, parent_config, train_assessment):
+def _write_child_config(plan, root, round_root, parent_config, train_assessment,
+                        *, round_index):
     from .mlx_sft import read_sft_config
     template = read_sft_config(
         _resolve(root, plan["sft_template_config"]), root=root)
@@ -286,7 +287,8 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment)
         "validation_metrics_path": str(
             (round_root / "candidate-adapter" / "validation-metrics.jsonl").resolve()),
         "targeted_sampling": {
-            **plan["subset"], "assessment_path": train_assessment["path"],
+            **plan["subset"], "seed": plan["subset"]["seed"] + round_index,
+            "assessment_path": train_assessment["path"],
             "scores_sha256": train_assessment["scores_sha256"],
             "summary_sha256": train_assessment["summary_sha256"],
         },
@@ -423,8 +425,9 @@ def run_campaign(path, *, phases=None):
                             plan, root, "valid", view)
                     else:
                         prior = state["rounds"][index - 1]
-                        round_state["parent_train"] = prior["candidate_train"]
-                        round_state["parent_valid"] = prior["candidate_valid"]
+                        prefix = "candidate" if prior["decision"] == "ACCEPTED" else "parent"
+                        round_state["parent_train"] = prior[f"{prefix}_train"]
+                        round_state["parent_valid"] = prior[f"{prefix}_valid"]
                     state["rounds"].append(round_state)
                     atomic_json(state_path, state)
                 train_assessment = _record_assessment(
@@ -437,7 +440,8 @@ def run_campaign(path, *, phases=None):
                     round_root / "parent-valid-assessment.log", "parent_valid")
                 if round_state["candidate_policy_config"] is None:
                     child_config = _write_child_config(
-                        plan, root, round_root, parent_policy, train_assessment)
+                        plan, root, round_root, parent_policy, train_assessment,
+                        round_index=index)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)
                 else:
@@ -452,7 +456,8 @@ def run_campaign(path, *, phases=None):
                     # inputs before every artifact-free retry; completed candidates
                     # remain immutable and are verified above.
                     child_config = _write_child_config(
-                        plan, root, round_root, parent_policy, train_assessment)
+                        plan, root, round_root, parent_policy, train_assessment,
+                        round_index=index)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)
                     if candidate_adapter.exists():
@@ -478,10 +483,9 @@ def run_campaign(path, *, phases=None):
                 round_state.update(comparison)
                 atomic_json(state_path, state)
                 if comparison["decision"] != "ACCEPTED":
-                    state["status"] = "FAILED_GATE"
                     state["selected_policy_config"] = str(parent_policy)
                     atomic_json(state_path, state)
-                    return state
+                    continue
                 state["current_policy_config"] = str(child_config.resolve())
                 state["selected_policy_config"] = str(child_config.resolve())
                 atomic_json(state_path, state)

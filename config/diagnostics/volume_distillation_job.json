@@ -1,0 +1,7 @@
+{
+  "inherits": "../reasoning/qwen3_0_6b_market_full_history_job.json",
+  "status": "volume_distillation_ab",
+  "dataset_output": "runs/reasoning-challenger/volume-ab/market-corpus",
+  "mlx_view": "runs/reasoning-challenger/volume-ab/market-view",
+  "sft_config": "config/diagnostics/volume_distillation_sft.json"
+}

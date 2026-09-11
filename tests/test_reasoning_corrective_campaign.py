@@ -265,12 +265,15 @@ def test_blocked_campaign_regenerates_stale_untrained_child_config(tmp_path):
     assert json.loads(child_path.read_text())["val_batches"] == 11
 
 
-def test_reasoning_campaign_rejects_forgetting_and_keeps_the_parent(tmp_path):
+def test_reasoning_campaign_rejects_forgetting_keeps_parent_and_refreshes_next_round(tmp_path):
     from propevolve.reasoning_policy.corrective_campaign import run_campaign
     campaign = campaign_config(tmp_path, rounds=2)
     result = run_campaign(campaign, phases=ForgetShort())
-    assert result["status"] == "FAILED_GATE"
-    assert len(result["rounds"]) == 1
-    assert result["rounds"][0]["decision"] == "REJECTED"
-    assert "retention" in result["rounds"][0]["failed_gates"]
+    assert result["status"] == "COMPLETE"
+    assert len(result["rounds"]) == 2
+    assert [row["decision"] for row in result["rounds"]] == ["REJECTED", "REJECTED"]
+    assert all("retention" in row["failed_gates"] for row in result["rounds"])
     assert result["selected_policy_config"] == str((tmp_path / "initial.json").resolve())
+    children = [json.loads((tmp_path / f"run/round-0{i}/candidate-policy.json").read_text())
+                for i in (1, 2)]
+    assert [row["targeted_sampling"]["seed"] for row in children] == [17, 18]
