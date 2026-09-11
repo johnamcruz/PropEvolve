@@ -172,8 +172,6 @@ _CAMPAIGN_KEYS = {
     "initial_policy_config", "sft_template_config", "prepared_view",
     "rounds", "initial_assessments", "subset", "acceptance", "timeouts",
 }
-_SUBSET_KEYS = {"rows_per_group", "mistake_fraction", "seed"}
-_SUBSET_PRIORITY_KEYS = {"priority_actions", "priority_multiplier"}
 
 
 def _resolve(root, value):
@@ -183,8 +181,6 @@ def _resolve(root, value):
 
 def _read_campaign(path):
     plan = read_recipe(path)
-    subset_keys = set(plan.get("subset", ())) if isinstance(
-        plan.get("subset"), dict) else set()
     if (set(plan) != _CAMPAIGN_KEYS
             or plan["schema"] != "propevolve_reasoning_corrective_campaign_v1"
             or not isinstance(plan["workspace_root"], str)
@@ -192,7 +188,7 @@ def _read_campaign(path):
             or not isinstance(plan["initial_assessments"], dict)
             or set(plan["initial_assessments"]) != {"train", "valid"}
             or not isinstance(plan["subset"], dict)
-            or subset_keys != _SUBSET_KEYS | _SUBSET_PRIORITY_KEYS
+            or set(plan["subset"]) != {"rows_per_group", "mistake_fraction", "seed"}
             or not isinstance(plan["timeouts"], dict)
             or set(plan["timeouts"]) != {"assessment_seconds", "training_seconds"}
             or any(isinstance(plan["timeouts"][name], bool)

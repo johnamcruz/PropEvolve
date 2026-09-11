@@ -18,9 +18,7 @@
   "subset": {
     "rows_per_group": 16,
     "mistake_fraction": 0.75,
-    "seed": 17,
-    "priority_actions": [],
-    "priority_multiplier": 1
+    "seed": 17
   },
   "acceptance": {
     "primary_metric": "worst_task_advantage",

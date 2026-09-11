@@ -68,44 +68,6 @@ def test_reasoning_workflow_rejects_removed_policy_kinds(tmp_path):
         stage_inputs(tmp_path, step)
 
 
-def test_workflow_dispatches_config_driven_corrective_loop_and_receipts_it(
-        tmp_path, monkeypatch):
-    import subprocess
-    root = Path(__file__).resolve().parents[1]
-    initial = tmp_path / "initial.json"
-    template = tmp_path / "template.json"
-    view = tmp_path / "view"
-    view.mkdir()
-    initial.write_text("{}")
-    template.write_text("{}")
-    (view / "view_manifest.json").write_text("{}")
-    campaign = tmp_path / "campaign.json"
-    campaign.write_text(json.dumps({"workspace_root": str(root),
-        "initial_policy_config": str(initial),
-        "sft_template_config": str(template), "prepared_view": str(view)}))
-    declared = tmp_path / "declared-input.json"
-    declared.write_text("{}")
-    output = tmp_path / "campaign-state.json"
-    seen = []
-
-    def run(command, **kwargs):
-        seen.append(command)
-        output.write_text(json.dumps({"status": "COMPLETE"}))
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    plan = tmp_path / "workflow.json"
-    plan.write_text(json.dumps({"workspace_root": str(root),
-        "state_file": str(tmp_path / "workflow-state.json"), "steps": [{
-            "id": "correct", "stage": "corrective", "job_config": str(campaign),
-            "inputs": [str(declared)], "outputs": [str(output)],
-            "log": str(tmp_path / "controller.log"), "timeout_seconds": 60,
-        }]}))
-    assert run_workflow(plan)["status"] == "COMPLETE"
-    assert seen == [[__import__("sys").executable, "-m",
-        "propevolve.reasoning_policy.corrective_campaign", "--config", str(campaign)]]
-
-
 @pytest.mark.parametrize("steps", [
     [],
     [{"id": "same", "stage": "audit", "inputs": ["in"], "outputs": ["out"],

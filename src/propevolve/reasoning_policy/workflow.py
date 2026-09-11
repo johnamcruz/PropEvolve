@@ -49,20 +49,9 @@ def stage_inputs(root, step):
     job_path = root / step["job_config"]
     recipe(job_path)
     job = read_recipe(job_path)
-    if step["stage"] == "corrective":
-        for key in ("initial_policy_config", "sft_template_config"):
-            if not job.get(key):
-                raise ValueError(f"missing stage configuration: {key}")
-            recipe(root / job[key])
-        view = root / job.get("prepared_view", "")
-        if not job.get("prepared_view") or not (view / "view_manifest.json").is_file():
-            raise ValueError("missing corrective prepared view")
-        result[str((view / "view_manifest.json").resolve())] = file_digest(
-            view / "view_manifest.json")
     for key in {
         "collect": ("source_recipe", "temporal_split_audit", "context_config"),
         "audit": (), "prepare": ("sft_config",), "train": ("sft_config",),
-        "corrective": (),
         "rl": ("source_recipe", "temporal_split_audit", "context_config", "rl_config", "sft_config"),
         "evaluate": ("source_recipe", "temporal_split_audit", "context_config", "evaluation_policy_config", "evaluation_metrics_config"),
     }[step["stage"]]:
@@ -92,8 +81,7 @@ def run_workflow(path):
     if not steps or len(names) != len(set(names)):
         raise ValueError("workflow needs unique stage IDs")
     for step in steps:
-        if step["stage"] not in {
-                "collect", "audit", "prepare", "train", "corrective", "rl", "evaluate"}:
+        if step["stage"] not in {"collect", "audit", "prepare", "train", "rl", "evaluate"}:
             raise ValueError("unsupported challenger stage")
         if not step["outputs"] or not step["inputs"]:
             raise ValueError("stage input and output receipts must be declared")
@@ -125,16 +113,11 @@ def run_workflow(path):
                 atomic_json(state_path, state)
                 log = root / step["log"]
                 log.parent.mkdir(parents=True, exist_ok=True)
-                command = ([sys.executable, "-m",
-                            "propevolve.reasoning_policy.corrective_campaign",
-                            "--config", str(root / step["job_config"])]
-                           if step["stage"] == "corrective" else
-                           [sys.executable, "-m", "propevolve.reasoning_policy.job",
-                            "--config", str(root / step["job_config"]), step["stage"]])
                 with log.open("ab") as stream:
-                    subprocess.run(command, cwd=root, stdout=stream,
-                                   stderr=subprocess.STDOUT, check=True,
-                                   timeout=step["timeout_seconds"])
+                    subprocess.run([sys.executable, "-m", "propevolve.reasoning_policy.job",
+                        "--config", str(root / step["job_config"]), step["stage"]],
+                        cwd=root, stdout=stream, stderr=subprocess.STDOUT, check=True,
+                        timeout=step["timeout_seconds"])
                 if stage_inputs(root, step) != inputs:
                     raise ValueError("stage inputs changed during execution")
                 state["completed"][name] = {"inputs": inputs, "outputs": file_identities(root, step["outputs"])}

@@ -1,6 +1,0 @@
-{
-  "inherits": "trade_inference_assessment_sft.json",
-  "adapter_path": "runs/reasoning-challenger/volume-ab/market-adapter",
-  "resume_adapter_file": "runs/reasoning-challenger/volume-ab/market-adapter/adapters.safetensors",
-  "training_log_prefix": "volume-action-parent"
-}

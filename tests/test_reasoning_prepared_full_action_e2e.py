@@ -36,8 +36,7 @@ def _embedding_cache(tmp_path, *, ticker="NQ", rows=8, width=2):
 
 
 def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="external-runtime",
-                         iters=1, embedding_storage="json", causal_state=False,
-                         state_defaults=None):
+                         iters=1, embedding_storage="json", causal_state=False):
     env = environment()
     labels = label_actions(env, reset_options={"ticker": "NQ", "start": 0}, prefix=(),
         continuation_factory=passive_factory, max_steps=8)
@@ -66,11 +65,9 @@ def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="e
         "trust_remote_code": False, "input_mode": "embeddings" if embeddings else "specialists",
         "projector": ({"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
                        "temporal_encoding": "pooled_levels",
-                       **({"state_fields": (["account.realized_pnl_norm"] if causal_state
-                                             else list(state_defaults)),
-                           "state_scales": [1.0]} if causal_state or state_defaults else {})}
+                       **({"state_fields": ["account.realized_pnl_norm"],
+                           "state_scales": [1.0]} if causal_state else {})}
                       if embeddings else None),
-        "prepared_state_defaults": state_defaults,
         "action_verbalizers": ACTION_VERBALIZERS,
         "action_supervision": {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
     path = tmp_path / "recipe.json"
@@ -98,12 +95,6 @@ def test_prepared_embedding_view_carries_configured_causal_state_as_numeric_inpu
     assert prepared["causal_state"] == [0.0]
     np.testing.assert_array_equal(batch[-3], [[0.0]])
     np.testing.assert_array_equal(batch[-1], [[False, False, True]])
-
-
-def test_market_only_preparation_uses_only_explicit_configured_state_defaults(tmp_path):
-    prepared, _, _ = prepared_action_view(
-        tmp_path, embeddings=True, state_defaults={"trade.current_r": 0.0})
-    assert prepared["causal_state"] == [0.0]
 
 
 def test_prepared_dataset_lazily_resolves_compact_embedding_sidecars(tmp_path):
