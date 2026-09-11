@@ -266,7 +266,16 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment)
     parent_metadata = json.loads(parent_metadata_path.read_text())
     requirements = {name: parent_metadata.get(name) for name in (
         "input_mode", "decision_objective", "action_supervision", "projector")}
+    view_manifest_path = _resolve(root, plan["prepared_view"]) / "view_manifest.json"
+    view_manifest = json.loads(view_manifest_path.read_text())
+    prepared_counts = view_manifest.get("prepared_counts")
+    valid_rows = (prepared_counts.get("valid")
+                  if isinstance(prepared_counts, dict) else None)
+    if type(valid_rows) is not int or valid_rows < 1:
+        raise ValueError("corrective campaign view lacks a valid prepared row count")
     child = dict(template)
+    validation_batch_size = child["validation_batch_size"]
+    child["val_batches"] = math.ceil(valid_rows / validation_batch_size)
     child.update({
         "workspace_root": str(root),
         "adapter_path": str((round_root / "candidate-adapter").resolve()),
@@ -438,6 +447,14 @@ def run_campaign(path, *, phases=None):
                             "training_selection.json", "adapter_config.json",
                             "targeted_sampling_receipt.json")
                 if round_state["candidate_artifacts"] is None:
+                    # A failed pre-training launch may leave a generated child config
+                    # with stale derived values. Rebuild it from the frozen campaign
+                    # inputs before every artifact-free retry; completed candidates
+                    # remain immutable and are verified above.
+                    child_config = _write_child_config(
+                        plan, root, round_root, parent_policy, train_assessment)
+                    round_state["candidate_policy_config"] = str(child_config.resolve())
+                    atomic_json(state_path, state)
                     if candidate_adapter.exists():
                         raise ValueError("unreceipted candidate adapter already exists")
                     phases.train(child_config, view, round_root / "candidate-training.log")

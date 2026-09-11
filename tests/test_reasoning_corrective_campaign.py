@@ -143,6 +143,17 @@ class FakePhases:
         (adapter / "adapter_config.json").write_text(json.dumps(config))
 
 
+class RequireCompleteValidation(FakePhases):
+    def train(self, config_path, view, log):
+        from propevolve.reasoning_policy.mlx_sft import read_sft_config
+        config = read_sft_config(config_path)
+        manifest = json.loads((view / "view_manifest.json").read_text())
+        capacity = config["val_batches"] * config["validation_batch_size"]
+        if capacity < manifest["prepared_counts"]["valid"]:
+            raise ValueError("early stopping requires complete validation coverage")
+        super().train(config_path, view, log)
+
+
 class InterruptOnce(FakePhases):
     def __init__(self):
         super().__init__()
@@ -178,7 +189,9 @@ def campaign_config(tmp_path, *, rounds=2):
     template.write_text(initial.read_text())
     view = tmp_path / "view"
     view.mkdir()
-    (view / "view_manifest.json").write_text("{}")
+    (view / "view_manifest.json").write_text(json.dumps({
+        "prepared_counts": {"train": 17, "valid": 11},
+    }))
     campaign = tmp_path / "campaign.json"
     campaign.write_text(json.dumps({
         "schema": "propevolve_reasoning_corrective_campaign_v1",
@@ -224,6 +237,32 @@ def test_reasoning_campaign_resumes_the_interrupted_round_without_reassessment(t
     assert result["status"] == "COMPLETE"
     assert [call for call in phases.calls if call[0] == "assess"][:2] == assessment_calls
     assert len([call for call in phases.calls if call[0] == "assess"]) == 4
+
+
+def test_corrective_child_covers_the_complete_fixed_validation_role(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+    campaign = campaign_config(tmp_path, rounds=1)
+    phases = RequireCompleteValidation()
+    result = run_campaign(campaign, phases=phases)
+    assert result["status"] == "COMPLETE"
+    child = json.loads((tmp_path / "run/round-01/candidate-policy.json").read_text())
+    assert child["validation_batch_size"] == 1
+    assert child["val_batches"] == 11
+
+
+def test_blocked_campaign_regenerates_stale_untrained_child_config(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+    campaign = campaign_config(tmp_path, rounds=1)
+    phases = InterruptOnce()
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run_campaign(campaign, phases=phases)
+    child_path = tmp_path / "run/round-01/candidate-policy.json"
+    child = json.loads(child_path.read_text())
+    child["val_batches"] = 1
+    child_path.write_text(json.dumps(child))
+    result = run_campaign(campaign, phases=RequireCompleteValidation())
+    assert result["status"] == "COMPLETE"
+    assert json.loads(child_path.read_text())["val_batches"] == 11
 
 
 def test_reasoning_campaign_rejects_forgetting_and_keeps_the_parent(tmp_path):
