@@ -6,7 +6,7 @@
   "initial_policy_config": "config/diagnostics/volume_action_parent_sft.json",
   "sft_template_config": "config/diagnostics/volume_corrective_sft.json",
   "prepared_view": "runs/reasoning-challenger/trade-inference-assessment/view",
-  "rounds": 20,
+  "rounds": 5,
   "initial_assessments": {
     "train": {
       "path": "runs/reasoning-challenger/trade-inference-assessment/train-assessment",
