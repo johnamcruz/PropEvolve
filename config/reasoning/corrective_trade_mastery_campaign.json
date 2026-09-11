@@ -8,7 +8,11 @@
   "prepared_view": "runs/reasoning-challenger/trade-inference-assessment/view",
   "rounds": 5,
   "initial_assessments": {
-    "train": null,
+    "train": {
+      "path": "runs/reasoning-challenger/trade-inference-assessment/train-assessment",
+      "scores_sha256": "6f5b806aa9bd51cfcde17d56cb705624d3b1dcd047170f5549f1b6524e681a62",
+      "summary_sha256": "e2e2380c0bf5b342e38ddd514c01ba162af3d5a6fe7bb42d6f990d95f461b46e"
+    },
     "valid": null
   },
   "subset": {
