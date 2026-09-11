@@ -80,6 +80,25 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
             or payload["stage_role"] != "market_distillation"
             or payload["market_loss_chunk_size"] is not None):
         raise ValueError("direct market distillation requires embedding market SFT only")
+    corrective_distillation = payload["error_selected_distillation"]
+    if corrective_distillation is not None:
+        if (not isinstance(corrective_distillation, dict)
+                or set(corrective_distillation) != {"loss_weight", "settings"}
+                or isinstance(corrective_distillation["loss_weight"], bool)
+                or not isinstance(corrective_distillation["loss_weight"], (int, float))
+                or not math.isfinite(float(corrective_distillation["loss_weight"]))
+                or corrective_distillation["loss_weight"] <= 0):
+            raise ValueError("invalid error-selected distillation configuration")
+        validate_market_distillation(corrective_distillation["settings"])
+        groups = {channel["name"].split(".", 1)[0]
+                  for channel in corrective_distillation["settings"]["channels"]}
+        if (not supervision["enabled"] or payload["input_mode"] != "embeddings"
+                or payload.get("stage_role") != "trade_mastery"
+                or payload.get("distillation_targets") is None
+                or set(payload["distillation_targets"]) != groups):
+            raise ValueError(
+                "error-selected distillation requires trade-mastery action rows "
+                "and exactly declared teacher groups")
     chunk_size = payload["market_loss_chunk_size"]
     if chunk_size is not None and (
             type(chunk_size) is not int or chunk_size < 1
@@ -301,6 +320,8 @@ def view_contract(config: dict) -> dict:
     contract = {key: config.get(key) for key in keys}
     if config.get("market_distillation") is not None:
         contract["market_distillation"] = config["market_distillation"]
+    if config.get("error_selected_distillation") is not None:
+        contract["error_selected_distillation"] = config["error_selected_distillation"]
     if config.get("coverage_sampling") is not None:
         contract["coverage_sampling"] = config["coverage_sampling"]
     if config.get("prepared_sampling") is not None:
@@ -367,6 +388,12 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             max_seq_length=config["max_seq_length"] - reserved,
                             chat_template_kwargs=config["chat_template_kwargs"])
                         encoded = {"tokens": tokens, "offset": offset}
+                    if config.get("error_selected_distillation") is not None:
+                        from .market_distillation import encode_market_targets
+                        encoded["error_selected_distillation"] = encode_market_targets(
+                            record, config["error_selected_distillation"]["settings"],
+                            tokenizer, max_seq_length=config["max_seq_length"] - reserved,
+                            chat_template_kwargs=config["chat_template_kwargs"])
                     if config["action_supervision"]["enabled"]:
                         from .supervision import action_targets
                         alternatives = action_targets(record)
@@ -630,7 +657,7 @@ def main(argv=None):
     verify_dataset(
         config["data"], requirements=config.get("dataset_requirements"),
         required_target_groups=config.get("distillation_targets"))
-    if Path(config["adapter_path"]).exists():
+    if args.train and Path(config["adapter_path"]).exists():
         raise FileExistsError("adapter output exists; choose a new path to preserve checkpoints")
     if Path(args.view).exists():
         effective = verify_mlx_view(args.config, args.view, root=args.root)

@@ -27,6 +27,11 @@ _GATE_KEYS = {
     "maximum_per_task_advantage_regression",
 }
 
+_DECISION_BOUNDARIES = {
+    "entry.ENTER", "entry.WAIT", "direction.LONG", "direction.SHORT",
+    "management.HOLD", "management.CLOSE",
+}
+
 
 def validate_acceptance(settings):
     if (not isinstance(settings, dict) or set(settings) != _GATE_KEYS
@@ -170,7 +175,8 @@ def compare_frozen_assessments(before, after, settings):
 _CAMPAIGN_KEYS = {
     "schema", "workspace_root", "state_file", "output_root",
     "initial_policy_config", "sft_template_config", "prepared_view",
-    "rounds", "initial_assessments", "subset", "acceptance", "timeouts",
+    "rounds", "initial_assessments", "preserved_assessments",
+    "required_teacher_groups", "subset", "acceptance", "timeouts",
 }
 
 
@@ -182,11 +188,16 @@ def _resolve(root, value):
 def _read_campaign(path):
     plan = read_recipe(path)
     if (set(plan) != _CAMPAIGN_KEYS
-            or plan["schema"] != "propevolve_reasoning_corrective_campaign_v1"
+            or plan["schema"] != "propevolve_reasoning_corrective_campaign_v2"
             or not isinstance(plan["workspace_root"], str)
             or type(plan["rounds"]) is not int or plan["rounds"] < 1
             or not isinstance(plan["initial_assessments"], dict)
             or set(plan["initial_assessments"]) != {"train", "valid"}
+            or not isinstance(plan["preserved_assessments"], list)
+            or not isinstance(plan["required_teacher_groups"], list)
+            or set(plan["required_teacher_groups"]) != {
+                "expansion", "trend", "regime", "volume"}
+            or len(plan["required_teacher_groups"]) != 4
             or not isinstance(plan["subset"], dict)
             or set(plan["subset"]) != {"rows_per_group", "mistake_fraction", "seed"}
             or not isinstance(plan["timeouts"], dict)
@@ -208,26 +219,44 @@ def _read_campaign(path):
                 not isinstance(descriptor, dict)
                 or set(descriptor) != {"path", "scores_sha256", "summary_sha256"}):
             raise ValueError("invalid initial assessment descriptor")
+    for descriptor in plan["preserved_assessments"]:
+        if (not isinstance(descriptor, dict)
+                or set(descriptor) != {"path", "scores_sha256", "summary_sha256"}):
+            raise ValueError("invalid preserved assessment descriptor")
     return plan
 
 
-def _assessment_descriptor(path, *, role, view_manifest):
+def _assessment_descriptor(path, *, role, view_manifest, teacher_groups):
     path = Path(path)
     summary_path, scores_path = path / "summary.json", path / "scores.jsonl"
     summary = json.loads(summary_path.read_text())
+    required = set(teacher_groups)
+    rows = 0
     with scores_path.open() as stream:
-        rows = sum(1 for line in stream if line.strip())
+        for line in stream:
+            if not line.strip():
+                continue
+            rows += 1
+            targets = json.loads(line).get("specialist_targets", {})
+            present = {name.split(".", 1)[0] for name in targets}
+            if not required.issubset(present):
+                raise ValueError("frozen action assessment lacks required teacher groups")
+    tasks = summary.get("metrics", {}).get("per_task", {})
     if (summary.get("role") != role or summary.get("weights_updated") is not False
             or summary.get("rows") != rows or rows < 1
-            or summary.get("view_manifest_sha256") != file_digest(view_manifest)):
+            or summary.get("view_manifest_sha256") != file_digest(view_manifest)
+            or set(tasks) != _DECISION_BOUNDARIES):
+        if set(tasks) != _DECISION_BOUNDARIES:
+            raise ValueError("frozen assessment must report all six decision boundaries")
         raise ValueError("assessment does not match its frozen role and view")
     return {"path": str(path.resolve()), "scores_sha256": file_digest(scores_path),
             "summary_sha256": file_digest(summary_path)}
 
 
-def _verify_assessment(descriptor, *, role, view_manifest):
+def _verify_assessment(descriptor, *, role, view_manifest, teacher_groups):
     actual = _assessment_descriptor(
-        descriptor["path"], role=role, view_manifest=view_manifest)
+        descriptor["path"], role=role, view_manifest=view_manifest,
+        teacher_groups=teacher_groups)
     if actual != descriptor:
         raise ValueError("completed campaign assessment changed")
     return actual
@@ -325,15 +354,17 @@ class SubprocessPhases:
 
 
 def _record_assessment(phases, campaign_state, round_state, state_path, policy,
-                       view, role, output, log, key):
+                       view, role, output, log, key, teacher_groups):
     if round_state.get(key) is not None:
         return _verify_assessment(round_state[key], role=role,
-                                  view_manifest=view / "view_manifest.json")
+                                  view_manifest=view / "view_manifest.json",
+                                  teacher_groups=teacher_groups)
     if output.exists():
         raise ValueError("unreceipted campaign assessment output already exists")
     phases.assess(policy, view, role, output, log)
     descriptor = _assessment_descriptor(
-        output, role=role, view_manifest=view / "view_manifest.json")
+        output, role=role, view_manifest=view / "view_manifest.json",
+        teacher_groups=teacher_groups)
     round_state[key] = descriptor
     atomic_json(state_path, campaign_state)
     return descriptor
@@ -346,16 +377,18 @@ def _initial_descriptor(plan, root, role, view):
     resolved = dict(descriptor)
     resolved["path"] = str(_resolve(root, descriptor["path"]).resolve())
     return _verify_assessment(
-        resolved, role=role, view_manifest=view / "view_manifest.json")
+        resolved, role=role, view_manifest=view / "view_manifest.json",
+        teacher_groups=plan["required_teacher_groups"])
 
 
-def _verify_completed_state(state, view):
+def _verify_completed_state(state, view, teacher_groups):
     for round_state in state["rounds"]:
         for name, role in (("parent_train", "train"), ("parent_valid", "valid"),
                            ("candidate_train", "train"), ("candidate_valid", "valid")):
             if round_state.get(name) is not None:
                 _verify_assessment(round_state[name], role=role,
-                    view_manifest=view / "view_manifest.json")
+                    view_manifest=view / "view_manifest.json",
+                    teacher_groups=teacher_groups)
         config_path = round_state.get("candidate_policy_config")
         artifacts = round_state.get("candidate_artifacts")
         if artifacts is not None:
@@ -385,7 +418,14 @@ def run_campaign(path, *, phases=None):
     })
     if state.get("identity_sha256") != identity:
         raise ValueError("reasoning campaign configuration or input identity changed")
-    _verify_completed_state(state, view)
+    for descriptor in plan["preserved_assessments"]:
+        preserved = dict(descriptor)
+        preserved["path"] = str(_resolve(root, preserved["path"]).resolve())
+        base = Path(preserved["path"])
+        if (file_digest(base / "scores.jsonl") != preserved["scores_sha256"]
+                or file_digest(base / "summary.json") != preserved["summary_sha256"]):
+            raise ValueError("preserved frozen assessment changed")
+    _verify_completed_state(state, view, plan["required_teacher_groups"])
     if state.get("status") in {"COMPLETE", "FAILED_GATE"}:
         return state
     if phases is None:
@@ -433,11 +473,13 @@ def run_campaign(path, *, phases=None):
                 train_assessment = _record_assessment(
                     phases, state, round_state, state_path, parent_policy, view, "train",
                     round_root / "parent-train-assessment",
-                    round_root / "parent-train-assessment.log", "parent_train")
+                    round_root / "parent-train-assessment.log", "parent_train",
+                    plan["required_teacher_groups"])
                 valid_assessment = _record_assessment(
                     phases, state, round_state, state_path, parent_policy, view, "valid",
                     round_root / "parent-valid-assessment",
-                    round_root / "parent-valid-assessment.log", "parent_valid")
+                    round_root / "parent-valid-assessment.log", "parent_valid",
+                    plan["required_teacher_groups"])
                 if round_state["candidate_policy_config"] is None:
                     child_config = _write_child_config(
                         plan, root, round_root, parent_policy, train_assessment,
@@ -471,11 +513,13 @@ def run_campaign(path, *, phases=None):
                 _record_assessment(
                     phases, state, round_state, state_path, child_config, view, "train",
                     round_root / "candidate-train-assessment",
-                    round_root / "candidate-train-assessment.log", "candidate_train")
+                    round_root / "candidate-train-assessment.log", "candidate_train",
+                    plan["required_teacher_groups"])
                 candidate_valid = _record_assessment(
                     phases, state, round_state, state_path, child_config, view, "valid",
                     round_root / "candidate-valid-assessment",
-                    round_root / "candidate-valid-assessment.log", "candidate_valid")
+                    round_root / "candidate-valid-assessment.log", "candidate_valid",
+                    plan["required_teacher_groups"])
                 comparison = compare_frozen_assessments(
                     valid_assessment["path"], candidate_valid["path"],
                     plan["acceptance"])

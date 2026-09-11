@@ -1,9 +1,9 @@
 {
-  "inherits": "../diagnostics/trade_inference_assessment_sft.json",
-  "iters": 11340,
-  "steps_per_report": 100,
-  "steps_per_eval": 2200,
-  "save_every": 2200,
+  "inherits": "error_selected_distillation_parent_sft.json",
+  "iters": 2200,
+  "steps_per_report": 50,
+  "steps_per_eval": 550,
+  "save_every": 550,
   "save_training_state": true,
   "early_stopping": {
     "enabled": true,
@@ -13,5 +13,5 @@
     "monitor": "worst_task_advantage",
     "mode": "max"
   },
-  "training_log_prefix": "corrective-trade-mastery-10k"
+  "training_log_prefix": "error-selected-four-teacher-correction"
 }

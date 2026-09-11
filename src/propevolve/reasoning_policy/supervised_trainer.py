@@ -627,6 +627,18 @@ def pack_examples(rows, *, max_seq_length):
         return packed + tuple(np.asarray([item[key] for item in market], dtype=dtype)
             for key, dtype in (("positions", np.int32), ("probabilities", np.float32),
                                ("weights", np.float32), ("label_ids", np.int32)))
+    corrective = [row.get("error_selected_distillation") for row in rows]
+    if any(item is not None for item in corrective):
+        if not all(item is not None for item in corrective):
+            raise ValueError("cannot mix corrected action rows with missing teacher targets")
+        width = max(len(item["tokens"]) for item in corrective)
+        query_tokens = np.zeros((len(rows), 1, width), np.int32)
+        for index, item in enumerate(corrective):
+            query_tokens[index, 0, :len(item["tokens"])] = item["tokens"]
+        return packed + (query_tokens,) + tuple(
+            np.asarray([item["market_targets"][key] for item in corrective], dtype=dtype)
+            for key, dtype in (("positions", np.int32), ("probabilities", np.float32),
+                               ("weights", np.float32), ("label_ids", np.int32)))
     return packed
 
 
@@ -674,16 +686,19 @@ def selected_token_scores(logits, targets):
 
 
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-                   causal_states, embeddings, available, query_positions=None,
-                   teacher_probabilities=None, teacher_weights=None, label_ids=None, *, config):
+                   causal_states, embeddings, available, *extras, config):
     if config.get("market_distillation") is not None:
-        if query_positions is None:
+        if len(extras) != 4:
             raise ValueError("market distillation requires an authenticated short-query view")
+        query_positions, teacher_probabilities, teacher_weights, label_ids = extras
         from .market_distillation import market_outputs
         return market_outputs(model, tokens, embeddings, available, causal_states,
             query_positions, teacher_probabilities, teacher_weights, label_ids)
-    if query_positions is not None:
+    corrective = config.get("error_selected_distillation")
+    if corrective is None and extras:
         raise ValueError("short-query view cannot be trained with token loss")
+    if corrective is not None and len(extras) != 5:
+        raise ValueError("error-selected action correction requires four-teacher targets")
     if config.get("market_loss_chunk_size") is not None:
         from .chunked_loss import chunked_market_outputs
         return chunked_market_outputs(model, tokens, offsets, lengths, valid, probabilities,
@@ -740,17 +755,22 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
                     config["action_supervision"], xp=mx, valid=valid[index]))
         else:
             losses.append(completion_objective(scores[index], valid[index], xp=mx))
-    return (mx.stack(losses).mean(), mx.array(tokens.shape[0]),
-            scores)
+    loss = mx.stack(losses).mean()
+    if corrective is not None:
+        query_tokens, positions, teacher_probabilities, teacher_weights, label_ids = extras
+        from .market_distillation import market_outputs
+        teacher_loss, _, _ = market_outputs(
+            model, query_tokens, embeddings, available, causal_states,
+            positions, teacher_probabilities, teacher_weights, label_ids)
+        loss = loss + corrective["loss_weight"] * teacher_loss
+    return loss, mx.array(tokens.shape[0]), scores
 
 
 def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-               causal_states, embeddings, available, query_positions=None,
-               teacher_probabilities=None, teacher_weights=None, label_ids=None, *, config):
+               causal_states, embeddings, available, *extras, config):
     loss, tokens_count, _ = _batch_outputs(
         model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-        causal_states, embeddings, available, query_positions, teacher_probabilities,
-        teacher_weights, label_ids, config=config)
+        causal_states, embeddings, available, *extras, config=config)
     return loss, tokens_count
 
 

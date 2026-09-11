@@ -150,3 +150,26 @@ def test_targeted_sampler_drives_real_mlx_training_batches():
     observed = [int(value) for batch in batches
                 for value in batch[-2][:, 0, 0].tolist()]
     assert sorted(observed) == [0, 1, 2, 3]
+
+
+def test_corrective_action_batch_carries_teacher_queries_from_the_same_selected_rows():
+    pytest.importorskip("mlx.core")
+    from propevolve.reasoning_policy.supervised_trainer import pack_examples
+
+    rows = []
+    for index in range(2):
+        rows.append({"tokens": [1, 2, 3], "offset": 1,
+            "alternatives": [([1, 2, 3], 1), ([1, 4, 3], 1), ([1, 5, 3], 1)],
+            "action_targets": {"names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+                               "probabilities": [0., 1., 0.], "values": [0., 2., -1.]},
+            "target_name": "ENTER_LONG_1", "causal_state": [],
+            "market_embeddings": [[float(index), 0.]], "market_available": [True],
+            "error_selected_distillation": {"tokens": [7, 8 + index, 9], "offset": 1,
+                "market_targets": {"positions": [1], "probabilities": [.8 - index * .2],
+                                   "weights": [1.], "label_ids": [10, 11]}}})
+
+    batch = pack_examples(rows, max_seq_length=8)
+
+    assert len(batch) == 15
+    assert batch[10][:, 0, :].tolist() == [[7, 8, 9], [7, 9, 9]]
+    assert __import__("numpy").allclose(batch[12], [[.8], [.6]])

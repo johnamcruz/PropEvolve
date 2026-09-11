@@ -29,16 +29,20 @@ def tiny_backbone(vocabulary=16, *, state=False):
         def __init__(self):
             super().__init__()
             self.embed_tokens = nn.Embedding(vocabulary, 8)
+        def __call__(self, inputs, input_embeddings=None):
+            x = self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
+            return mx.cumsum(x, axis=1)
     class Backbone(nn.Module):
         def __init__(self):
             super().__init__()
             self.model = Core()
             self.output = nn.Linear(8, vocabulary)
+            self.lm_head = self.output
+            self.args = type("Args", (), {"tie_word_embeddings": False})()
             self.forward_calls = 0
         def __call__(self, inputs, input_embeddings=None):
             self.forward_calls += 1
-            x = self.model.embed_tokens(inputs) if input_embeddings is None else input_embeddings
-            return self.output(mx.cumsum(x, axis=1))
+            return self.output(self.model(inputs, input_embeddings=input_embeddings))
     model = Backbone()
     model.freeze()
     attach_projector(model, {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
@@ -263,6 +267,32 @@ def test_real_mlx_hierarchical_update_learns_entry_and_direction_together():
     after = loss(model, *packed)
     mx.eval(before, after)
     assert float(after.item()) < float(before.item())
+
+
+def test_error_selected_action_update_uses_action_and_teacher_targets_on_same_row():
+    from mlx.utils import tree_flatten
+
+    model = tiny_backbone()
+    row = {**example(), "error_selected_distillation": {
+        "tokens": [1, 7, 8, 4], "offset": 2,
+        "market_targets": {"positions": [1, 2], "probabilities": [.9, .1],
+                           "weights": [1., 1.], "label_ids": [9, 10]},
+    }}
+    packed = tuple(mx.array(value) for value in pack_examples([row], max_seq_length=8))
+    common = {"input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 2., "margin": .25}}
+    action_only = batch_loss(model, *packed[:10], config=common)[0]
+    combined_config = {**common, "error_selected_distillation": {
+        "loss_weight": .5, "settings": {}}}
+    combined, gradients = nn.value_and_grad(
+        model, lambda m, *batch: batch_loss(m, *batch, config=combined_config)[0]
+    )(model, *packed)
+    mx.eval(action_only, combined, gradients)
+
+    assert float(combined.item()) > float(action_only.item())
+    assert any(np.any(np.asarray(value) != 0)
+               for _, value in tree_flatten(gradients))
 
 
 def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():

@@ -437,3 +437,21 @@ def test_prepared_view_can_be_reused_across_learning_hyperparameters(tmp_path):
             verify_mlx_view(third, view)
     finally:
         mlx_sft.verify_dataset = original
+
+
+def test_read_only_prepare_may_use_an_existing_frozen_adapter(monkeypatch, tmp_path):
+    from propevolve.reasoning_policy import mlx_sft
+
+    adapter = tmp_path / "frozen-adapter"
+    adapter.mkdir()
+    view = tmp_path / "view"
+    view.mkdir()
+    config = {"data": str(tmp_path / "data"), "adapter_path": str(adapter),
+              "dataset_requirements": None, "distillation_targets": None}
+    monkeypatch.setattr(mlx_sft, "read_sft_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(mlx_sft, "verify_dataset", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mlx_sft, "verify_mlx_view", lambda *args, **kwargs: view / "sft.json")
+
+    assert mlx_sft.main(["--config", "recipe.json", "--view", str(view)]) == 0
+    with pytest.raises(FileExistsError, match="adapter output exists"):
+        mlx_sft.main(["--config", "recipe.json", "--view", str(view), "--train"])

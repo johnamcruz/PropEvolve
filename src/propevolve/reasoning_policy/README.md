@@ -74,7 +74,7 @@ and short SFT rounds:
 
 ```sh
 python -m propevolve.reasoning_policy.corrective_campaign \
-  --config config/reasoning/corrective_trade_mastery_campaign.json
+  --config config/reasoning/error_selected_distillation_campaign.json
 ```
 
 Each round assesses the accepted parent over the complete development role,
@@ -308,3 +308,23 @@ are written under the configured output directory. `prepared_sampling` explicitl
 selects a fixed diagnostic slice; leave it null for full-pool training. Original
 datasets are not modified. Software tests and teacher fit are not trade-mastery
 or promotion evidence. 2026 remains sealed.
+### Error-selected four-teacher correction contract
+
+The production correction loop always starts by running the frozen policy over
+fixed economic action rows. It audits six hierarchical boundaries while keeping
+the executable policy at five actions:
+
+- flat state: `ENTER` versus `WAIT`;
+- authenticated entry: `LONG` versus `SHORT`;
+- open trade: `HOLD` versus `CLOSE`.
+
+Only rows where the frozen policy makes an action mistake are correction
+examples. Configured mastered rows are retained as anti-forgetting anchors.
+Every selected row carries authenticated Expansion, Trend, Regime, and Volume
+probability targets aligned to the same completed Chronos-2 embedding window.
+The teachers are auxiliary training targets and diagnostic metadata; they are
+never policy inputs. After a brief correction, the candidate is reassessed on
+the identical fixed rows and is accepted only when mistakes improve without
+forgetting any mastered action or decision boundary. Rejected candidates are
+discarded and the next round refreshes the remaining mistakes from the retained
+parent.

@@ -1,0 +1,10 @@
+{
+  "inherits": "../diagnostics/trade_inference_assessment_job.json",
+  "status": "error_selected_four_teacher_trade_mastery",
+  "specialist_supervision_roles": ["train", "valid"],
+  "temporal_split_audit": "runs/reasoning-challenger/error-selected-distillation/source-audit.json",
+  "dataset_output": "runs/reasoning-challenger/error-selected-distillation/dataset",
+  "label_census_output": "runs/reasoning-challenger/error-selected-distillation/label-census.json",
+  "mlx_view": "runs/reasoning-challenger/error-selected-distillation/view",
+  "sft_config": "config/reasoning/error_selected_distillation_parent_sft.json"
+}

@@ -1,0 +1,31 @@
+{
+  "inherits": "../diagnostics/trade_inference_assessment_sft.json",
+  "data": "runs/reasoning-challenger/error-selected-distillation/dataset",
+  "stage_role": "trade_mastery",
+  "distillation_targets": ["expansion", "trend", "regime", "volume"],
+  "error_selected_distillation": {
+    "loss_weight": 0.25,
+    "settings": {
+      "instruction": "Estimate each requested market probability from the completed Chronos-2 embedding context. Long and Short events are independent. Future prices and teacher answers are unavailable.",
+      "negative_token": "N",
+      "positive_token": "Y",
+      "channels": [
+        {"name": "expansion.long_attempt_probability", "query": "\nLong expansion attempt?", "weight": 1.0},
+        {"name": "expansion.long_clean_retained_given_attempt_probability", "query": "\nLong expansion quality conditional on attempt?", "weight": 1.0},
+        {"name": "expansion.short_attempt_probability", "query": "\nShort expansion attempt?", "weight": 1.0},
+        {"name": "expansion.short_clean_retained_given_attempt_probability", "query": "\nShort expansion quality conditional on attempt?", "weight": 1.0},
+        {"name": "regime.chop_no_trend_probability", "query": "\nChop without trend?", "weight": 1.0},
+        {"name": "regime.chop_end_transition_probability", "query": "\nTransition out of chop?", "weight": 1.0},
+        {"name": "regime.expansion_trend_probability", "query": "\nExpansion trend regime?", "weight": 1.0},
+        {"name": "trend.long_launch_probability", "query": "\nLong trend launch?", "weight": 1.0},
+        {"name": "trend.short_launch_probability", "query": "\nShort trend launch?", "weight": 1.0},
+        {"name": "trend.long_conditional_quality", "query": "\nLong trend conditional quality?", "weight": 1.0},
+        {"name": "trend.short_conditional_quality", "query": "\nShort trend conditional quality?", "weight": 1.0},
+        {"name": "volume.long_participation_probability", "query": "\nLong-side volume participation?", "weight": 1.0},
+        {"name": "volume.long_clean_given_participation_probability", "query": "\nLong-side volume quality conditional on participation?", "weight": 1.0},
+        {"name": "volume.short_participation_probability", "query": "\nShort-side volume participation?", "weight": 1.0},
+        {"name": "volume.short_clean_given_participation_probability", "query": "\nShort-side volume quality conditional on participation?", "weight": 1.0}
+      ]
+    }
+  }
+}

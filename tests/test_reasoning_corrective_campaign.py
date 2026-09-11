@@ -4,19 +4,24 @@ import pytest
 
 
 ACTIONS = ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE")
+BOUNDARIES = ("entry.ENTER", "entry.WAIT", "direction.LONG",
+              "direction.SHORT", "management.HOLD", "management.CLOSE")
+TEACHERS = ("expansion", "trend", "regime", "volume")
 
 
-def assessment(path, advantages, *, primary, task_advantages=None):
+def assessment(path, advantages, *, primary, task_advantages=None,
+               teacher_groups=TEACHERS):
     path.mkdir()
     rows = []
     for index, (target, advantage) in enumerate(advantages):
         rows.append({"index": index, "source_id": f"row-{index}",
             "completed_at_ns": 100 + index, "ticker": "NQ", "target": target,
             "predicted": target if advantage >= 0 else "other", "correct": advantage >= 0,
-            "scores": {}, "target_advantage": advantage, "specialist_targets": {}})
+            "scores": {}, "target_advantage": advantage,
+            "specialist_targets": {f"{name}.signal": 0.5 for name in teacher_groups}})
     (path / "scores.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows))
-    tasks = task_advantages or {"trade": primary}
+    tasks = task_advantages or {name: primary for name in BOUNDARIES}
     (path / "summary.json").write_text(json.dumps({
         "role": "valid", "rows": len(rows), "weights_updated": False,
         "metrics": {"worst_task_advantage": primary,
@@ -121,8 +126,8 @@ class FakePhases:
             rows.extend(((action, -.8 + generation * .5),
                          (action, 1. - generation * .05)))
         assessment(output, rows, primary=-.8 + generation * .5,
-                   task_advantages={"entry": -.6 + generation * .5,
-                                    "management": -.4 + generation * .4})
+                   task_advantages={name: -.6 + generation * .5
+                                    for name in BOUNDARIES})
         summary_path = output / "summary.json"
         summary = json.loads(summary_path.read_text())
         summary["role"] = role
@@ -194,16 +199,50 @@ def campaign_config(tmp_path, *, rounds=2):
     }))
     campaign = tmp_path / "campaign.json"
     campaign.write_text(json.dumps({
-        "schema": "propevolve_reasoning_corrective_campaign_v1",
+        "schema": "propevolve_reasoning_corrective_campaign_v2",
         "workspace_root": str(tmp_path), "state_file": "run/state.json",
         "output_root": "run", "initial_policy_config": "initial.json",
         "sft_template_config": "template.json", "prepared_view": "view",
         "rounds": rounds, "initial_assessments": {"train": None, "valid": None},
+        "preserved_assessments": [],
+        "required_teacher_groups": list(TEACHERS),
         "subset": {"rows_per_group": 2, "mistake_fraction": .5, "seed": 17},
         "acceptance": gate(minimum_retained_mastery_rate=.9),
         "timeouts": {"assessment_seconds": 60, "training_seconds": 60},
     }))
     return campaign
+
+
+def test_campaign_rejects_action_assessment_missing_one_teacher_group(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+
+    class MissingVolume(FakePhases):
+        def assess(self, policy_config, view, role, output, log):
+            super().assess(policy_config, view, role, output, log)
+            rows = [json.loads(line) for line in (output / "scores.jsonl").read_text().splitlines()]
+            for row in rows:
+                row["specialist_targets"] = {
+                    key: value for key, value in row["specialist_targets"].items()
+                    if not key.startswith("volume.")}
+            (output / "scores.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows))
+
+    with pytest.raises(ValueError, match="teacher groups"):
+        run_campaign(campaign_config(tmp_path), phases=MissingVolume())
+
+
+def test_campaign_rejects_assessment_without_all_six_decision_boundaries(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+
+    class MissingShortBoundary(FakePhases):
+        def assess(self, policy_config, view, role, output, log):
+            super().assess(policy_config, view, role, output, log)
+            summary = json.loads((output / "summary.json").read_text())
+            summary["metrics"]["per_task"].pop("direction.SHORT")
+            (output / "summary.json").write_text(json.dumps(summary))
+
+    with pytest.raises(ValueError, match="six decision boundaries"):
+        run_campaign(campaign_config(tmp_path), phases=MissingShortBoundary())
 
 
 def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path):
