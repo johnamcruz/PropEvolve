@@ -125,7 +125,8 @@ def test_learning_audit_cli_scores_an_authenticated_record_without_training(
     assert report[0]["source_id"] == "row-1"
     assert report[0]["correct"] is True
 def test_frozen_action_assessment_strips_teacher_training_queries_only():
-    from propevolve.reasoning_policy.learning_audit import TeacherFreeAssessmentRows
+    from propevolve.reasoning_policy.learning_audit import (
+        TeacherFreeAssessmentRows, teacher_free_assessment_config)
 
     original = [{"tokens": [1, 2], "error_selected_distillation": {
         "tokens": [3, 4], "market_targets": {"probabilities": [.8]}}}]
@@ -133,3 +134,10 @@ def test_frozen_action_assessment_strips_teacher_training_queries_only():
 
     assert frozen[0] == {"tokens": [1, 2]}
     assert "error_selected_distillation" in original[0]
+    configured = teacher_free_assessment_config({
+        "action_supervision": {"enabled": True},
+        "error_selected_distillation": {"loss_weight": .25},
+        "market_distillation": None,
+    })
+    assert configured["action_supervision"] == {"enabled": True}
+    assert configured["error_selected_distillation"] is None

@@ -26,6 +26,14 @@ class TeacherFreeAssessmentRows:
         return row
 
 
+def teacher_free_assessment_config(config):
+    """Disable training-only auxiliary objectives for frozen action scoring."""
+    result = dict(config)
+    result["error_selected_distillation"] = None
+    result["market_distillation"] = None
+    return result
+
+
 def score_labeled_examples(policy, records):
     """Measure every action class independently; do not hide side collapse."""
     output = []
@@ -139,7 +147,9 @@ def assess_prepared(config_path, view, *, role, output, root=None):
             if sum(len(items[0]) for items in groups.values()) % 100 == 0:
                 stream.flush()
                 print(f"[assessment] scored={sum(len(items[0]) for items in groups.values())}/{len(dataset)}", flush=True)
-        metrics = evaluate_action_validation(policy.model, dataset, config, on_scored=record_score)
+        metrics = evaluate_action_validation(
+            policy.model, dataset, teacher_free_assessment_config(config),
+            on_scored=record_score)
     metric = (hierarchical_boundary_metrics if config.get("decision_objective") == "hierarchical_binary"
               else action_boundary_metrics)
     report = {"role": role, "rows": len(dataset), "weights_updated": False,
