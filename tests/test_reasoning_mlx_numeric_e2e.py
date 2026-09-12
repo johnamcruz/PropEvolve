@@ -273,7 +273,7 @@ def test_error_selected_action_update_uses_action_and_teacher_targets_on_same_ro
     from mlx.utils import tree_flatten
 
     model = tiny_backbone()
-    row = {**example(), "error_selected_distillation": {
+    row = {**example(), "target_name": "ENTER_LONG_1", "error_selected_distillation": {
         "tokens": [1, 7, 8, 4], "offset": 2,
         "market_targets": {"positions": [1, 2], "probabilities": [.9, .1],
                            "weights": [1., 1.], "label_ids": [9, 10]},
@@ -350,6 +350,29 @@ def test_production_action_batch_retains_parent_only_on_mastered_row():
 
     assert float(retained.item()) > float(action_only.item())
     assert float(same_retained.item()) == pytest.approx(float(retained.item()), abs=1e-6)
+
+
+def test_frozen_action_validation_does_not_require_training_only_anchor_tensors():
+    from propevolve.reasoning_policy.supervised_trainer import evaluate_action_validation
+
+    model = tiny_backbone()
+    row = {**example(), "target_name": "ENTER_LONG_1", "error_selected_distillation": {
+        "tokens": [1, 7, 8, 4], "offset": 2,
+        "market_targets": {"positions": [1, 2], "probabilities": [.9, .1],
+                           "weights": [1., 1.], "label_ids": [9, 10]},
+    }}
+    config = {
+        "seed": 17, "validation_batch_size": 1, "max_seq_length": 8,
+        "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 2., "margin": .25},
+        "error_selected_distillation": {"loss_weight": .5, "settings": {}},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+    }
+
+    result = evaluate_action_validation(model, [row], config)
+
+    assert result["val_loss"] > 0
 
 
 def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():

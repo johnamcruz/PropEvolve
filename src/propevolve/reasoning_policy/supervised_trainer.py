@@ -824,6 +824,10 @@ def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, ta
 def evaluate_action_validation(model, dataset, config, *, on_scored=None):
     """Evaluate every fixed validation row once and expose balanced boundaries."""
     import mlx.core as mx
+    # Frozen validation rows are never training anchors. Retention is evaluated
+    # by the campaign's same-row parent/candidate gate, not added to val loss.
+    evaluation_config = ({**config, "mastered_anchor_retention": None}
+                         if config.get("mastered_anchor_retention") is not None else config)
     order = balanced_validation_order(dataset, rng=np.random.default_rng(config["seed"]))
     batch_size = config["validation_batch_size"]
     rows_seen, score_rows, weighted_loss = [], [], 0.0
@@ -834,7 +838,7 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
         rows = [dataset[int(index)] for index in indices]
         tensors = tuple(mx.array(value) for value in pack_examples(
             rows, max_seq_length=config["max_seq_length"]))
-        loss, _, scores = _batch_outputs(model, *tensors, config=config)
+        loss, _, scores = _batch_outputs(model, *tensors, config=evaluation_config)
         mx.eval(loss, scores)
         weighted_loss += float(loss.item()) * len(rows)
         rows_seen.extend(rows)
