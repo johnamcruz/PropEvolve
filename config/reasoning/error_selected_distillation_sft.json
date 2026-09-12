@@ -1,5 +1,6 @@
 {
   "inherits": "error_selected_distillation_parent_sft.json",
+  "batch_size": 2,
   "iters": 2200,
   "validation_batch_size": 2,
   "steps_per_report": 50,
