@@ -16,6 +16,19 @@ _SETTING_KEYS = {
 }
 
 
+def validate_mastered_anchor_retention(settings):
+    if settings is None:
+        return
+    if (not isinstance(settings, dict)
+            or set(settings) != {"loss_weight", "temperature"}
+            or any(isinstance(settings[name], bool)
+                   or not isinstance(settings[name], (int, float))
+                   or not math.isfinite(float(settings[name]))
+                   or settings[name] <= 0
+                   for name in ("loss_weight", "temperature"))):
+        raise ValueError("invalid mastered anchor retention configuration")
+
+
 def validate_targeted_sampling(settings):
     if settings is None:
         return
@@ -60,9 +73,12 @@ def _validated_groups(scored, settings, *, train_bounds, expected_rows=None):
                 or not isinstance(ticker, str) or not ticker
                 or not isinstance(target, str) or not target):
             raise ValueError("invalid or non-training assessment row")
+        correct = row.get("correct", advantage >= 0)
+        if type(correct) is not bool:
+            raise ValueError("invalid training assessment correctness")
         seen.add(index)
         year = str(np.datetime64(timestamp, "ns"))[:4]
-        groups[(ticker, target, year)][int(advantage >= 0)].append(index)
+        groups[(ticker, target, year)][int(correct)].append(index)
     if not seen:
         raise ValueError("empty training assessment")
     if expected_rows is not None and seen != set(range(expected_rows)):
@@ -82,6 +98,7 @@ class TargetedSampler:
             "ticker": row["ticker"],
             "target": row["target"],
             "predicted": row.get("predicted"),
+            "correct": bool(row.get("correct", row["target_advantage"] >= 0)),
             "target_advantage": float(row["target_advantage"]),
             "scores": row.get("scores"),
         } for row in scored}
@@ -167,6 +184,31 @@ class TargetedSampler:
                 queue = queues[name]
                 order.append(int(queue[position % len(queue)]))
         return np.asarray(order, dtype=np.int64)
+
+    def training_row(self, index, row, *, retain_mastery=False):
+        """Attach frozen scores only when this exact row was already mastered."""
+        if not retain_mastery:
+            return row
+        evidence = self.evidence[int(index)]
+        target = row.get("action_targets")
+        names = target.get("names") if isinstance(target, dict) else None
+        if (row.get("target_name") != evidence["target"]
+                or not isinstance(names, list) or not names):
+            raise ValueError("targeted row differs from frozen assessment")
+        anchor = evidence["correct"]
+        parent = evidence["scores"]
+        if anchor and (not isinstance(parent, dict) or set(parent) != set(names)
+                or any(isinstance(parent[name], bool)
+                       or not isinstance(parent[name], (int, float))
+                       or not math.isfinite(float(parent[name])) for name in names)):
+            raise ValueError("mastered anchor lacks aligned frozen parent scores")
+        result = dict(row)
+        result["mastered_anchor_retention"] = {
+            "is_anchor": anchor,
+            "scores": ([float(parent[name]) for name in names]
+                       if anchor else [0.] * len(names)),
+        }
+        return result
 
     def selection_receipt(self, round_index):
         """Describe exact mistake corrections and retained anchors for one round."""

@@ -120,6 +120,14 @@ def test_sft_json_enables_only_authenticated_targeted_action_sampling(tmp_path):
     selected = read_sft_config(path, root=tmp_path)
     assert selected["targeted_sampling"]["assessment_path"] == str(
         (tmp_path / "assessment").resolve())
+    retained = {**payload, "mastered_anchor_retention": {
+        "loss_weight": 1.0, "temperature": 1.0}}
+    path.write_text(json.dumps(retained))
+    assert read_sft_config(path, root=tmp_path)["mastered_anchor_retention"] == {
+        "loss_weight": 1.0, "temperature": 1.0}
+    path.write_text(json.dumps({**retained, "targeted_sampling": None}))
+    with pytest.raises(ValueError, match="mastered anchor retention"):
+        read_sft_config(path, root=tmp_path)
     path.write_text(json.dumps({**payload, "action_supervision": {
         **payload["action_supervision"], "enabled": False}}))
     with pytest.raises(ValueError, match="targeted sampling"):
@@ -150,6 +158,64 @@ def test_targeted_sampler_drives_real_mlx_training_batches():
     observed = [int(value) for batch in batches
                 for value in batch[-2][:, 0, 0].tolist()]
     assert sorted(observed) == [0, 1, 2, 3]
+
+
+def test_targeted_batches_align_parent_scores_only_for_mastered_anchors():
+    pytest.importorskip("mlx.core")
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+
+    names = ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
+    scored = [
+        dict(index=0, ticker="NQ", target="ENTER_LONG_1", completed_at_ns=100,
+             target_advantage=-1., scores={"ENTER_SHORT_1": -3., "WAIT": 2.,
+                                            "ENTER_LONG_1": 1.}),
+        dict(index=1, ticker="NQ", target="ENTER_LONG_1", completed_at_ns=101,
+             target_advantage=1., scores={"ENTER_SHORT_1": -4., "WAIT": 1.,
+                                           "ENTER_LONG_1": 2.}),
+    ]
+    sampler = TargetedSampler(scored, settings(), train_bounds=(100, 200),
+                              expected_rows=2)
+    rows = [{"tokens": [1, 2, 3], "offset": 1,
+        "alternatives": [([1, 2, 3], 1), ([1, 4, 3], 1), ([1, 5, 3], 1)],
+        "action_targets": {"names": names, "probabilities": [0., 1., 0.],
+                           "values": [0., 1., -1.]},
+        "target_name": "ENTER_LONG_1", "causal_state": [],
+        "market_embeddings": [[float(index), 0.]], "market_available": [True],
+        "error_selected_distillation": {"tokens": [7, 8, 9], "offset": 1,
+            "market_targets": {"positions": [1], "probabilities": [.8],
+                               "weights": [1.], "label_ids": [10, 11]}}}
+        for index in range(2)]
+
+    batch = next(tensor_batches(
+        rows, 2, 8, loop=True, seed=17, targeted_sampler=sampler,
+        mastered_anchor_retention={"loss_weight": 1., "temperature": 1.}))
+
+    assert len(batch) == 17
+    parent_scores = batch[-2].tolist()
+    anchor_mask = batch[-1].tolist()
+    observed = {int(embedding): (scores, retained) for embedding, scores, retained in zip(
+        batch[8][:, 0, 0].tolist(), parent_scores, anchor_mask)}
+    assert observed[0][1] is False
+    assert observed[1][1] is True
+    assert observed[1][0] == [1., 2., -4.]
+
+
+def test_tied_but_incorrect_parent_row_is_never_protected_as_mastered():
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+
+    scored = [dict(index=0, ticker="NQ", target="WAIT", predicted="ENTER_LONG_1",
+                   correct=False, completed_at_ns=100, target_advantage=0.,
+                   scores={"WAIT": 1., "ENTER_LONG_1": 1., "ENTER_SHORT_1": -2.})]
+    sampler = TargetedSampler(scored, settings(rows_per_group=2),
+                              train_bounds=(100, 200), expected_rows=1)
+    row = {"target_name": "WAIT", "action_targets": {
+        "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]}}
+
+    marked = sampler.training_row(0, row, retain_mastery=True)
+
+    assert marked["mastered_anchor_retention"] == {
+        "is_anchor": False, "scores": [0., 0., 0.]}
 
 
 def test_corrective_action_batch_carries_teacher_queries_from_the_same_selected_rows():

@@ -628,6 +628,7 @@ def pack_examples(rows, *, max_seq_length):
             for key, dtype in (("positions", np.int32), ("probabilities", np.float32),
                                ("weights", np.float32), ("label_ids", np.int32)))
     corrective = [row.get("error_selected_distillation") for row in rows]
+    result = packed
     if any(item is not None for item in corrective):
         if not all(item is not None for item in corrective):
             raise ValueError("cannot mix corrected action rows with missing teacher targets")
@@ -635,16 +636,33 @@ def pack_examples(rows, *, max_seq_length):
         query_tokens = np.zeros((len(rows), 1, width), np.int32)
         for index, item in enumerate(corrective):
             query_tokens[index, 0, :len(item["tokens"])] = item["tokens"]
-        return packed + (query_tokens,) + tuple(
+        result += (query_tokens,) + tuple(
             np.asarray([item["market_targets"][key] for item in corrective], dtype=dtype)
             for key, dtype in (("positions", np.int32), ("probabilities", np.float32),
                                ("weights", np.float32), ("label_ids", np.int32)))
-    return packed
+    retention = [row.get("mastered_anchor_retention") for row in rows]
+    if any(item is not None for item in retention):
+        if not all(item is not None for item in retention):
+            raise ValueError("cannot mix retained anchors with unmarked correction rows")
+        parent_scores = np.zeros_like(probabilities)
+        anchor_mask = np.zeros(len(rows), dtype=bool)
+        for index, (item, group) in enumerate(zip(retention, alternatives)):
+            scores = item.get("scores")
+            if (not isinstance(item.get("is_anchor"), (bool, np.bool_))
+                    or not isinstance(scores, list) or len(scores) != len(group)
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not math.isfinite(float(value)) for value in scores)):
+                raise ValueError("invalid mastered anchor retention row")
+            parent_scores[index, :len(group)] = scores
+            anchor_mask[index] = item["is_anchor"]
+        result += (parent_scores, anchor_mask)
+    return result
 
 
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
                    sampling_strategy="random", include_partial=False, skip_batches=0,
-                   coverage_sampler=None, targeted_sampler=None):
+                   coverage_sampler=None, targeted_sampler=None,
+                   mastered_anchor_retention=None):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
@@ -670,7 +688,14 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
             if loop and skip_batches:
                 skip_batches -= 1
                 continue
-            rows = [dataset[int(i)] for i in order[start:start + batch_size]]
+            indices = order[start:start + batch_size]
+            rows = [dataset[int(i)] for i in indices]
+            if mastered_anchor_retention is not None:
+                if targeted_sampler is None:
+                    raise ValueError("mastered anchor retention requires targeted sampling")
+                rows = [targeted_sampler.training_row(
+                    int(index), row, retain_mastery=True)
+                    for index, row in zip(indices, rows)]
             yield tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
         if not loop:
             return
@@ -685,6 +710,21 @@ def selected_token_scores(logits, targets):
     return selected - mx.logsumexp(logits, axis=-1)
 
 
+def anchor_retention_loss(scores, parent_scores, anchor_mask, *, temperature, valid=None):
+    """KL from a correct frozen parent, with mistake rows contributing exactly zero."""
+    import mlx.core as mx
+    if valid is None:
+        valid = mx.ones_like(scores, dtype=mx.bool_)
+    floor = mx.array(-1e9, dtype=mx.float32)
+    student = mx.where(valid, scores.astype(mx.float32) / temperature, floor)
+    teacher = mx.where(valid, parent_scores.astype(mx.float32) / temperature, floor)
+    student_log = student - mx.logsumexp(student, axis=-1, keepdims=True)
+    teacher_log = teacher - mx.logsumexp(teacher, axis=-1, keepdims=True)
+    per_row = mx.sum(mx.exp(teacher_log) * (teacher_log - student_log), axis=-1)
+    mask = anchor_mask.astype(mx.float32)
+    return temperature ** 2 * mx.sum(per_row * mask) / mx.maximum(mx.sum(mask), 1.)
+
+
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
                    causal_states, embeddings, available, *extras, config):
     if config.get("market_distillation") is not None:
@@ -695,9 +735,11 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
         return market_outputs(model, tokens, embeddings, available, causal_states,
             query_positions, teacher_probabilities, teacher_weights, label_ids)
     corrective = config.get("error_selected_distillation")
-    if corrective is None and extras:
+    retention = config.get("mastered_anchor_retention")
+    if corrective is None and retention is None and extras:
         raise ValueError("short-query view cannot be trained with token loss")
-    if corrective is not None and len(extras) != 5:
+    expected_extras = (5 if corrective is not None else 0) + (2 if retention is not None else 0)
+    if (corrective is not None or retention is not None) and len(extras) != expected_extras:
         raise ValueError("error-selected action correction requires four-teacher targets")
     if config.get("market_loss_chunk_size") is not None:
         from .chunked_loss import chunked_market_outputs
@@ -757,12 +799,17 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             losses.append(completion_objective(scores[index], valid[index], xp=mx))
     loss = mx.stack(losses).mean()
     if corrective is not None:
-        query_tokens, positions, teacher_probabilities, teacher_weights, label_ids = extras
+        query_tokens, positions, teacher_probabilities, teacher_weights, label_ids = extras[:5]
         from .market_distillation import market_outputs
         teacher_loss, _, _ = market_outputs(
             model, query_tokens, embeddings, available, causal_states,
             positions, teacher_probabilities, teacher_weights, label_ids)
         loss = loss + corrective["loss_weight"] * teacher_loss
+    if retention is not None:
+        parent_scores, anchor_mask = extras[-2:]
+        loss = loss + retention["loss_weight"] * anchor_retention_loss(
+            scores, parent_scores, anchor_mask,
+            temperature=retention["temperature"], valid=valid)
     return loss, mx.array(tokens.shape[0]), scores
 
 
@@ -880,6 +927,7 @@ def train_supervised(config, view):
         targeted_receipt = {
             "schema": "propevolve_targeted_sampling_receipt_v1",
             "assessment": dict(config["targeted_sampling"]),
+            "mastered_anchor_retention": config.get("mastered_anchor_retention"),
             "pool_rows": targeted_sampler.pool_rows,
             "rounds": [targeted_sampler.selection_receipt(index)
                        for index in range(selection_rounds)],
@@ -902,6 +950,7 @@ def train_supervised(config, view):
                             else len(targeted_sampler.groups)
                             if targeted_sampler is not None else None),
         "targeted_sampling": targeted_sampler is not None,
+        "mastered_anchor_retention": config.get("mastered_anchor_retention"),
         "targeted_sampling_summary": (None if targeted_receipt is None else {
             "rounds": len(targeted_receipt["rounds"]),
             "mistake_draws": sum(row["mistake_draws"]
@@ -970,6 +1019,7 @@ def train_supervised(config, view):
                        include_partial=config.get("include_partial_batch", False),
                        coverage_sampler=coverage_sampler,
                        targeted_sampler=targeted_sampler,
+                       mastered_anchor_retention=config.get("mastered_anchor_retention"),
                        skip_batches=resume_iteration)
     def evaluate_loss():
         if config.get("market_distillation") is not None:

@@ -11,6 +11,7 @@
   "market_loss_chunk_size": null,
   "market_distillation": null,
   "error_selected_distillation": null,
+  "mastered_anchor_retention": null,
   "coverage_sampling": null,
   "prepared_sampling": null,
   "targeted_sampling": null,

@@ -99,6 +99,13 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
             raise ValueError(
                 "error-selected distillation requires trade-mastery action rows "
                 "and exactly declared teacher groups")
+    retention = payload["mastered_anchor_retention"]
+    from .targeted_subset import validate_mastered_anchor_retention
+    validate_mastered_anchor_retention(retention)
+    if retention is not None:
+        if payload["targeted_sampling"] is None or not supervision["enabled"]:
+            raise ValueError(
+                "mastered anchor retention requires targeted action supervision")
     chunk_size = payload["market_loss_chunk_size"]
     if chunk_size is not None and (
             type(chunk_size) is not int or chunk_size < 1

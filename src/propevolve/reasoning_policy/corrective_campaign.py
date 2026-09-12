@@ -176,7 +176,8 @@ _CAMPAIGN_KEYS = {
     "schema", "workspace_root", "state_file", "output_root",
     "initial_policy_config", "sft_template_config", "prepared_view",
     "rounds", "initial_assessments", "preserved_assessments",
-    "required_teacher_groups", "subset", "acceptance", "timeouts",
+    "required_teacher_groups", "subset", "mastered_anchor_retention",
+    "acceptance", "timeouts",
 }
 
 
@@ -210,6 +211,10 @@ def _read_campaign(path):
     from .targeted_subset import validate_targeted_sampling
     validate_targeted_sampling({**plan["subset"], "assessment_path": "pending",
         "scores_sha256": "0" * 64, "summary_sha256": "0" * 64})
+    from .targeted_subset import validate_mastered_anchor_retention
+    validate_mastered_anchor_retention(plan["mastered_anchor_retention"])
+    if plan["mastered_anchor_retention"] is None:
+        raise ValueError("corrective campaign requires mastered anchor retention")
     for name in ("state_file", "output_root", "initial_policy_config",
                  "sft_template_config", "prepared_view"):
         if not isinstance(plan[name], str) or not plan[name].strip():
@@ -321,6 +326,7 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
             "scores_sha256": train_assessment["scores_sha256"],
             "summary_sha256": train_assessment["summary_sha256"],
         },
+        "mastered_anchor_retention": plan["mastered_anchor_retention"],
     })
     path = round_root / "candidate-policy.json"
     atomic_json(path, child)

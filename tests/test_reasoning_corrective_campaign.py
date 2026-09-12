@@ -207,6 +207,7 @@ def campaign_config(tmp_path, *, rounds=2):
         "preserved_assessments": [],
         "required_teacher_groups": list(TEACHERS),
         "subset": {"rows_per_group": 2, "mistake_fraction": .5, "seed": 17},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
         "acceptance": gate(minimum_retained_mastery_rate=.9),
         "timeouts": {"assessment_seconds": 60, "training_seconds": 60},
     }))
@@ -260,6 +261,8 @@ def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path
     first_child = json.loads((tmp_path / "run/round-01/candidate-policy.json").read_text())
     assert first_child["targeted_sampling"]["assessment_path"].endswith(
         "parent-train-assessment")
+    assert first_child["mastered_anchor_retention"] == {
+        "loss_weight": 1., "temperature": 1.}
 
 
 def test_reasoning_campaign_resumes_the_interrupted_round_without_reassessment(tmp_path):

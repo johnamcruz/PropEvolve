@@ -295,6 +295,63 @@ def test_error_selected_action_update_uses_action_and_teacher_targets_on_same_ro
                for _, value in tree_flatten(gradients))
 
 
+def test_mastered_anchor_retention_penalizes_drift_and_never_protects_mistakes():
+    from propevolve.reasoning_policy.supervised_trainer import anchor_retention_loss
+
+    parent = mx.array([[2., 1., -1.], [3., 1., -2.]])
+    matching = mx.array([[2., 1., -1.], [-4., 5., 6.]])
+    drifted = mx.array([[-1., 2., 1.], [100., -100., 0.]])
+    anchors = mx.array([True, False])
+
+    same = anchor_retention_loss(matching, parent, anchors, temperature=1.)
+    changed = anchor_retention_loss(drifted, parent, anchors, temperature=1.)
+    changed_mistake_only = anchor_retention_loss(
+        mx.array([[2., 1., -1.], [-100., 100., 0.]]), parent, anchors,
+        temperature=1.)
+    mx.eval(same, changed, changed_mistake_only)
+
+    assert float(same.item()) == pytest.approx(0., abs=1e-6)
+    assert float(changed.item()) > 0.1
+    assert float(changed_mistake_only.item()) == pytest.approx(0., abs=1e-6)
+
+
+def test_production_action_batch_retains_parent_only_on_mastered_row():
+    from propevolve.reasoning_policy.supervised_trainer import _batch_outputs, pack_examples
+
+    model = tiny_backbone()
+    base = example()
+    rows = [
+        {**base, "market_embeddings": [[0., 1.], [1., 0.], [1., 1.]],
+         "market_available": [True, True, True],
+         "mastered_anchor_retention": {
+             "is_anchor": True, "scores": [8., -4., -5.]}},
+        {**base, "market_embeddings": [[1., 0.], [0., 1.], [1., 1.]],
+         "market_available": [True, True, True],
+         "mastered_anchor_retention": {
+             "is_anchor": False, "scores": [-100., 100., 0.]}},
+    ]
+    config = {
+        "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 2., "margin": .25},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+    }
+    packed = tuple(mx.array(value) for value in pack_examples(rows, max_seq_length=8))
+    retained, _, _ = _batch_outputs(model, *packed, config=config)
+
+    changed_mistake = [rows[0], {**rows[1], "mastered_anchor_retention": {
+        "is_anchor": False, "scores": [100., -100., 50.]}}]
+    changed = tuple(mx.array(value) for value in pack_examples(
+        changed_mistake, max_seq_length=8))
+    same_retained, _, _ = _batch_outputs(model, *changed, config=config)
+    action_only, _, _ = _batch_outputs(model, *packed[:10], config={
+        key: value for key, value in config.items() if key != "mastered_anchor_retention"})
+    mx.eval(retained, same_retained, action_only)
+
+    assert float(retained.item()) > float(action_only.item())
+    assert float(same_retained.item()) == pytest.approx(float(retained.item()), abs=1e-6)
+
+
 def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():
     import mlx.optimizers as optim
 

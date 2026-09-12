@@ -22,6 +22,7 @@
   ],
   "initial_assessments": {"train": null, "valid": null},
   "subset": {"rows_per_group": 84, "mistake_fraction": 0.75, "seed": 17},
+  "mastered_anchor_retention": {"loss_weight": 1.0, "temperature": 1.0},
   "acceptance": {
     "primary_metric": "worst_task_advantage",
     "minimum_primary_improvement": 0.01,
