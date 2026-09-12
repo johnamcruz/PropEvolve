@@ -6,7 +6,7 @@
   "initial_policy_config": "config/reasoning/error_selected_distillation_parent_sft.json",
   "sft_template_config": "config/reasoning/error_selected_distillation_sft.json",
   "prepared_view": "runs/reasoning-challenger/error-selected-distillation/view",
-  "rounds": 5,
+  "rounds": 10,
   "required_teacher_groups": ["expansion", "trend", "regime", "volume"],
   "preserved_assessments": [
     {
@@ -20,7 +20,18 @@
       "summary_sha256": "e14fa32fcfb9e37bd964f84f23e87fc46f524735dcaa3b507f038026928e5b1c"
     }
   ],
-  "initial_assessments": {"train": null, "valid": null},
+  "initial_assessments": {
+    "train": {
+      "path": "runs/reasoning-challenger/error-selected-distillation/frozen-epoch-097-assessments/train",
+      "scores_sha256": "49318db09b3e5d3c59ac37d01b5f0801bc28b7c40ede6d0f59038777495c3620",
+      "summary_sha256": "5346f4cfda5ea6ae46d56f55cf73a1f348ec439b75ce8b92559c1b6d526609e3"
+    },
+    "valid": {
+      "path": "runs/reasoning-challenger/error-selected-distillation/frozen-epoch-097-assessments/valid",
+      "scores_sha256": "eb1cf05c3c82333dc8e77c98228aadc9f7bd5025427c41c6605ef01809664c64",
+      "summary_sha256": "3c3f2109ca2f48a74d8ac036f5dc14310e3d82f13acc115fe9d469233392e0de"
+    }
+  },
   "subset": {"rows_per_group": 84, "mistake_fraction": 0.75, "seed": 17},
   "mastered_anchor_retention": {"loss_weight": 1.0, "temperature": 1.0},
   "acceptance": {
