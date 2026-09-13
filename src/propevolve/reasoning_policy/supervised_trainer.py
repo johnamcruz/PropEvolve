@@ -842,7 +842,12 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
         mx.eval(loss, scores)
         weighted_loss += float(loss.item()) * len(rows)
         rows_seen.extend(rows)
-        batch_scores = scores.tolist()
+        # Mixed flat/position batches pad HOLD/CLOSE rows to the wider
+        # WAIT/LONG/SHORT tensor. Metrics and exported assessment evidence must
+        # contain only actions legal for that exact row.
+        legal_action_mask = np.asarray(tensors[3], dtype=bool)
+        batch_scores = [np.asarray(values)[mask].tolist()
+                        for values, mask in zip(scores.tolist(), legal_action_mask)]
         score_rows.extend(batch_scores)
         if on_scored is not None:
             for index, values in zip(indices, batch_scores):

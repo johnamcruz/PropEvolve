@@ -380,13 +380,18 @@ def test_frozen_action_validation_batch_two_matches_batch_one():
 
     model = tiny_backbone()
     rows = []
-    for index, target in enumerate(("ENTER_LONG_1", "ENTER_SHORT_1")):
+    for index, target in enumerate(("ENTER_LONG_1", "CLOSE")):
         row = {**example(), "target_name": target,
                "market_embeddings": [[0., 0.], [1. + index, 2.], [3., 4.]],
                "error_selected_distillation": {
                    "tokens": [1, 7, 8, 4], "offset": 2,
                    "market_targets": {"positions": [1, 2], "probabilities": [.9, .1],
                                       "weights": [1., 1.], "label_ids": [9, 10]}}}
+        if target == "CLOSE":
+            row["alternatives"] = [([1, 2, 7, 4], 2), ([1, 2, 8, 4], 2)]
+            row["action_targets"] = {
+                "names": ["HOLD", "CLOSE"], "probabilities": [.1, .9],
+                "values": [-1., 0.]}
         rows.append(row)
     common = {
         "seed": 17, "max_seq_length": 8, "input_mode": "embeddings",
@@ -403,8 +408,13 @@ def test_frozen_action_validation_batch_two_matches_batch_one():
         **common, "validation_batch_size": 2})
 
     assert paired["val_loss"] == pytest.approx(single["val_loss"], abs=1e-6)
+    assert set(paired["per_task"]) == {
+        "entry.ENTER", "direction.LONG", "management.CLOSE"}
     assert paired["worst_task_advantage"] == pytest.approx(
         single["worst_task_advantage"], abs=1e-6)
+    for task in paired["per_task"]:
+        assert paired["per_task"][task]["mean_target_advantage"] == pytest.approx(
+            single["per_task"][task]["mean_target_advantage"], abs=1e-6)
 
 
 def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():
