@@ -67,7 +67,7 @@ ties receive no ranking margin. Soft labels preserve their uncertainty.
 
 
 def hierarchical_action_objective(scores, probabilities, values, config, *,
-                                  task_code, xp):
+                                  task_code, xp, correction_boundaries=None):
     """Optimize state-appropriate binary decisions with shared action scores.
 
     ``task_code`` is zero for a flat WAIT/LONG/SHORT state and one for a
@@ -78,6 +78,8 @@ def hierarchical_action_objective(scores, probabilities, values, config, *,
     scores = xp.array(scores)
     probabilities = xp.array(probabilities)
     values = xp.array(values)
+    boundaries = (xp.ones(3) if correction_boundaries is None
+                  else xp.array(correction_boundaries).astype(scores.dtype))
     if scores.shape[0] == 2:
         # Positioned batches have only HOLD/CLOSE. Pad the unused flat branch
         # because MLX traces both sides of the final ``where``.
@@ -105,10 +107,14 @@ def hierarchical_action_objective(scores, probabilities, values, config, *,
         direction_probabilities.sum(), 1e-12)
     direction_loss = action_objective(
         scores[1:3], direction_probabilities, values[1:3], config, xp=xp)
-    flat_loss = (entry_loss + direction_eligible * direction_loss) / (
-        1.0 + direction_eligible)
+    entry_weight = boundaries[0]
+    direction_weight = boundaries[1] * direction_eligible
+    flat_weight = entry_weight + direction_weight
+    flat_loss = (entry_weight * entry_loss + direction_weight * direction_loss) / xp.maximum(
+        flat_weight, 1.0)
 
     management_loss = action_objective(
         scores[:2], probabilities[:2] / xp.maximum(probabilities[:2].sum(), 1e-12),
         values[:2], config, xp=xp)
+    management_loss = boundaries[2] * management_loss
     return xp.where(task_code == 0, flat_loss, management_loss)

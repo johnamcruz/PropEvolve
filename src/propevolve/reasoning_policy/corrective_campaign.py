@@ -90,6 +90,39 @@ def _task_advantages(summary):
     return result
 
 
+def _decision_advantages(row):
+    """Return target-relative evidence for each applicable decision boundary."""
+    target = row.get("target")
+    scores = row.get("scores")
+    if not isinstance(scores, dict):
+        raise ValueError("frozen assessment lacks action scores")
+    if target in {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}:
+        names = {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+        if set(scores) != names:
+            raise ValueError("invalid frozen flat-action scores")
+        wait = float(scores["WAIT"])
+        long = float(scores["ENTER_LONG_1"])
+        short = float(scores["ENTER_SHORT_1"])
+        if not all(math.isfinite(value) for value in (wait, long, short)):
+            raise ValueError("invalid frozen flat-action scores")
+        if target == "WAIT":
+            return {"entry.WAIT": wait - max(long, short)}
+        side, other = ((long, short) if target == "ENTER_LONG_1"
+                       else (short, long))
+        direction = "direction.LONG" if target == "ENTER_LONG_1" else "direction.SHORT"
+        return {"entry.ENTER": max(long, short) - wait,
+                direction: side - other}
+    if target in {"HOLD", "CLOSE"}:
+        if set(scores) != {"HOLD", "CLOSE"}:
+            raise ValueError("invalid frozen management scores")
+        hold, close = float(scores["HOLD"]), float(scores["CLOSE"])
+        if not all(math.isfinite(value) for value in (hold, close)):
+            raise ValueError("invalid frozen management scores")
+        return ({"management.HOLD": hold - close} if target == "HOLD"
+                else {"management.CLOSE": close - hold})
+    raise ValueError("frozen assessment contains an unknown action")
+
+
 def compare_frozen_assessments(before, after, settings):
     """Gate one candidate using identical chronological validation decisions."""
     validate_acceptance(settings)
@@ -100,6 +133,7 @@ def compare_frozen_assessments(before, after, settings):
     identity = ("source_id", "completed_at_ns", "ticker", "target")
     expected_actions = {action.name for action in Action}
     evidence = defaultdict(lambda: {"mistake_deltas": [], "retained": []})
+    boundary_evidence = defaultdict(lambda: {"mistake_deltas": [], "retained": []})
     for index in sorted(before_rows):
         parent, candidate = before_rows[index], after_rows[index]
         if any(parent.get(key) != candidate.get(key) for key in identity):
@@ -112,8 +146,21 @@ def compare_frozen_assessments(before, after, settings):
             evidence[target]["mistake_deltas"].append((new - old, new >= 0))
         else:
             evidence[target]["retained"].append(new >= 0)
+        old_boundaries = _decision_advantages(parent)
+        new_boundaries = _decision_advantages(candidate)
+        if set(old_boundaries) != set(new_boundaries):
+            raise ValueError("frozen assessment decision boundaries differ")
+        for boundary, old_boundary in old_boundaries.items():
+            new_boundary = new_boundaries[boundary]
+            if old_boundary > 0:
+                boundary_evidence[boundary]["retained"].append(new_boundary > 0)
+            else:
+                boundary_evidence[boundary]["mistake_deltas"].append(
+                    (new_boundary - old_boundary, new_boundary > 0))
     if set(evidence) != expected_actions:
         raise ValueError("frozen assessment does not cover every legal action")
+    if set(boundary_evidence) != _DECISION_BOUNDARIES:
+        raise ValueError("frozen assessment does not cover all six decision boundaries")
     per_action = {}
     all_mistake_deltas, all_corrected, all_retained = [], [], []
     retention_rates = []
@@ -137,6 +184,26 @@ def compare_frozen_assessments(before, after, settings):
         }
     if not all_mistake_deltas or not all_retained:
         raise ValueError("candidate gate requires both mistakes and mastered examples")
+    per_boundary = {}
+    boundary_mistake_deltas, boundary_retention_rates = [], []
+    for boundary in sorted(boundary_evidence):
+        mistakes = boundary_evidence[boundary]["mistake_deltas"]
+        retained = boundary_evidence[boundary]["retained"]
+        boundary_mistake_deltas.extend(delta for delta, _ in mistakes)
+        retention = None if not retained else float(np.mean(retained))
+        if retention is not None:
+            boundary_retention_rates.append(retention)
+        per_boundary[boundary] = {
+            "mistakes": len(mistakes),
+            "mean_mistake_advantage_delta": (
+                None if not mistakes else float(np.mean([delta for delta, _ in mistakes]))),
+            "corrected_mistake_rate": (
+                None if not mistakes else float(np.mean([flag for _, flag in mistakes]))),
+            "mastered": len(retained),
+            "retained_mastery_rate": retention,
+        }
+    if not boundary_mistake_deltas or not boundary_retention_rates:
+        raise ValueError("candidate gate requires boundary mistakes and mastery")
     primary = settings["primary_metric"]
     primary_delta = _metric(after_summary, primary) - _metric(before_summary, primary)
     before_tasks, after_tasks = _task_advantages(before_summary), _task_advantages(after_summary)
@@ -145,6 +212,8 @@ def compare_frozen_assessments(before, after, settings):
     task_deltas = {name: after_tasks[name] - before_tasks[name] for name in before_tasks}
     mean_mistake_delta = float(np.mean(all_mistake_deltas))
     minimum_retention = min(retention_rates)
+    mean_boundary_mistake_delta = float(np.mean(boundary_mistake_deltas))
+    minimum_boundary_retention = min(boundary_retention_rates)
     action_mistake_deltas = [row["mean_mistake_advantage_delta"]
         for row in per_action.values()
         if row["mean_mistake_advantage_delta"] is not None]
@@ -155,6 +224,10 @@ def compare_frozen_assessments(before, after, settings):
         failed.append("mistake_improvement")
     if minimum_retention < settings["minimum_retained_mastery_rate"]:
         failed.append("retention")
+    if mean_boundary_mistake_delta < settings["minimum_mean_mistake_advantage_delta"]:
+        failed.append("boundary_mistake_improvement")
+    if minimum_boundary_retention < settings["minimum_retained_mastery_rate"]:
+        failed.append("boundary_retention")
     if min(action_mistake_deltas) < -settings["maximum_per_action_mistake_regression"]:
         failed.append("action_regression")
     if min(task_deltas.values()) < -settings["maximum_per_task_advantage_regression"]:
@@ -167,8 +240,11 @@ def compare_frozen_assessments(before, after, settings):
         "mean_mistake_advantage_delta": mean_mistake_delta,
         "corrected_mistake_rate": float(np.mean(all_corrected)),
         "minimum_retained_mastery_rate": minimum_retention,
+        "mean_boundary_mistake_advantage_delta": mean_boundary_mistake_delta,
+        "minimum_retained_boundary_rate": minimum_boundary_retention,
         "task_advantage_deltas": task_deltas,
         "per_action": per_action,
+        "per_boundary": per_boundary,
     }
 
 

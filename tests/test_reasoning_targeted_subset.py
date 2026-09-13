@@ -160,7 +160,7 @@ def test_targeted_sampler_drives_real_mlx_training_batches():
     assert sorted(observed) == [0, 1, 2, 3]
 
 
-def test_targeted_batches_align_parent_scores_only_for_mastered_anchors():
+def test_targeted_batches_align_parent_scores_and_mastered_boundaries():
     pytest.importorskip("mlx.core")
     from propevolve.reasoning_policy.supervised_trainer import tensor_batches
     from propevolve.reasoning_policy.targeted_subset import TargetedSampler
@@ -193,11 +193,12 @@ def test_targeted_batches_align_parent_scores_only_for_mastered_anchors():
 
     assert len(batch) == 17
     parent_scores = batch[-2].tolist()
-    anchor_mask = batch[-1].tolist()
+    boundary_masks = batch[-1].tolist()
     observed = {int(embedding): (scores, retained) for embedding, scores, retained in zip(
-        batch[8][:, 0, 0].tolist(), parent_scores, anchor_mask)}
-    assert observed[0][1] is False
-    assert observed[1][1] is True
+        batch[8][:, 0, 0].tolist(), parent_scores, boundary_masks)}
+    assert observed[0][1] == [False, True, False]
+    assert observed[1][1] == [True, True, False]
+    assert observed[0][0] == [2., 1., -3.]
     assert observed[1][0] == [1., 2., -4.]
 
 
@@ -210,12 +211,62 @@ def test_tied_but_incorrect_parent_row_is_never_protected_as_mastered():
     sampler = TargetedSampler(scored, settings(rows_per_group=2),
                               train_bounds=(100, 200), expected_rows=1)
     row = {"target_name": "WAIT", "action_targets": {
-        "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]}}
+        "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+        "values": [1., 0., -1.]}}
 
     marked = sampler.training_row(0, row, retain_mastery=True)
 
     assert marked["mastered_anchor_retention"] == {
-        "is_anchor": False, "scores": [0., 0., 0.]}
+        "boundaries": {"entry": False, "direction": False, "management": False},
+        "scores": [1., 1., -2.]}
+
+
+def test_retention_marks_each_hierarchical_boundary_independently():
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+
+    evidence = [
+        # ENTER is correct, but SHORT outranks the authenticated LONG side.
+        ("ENTER_LONG_1", [0., 1., 2.], [0., 2., 1.],
+         {"entry": True, "direction": False, "management": False}),
+        # WAIT wins incorrectly, but LONG still outranks SHORT.
+        ("ENTER_LONG_1", [2., 1., 0.], [0., 2., 1.],
+         {"entry": False, "direction": True, "management": False}),
+        ("ENTER_LONG_1", [0., 2., 1.], [0., 2., 1.],
+         {"entry": True, "direction": True, "management": False}),
+        ("ENTER_LONG_1", [3., 1., 2.], [0., 2., 1.],
+         {"entry": False, "direction": False, "management": False}),
+        # WAIT has no economically meaningful direction boundary.
+        ("WAIT", [2., 1., 0.], [1., 0., -1.],
+         {"entry": True, "direction": False, "management": False}),
+        ("CLOSE", [0., 1.], [0., 2.],
+         {"entry": False, "direction": False, "management": True}),
+    ]
+    scored, rows = [], []
+    for index, (target, scores, values, _) in enumerate(evidence):
+        names = (["HOLD", "CLOSE"] if target == "CLOSE" else
+                 ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"])
+        by_name = dict(zip(names, scores))
+        predicted = max(names, key=by_name.get)
+        scored.append(dict(
+            index=index, ticker="NQ", target=target, predicted=predicted,
+            correct=predicted == target, completed_at_ns=100 + index,
+            target_advantage=by_name[target] - max(
+                value for name, value in by_name.items() if name != target),
+            scores=by_name,
+        ))
+        rows.append({
+            "target_name": target,
+            "action_targets": {"names": names, "values": values},
+        })
+    sampler = TargetedSampler(
+        scored, settings(rows_per_group=2), train_bounds=(100, 200),
+        expected_rows=len(rows))
+
+    observed = [sampler.training_row(
+        index, row, retain_mastery=True)["mastered_anchor_retention"]["boundaries"]
+        for index, row in enumerate(rows)]
+
+    assert observed == [expected for *_, expected in evidence]
 
 
 def test_corrective_action_batch_carries_teacher_queries_from_the_same_selected_rows():

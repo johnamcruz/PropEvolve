@@ -92,11 +92,12 @@ def test_positioned_state_produces_only_hold_close_task():
     assert tasks[0]["values"] == [1.2, 0.4]
 
 
-def _objective(scores, probabilities, values, task_code):
+def _objective(scores, probabilities, values, task_code, correction_boundaries=None):
     return float(hierarchical_action_objective(
         scores, probabilities, values,
         {"soft_target_weight": 0.5, "ranking_weight": 2.0, "margin": 0.1},
         task_code=task_code, xp=__import__("numpy"),
+        correction_boundaries=correction_boundaries,
     ))
 
 
@@ -151,6 +152,33 @@ def test_positioned_loss_is_only_hold_close_binary():
     tied = _objective([0.0, 0.0], [.8, .2], [1.2, 0.4], 1)
     correct = _objective([1.0, -1.0], [.8, .2], [1.2, 0.4], 1)
     assert correct < tied
+
+
+def test_corrective_loss_changes_only_failed_hierarchical_boundaries():
+    probabilities = [.1, .8, .1]
+    values = [0., 2., 1.]
+
+    # ENTER is already correct. Correcting direction lowers loss, while an
+    # entry-only score change leaves the correction loss exactly unchanged.
+    direction_wrong = _objective(
+        [0., 1., 2.], probabilities, values, 0, [False, True, False])
+    direction_fixed = _objective(
+        [0., 2., 1.], probabilities, values, 0, [False, True, False])
+    entry_only_change = _objective(
+        [-3., 1., 2.], probabilities, values, 0, [False, True, False])
+    assert direction_fixed < direction_wrong
+    assert entry_only_change == direction_wrong
+
+    # Direction is already correct. Correcting ENTER lowers loss, while a
+    # direction-only score change leaves the correction loss unchanged.
+    entry_wrong = _objective(
+        [2., 1., 0.], probabilities, values, 0, [True, False, False])
+    entry_fixed = _objective(
+        [0., 1., 0.], probabilities, values, 0, [True, False, False])
+    direction_only_change = _objective(
+        [2., 1., -5.], probabilities, values, 0, [True, False, False])
+    assert entry_fixed < entry_wrong
+    assert direction_only_change == entry_wrong
 
 
 def test_hierarchical_metrics_report_each_binary_boundary_and_reconstructed_actions():

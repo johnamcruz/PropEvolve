@@ -645,17 +645,22 @@ def pack_examples(rows, *, max_seq_length):
         if not all(item is not None for item in retention):
             raise ValueError("cannot mix retained anchors with unmarked correction rows")
         parent_scores = np.zeros_like(probabilities)
-        anchor_mask = np.zeros(len(rows), dtype=bool)
+        boundary_masks = np.zeros((len(rows), 3), dtype=bool)
+        boundary_names = ("entry", "direction", "management")
         for index, (item, group) in enumerate(zip(retention, alternatives)):
             scores = item.get("scores")
-            if (not isinstance(item.get("is_anchor"), (bool, np.bool_))
+            boundaries = item.get("boundaries")
+            if (not isinstance(boundaries, dict)
+                    or set(boundaries) != set(boundary_names)
+                    or any(not isinstance(boundaries[name], (bool, np.bool_))
+                           for name in boundary_names)
                     or not isinstance(scores, list) or len(scores) != len(group)
                     or any(isinstance(value, bool) or not isinstance(value, (int, float))
                            or not math.isfinite(float(value)) for value in scores)):
                 raise ValueError("invalid mastered anchor retention row")
             parent_scores[index, :len(group)] = scores
-            anchor_mask[index] = item["is_anchor"]
-        result += (parent_scores, anchor_mask)
+            boundary_masks[index] = [boundaries[name] for name in boundary_names]
+        result += (parent_scores, boundary_masks)
     return result
 
 
@@ -725,6 +730,34 @@ def anchor_retention_loss(scores, parent_scores, anchor_mask, *, temperature, va
     return temperature ** 2 * mx.sum(per_row * mask) / mx.maximum(mx.sum(mask), 1.)
 
 
+def boundary_retention_loss(scores, parent_scores, boundary_masks, *, temperature):
+    """Preserve only the hierarchical decisions mastered by the frozen parent."""
+    import mlx.core as mx
+    scores = scores.astype(mx.float32)
+    parent_scores = parent_scores.astype(mx.float32)
+    if scores.shape[1] == 2:
+        padding = mx.zeros((scores.shape[0], 1), dtype=mx.float32)
+        scores = mx.concatenate([scores, padding], axis=1)
+        parent_scores = mx.concatenate([parent_scores, padding], axis=1)
+
+    def divergence(student, teacher):
+        student = student / temperature
+        teacher = teacher / temperature
+        student_log = student - mx.logsumexp(student, axis=-1, keepdims=True)
+        teacher_log = teacher - mx.logsumexp(teacher, axis=-1, keepdims=True)
+        return mx.sum(mx.exp(teacher_log) * (teacher_log - student_log), axis=-1)
+
+    entry = divergence(
+        mx.stack([scores[:, 0], mx.maximum(scores[:, 1], scores[:, 2])], axis=-1),
+        mx.stack([parent_scores[:, 0],
+                  mx.maximum(parent_scores[:, 1], parent_scores[:, 2])], axis=-1))
+    direction = divergence(scores[:, 1:3], parent_scores[:, 1:3])
+    management = divergence(scores[:, :2], parent_scores[:, :2])
+    losses = mx.stack([entry, direction, management], axis=-1)
+    mask = boundary_masks.astype(mx.float32)
+    return temperature ** 2 * mx.sum(losses * mask) / mx.maximum(mx.sum(mask), 1.)
+
+
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
                    causal_states, embeddings, available, *extras, config):
     if config.get("market_distillation") is not None:
@@ -786,12 +819,15 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
     else:
         scores = mean_completion_scores(token_scores, mask, xp=mx)
     losses = []
+    correction_masks = None if retention is None else ~extras[-1]
     for index in range(batch_size):
         if config["action_supervision"]["enabled"]:
             if config.get("decision_objective", "full_action") == "hierarchical_binary":
                 losses.append(hierarchical_action_objective(
                     scores[index], probabilities[index], values[index],
-                    config["action_supervision"], task_code=task_codes[index], xp=mx))
+                    config["action_supervision"], task_code=task_codes[index], xp=mx,
+                    correction_boundaries=(None if correction_masks is None
+                                           else correction_masks[index])))
             else:
                 losses.append(action_objective(scores[index], probabilities[index], values[index],
                     config["action_supervision"], xp=mx, valid=valid[index]))
@@ -806,10 +842,10 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             positions, teacher_probabilities, teacher_weights, label_ids)
         loss = loss + corrective["loss_weight"] * teacher_loss
     if retention is not None:
-        parent_scores, anchor_mask = extras[-2:]
-        loss = loss + retention["loss_weight"] * anchor_retention_loss(
-            scores, parent_scores, anchor_mask,
-            temperature=retention["temperature"], valid=valid)
+        parent_scores, boundary_masks = extras[-2:]
+        loss = loss + retention["loss_weight"] * boundary_retention_loss(
+            scores, parent_scores, boundary_masks,
+            temperature=retention["temperature"])
     return loss, mx.array(tokens.shape[0]), scores
 
 

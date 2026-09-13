@@ -10,14 +10,29 @@ TEACHERS = ("expansion", "trend", "regime", "volume")
 
 
 def assessment(path, advantages, *, primary, task_advantages=None,
-               teacher_groups=TEACHERS):
+               teacher_groups=TEACHERS, score_rows=None):
     path.mkdir()
     rows = []
     for index, (target, advantage) in enumerate(advantages):
+        if score_rows is not None:
+            scores = score_rows[index]
+        elif target == "WAIT":
+            scores = {"WAIT": advantage, "ENTER_LONG_1": 0.,
+                      "ENTER_SHORT_1": -1.}
+        elif target == "ENTER_LONG_1":
+            scores = {"WAIT": 0., "ENTER_LONG_1": advantage,
+                      "ENTER_SHORT_1": -1.}
+        elif target == "ENTER_SHORT_1":
+            scores = {"WAIT": 0., "ENTER_LONG_1": -1.,
+                      "ENTER_SHORT_1": advantage}
+        elif target == "HOLD":
+            scores = {"HOLD": advantage, "CLOSE": 0.}
+        else:
+            scores = {"HOLD": 0., "CLOSE": advantage}
         rows.append({"index": index, "source_id": f"row-{index}",
             "completed_at_ns": 100 + index, "ticker": "NQ", "target": target,
             "predicted": target if advantage >= 0 else "other", "correct": advantage >= 0,
-            "scores": {}, "target_advantage": advantage,
+            "scores": scores, "target_advantage": advantage,
             "specialist_targets": {f"{name}.signal": 0.5 for name in teacher_groups}})
     (path / "scores.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows))
@@ -70,6 +85,55 @@ def test_frozen_candidate_is_rejected_when_one_action_forgets_mastered_rows(tmp_
     report = compare_frozen_assessments(before, after, gate())
     assert report["decision"] == "REJECTED"
     assert "retention" in report["failed_gates"]
+
+
+def test_frozen_candidate_rejects_fixing_direction_by_forgetting_mastered_entry(tmp_path):
+    """Partial mastery is retained independently of the final action answer."""
+    from propevolve.reasoning_policy.corrective_campaign import compare_frozen_assessments
+
+    rows = []
+    for action in ACTIONS:
+        rows.extend(((action, -1.), (action, 1.)))
+    before_scores = []
+    after_scores = []
+    for action, advantage in rows:
+        if action == "ENTER_LONG_1" and advantage < 0:
+            # Parent enters but picks SHORT: entry mastered, direction failed.
+            before_scores.append({"WAIT": 0., "ENTER_LONG_1": 1.,
+                                  "ENTER_SHORT_1": 2.})
+            # Candidate fixes direction but now WAIT outranks both sides.
+            after_scores.append({"WAIT": 3., "ENTER_LONG_1": 2.5,
+                                 "ENTER_SHORT_1": 1.})
+        else:
+            before_scores.append(None)
+            after_scores.append(None)
+
+    def defaults(action, advantage):
+        if action == "WAIT":
+            return {"WAIT": advantage, "ENTER_LONG_1": 0., "ENTER_SHORT_1": -1.}
+        if action == "ENTER_LONG_1":
+            return {"WAIT": 0., "ENTER_LONG_1": advantage, "ENTER_SHORT_1": -1.}
+        if action == "ENTER_SHORT_1":
+            return {"WAIT": 0., "ENTER_LONG_1": -1., "ENTER_SHORT_1": advantage}
+        if action == "HOLD":
+            return {"HOLD": advantage, "CLOSE": 0.}
+        return {"HOLD": 0., "CLOSE": advantage}
+
+    before_scores = [score or defaults(action, advantage)
+                     for score, (action, advantage) in zip(before_scores, rows)]
+    after_rows = [(action, .5 if advantage < 0 else .8)
+                  for action, advantage in rows]
+    after_scores = [score or defaults(action, advantage)
+                    for score, (action, advantage) in zip(after_scores, after_rows)]
+    before, after = tmp_path / "before", tmp_path / "after"
+    assessment(before, rows, primary=-1., score_rows=before_scores)
+    assessment(after, after_rows, primary=.2, score_rows=after_scores)
+
+    report = compare_frozen_assessments(before, after, gate())
+
+    assert report["decision"] == "REJECTED"
+    assert "boundary_retention" in report["failed_gates"]
+    assert report["per_boundary"]["entry.ENTER"]["retained_mastery_rate"] < 1.
 
 
 def test_frozen_assessment_comparison_rejects_row_drift(tmp_path):

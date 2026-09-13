@@ -15,6 +15,53 @@ _SETTING_KEYS = {
     "rows_per_group", "mistake_fraction", "seed",
 }
 
+_RETENTION_BOUNDARIES = ("entry", "direction", "management")
+
+
+def _mastered_boundaries(row, scores):
+    """Return independently mastered hierarchical decisions for one state."""
+    target = row.get("target_name")
+    action_targets = row.get("action_targets")
+    names = action_targets.get("names") if isinstance(action_targets, dict) else None
+    values = action_targets.get("values") if isinstance(action_targets, dict) else None
+    if (not isinstance(names, list) or not isinstance(values, list)
+            or len(names) != len(values) or target not in names
+            or not isinstance(scores, dict) or set(scores) != set(names)
+            or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(float(value))
+                   for value in (*values, *scores.values()))):
+        raise ValueError("invalid mastered boundary evidence")
+    result = {name: False for name in _RETENTION_BOUNDARIES}
+    by_value = dict(zip(names, map(float, values)))
+    by_score = {name: float(scores[name]) for name in names}
+    if set(names) == {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}:
+        long_value = by_value["ENTER_LONG_1"]
+        short_value = by_value["ENTER_SHORT_1"]
+        enter = (max(long_value, short_value) > by_value["WAIT"]
+                 and long_value != short_value)
+        expected = ("WAIT" if not enter else
+                    "ENTER_LONG_1" if long_value > short_value else "ENTER_SHORT_1")
+        if target != expected:
+            raise ValueError("action target differs from economic boundary")
+        wait_score = by_score["WAIT"]
+        long_score = by_score["ENTER_LONG_1"]
+        short_score = by_score["ENTER_SHORT_1"]
+        strongest_side = max(long_score, short_score)
+        result["entry"] = ((strongest_side > wait_score) if enter
+                           else (wait_score > strongest_side))
+        if enter:
+            result["direction"] = ((long_score > short_score) if long_value > short_value
+                                   else (short_score > long_score))
+        return result
+    if set(names) == {"HOLD", "CLOSE"}:
+        expected = "HOLD" if by_value["HOLD"] >= by_value["CLOSE"] else "CLOSE"
+        if target != expected:
+            raise ValueError("action target differs from economic boundary")
+        other = "CLOSE" if target == "HOLD" else "HOLD"
+        result["management"] = by_score[target] > by_score[other]
+        return result
+    raise ValueError("unsupported mastered boundary state")
+
 
 def validate_mastered_anchor_retention(settings):
     if settings is None:
@@ -186,7 +233,7 @@ class TargetedSampler:
         return np.asarray(order, dtype=np.int64)
 
     def training_row(self, index, row, *, retain_mastery=False):
-        """Attach frozen scores only when this exact row was already mastered."""
+        """Attach frozen scores and independently mastered decision boundaries."""
         if not retain_mastery:
             return row
         evidence = self.evidence[int(index)]
@@ -195,18 +242,12 @@ class TargetedSampler:
         if (row.get("target_name") != evidence["target"]
                 or not isinstance(names, list) or not names):
             raise ValueError("targeted row differs from frozen assessment")
-        anchor = evidence["correct"]
         parent = evidence["scores"]
-        if anchor and (not isinstance(parent, dict) or set(parent) != set(names)
-                or any(isinstance(parent[name], bool)
-                       or not isinstance(parent[name], (int, float))
-                       or not math.isfinite(float(parent[name])) for name in names)):
-            raise ValueError("mastered anchor lacks aligned frozen parent scores")
+        boundaries = _mastered_boundaries(row, parent)
         result = dict(row)
         result["mastered_anchor_retention"] = {
-            "is_anchor": anchor,
-            "scores": ([float(parent[name]) for name in names]
-                       if anchor else [0.] * len(names)),
+            "boundaries": boundaries,
+            "scores": [float(parent[name]) for name in names],
         }
         return result
 

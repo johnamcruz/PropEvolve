@@ -315,7 +315,131 @@ def test_mastered_anchor_retention_penalizes_drift_and_never_protects_mistakes()
     assert float(changed_mistake_only.item()) == pytest.approx(0., abs=1e-6)
 
 
-def test_production_action_batch_retains_parent_only_on_mastered_row():
+def test_boundary_retention_changes_only_the_failed_hierarchical_decision():
+    from propevolve.reasoning_policy.supervised_trainer import boundary_retention_loss
+
+    # Row 0 mastered ENTER but not direction. Row 1 mastered direction but not
+    # ENTER. Swapping the two side scores corrects row 0's direction without
+    # changing its ENTER preference; lowering WAIT fixes row 1 without changing
+    # its LONG preference.
+    parent = mx.array([[0., 1., 2.], [2., 1., 0.]])
+    corrected = mx.array([[0., 2., 1.], [0., 1., 0.]])
+    boundaries = mx.array([[True, False, False], [False, True, False]])
+    preserved = boundary_retention_loss(
+        corrected, parent, boundaries, temperature=1.)
+    entry_erased = boundary_retention_loss(
+        mx.array([[3., 2., 1.], [0., 1., 0.]]), parent, boundaries,
+        temperature=1.)
+    direction_erased = boundary_retention_loss(
+        mx.array([[0., 2., 1.], [0., 0., 1.]]), parent, boundaries,
+        temperature=1.)
+    mx.eval(preserved, entry_erased, direction_erased)
+
+    assert float(preserved.item()) == pytest.approx(0., abs=1e-6)
+    assert float(entry_erased.item()) > 0.1
+    assert float(direction_erased.item()) > 0.1
+
+
+def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery():
+    import mlx.optimizers as optim
+    from propevolve.reasoning_policy.supervised_trainer import _batch_outputs
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+    from test_reasoning_targeted_subset import settings
+
+    class BoundaryModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lookup = nn.Embedding(16, 16)
+
+        def __call__(self, inputs):
+            return self.lookup(inputs)
+
+    model = BoundaryModel()
+    weights = np.full((16, 16), -8., dtype=np.float32)
+    # Each independent context exercises one contract row. Flat action tokens
+    # are WAIT=2, LONG=3, SHORT=4; positioned tokens are HOLD=2, CLOSE=3.
+    cases = [
+        # ENTER correct/direction wrong; ENTER wrong/direction correct.
+        (1, "ENTER_LONG_1", [0., 1., 2.], [0., 2., 1.]),
+        (5, "ENTER_LONG_1", [2., 1., 0.], [0., 2., 1.]),
+        # Both correct; both wrong.
+        (7, "ENTER_LONG_1", [0., 2., 1.], [0., 2., 1.]),
+        (8, "ENTER_LONG_1", [3., 1., 2.], [0., 2., 1.]),
+        # WAIT has no direction task; positioned state has management only.
+        (9, "WAIT", [2., 1., 0.], [1., 0., -1.]),
+        (10, "CLOSE", [1., 0.], [0., 2.]),
+    ]
+    for context, _, scores, _ in cases:
+        action_tokens = [2, 3] if len(scores) == 2 else [2, 3, 4]
+        weights[context, action_tokens] = scores
+    model.lookup.weight = mx.array(weights)
+    rows, assessed = [], []
+    for index, (context, target, scores, values) in enumerate(cases):
+        names = (["HOLD", "CLOSE"] if len(scores) == 2 else
+                 ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"])
+        action_tokens = (2, 3) if len(scores) == 2 else (2, 3, 4)
+        alternatives = [([context, token, 6], 1) for token in action_tokens]
+        target_index = names.index(target)
+        probabilities = [.1] * len(names)
+        probabilities[target_index] = .9 if len(names) == 2 else .8
+        rows.append({
+            "tokens": alternatives[target_index][0], "offset": 1,
+            "alternatives": alternatives,
+            "action_targets": {"names": names, "probabilities": probabilities,
+                               "values": values},
+            "target_name": target, "causal_state": [],
+            "market_embeddings": [[0.]], "market_available": [True],
+        })
+        by_name = dict(zip(names, scores))
+        predicted = max(names, key=by_name.get)
+        assessed.append({
+            "index": index, "ticker": "NQ", "target": target,
+            "predicted": predicted, "correct": predicted == target,
+            "completed_at_ns": 100 + index,
+            "target_advantage": by_name[target] - max(
+                value for name, value in by_name.items() if name != target),
+            "scores": by_name,
+        })
+    sampler = TargetedSampler(
+        assessed, settings(rows_per_group=2), train_bounds=(100, 200),
+        expected_rows=len(cases))
+    selected = [sampler.training_row(i, row, retain_mastery=True)
+                for i, row in enumerate(rows)]
+    packed = tuple(mx.array(value) for value in pack_examples(selected, max_seq_length=8))
+    config = {
+        "input_mode": "tokens", "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 2., "margin": .25},
+        "mastered_anchor_retention": {"loss_weight": 4., "temperature": 1.},
+    }
+
+    def loss(m):
+        return batch_loss(m, *packed, config=config)[0]
+
+    optimizer = optim.Adam(learning_rate=3e-2)
+    value_and_grad = nn.value_and_grad(model, loss)
+    for _ in range(80):
+        _, gradients = value_and_grad(model)
+        optimizer.update(model, gradients)
+        mx.eval(model.parameters(), optimizer.state)
+    _, _, scores = _batch_outputs(model, *packed, config=config)
+    scores = np.asarray(scores)
+
+    # ENTER correct/direction wrong: retain entry and correct direction.
+    assert scores[0, 1] > scores[0, 2]
+    assert max(scores[0, 1:]) > scores[0, 0]
+    # ENTER wrong/direction correct: correct entry and retain direction.
+    assert max(scores[1, 1:]) > scores[1, 0]
+    assert scores[1, 1] > scores[1, 2]
+    # Both correct remain correct; both wrong are both corrected.
+    assert scores[2, 1] > scores[2, 0] and scores[2, 1] > scores[2, 2]
+    assert scores[3, 1] > scores[3, 0] and scores[3, 1] > scores[3, 2]
+    # WAIT trains no arbitrary direction; positioned state trains CLOSE only.
+    assert scores[4, 0] > max(scores[4, 1:])
+    assert scores[5, 1] > scores[5, 0]
+
+
+def test_production_action_batch_retains_only_mastered_boundaries():
     from propevolve.reasoning_policy.supervised_trainer import _batch_outputs, pack_examples
 
     model = tiny_backbone()
@@ -324,11 +448,13 @@ def test_production_action_batch_retains_parent_only_on_mastered_row():
         {**base, "market_embeddings": [[0., 1.], [1., 0.], [1., 1.]],
          "market_available": [True, True, True],
          "mastered_anchor_retention": {
-             "is_anchor": True, "scores": [8., -4., -5.]}},
+             "boundaries": {"entry": True, "direction": False, "management": False},
+             "scores": [0., 1., 2.]}},
         {**base, "market_embeddings": [[1., 0.], [0., 1.], [1., 1.]],
          "market_available": [True, True, True],
          "mastered_anchor_retention": {
-             "is_anchor": False, "scores": [-100., 100., 0.]}},
+             "boundaries": {"entry": False, "direction": True, "management": False},
+             "scores": [2., 1., 0.]}},
     ]
     config = {
         "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
@@ -339,10 +465,16 @@ def test_production_action_batch_retains_parent_only_on_mastered_row():
     packed = tuple(mx.array(value) for value in pack_examples(rows, max_seq_length=8))
     retained, _, _ = _batch_outputs(model, *packed, config=config)
 
-    changed_mistake = [rows[0], {**rows[1], "mastered_anchor_retention": {
-        "is_anchor": False, "scores": [100., -100., 50.]}}]
+    changed_unmastered = [
+        {**rows[0], "mastered_anchor_retention": {
+            "boundaries": {"entry": True, "direction": False, "management": False},
+            "scores": [0., 2., 1.]}},
+        {**rows[1], "mastered_anchor_retention": {
+            "boundaries": {"entry": False, "direction": True, "management": False},
+            "scores": [0., 1., 0.]}},
+    ]
     changed = tuple(mx.array(value) for value in pack_examples(
-        changed_mistake, max_seq_length=8))
+        changed_unmastered, max_seq_length=8))
     same_retained, _, _ = _batch_outputs(model, *changed, config=config)
     action_only, _, _ = _batch_outputs(model, *packed[:10], config={
         key: value for key, value in config.items() if key != "mastered_anchor_retention"})

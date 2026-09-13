@@ -328,3 +328,19 @@ the identical fixed rows and is accepted only when mistakes improve without
 forgetting any mastered action or decision boundary. Rejected candidates are
 discarded and the next round refreshes the remaining mistakes from the retained
 parent.
+
+Retention and correction are applied independently at each hierarchical
+decision boundary:
+
+1. If ENTER is correct and direction is wrong, retain `ENTER > WAIT` and
+   correct only `LONG` versus `SHORT`.
+2. If ENTER is wrong and direction is correct, correct `ENTER` versus `WAIT`
+   and retain `LONG` versus `SHORT`.
+3. If both are correct, retain both boundaries.
+4. If both are wrong, correct both boundaries.
+5. A WAIT target trains only `WAIT > ENTER`; direction is inapplicable.
+6. An open position trains only `HOLD` versus `CLOSE`.
+
+An exact tie is not mastered evidence. Boundary-specific retention never
+protects a parent mistake, and the same row may simultaneously correct one
+decision while retaining another.
