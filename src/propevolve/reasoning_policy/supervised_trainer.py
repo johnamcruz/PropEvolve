@@ -742,7 +742,8 @@ def anchor_retention_loss(scores, parent_scores, anchor_mask, *, temperature, va
     return temperature ** 2 * mx.sum(per_row * mask) / mx.maximum(mx.sum(mask), 1.)
 
 
-def boundary_retention_loss(scores, parent_scores, boundary_masks, *, temperature):
+def boundary_retention_loss(scores, parent_scores, boundary_masks, *, temperature,
+                            minimum_margin=0.):
     """Preserve only the hierarchical decisions mastered by the frozen parent."""
     import mlx.core as mx
     scores = scores.astype(mx.float32)
@@ -765,7 +766,24 @@ def boundary_retention_loss(scores, parent_scores, boundary_masks, *, temperatur
                   mx.maximum(parent_scores[:, 1], parent_scores[:, 2])], axis=-1))
     direction = divergence(scores[:, 1:3], parent_scores[:, 1:3])
     management = divergence(scores[:, :2], parent_scores[:, :2])
-    losses = mx.stack([entry, direction, management], axis=-1)
+    entry_gap = mx.maximum(scores[:, 1], scores[:, 2]) - scores[:, 0]
+    parent_entry_gap = mx.maximum(
+        parent_scores[:, 1], parent_scores[:, 2]) - parent_scores[:, 0]
+    direction_gap = scores[:, 1] - scores[:, 2]
+    parent_direction_gap = parent_scores[:, 1] - parent_scores[:, 2]
+    management_gap = scores[:, 0] - scores[:, 1]
+    parent_management_gap = parent_scores[:, 0] - parent_scores[:, 1]
+
+    def margin_loss(student_gap, parent_gap):
+        sign = mx.where(parent_gap > 0, 1., -1.)
+        return mx.maximum(minimum_margin - sign * student_gap, 0.)
+
+    margins = mx.stack([
+        margin_loss(entry_gap, parent_entry_gap),
+        margin_loss(direction_gap, parent_direction_gap),
+        margin_loss(management_gap, parent_management_gap),
+    ], axis=-1)
+    losses = mx.stack([entry, direction, management], axis=-1) + margins
     mask = boundary_masks.astype(mx.float32)
     return temperature ** 2 * mx.sum(losses * mask) / mx.maximum(mx.sum(mask), 1.)
 
@@ -857,7 +875,8 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
         parent_scores, boundary_masks = extras[-2:]
         loss = loss + retention["loss_weight"] * boundary_retention_loss(
             scores, parent_scores, boundary_masks,
-            temperature=retention["temperature"])
+            temperature=retention["temperature"],
+            minimum_margin=config["action_supervision"]["margin"])
     return loss, mx.array(tokens.shape[0]), scores
 
 
@@ -1061,6 +1080,9 @@ def train_supervised(config, view):
             "mistake_draws": sum(row["mistake_draws"]
                 for row in targeted_receipt["rounds"]),
             "anchor_draws": sum(row["anchor_draws"]
+                for row in targeted_receipt["rounds"]),
+            "rejection_priority_draws": sum(
+                row["rejection_priority_draws"]
                 for row in targeted_receipt["rounds"]),
         }),
         "valid_rows": len(datasets["valid"]),

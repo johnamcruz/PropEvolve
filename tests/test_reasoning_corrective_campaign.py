@@ -270,8 +270,10 @@ def campaign_config(tmp_path, *, rounds=2):
         "rounds": rounds, "initial_assessments": {"train": None, "valid": None},
         "preserved_assessments": [],
         "required_teacher_groups": list(TEACHERS),
-        "subset": {"rows_per_group": 2, "mistake_fraction": .5, "seed": 17},
+        "subset": {"rows_per_group": 2, "mistake_fraction": .5, "seed": 17,
+                   "balance_mode": "hierarchical_boundaries"},
         "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+        "rejection_adaptation": {"enabled": True},
         "acceptance": gate(minimum_retained_mastery_rate=.9),
         "timeouts": {"assessment_seconds": 60, "training_seconds": 60},
     }))
@@ -426,3 +428,8 @@ def test_reasoning_campaign_rejects_forgetting_keeps_parent_and_refreshes_next_r
     children = [json.loads((tmp_path / f"run/round-0{i}/candidate-policy.json").read_text())
                 for i in (1, 2)]
     assert [row["targeted_sampling"]["seed"] for row in children] == [17, 18]
+    assert "priority_assessment_path" not in children[0]["targeted_sampling"]
+    assert children[1]["targeted_sampling"]["priority_assessment_path"].endswith(
+        "round-01/candidate-train-assessment")
+    assert len(children[1]["targeted_sampling"]["priority_scores_sha256"]) == 64
+    assert len(children[1]["targeted_sampling"]["priority_summary_sha256"]) == 64

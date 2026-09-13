@@ -49,7 +49,8 @@ def score_labeled_examples(policy, records):
                     or not set(supplied).issubset(choices) or answer not in supplied):
                 raise ValueError("audit target conflicts with legal actions")
             choices = tuple(supplied)
-        context = {key: record[key] for key in ("market_embeddings", "market_available") if key in record}
+        context = {key: record[key] for key in (
+            "market_embeddings", "market_available", "causal_state") if key in record}
         scores = policy.completion_scores(record["messages"][:-1], choices,
             **({"market_context": context} if context else {}))
         if set(scores) != set(choices) or not all(math.isfinite(x) for x in scores.values()):

@@ -10,9 +10,14 @@ import numpy as np
 from .integrity import file_digest
 
 
-_SETTING_KEYS = {
+_BASE_SETTING_KEYS = {
     "assessment_path", "scores_sha256", "summary_sha256",
-    "rows_per_group", "mistake_fraction", "seed",
+    "rows_per_group", "mistake_fraction", "seed", "balance_mode",
+}
+
+_PRIORITY_SETTING_KEYS = {
+    "priority_assessment_path", "priority_scores_sha256",
+    "priority_summary_sha256",
 }
 
 _RETENTION_BOUNDARIES = ("entry", "direction", "management")
@@ -79,7 +84,10 @@ def validate_mastered_anchor_retention(settings):
 def validate_targeted_sampling(settings):
     if settings is None:
         return
-    if (not isinstance(settings, dict) or set(settings) != _SETTING_KEYS
+    keys = set(settings) if isinstance(settings, dict) else set()
+    if (not isinstance(settings, dict)
+            or keys not in (_BASE_SETTING_KEYS,
+                            _BASE_SETTING_KEYS | _PRIORITY_SETTING_KEYS)
             or not isinstance(settings["assessment_path"], str)
             or not settings["assessment_path"].strip()
             or any(not isinstance(settings[name], str) or len(settings[name]) != 64
@@ -92,8 +100,44 @@ def validate_targeted_sampling(settings):
             or isinstance(settings["mistake_fraction"], bool)
             or not isinstance(settings["mistake_fraction"], (int, float))
             or not math.isfinite(float(settings["mistake_fraction"]))
-            or not 0 < settings["mistake_fraction"] < 1):
+            or not 0 < settings["mistake_fraction"] < 1
+            or settings["balance_mode"] != "hierarchical_boundaries"):
         raise ValueError("invalid targeted sampling configuration")
+    if _PRIORITY_SETTING_KEYS.issubset(keys) and (
+            not isinstance(settings["priority_assessment_path"], str)
+            or not settings["priority_assessment_path"].strip()
+            or any(not isinstance(settings[name], str) or len(settings[name]) != 64
+                   or any(character not in "0123456789abcdef"
+                          for character in settings[name])
+                   for name in ("priority_scores_sha256",
+                                "priority_summary_sha256"))):
+        raise ValueError("invalid targeted rejection evidence")
+
+
+def _assessment_boundaries(row):
+    """Return applicable mastered boundaries from frozen action scores."""
+    target, scores = row.get("target"), row.get("scores")
+    if target in {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}:
+        names = {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
+        if not isinstance(scores, dict) or set(scores) != names:
+            raise ValueError("invalid rejection-priority action scores")
+        wait, long, short = map(float, (scores["WAIT"], scores["ENTER_LONG_1"],
+                                        scores["ENTER_SHORT_1"]))
+        if not all(math.isfinite(value) for value in (wait, long, short)):
+            raise ValueError("invalid rejection-priority action scores")
+        if target == "WAIT":
+            return {"entry": wait > max(long, short)}
+        side = long if target == "ENTER_LONG_1" else short
+        other = short if target == "ENTER_LONG_1" else long
+        return {"entry": max(long, short) > wait, "direction": side > other}
+    if target in {"HOLD", "CLOSE"}:
+        if not isinstance(scores, dict) or set(scores) != {"HOLD", "CLOSE"}:
+            raise ValueError("invalid rejection-priority action scores")
+        hold, close = map(float, (scores["HOLD"], scores["CLOSE"]))
+        if not all(math.isfinite(value) for value in (hold, close)):
+            raise ValueError("invalid rejection-priority action scores")
+        return {"management": (hold > close if target == "HOLD" else close > hold)}
+    raise ValueError("invalid rejection-priority action target")
 
 
 def _validated_groups(scored, settings, *, train_bounds, expected_rows=None):
@@ -136,7 +180,8 @@ def _validated_groups(scored, settings, *, train_bounds, expected_rows=None):
 class TargetedSampler:
     """Rotate mistakes and retained examples, then balance every action."""
 
-    def __init__(self, scored, settings, *, train_bounds, expected_rows=None):
+    def __init__(self, scored, settings, *, train_bounds, expected_rows=None,
+                 priority_scored=None):
         groups = _validated_groups(
             scored, settings, train_bounds=train_bounds, expected_rows=expected_rows)
         self.evidence = {int(row["index"]): {
@@ -149,6 +194,25 @@ class TargetedSampler:
             "target_advantage": float(row["target_advantage"]),
             "scores": row.get("scores"),
         } for row in scored}
+        self.priority = set()
+        if priority_scored is not None:
+            _validated_groups(priority_scored, settings, train_bounds=train_bounds,
+                              expected_rows=expected_rows)
+            candidate = {int(row["index"]): row for row in priority_scored}
+            parent = {int(row["index"]): row for row in scored}
+            if set(candidate) != set(parent):
+                raise ValueError("rejection-priority assessment rows differ")
+            for index in parent:
+                identity = ("source_id", "completed_at_ns", "ticker", "target")
+                if any(parent[index].get(name) != candidate[index].get(name)
+                       for name in identity):
+                    raise ValueError("rejection-priority assessment rows differ")
+                before = _assessment_boundaries(parent[index])
+                after = _assessment_boundaries(candidate[index])
+                if set(before) != set(after):
+                    raise ValueError("rejection-priority boundaries differ")
+                if any(not after[name] for name in before):
+                    self.priority.add(index)
         self.seed = settings["seed"]
         self.quota = settings["rows_per_group"]
         self.mistake_fraction = float(settings["mistake_fraction"])
@@ -166,7 +230,7 @@ class TargetedSampler:
             raise ValueError("targeted sampling produced no action classes")
         self.action_names = tuple(sorted(counts))
         self.rows_per_action = max(counts.values())
-        self.round_rows = self.rows_per_action * len(self.action_names)
+        self.round_rows = sum(self._round_quotas(counts).values())
 
     @classmethod
     def from_assessment(cls, settings, *, view_manifest_path, train_bounds,
@@ -185,8 +249,26 @@ class TargetedSampler:
             raise ValueError("targeted assessment does not match the training view")
         with scores_path.open() as stream:
             scored = [json.loads(line) for line in stream if line.strip()]
+        priority_scored = None
+        if _PRIORITY_SETTING_KEYS.issubset(settings):
+            priority_root = Path(settings["priority_assessment_path"])
+            priority_summary = priority_root / "summary.json"
+            priority_scores = priority_root / "scores.jsonl"
+            if (file_digest(priority_summary) != settings["priority_summary_sha256"]
+                    or file_digest(priority_scores) != settings["priority_scores_sha256"]):
+                raise ValueError("rejection-priority assessment changed")
+            priority_metadata = json.loads(priority_summary.read_text())
+            if (priority_metadata.get("role") != "train"
+                    or priority_metadata.get("weights_updated") is not False
+                    or priority_metadata.get("rows") != expected_rows
+                    or priority_metadata.get("view_manifest_sha256")
+                    != file_digest(view_manifest_path)):
+                raise ValueError(
+                    "rejection-priority assessment does not match training view")
+            with priority_scores.open() as stream:
+                priority_scored = [json.loads(line) for line in stream if line.strip()]
         return cls(scored, settings, train_bounds=train_bounds,
-                   expected_rows=expected_rows)
+                   expected_rows=expected_rows, priority_scored=priority_scored)
 
     @staticmethod
     def _rotate(pool, count, offset):
@@ -223,14 +305,45 @@ class TargetedSampler:
         if set(by_action) != set(self.action_names):
             raise ValueError("targeted sampling lost an action class")
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, round_index]))
-        queues = {name: list(rng.permutation(by_action[name]))
-                  for name in self.action_names}
+        quotas = self._round_quotas({name: len(rows) for name, rows in by_action.items()})
         order = []
-        for position in range(self.rows_per_action):
-            for name in self.action_names:
-                queue = queues[name]
-                order.append(int(queue[position % len(queue)]))
-        return np.asarray(order, dtype=np.int64)
+        for name in self.action_names:
+            rows = by_action[name]
+            mistakes = [index for index in rows if not self.evidence[index]["correct"]]
+            anchors = [index for index in rows if self.evidence[index]["correct"]]
+            count = quotas[name]
+            mistake_count = round(count * self.mistake_fraction)
+            if mistakes and anchors:
+                mistake_count = min(count - 1, max(1, mistake_count))
+            elif not mistakes:
+                mistake_count = 0
+            else:
+                mistake_count = count
+            order += self._priority_cycle(mistakes, mistake_count, rng)
+            order += self._priority_cycle(anchors, count - mistake_count, rng)
+        return rng.permutation(np.asarray(order, dtype=np.int64))
+
+    @staticmethod
+    def _round_quotas(counts):
+        """Balance outcomes inside each hierarchical binary decision."""
+        actions = {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"}
+        if set(counts) == actions:
+            side = max(counts["ENTER_LONG_1"], counts["ENTER_SHORT_1"])
+            management = max(counts["HOLD"], counts["CLOSE"])
+            return {"WAIT": side * 2, "ENTER_LONG_1": side,
+                    "ENTER_SHORT_1": side, "HOLD": management, "CLOSE": management}
+        width = max(counts.values())
+        return {name: width for name in counts}
+
+    def _priority_cycle(self, pool, count, rng):
+        if not pool or count < 1:
+            return []
+        priority = list(rng.permutation(
+            [index for index in pool if index in self.priority]))
+        ordinary = list(rng.permutation(
+            [index for index in pool if index not in self.priority]))
+        ordered = priority + ordinary
+        return [int(ordered[index % len(ordered)]) for index in range(count)]
 
     def training_row(self, index, row, *, retain_mastery=False):
         """Attach frozen scores and independently mastered decision boundaries."""
@@ -278,7 +391,8 @@ class TargetedSampler:
                 f"correct: retain {target} above alternatives"
             )
             draws.append({**evidence, "index": index, "year": years[index],
-                          "kind": kind, "feedback": feedback})
+                          "kind": kind, "feedback": feedback,
+                          "rejection_priority": index in self.priority})
         mistake_draws = sum(row["mistake_draws"] for row in per_action.values())
         anchor_draws = sum(row["anchor_draws"] for row in per_action.values())
         return {
@@ -287,6 +401,8 @@ class TargetedSampler:
             "unique_rows": len(set(order)),
             "mistake_draws": mistake_draws,
             "anchor_draws": anchor_draws,
+            "rejection_priority_draws": sum(
+                row["rejection_priority"] for row in draws),
             "per_action": dict(sorted(per_action.items())),
             "per_ticker": dict(sorted(per_ticker.items())),
             "draws": draws,

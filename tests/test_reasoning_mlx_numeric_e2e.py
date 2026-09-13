@@ -340,6 +340,23 @@ def test_boundary_retention_changes_only_the_failed_hierarchical_decision():
     assert float(direction_erased.item()) > 0.1
 
 
+def test_boundary_retention_enforces_a_configured_positive_margin():
+    from propevolve.reasoning_policy.supervised_trainer import boundary_retention_loss
+
+    parent = mx.array([[0., .2, -.1]])
+    boundaries = mx.array([[True, True, False]])
+    weak = boundary_retention_loss(
+        mx.array([[0., .01, 0.]]), parent, boundaries,
+        temperature=1., minimum_margin=.25)
+    safe = boundary_retention_loss(
+        mx.array([[0., .4, 0.]]), parent, boundaries,
+        temperature=1., minimum_margin=.25)
+    mx.eval(weak, safe)
+
+    assert float(weak.item()) > float(safe.item())
+    assert float(weak.item()) > .1
+
+
 def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery():
     import mlx.optimizers as optim
     from propevolve.reasoning_policy.supervised_trainer import _batch_outputs

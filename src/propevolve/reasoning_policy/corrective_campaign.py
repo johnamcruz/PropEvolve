@@ -253,7 +253,7 @@ _CAMPAIGN_KEYS = {
     "initial_policy_config", "sft_template_config", "prepared_view",
     "rounds", "initial_assessments", "preserved_assessments",
     "required_teacher_groups", "subset", "mastered_anchor_retention",
-    "acceptance", "timeouts",
+    "rejection_adaptation", "acceptance", "timeouts",
 }
 
 
@@ -276,7 +276,11 @@ def _read_campaign(path):
                 "expansion", "trend", "regime", "volume"}
             or len(plan["required_teacher_groups"]) != 4
             or not isinstance(plan["subset"], dict)
-            or set(plan["subset"]) != {"rows_per_group", "mistake_fraction", "seed"}
+            or set(plan["subset"]) != {
+                "rows_per_group", "mistake_fraction", "seed", "balance_mode"}
+            or not isinstance(plan["rejection_adaptation"], dict)
+            or set(plan["rejection_adaptation"]) != {"enabled"}
+            or type(plan["rejection_adaptation"]["enabled"]) is not bool
             or not isinstance(plan["timeouts"], dict)
             or set(plan["timeouts"]) != {"assessment_seconds", "training_seconds"}
             or any(isinstance(plan["timeouts"][name], bool)
@@ -359,7 +363,7 @@ def _campaign_identity(plan, root):
 
 
 def _write_child_config(plan, root, round_root, parent_config, train_assessment,
-                        valid_assessment, *, round_index):
+                        valid_assessment, *, round_index, priority_assessment=None):
     from .mlx_sft import read_sft_config
     template = read_sft_config(
         _resolve(root, plan["sft_template_config"]), root=root)
@@ -410,6 +414,12 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
             "view_manifest_sha256": file_digest(view_manifest_path),
         },
     })
+    if priority_assessment is not None and plan["rejection_adaptation"]["enabled"]:
+        child["targeted_sampling"].update({
+            "priority_assessment_path": priority_assessment["path"],
+            "priority_scores_sha256": priority_assessment["scores_sha256"],
+            "priority_summary_sha256": priority_assessment["summary_sha256"],
+        })
     path = round_root / "candidate-policy.json"
     atomic_json(path, child)
     return path
@@ -568,11 +578,20 @@ def run_campaign(path, *, phases=None):
                     round_root / "parent-valid-assessment",
                     round_root / "parent-valid-assessment.log", "parent_valid",
                     plan["required_teacher_groups"])
+                priority_assessment = None
+                if index > 0 and plan["rejection_adaptation"]["enabled"]:
+                    prior = state["rounds"][index - 1]
+                    if prior.get("decision") == "REJECTED":
+                        priority_assessment = prior.get("candidate_train")
+                        if priority_assessment is None:
+                            raise ValueError(
+                                "rejected round lacks candidate training assessment")
                 if round_state["candidate_policy_config"] is None:
                     child_config = _write_child_config(
                         plan, root, round_root, parent_policy, train_assessment,
                         valid_assessment,
-                        round_index=index)
+                        round_index=index,
+                        priority_assessment=priority_assessment)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)
                 else:
@@ -589,7 +608,8 @@ def run_campaign(path, *, phases=None):
                     child_config = _write_child_config(
                         plan, root, round_root, parent_policy, train_assessment,
                         valid_assessment,
-                        round_index=index)
+                        round_index=index,
+                        priority_assessment=priority_assessment)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)
                     if candidate_adapter.exists():

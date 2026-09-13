@@ -6,7 +6,8 @@ import pytest
 def settings(**updates):
     value = dict(assessment_path="unused", scores_sha256="0" * 64,
                  summary_sha256="1" * 64, rows_per_group=2,
-                 mistake_fraction=.5, seed=17)
+                 mistake_fraction=.5, seed=17,
+                 balance_mode="hierarchical_boundaries")
     value.update(updates)
     return value
 
@@ -96,6 +97,70 @@ def test_targeted_rounds_refresh_examples_and_reject_incomplete_assessment():
     with pytest.raises(ValueError, match="exactly"):
         TargetedSampler(rows[:-1], settings(), train_bounds=(100, 200),
                         expected_rows=12)
+
+
+def test_targeted_round_balances_the_three_hierarchical_decisions():
+    """Flat actions are not three independent classes: WAIT balances ENTER."""
+    from collections import Counter
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+
+    actions = ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"]
+    rows = []
+    for action in actions:
+        for offset, advantage in enumerate((-1., 1.)):
+            rows.append(dict(index=len(rows), ticker="NQ", target=action,
+                completed_at_ns=100 + len(rows), target_advantage=advantage))
+    sampler = TargetedSampler(rows, settings(), train_bounds=(100, 200),
+                              expected_rows=len(rows))
+
+    targets = Counter(sampler.evidence[index]["target"]
+                      for index in map(int, sampler.order(0)))
+
+    assert targets["WAIT"] == targets["ENTER_LONG_1"] + targets["ENTER_SHORT_1"]
+    assert targets["ENTER_LONG_1"] == targets["ENTER_SHORT_1"]
+    assert targets["HOLD"] == targets["CLOSE"]
+
+
+def test_rejected_candidate_prioritizes_unresolved_and_regressed_boundaries():
+    """The next round learns from the rejected candidate, not just a new seed."""
+    from propevolve.reasoning_policy.targeted_subset import TargetedSampler
+
+    flat = {
+        "WAIT": {"WAIT": 2., "ENTER_LONG_1": 0., "ENTER_SHORT_1": -1.},
+        "ENTER_LONG_1": {"WAIT": 0., "ENTER_LONG_1": 2., "ENTER_SHORT_1": -1.},
+        "ENTER_SHORT_1": {"WAIT": 0., "ENTER_LONG_1": -1., "ENTER_SHORT_1": 2.},
+    }
+    management = {
+        "HOLD": {"HOLD": 2., "CLOSE": 0.},
+        "CLOSE": {"HOLD": 0., "CLOSE": 2.},
+    }
+    actions = ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"]
+    parent, candidate = [], []
+    for index, action in enumerate(actions):
+        scores = flat.get(action, management.get(action))
+        row = dict(index=index, source_id=f"row-{index}", ticker="NQ",
+                   target=action, completed_at_ns=100 + index,
+                   target_advantage=1., correct=True, scores=scores)
+        parent.append(row)
+        candidate.append(dict(row))
+    # Regress a mastered WAIT boundary and leave a Long direction unresolved.
+    candidate[0]["scores"] = {
+        "WAIT": 0., "ENTER_LONG_1": 2., "ENTER_SHORT_1": -1.}
+    parent[1].update(target_advantage=-1., correct=False,
+                     scores={"WAIT": 2., "ENTER_LONG_1": 0.,
+                             "ENTER_SHORT_1": -1.})
+    candidate[1].update(target_advantage=-1., correct=False,
+                        scores={"WAIT": 2., "ENTER_LONG_1": 0.,
+                                "ENTER_SHORT_1": 1.})
+
+    sampler = TargetedSampler(parent, settings(), train_bounds=(100, 200),
+                              expected_rows=5, priority_scored=candidate)
+    receipt = sampler.selection_receipt(0)
+
+    assert sampler.priority == {0, 1}
+    assert receipt["rejection_priority_draws"] >= 2
+    assert {row["index"] for row in receipt["draws"]
+            if row["rejection_priority"]} == {0, 1}
 
 
 def test_sft_json_enables_only_authenticated_targeted_action_sampling(tmp_path):

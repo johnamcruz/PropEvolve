@@ -65,6 +65,13 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
             pad = storage["context_steps"] - count
             record["market_embeddings"] = np.pad(values, ((pad, 0), (0, 0))).tolist()
             record["market_available"] = ([False] * pad) + ([True] * count)
+            state_fields = config["projector"].get("state_fields", [])
+            if state_fields:
+                prompt = json.loads(record["messages"][-2]["content"])
+                fields = prompt["fields"]
+                latest = prompt["history_oldest_first"][-1]
+                record["causal_state"] = [
+                    float(latest[fields.index(field)]) for field in state_fields]
             compact_records.append(record)
     data = tmp_path / "data"
     write_supervised_dataset(
@@ -101,6 +108,7 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
         "adapter_path": str(tmp_path / "adapter"),
         "iters": 50,
         "val_batches": 5,
+        "validation_batch_size": 1,
         "steps_per_eval": 50,
         "save_every": 50,
         "grad_accumulation_steps": 5,
@@ -129,7 +137,8 @@ def test_real_qlora_learns_all_action_classes_and_reload_preserves_scores(tmp_pa
             # Real model tokenizer: training and inference must score exactly
             # the same answer tokens, with exactly the same causal prefix.
             market_context = {key: record[key]
-                              for key in ("market_embeddings", "market_available")}
+                              for key in ("market_embeddings", "market_available",
+                                          "causal_state") if key in record}
             inference = policy.tokenize_completions(
                 messages[:-1], [messages[-1]["content"]],
                 market_context=market_context)

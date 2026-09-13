@@ -32,8 +32,14 @@
       "summary_sha256": "3c3f2109ca2f48a74d8ac036f5dc14310e3d82f13acc115fe9d469233392e0de"
     }
   },
-  "subset": {"rows_per_group": 84, "mistake_fraction": 0.75, "seed": 17},
+  "subset": {
+    "rows_per_group": 84,
+    "mistake_fraction": 0.75,
+    "seed": 17,
+    "balance_mode": "hierarchical_boundaries"
+  },
   "mastered_anchor_retention": {"loss_weight": 1.0, "temperature": 1.0},
+  "rejection_adaptation": {"enabled": true},
   "acceptance": {
     "primary_metric": "worst_task_advantage",
     "minimum_primary_improvement": 0.01,

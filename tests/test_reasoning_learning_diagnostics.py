@@ -24,6 +24,30 @@ def test_frozen_audit_respects_actual_legal_actions_instead_of_inventing_alterna
     assert report["target_advantage"] is None
 
 
+def test_frozen_audit_forwards_the_complete_causal_embedding_context():
+    class CapturingPolicy:
+        def __init__(self):
+            self.context = None
+
+        def completion_scores(self, messages, choices, *, market_context):
+            self.context = market_context
+            return {choice: float(choice == "WAIT") for choice in choices}
+
+    policy = CapturingPolicy()
+    record = {"source_id": "causal", "completed_at_ns": 1,
+        "market_embeddings": [[1., 2.]], "market_available": [True],
+        "causal_state": [0.25, -0.5],
+        "messages": [{"role": "user", "content": json.dumps({"legal_actions":
+            ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]})},
+            {"role": "assistant", "content": "WAIT"}]}
+
+    score_labeled_examples(policy, [record])
+
+    assert policy.context == {
+        "market_embeddings": [[1., 2.]], "market_available": [True],
+        "causal_state": [0.25, -0.5]}
+
+
 def test_trade_mastery_report_is_separate_from_challenge_economics():
     scored = [
         {"target": name, "correct": correct, "target_advantage": advantage}
