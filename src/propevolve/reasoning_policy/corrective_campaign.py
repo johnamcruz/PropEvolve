@@ -359,7 +359,7 @@ def _campaign_identity(plan, root):
 
 
 def _write_child_config(plan, root, round_root, parent_config, train_assessment,
-                        *, round_index):
+                        valid_assessment, *, round_index):
     from .mlx_sft import read_sft_config
     template = read_sft_config(
         _resolve(root, plan["sft_template_config"]), root=root)
@@ -403,6 +403,12 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
             "summary_sha256": train_assessment["summary_sha256"],
         },
         "mastered_anchor_retention": plan["mastered_anchor_retention"],
+        "initial_validation_receipt": {
+            **valid_assessment,
+            "policy_config_path": str(parent_config.resolve()),
+            "policy_config_sha256": file_digest(parent_config),
+            "view_manifest_sha256": file_digest(view_manifest_path),
+        },
     })
     path = round_root / "candidate-policy.json"
     atomic_json(path, child)
@@ -565,6 +571,7 @@ def run_campaign(path, *, phases=None):
                 if round_state["candidate_policy_config"] is None:
                     child_config = _write_child_config(
                         plan, root, round_root, parent_policy, train_assessment,
+                        valid_assessment,
                         round_index=index)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)
@@ -581,6 +588,7 @@ def run_campaign(path, *, phases=None):
                     # remain immutable and are verified above.
                     child_config = _write_child_config(
                         plan, root, round_root, parent_policy, train_assessment,
+                        valid_assessment,
                         round_index=index)
                     round_state["candidate_policy_config"] = str(child_config.resolve())
                     atomic_json(state_path, state)

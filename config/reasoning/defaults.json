@@ -12,6 +12,7 @@
   "market_distillation": null,
   "error_selected_distillation": null,
   "mastered_anchor_retention": null,
+  "initial_validation_receipt": null,
   "coverage_sampling": null,
   "prepared_sampling": null,
   "targeted_sampling": null,

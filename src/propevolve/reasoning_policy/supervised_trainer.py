@@ -319,6 +319,18 @@ class PostUpdateValidation:
         if stopping is not None:
             raise stopping
 
+    def reuse(self, iteration, result):
+        """Seed validation from an authenticated identical-policy receipt."""
+        epoch = iteration / self.train_batches
+        report = {"iteration": iteration, "epoch": epoch, "val_time": 0.0,
+                  "receipt_reused": True, **result}
+        decision = self.guard.on_val_loss_report(report)
+        report.update(decision)
+        self.progress(
+            f"Epoch {epoch:.3f} (iteration {iteration}/{self.total_iterations}): "
+            f"reused authenticated validation receipt, Best {report['best_metric']}")
+        self.record_validation(dict(report))
+
     def on_train_loss_report(self, train_info):
         iteration = train_info.get("iteration")
         if type(iteration) is not int or iteration < 1:
@@ -862,8 +874,9 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
     import mlx.core as mx
     # Frozen validation rows are never training anchors. Retention is evaluated
     # by the campaign's same-row parent/candidate gate, not added to val loss.
-    evaluation_config = ({**config, "mastered_anchor_retention": None}
-                         if config.get("mastered_anchor_retention") is not None else config)
+    evaluation_config = {**config, "mastered_anchor_retention": None,
+                         "error_selected_distillation": None,
+                         "market_distillation": None}
     order = balanced_validation_order(dataset, rng=np.random.default_rng(config["seed"]))
     batch_size = config["validation_batch_size"]
     rows_seen, score_rows, weighted_loss = [], [], 0.0
@@ -874,7 +887,10 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
         rows = [dataset[int(index)] for index in indices]
         tensors = tuple(mx.array(value) for value in pack_examples(
             rows, max_seq_length=config["max_seq_length"]))
-        loss, _, scores = _batch_outputs(model, *tensors, config=evaluation_config)
+        # Frozen action validation is teacher-free. The prepared rows may carry
+        # training-only distillation/retention tensors, but they must neither be
+        # computed nor influence checkpoint selection.
+        loss, _, scores = _batch_outputs(model, *tensors[:10], config=evaluation_config)
         mx.eval(loss, scores)
         weighted_loss += float(loss.item()) * len(rows)
         rows_seen.extend(rows)
@@ -893,6 +909,48 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
               else action_boundary_metrics)
     metrics = metric(rows_seen, score_rows, margin=config["action_supervision"]["margin"])
     return {"val_loss": weighted_loss / len(rows_seen), **metrics}
+
+
+def authenticated_initial_validation(config, view, *, valid_rows):
+    """Load a frozen parent receipt only when every relevant identity matches."""
+    descriptor = config.get("initial_validation_receipt")
+    if descriptor is None:
+        return None
+    from .integrity import file_digest
+    from .mlx_sft import read_sft_config
+    root = Path(descriptor["path"])
+    summary_path, scores_path = root / "summary.json", root / "scores.jsonl"
+    policy_path = Path(descriptor["policy_config_path"])
+    view_manifest = Path(view) / "view_manifest.json"
+    if (file_digest(summary_path) != descriptor["summary_sha256"]
+            or file_digest(scores_path) != descriptor["scores_sha256"]
+            or file_digest(policy_path) != descriptor["policy_config_sha256"]
+            or file_digest(view_manifest) != descriptor["view_manifest_sha256"]):
+        raise ValueError("initial validation receipt identity changed")
+    summary = json.loads(summary_path.read_text())
+    score_rows = sum(1 for line in scores_path.open() if line.strip())
+    if (summary.get("role") != "valid"
+            or summary.get("weights_updated") is not False
+            or summary.get("rows") != valid_rows
+            or score_rows != valid_rows
+            or summary.get("config_sha256") != descriptor["policy_config_sha256"]
+            or summary.get("view_manifest_sha256") != descriptor["view_manifest_sha256"]):
+        raise ValueError("initial validation receipt does not match the frozen parent")
+    parent = read_sft_config(policy_path, root=config.get("workspace_root"))
+    expected_weights = Path(parent["adapter_path"]) / "adapters.safetensors"
+    if expected_weights.resolve() != Path(config["resume_adapter_file"]).resolve():
+        raise ValueError("initial validation receipt parent differs from warm start")
+    metrics = summary.get("metrics")
+    monitor = config["early_stopping"]["monitor"]
+    if (not isinstance(metrics, dict)
+            or isinstance(metrics.get("val_loss"), bool)
+            or not isinstance(metrics.get("val_loss"), (int, float))
+            or not math.isfinite(float(metrics["val_loss"]))
+            or isinstance(metrics.get(monitor), bool)
+            or not isinstance(metrics.get(monitor), (int, float))
+            or not math.isfinite(float(metrics[monitor]))):
+        raise ValueError("initial validation receipt lacks checkpoint metrics")
+    return dict(metrics)
 
 
 def train_supervised(config, view):
@@ -937,6 +995,8 @@ def train_supervised(config, view):
     optimizer = build_optimizer(config)
     from .mlx_sft import PreparedDataset
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
+    initial_validation = authenticated_initial_validation(
+        config, view, valid_rows=len(datasets["valid"]))
     coverage_sampler = None
     targeted_sampler = None
     round_rows = len(datasets["train"])
@@ -1113,7 +1173,10 @@ def train_supervised(config, view):
     try:
         try:
             if not resume_iteration:
-                validation.evaluate(0)
+                if initial_validation is None:
+                    validation.evaluate(0)
+                else:
+                    validation.reuse(0, initial_validation)
             train(model, optimizer, datasets["train"], None, args=args,
                 loss=partial(batch_loss, config=config),
                 iterate_batches=iterator, training_callback=ResumeCallback())

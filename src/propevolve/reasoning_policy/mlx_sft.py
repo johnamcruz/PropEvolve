@@ -106,6 +106,24 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         if payload["targeted_sampling"] is None or not supervision["enabled"]:
             raise ValueError(
                 "mastered anchor retention requires targeted action supervision")
+    initial_receipt = payload["initial_validation_receipt"]
+    receipt_keys = {"path", "scores_sha256", "summary_sha256",
+                    "policy_config_path", "policy_config_sha256",
+                    "view_manifest_sha256"}
+    if initial_receipt is not None and (
+            not isinstance(initial_receipt, dict)
+            or set(initial_receipt) != receipt_keys
+            or any(not isinstance(initial_receipt[name], str)
+                   or not initial_receipt[name].strip()
+                   for name in receipt_keys)
+            or any(len(initial_receipt[name]) != 64
+                   or any(character not in "0123456789abcdef"
+                          for character in initial_receipt[name])
+                   for name in ("scores_sha256", "summary_sha256",
+                                "policy_config_sha256", "view_manifest_sha256"))):
+        raise ValueError("invalid initial validation receipt")
+    if initial_receipt is not None and payload["resume_adapter_file"] is None:
+        raise ValueError("initial validation receipt requires a frozen parent adapter")
     chunk_size = payload["market_loss_chunk_size"]
     if chunk_size is not None and (
             type(chunk_size) is not int or chunk_size < 1

@@ -147,6 +147,32 @@ def test_post_update_validation_exposes_pruner_metrics_at_same_boundary():
     assert all(row["worst_action_advantage"] == 0.3 for row in recorded)
 
 
+def test_authenticated_initial_validation_receipt_seeds_guard_without_recomputation():
+    evaluated = []
+    recorded = []
+    snapshots = []
+    guard = ValidationLossGuard(
+        {"enabled": True, "patience_evaluations": 3, "min_delta": 0.0,
+         "restore_best": True, "monitor": "worst_task_advantage", "mode": "max"},
+        on_improvement=lambda report: snapshots.append(report["iteration"]),
+    )
+    callback = PostUpdateValidation(
+        guard, every=2, total_iterations=4,
+        evaluate_loss=lambda: evaluated.append(True), progress=lambda message: None,
+        record_validation=recorded.append,
+    )
+    receipt = {"val_loss": 2.5, "worst_task_advantage": -1.1,
+               "task_macro_accuracy": .52, "per_task": {}}
+
+    callback.reuse(0, receipt)
+
+    assert evaluated == []
+    assert snapshots == [0]
+    assert recorded[0]["receipt_reused"] is True
+    assert guard.best_iteration == 0
+    assert guard.best_metric == -1.1
+
+
 def test_epoch_log_records_learning_and_overfit_guard_state(tmp_path):
     log = TrainingEventLog(
         tmp_path / "training.log", events_path=tmp_path / "training.events.jsonl",

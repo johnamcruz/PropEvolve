@@ -327,6 +327,49 @@ def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path
         "parent-train-assessment")
     assert first_child["mastered_anchor_retention"] == {
         "loss_weight": 1., "temperature": 1.}
+    assert first_child["initial_validation_receipt"]["path"].endswith(
+        "parent-valid-assessment")
+
+
+def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_identity(tmp_path):
+    from propevolve.reasoning_policy.integrity import file_digest
+    from propevolve.reasoning_policy.mlx_sft import read_sft_config
+    from propevolve.reasoning_policy.supervised_trainer import authenticated_initial_validation
+
+    recipe = tmp_path / "parent.json"
+    adapter = tmp_path / "parent-adapter"
+    sft_config(recipe, adapter)
+    view = tmp_path / "view"
+    view.mkdir()
+    manifest = view / "view_manifest.json"
+    manifest.write_text(json.dumps({"prepared_counts": {"valid": 10}}))
+    receipt = tmp_path / "receipt"
+    rows = [(action, 1.) for action in ACTIONS] * 2
+    assessment(receipt, rows, primary=.1)
+    summary_path = receipt / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["metrics"]["val_loss"] = 2.5
+    summary.update({"config_sha256": file_digest(recipe),
+                    "view_manifest_sha256": file_digest(manifest)})
+    summary_path.write_text(json.dumps(summary))
+    descriptor = {
+        "path": str(receipt),
+        "scores_sha256": file_digest(receipt / "scores.jsonl"),
+        "summary_sha256": file_digest(summary_path),
+        "policy_config_path": str(recipe),
+        "policy_config_sha256": file_digest(recipe),
+        "view_manifest_sha256": file_digest(manifest),
+    }
+    config = {**read_sft_config(recipe),
+              "resume_adapter_file": str(adapter / "adapters.safetensors"),
+              "initial_validation_receipt": descriptor}
+
+    metrics = authenticated_initial_validation(config, view, valid_rows=10)
+    assert metrics["worst_task_advantage"] == .1
+
+    (receipt / "scores.jsonl").write_text("tampered\n")
+    with pytest.raises(ValueError, match="identity changed"):
+        authenticated_initial_validation(config, view, valid_rows=10)
 
 
 def test_reasoning_campaign_resumes_the_interrupted_round_without_reassessment(tmp_path):
