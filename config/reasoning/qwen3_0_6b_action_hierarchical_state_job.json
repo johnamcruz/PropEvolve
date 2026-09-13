@@ -1,8 +1,0 @@
-{
-  "inherits": "action_mastery_selection_job.json",
-  "status": "qwen3_0_6b_hierarchical_causal_trade_state",
-  "mlx_view": "runs/reasoning-challenger/qwen3-0.6b-action-hierarchical-state-mlx-view",
-  "sft_config": "config/reasoning/qwen3_0_6b_action_hierarchical_sft.json",
-  "rl_config": "config/reasoning/qwen3_0_6b_hierarchical_rl.json",
-  "evaluation_policy_config": "config/reasoning/qwen3_0_6b_hierarchical_rl_evaluation.json"
-}

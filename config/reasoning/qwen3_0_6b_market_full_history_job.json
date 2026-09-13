@@ -1,6 +1,0 @@
-{
-  "inherits": "market_full_history_job.json",
-  "status": "qwen3_0_6b_full_history_market_distillation",
-  "mlx_view": "runs/reasoning-challenger/qwen3-0.6b-market-all-eligible-mlx-view",
-  "sft_config": "config/reasoning/qwen3_0_6b_market_full_history_sft.json"
-}

@@ -1,6 +1,0 @@
-{
-  "inherits": "rl.json",
-  "input_policy_config": "config/reasoning/qwen3_0_6b_action_hierarchical_sft.json",
-  "output_adapter": "runs/reasoning-challenger/qwen3-0.6b-hierarchical-rl-adapters",
-  "checkpoint_root": "runs/reasoning-challenger/qwen3-0.6b-hierarchical-rl-checkpoints"
-}

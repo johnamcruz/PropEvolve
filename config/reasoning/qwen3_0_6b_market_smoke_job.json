@@ -1,6 +1,0 @@
-{
-  "inherits": "market_job.json",
-  "status": "qwen3_0_6b_market_learnability_smoke",
-  "mlx_view": "runs/reasoning-challenger/qwen3-0.6b-market-smoke-mlx-view",
-  "sft_config": "config/reasoning/qwen3_0_6b_market_smoke_sft.json"
-}

@@ -1,4 +1,0 @@
-{
-  "inherits": "qwen3_0_6b_action_hierarchical_sft.json",
-  "adapter_path": "runs/reasoning-challenger/qwen3-0.6b-hierarchical-rl-adapters"
-}
