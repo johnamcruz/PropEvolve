@@ -64,8 +64,10 @@ JSON. The setting pins the assessment directory plus the SHA-256 identities of
 mistake fraction and a seed. Training fails closed unless the scores cover the
 entire prepared training role and the summary names the same prepared-view
 manifest. Each round rotates unresolved rows while retaining already-correct
-rows, then balances all legal action classes. Validation remains the complete,
-fixed chronological selection role; its errors never enter this sampler.
+rows. Sampling balances ENTER versus WAIT, Long versus Short, and HOLD versus
+CLOSE rather than treating the five executable actions as independent classes.
+Validation remains the complete, fixed chronological selection role; its errors
+never enter this sampler.
 
 ### Corrective trade-mastery campaign
 
@@ -83,8 +85,10 @@ action/ticker/year mass, fine-tunes a new immutable candidate, and reassesses
 the parent and candidate over the same fixed chronological validation rows. A
 candidate becomes the next parent only when mistake margins improve while every
 WAIT/Long/Short/HOLD/CLOSE boundary retains its mastered rows and no task
-regresses beyond the configured tolerance. A rejected candidate never becomes
-the parent.
+regresses beyond the configured tolerance. A mastered binary decision receives
+both frozen-parent retention and a positive-margin constraint. A rejected
+candidate never becomes the parent; its unresolved and regressed training
+boundaries are authenticated and prioritized in the following round.
 
 The state file receipts every assessment and adapter artifact by SHA-256. An
 interrupted run resumes the incomplete round and skips only authenticated
