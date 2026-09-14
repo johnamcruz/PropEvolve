@@ -290,6 +290,40 @@ def test_policy_evaluation_can_pass_in_unchanged_simulator_from_reset():
     assert result["teacher_free"] is False
 
 
+@pytest.mark.parametrize("direction,entry", [
+    (1, Action.ENTER_LONG_1), (-1, Action.ENTER_SHORT_1),
+])
+def test_trade_sequence_keeps_repeated_management_states_and_failed_entry(direction, entry):
+    base = environment()
+    market = base.markets['NQ']
+    path = 1000 + direction * np.array([0, 0, 0, -2, -4, -6, -20, -25.])
+    for name in ('open', 'close'):
+        getattr(market, name)[:] = path
+    market.high[:] = path + .1
+    market.low[:] = path - .1
+    env = HistoricalChallengeEnv(base.markets, tick_values=base.tick_values,
+        round_trip_fees=base.round_trip_fees,
+        spec=replace(base.spec, per_trade_risk_dollars=300,
+                     ratchet_activation_r=10, ratchet_giveback_r=1), seed=7)
+    records = [item['action'] for item in collect_examples(
+        env, reset_options={'ticker':'NQ','start':0},
+        context_config=ContextConfig(2, ('trade.current_r',), input_mode='embeddings'),
+        sources=(), behavior_factory=passive_factory, continuation_factory=passive_factory,
+        source_id='failed-entry', continuation_id='trade-mastery-grid',
+        maximum_examples=3, sample_stride=1, rollout_max_steps=8, target_temperature=.5,
+        collection_warmup_steps=1, action_label_mode='trade_mastery_grid',
+        initial_entry_action=entry, management_only=True,
+        management_sampling='all_states',
+        opportunity_contract={'horizon':4,'target_rs':[2.,3.,4.],'stop_r':1.,
+            'position_minimum_improvement_r':.1,
+            'utilities':{'winner':2.,'failure':-1.,'wait':0.,'missed_opportunity':-.25,'conflict_margin':.25}},
+        collect_market_targets=False)]
+    assert len(records) == 3
+    assert all(r['targets']['action_order'] == ['HOLD','CLOSE'] for r in records)
+    assert all(r['messages'][-1]['content'] == 'CLOSE' for r in records)
+    assert len({r['completed_at_ns'] for r in records}) == 3
+
+
 def test_responsibility_evaluation_does_not_mix_trade_and_challenge_metrics(monkeypatch):
     from propevolve.reasoning_policy import evaluation
     scored = [

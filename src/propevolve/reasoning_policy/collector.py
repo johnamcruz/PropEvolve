@@ -22,6 +22,7 @@ def collect_examples(
     opportunity_contract, collect_action_targets=True, collect_market_targets=True,
     action_label_mode="continuation", collection_warmup_steps=0,
     augment_action_targets=False, initial_entry_action=None,
+    management_sampling="first_per_action", management_only=False,
 ):
     """Yield market/action records from one declared chronological episode.
 
@@ -41,6 +42,10 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
         raise ValueError("collection must request at least one target family")
     if type(augment_action_targets) is not bool:
         raise ValueError("action target augmentation must be boolean")
+    if management_sampling not in {"first_per_action", "all_states"}:
+        raise ValueError("unknown management sampling")
+    if type(management_only) is not bool or (management_only and action_label_mode != "trade_mastery_grid"):
+        raise ValueError("management-only collection requires trade mastery")
     if augment_action_targets and not collect_action_targets:
         raise ValueError("action target augmentation requires action records")
     if action_label_mode not in {
@@ -86,7 +91,10 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
             sources and (collect_market_targets or augment_action_targets))
         specialist_targets_available = (not needs_specialist_targets or all(
             source.targets.target(ticker, row) is not None for source in sources))
-        if sample_due and specialist_targets_available:
+        if sample_due and specialist_targets_available and not (management_only and entry_action is None):
+            if ((collect_market_targets or augment_action_targets or entry_action is None)
+                    and row + opportunity_contract.get("horizon", 0) >= len(market.close)):
+                return  # censored tail is not a failed setup
             window = history.snapshot()
             action_record = None
             if collect_action_targets:
@@ -200,7 +208,8 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                     market_record["messages"][0]["content"] += " Also estimate the labeled specialist market state."
             target_name = (None if action_record is None else
                            action_record["messages"][-1]["content"])
-            emit_record = (action_label_mode != "trade_mastery_grid"
+            emit_record = (management_sampling == "all_states"
+                           or action_label_mode != "trade_mastery_grid"
                            or target_name not in emitted_trade_targets)
             if emit_record:
                 yield {"action": action_record, "market": market_record}

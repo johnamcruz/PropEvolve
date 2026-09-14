@@ -1,0 +1,18 @@
+{
+  "source": "config/reasoning/source_environment.json",
+  "dataset_manifest": "runs/reasoning-challenger/error-selected-distillation/dataset/manifest.json",
+  "context": "config/reasoning/context_trade_mastery_embeddings.json",
+  "output": "runs/reasoning-challenger/decisive-simulator-01",
+  "policies": {
+    "parent": "config/reasoning/error_selected_distillation_parent_sft.json",
+    "candidate": "runs/reasoning-challenger/decisive-learning-01/policy.json"
+  },
+  "validation_start": "2024-01-01",
+  "validation_end": "2025-01-01",
+  "episodes": [{"ticker": "NQ", "start_time": "2024-06-03T14:30:00"}],
+  "max_steps": 128,
+  "progress_every": 32,
+  "seed": 17,
+  "memory_gb": 6,
+  "cache_mb": 256
+}

@@ -1,0 +1,16 @@
+{
+  "view": "runs/reasoning-challenger/error-selected-distillation/view",
+  "dataset": "runs/reasoning-challenger/error-selected-distillation/dataset",
+  "policies": {
+    "parent": "config/reasoning/error_selected_distillation_parent_sft.json",
+    "candidate": "runs/reasoning-challenger/decisive-learning-01/policy.json"
+  },
+  "output": "runs/reasoning-challenger/decisive-generalization-01",
+  "tickers": ["NQ", "ES", "GC", "RTY", "YM", "CL", "SI", "ZB", "ZN"],
+  "actions": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"],
+  "rows_per_group": 2,
+  "seed": 17,
+  "ambiguity_r": 0.01,
+  "memory_gb": 6,
+  "cache_mb": 256
+}
