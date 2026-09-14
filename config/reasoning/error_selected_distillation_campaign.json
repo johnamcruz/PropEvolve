@@ -1,8 +1,8 @@
 {
   "schema": "propevolve_reasoning_corrective_campaign_v2",
   "workspace_root": ".",
-  "state_file": "runs/reasoning-challenger/error-selected-distillation/campaign-state.json",
-  "output_root": "runs/reasoning-challenger/error-selected-distillation/corrections",
+  "state_file": "runs/reasoning-challenger/error-selected-distillation/restart-1e6/campaign-state.json",
+  "output_root": "runs/reasoning-challenger/error-selected-distillation/restart-1e6/corrections",
   "initial_policy_config": "config/reasoning/error_selected_distillation_parent_sft.json",
   "sft_template_config": "config/reasoning/error_selected_distillation_sft.json",
   "prepared_view": "runs/reasoning-challenger/error-selected-distillation/view",
