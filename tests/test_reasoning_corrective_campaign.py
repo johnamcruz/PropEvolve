@@ -251,7 +251,8 @@ class ForgetShort(FakePhases):
         scores.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def campaign_config(tmp_path, *, rounds=2):
+def campaign_config(tmp_path, *, rounds=2,
+                    parent_advancement_mode="accepted_only"):
     initial = tmp_path / "initial.json"
     sft_config(initial, tmp_path / "initial-adapter")
     template = tmp_path / "template.json"
@@ -274,6 +275,12 @@ def campaign_config(tmp_path, *, rounds=2):
                    "balance_mode": "hierarchical_boundaries"},
         "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
         "rejection_adaptation": {"enabled": True},
+        "parent_advancement": {
+            "mode": parent_advancement_mode,
+            "minimum_primary_improvement": .1,
+            "minimum_mean_mistake_advantage_delta": .1,
+            "minimum_mean_boundary_mistake_advantage_delta": .1,
+        },
         "acceptance": gate(minimum_retained_mastery_rate=.9),
         "timeouts": {"assessment_seconds": 60, "training_seconds": 60},
     }))
@@ -433,3 +440,24 @@ def test_reasoning_campaign_rejects_forgetting_keeps_parent_and_refreshes_next_r
         "round-01/candidate-train-assessment")
     assert len(children[1]["targeted_sampling"]["priority_scores_sha256"]) == 64
     assert len(children[1]["targeted_sampling"]["priority_summary_sha256"]) == 64
+
+
+def test_cumulative_campaign_advances_improved_candidate_without_final_promotion(tmp_path):
+    """A useful correction becomes the next parent while final gates stay strict."""
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+
+    campaign = campaign_config(
+        tmp_path, rounds=2, parent_advancement_mode="cumulative_improvement")
+    result = run_campaign(campaign, phases=ForgetShort())
+
+    assert result["rounds"][0]["decision"] == "REJECTED"
+    assert result["rounds"][0]["parent_decision"] == "ADVANCED"
+    first_child = (tmp_path / "run/round-01/candidate-policy.json").resolve()
+    second = json.loads(
+        (tmp_path / "run/round-02/candidate-policy.json").read_text())
+    assert result["rounds"][1]["parent_policy_config"] == str(first_child)
+    assert second["resume_adapter_file"].endswith(
+        "run/round-01/candidate-adapter/adapters.safetensors")
+    assert second["targeted_sampling"]["assessment_path"].endswith(
+        "round-01/candidate-train-assessment")
+    assert "priority_assessment_path" not in second["targeted_sampling"]
