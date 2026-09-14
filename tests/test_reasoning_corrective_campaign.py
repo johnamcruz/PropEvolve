@@ -273,6 +273,18 @@ class RoundQualityPhases(FakePhases):
         summary_path.write_text(json.dumps(summary))
 
 
+class RejectThenInterruptThird(ForgetShort):
+    def __init__(self):
+        super().__init__()
+        self.train_calls = 0
+
+    def train(self, config_path, view, log):
+        self.train_calls += 1
+        if self.train_calls == 3:
+            raise RuntimeError("stop before third candidate artifacts")
+        super().train(config_path, view, log)
+
+
 def campaign_config(tmp_path, *, rounds=2):
     initial = tmp_path / "initial.json"
     sft_config(initial, tmp_path / "initial-adapter")
@@ -478,3 +490,40 @@ def test_campaign_selects_best_strict_round_for_parent_and_rl_handoff(tmp_path):
         (tmp_path / "run/round-03/candidate-policy.json").read_text())
     assert third["resume_adapter_file"].endswith(
         "run/round-02/candidate-adapter/adapters.safetensors")
+
+
+def test_resumed_explicit_baseline_uses_its_candidate_assessments(tmp_path):
+    """A selected rejected candidate keeps matching weights and assessment lineage."""
+    import shutil
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+    from propevolve.reasoning_policy.workflow import atomic_json
+
+    campaign = campaign_config(tmp_path, rounds=3)
+    phases = RejectThenInterruptThird()
+    with pytest.raises(RuntimeError, match="third candidate"):
+        run_campaign(campaign, phases=phases)
+    state_path = tmp_path / "run/state.json"
+    state = json.loads(state_path.read_text())
+    round_two = state["rounds"][1]
+    state["rounds"] = state["rounds"][:2]
+    state["status"] = "PENDING"
+    state.pop("error", None)
+    state["current_policy_config"] = round_two["candidate_policy_config"]
+    state["selected_policy_config"] = round_two["candidate_policy_config"]
+    atomic_json(state_path, state)
+    shutil.rmtree(tmp_path / "run/round-03")
+
+    phases.train_calls = 2
+    with pytest.raises(RuntimeError, match="third candidate"):
+        run_campaign(campaign, phases=phases)
+
+    third = json.loads(
+        (tmp_path / "run/round-03/candidate-policy.json").read_text())
+    resumed = json.loads(state_path.read_text())
+    assert resumed["rounds"][2]["parent_policy_config"] == \
+        round_two["candidate_policy_config"]
+    assert third["targeted_sampling"]["assessment_path"].endswith(
+        "round-02/candidate-train-assessment")
+    assert third["initial_validation_receipt"]["path"].endswith(
+        "round-02/candidate-valid-assessment")
+    assert "priority_assessment_path" not in third["targeted_sampling"]

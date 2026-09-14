@@ -525,6 +525,17 @@ def _select_best_strict_candidate(state, primary_metric):
     state["rl_handoff_round"] = int(row["round"])
 
 
+def _prior_assessment_prefix(prior, parent_policy):
+    parent = Path(parent_policy).resolve()
+    candidate = prior.get("candidate_policy_config")
+    previous = prior.get("parent_policy_config")
+    if isinstance(candidate, str) and parent == Path(candidate).resolve():
+        return "candidate"
+    if isinstance(previous, str) and parent == Path(previous).resolve():
+        return "parent"
+    raise ValueError("selected curriculum parent lacks matching assessment lineage")
+
+
 def run_campaign(path, *, phases=None):
     """Run or resume the reasoning trade-mastery corrective campaign."""
     plan = _read_campaign(path)
@@ -593,9 +604,9 @@ def run_campaign(path, *, phases=None):
                             plan, root, "valid", view)
                     else:
                         prior = state["rounds"][index - 1]
-                        prefix = "candidate" if prior["decision"] == "ACCEPTED" else "parent"
-                        round_state["parent_train"] = prior[f"{prefix}_train"]
-                        round_state["parent_valid"] = prior[f"{prefix}_valid"]
+                        prior_prefix = _prior_assessment_prefix(prior, parent_policy)
+                        round_state["parent_train"] = prior[f"{prior_prefix}_train"]
+                        round_state["parent_valid"] = prior[f"{prior_prefix}_valid"]
                     state["rounds"].append(round_state)
                     atomic_json(state_path, state)
                 train_assessment = _record_assessment(
@@ -611,7 +622,9 @@ def run_campaign(path, *, phases=None):
                 priority_assessment = None
                 if index > 0 and plan["rejection_adaptation"]["enabled"]:
                     prior = state["rounds"][index - 1]
-                    if prior.get("decision") == "REJECTED":
+                    if (prior.get("decision") == "REJECTED"
+                            and _prior_assessment_prefix(
+                                prior, parent_policy) == "parent"):
                         priority_assessment = prior.get("candidate_train")
                         if priority_assessment is None:
                             raise ValueError(
