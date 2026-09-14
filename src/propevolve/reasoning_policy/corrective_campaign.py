@@ -27,12 +27,6 @@ _GATE_KEYS = {
     "maximum_per_task_advantage_regression",
 }
 
-_PARENT_ADVANCEMENT_KEYS = {
-    "mode", "minimum_primary_improvement",
-    "minimum_mean_mistake_advantage_delta",
-    "minimum_mean_boundary_mistake_advantage_delta",
-}
-
 _DECISION_BOUNDARIES = {
     "entry.ENTER", "entry.WAIT", "direction.LONG", "direction.SHORT",
     "management.HOLD", "management.CLOSE",
@@ -51,41 +45,6 @@ def validate_acceptance(settings):
             raise ValueError("invalid corrective campaign acceptance settings")
     if settings["minimum_retained_mastery_rate"] > 1:
         raise ValueError("invalid corrective campaign acceptance settings")
-
-
-def validate_parent_advancement(settings):
-    if (not isinstance(settings, dict)
-            or set(settings) != _PARENT_ADVANCEMENT_KEYS
-            or settings["mode"] not in {
-                "accepted_only", "cumulative_improvement"}):
-        raise ValueError("invalid corrective campaign parent advancement settings")
-    for name in _PARENT_ADVANCEMENT_KEYS - {"mode"}:
-        value = settings[name]
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(float(value)) or value < 0):
-            raise ValueError("invalid corrective campaign parent advancement settings")
-
-
-def decide_parent_advancement(comparison, settings):
-    """Separate a useful curriculum parent from final model acceptance."""
-    validate_parent_advancement(settings)
-    if comparison["decision"] == "ACCEPTED":
-        return {"parent_decision": "ADVANCED", "failed_parent_gates": []}
-    if settings["mode"] == "accepted_only":
-        return {"parent_decision": "RETAINED",
-                "failed_parent_gates": ["final_acceptance"]}
-    checks = {
-        "primary_improvement": comparison["primary_improvement"]
-            >= settings["minimum_primary_improvement"],
-        "mistake_improvement": comparison["mean_mistake_advantage_delta"]
-            >= settings["minimum_mean_mistake_advantage_delta"],
-        "boundary_mistake_improvement":
-            comparison["mean_boundary_mistake_advantage_delta"]
-            >= settings["minimum_mean_boundary_mistake_advantage_delta"],
-    }
-    failed = [name for name, passed in checks.items() if not passed]
-    return {"parent_decision": "ADVANCED" if not failed else "RETAINED",
-            "failed_parent_gates": failed}
 
 
 def _read_assessment(path):
@@ -294,7 +253,7 @@ _CAMPAIGN_KEYS = {
     "initial_policy_config", "sft_template_config", "prepared_view",
     "rounds", "initial_assessments", "preserved_assessments",
     "required_teacher_groups", "subset", "mastered_anchor_retention",
-    "rejection_adaptation", "parent_advancement", "acceptance", "timeouts",
+    "rejection_adaptation", "acceptance", "timeouts",
 }
 
 
@@ -329,7 +288,6 @@ def _read_campaign(path):
                    or plan["timeouts"][name] <= 0 for name in plan["timeouts"])):
         raise ValueError("invalid reasoning corrective campaign configuration")
     validate_acceptance(plan["acceptance"])
-    validate_parent_advancement(plan["parent_advancement"])
     from .targeted_subset import validate_targeted_sampling
     validate_targeted_sampling({**plan["subset"], "assessment_path": "pending",
         "scores_sha256": "0" * 64, "summary_sha256": "0" * 64})
@@ -586,7 +544,7 @@ def run_campaign(path, *, phases=None):
                 round_root.mkdir(parents=True, exist_ok=True)
                 if index < len(state["rounds"]):
                     round_state = state["rounds"][index]
-                    if round_state.get("parent_decision") == "ADVANCED":
+                    if round_state.get("decision") == "ACCEPTED":
                         continue
                     parent_policy = Path(round_state["parent_policy_config"])
                 else:
@@ -605,8 +563,7 @@ def run_campaign(path, *, phases=None):
                             plan, root, "valid", view)
                     else:
                         prior = state["rounds"][index - 1]
-                        prefix = ("candidate" if prior.get("parent_decision") == "ADVANCED"
-                                  else "parent")
+                        prefix = "candidate" if prior["decision"] == "ACCEPTED" else "parent"
                         round_state["parent_train"] = prior[f"{prefix}_train"]
                         round_state["parent_valid"] = prior[f"{prefix}_valid"]
                     state["rounds"].append(round_state)
@@ -624,8 +581,7 @@ def run_campaign(path, *, phases=None):
                 priority_assessment = None
                 if index > 0 and plan["rejection_adaptation"]["enabled"]:
                     prior = state["rounds"][index - 1]
-                    if (prior.get("decision") == "REJECTED"
-                            and prior.get("parent_decision") != "ADVANCED"):
+                    if prior.get("decision") == "REJECTED":
                         priority_assessment = prior.get("candidate_train")
                         if priority_assessment is None:
                             raise ValueError(
@@ -677,13 +633,10 @@ def run_campaign(path, *, phases=None):
                 comparison = compare_frozen_assessments(
                     valid_assessment["path"], candidate_valid["path"],
                     plan["acceptance"])
-                advancement = decide_parent_advancement(
-                    comparison, plan["parent_advancement"])
-                comparison = {**comparison, **advancement}
                 atomic_json(round_root / "comparison.json", comparison)
                 round_state.update(comparison)
                 atomic_json(state_path, state)
-                if comparison["parent_decision"] != "ADVANCED":
+                if comparison["decision"] != "ACCEPTED":
                     state["selected_policy_config"] = str(parent_policy)
                     atomic_json(state_path, state)
                     continue
