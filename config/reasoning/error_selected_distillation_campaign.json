@@ -26,16 +26,8 @@
     }
   ],
   "initial_assessments": {
-    "train": {
-      "path": "runs/reasoning-challenger/error-selected-distillation/frozen-epoch-097-assessments/train-independent-v1",
-      "scores_sha256": "49318db09b3e5d3c59ac37d01b5f0801bc28b7c40ede6d0f59038777495c3620",
-      "summary_sha256": "249b1763c7465b4fcadbccd035f2b6877f9125c2fd993d5bae10d8fd1504fa1f"
-    },
-    "valid": {
-      "path": "runs/reasoning-challenger/error-selected-distillation/frozen-epoch-097-assessments/valid-independent-v1",
-      "scores_sha256": "eb1cf05c3c82333dc8e77c98228aadc9f7bd5025427c41c6605ef01809664c64",
-      "summary_sha256": "e1ef5ecc0038cf5912127d514cf1c7fada822d28ca7e88820d8540a9e83d592e"
-    }
+    "train": null,
+    "valid": null
   },
   "subset": {
     "rows_per_group": 84,
