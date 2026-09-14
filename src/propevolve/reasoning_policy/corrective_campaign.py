@@ -305,7 +305,7 @@ def _resolve(root, value):
 
 def _read_campaign(path):
     plan = read_recipe(path)
-    if (set(plan) != _CAMPAIGN_KEYS
+    if (set(plan) - {"assessment_cache_root"} != _CAMPAIGN_KEYS
             or plan["schema"] != "propevolve_reasoning_corrective_campaign_v2"
             or not isinstance(plan["workspace_root"], str)
             or type(plan["rounds"]) is not int or plan["rounds"] < 1
@@ -328,6 +328,10 @@ def _read_campaign(path):
                    or not isinstance(plan["timeouts"][name], (int, float))
                    or plan["timeouts"][name] <= 0 for name in plan["timeouts"])):
         raise ValueError("invalid reasoning corrective campaign configuration")
+    if "assessment_cache_root" in plan and (
+            not isinstance(plan["assessment_cache_root"], str)
+            or not plan["assessment_cache_root"].strip()):
+        raise ValueError("assessment_cache_root must be a nonempty path")
     validate_acceptance(plan["acceptance"])
     from .targeted_subset import validate_targeted_sampling
     validate_targeted_sampling({**plan["subset"], "assessment_path": "pending",
@@ -470,9 +474,10 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
 class SubprocessPhases:
     """Isolate model phases so MLX memory is released between campaign steps."""
 
-    def __init__(self, root, timeouts):
+    def __init__(self, root, timeouts, *, assessment_cache_root=None):
         self.root = Path(root)
         self.timeouts = timeouts
+        self.assessment_cache_root = assessment_cache_root
 
     def _run(self, command, log, timeout):
         Path(log).parent.mkdir(parents=True, exist_ok=True)
@@ -481,10 +486,19 @@ class SubprocessPhases:
                            stderr=subprocess.STDOUT, check=True, timeout=timeout)
 
     def assess(self, policy_config, view, role, output, log):
-        self._run([sys.executable, "-u", str(self.root / "scripts/assess_reasoning_trade.py"),
-            "--config", str(policy_config), "--view", str(view), "--role", role,
-            "--output", str(output), "--root", str(self.root)], log,
-            self.timeouts["assessment_seconds"])
+        from .assessment_receipts import cached_assessment
+        from .mlx_sft import verify_mlx_view
+        # A receipt never substitutes for authenticating the underlying dataset
+        # and external embedding shards, even when inference can be skipped.
+        verify_mlx_view(policy_config, view, root=self.root)
+        def run(policy, prepared_view, selected_role, destination, selected_log):
+            self._run([sys.executable, "-u", str(self.root / "scripts/assess_reasoning_trade.py"),
+                "--config", str(policy), "--view", str(prepared_view), "--role", selected_role,
+                "--output", str(destination), "--root", str(self.root)], selected_log,
+                self.timeouts["assessment_seconds"])
+        cached_assessment(policy_config, view, role, output, log,
+            cache_root=self.assessment_cache_root or Path(view) / "assessment-receipts",
+            run=run, root=self.root)
 
     def train(self, config_path, view, log):
         self._run([sys.executable, "-u", "-m", "propevolve.reasoning_policy.mlx_sft",
@@ -610,7 +624,9 @@ def run_campaign(path, *, phases=None):
     if state.get("status") in {"COMPLETE", "FAILED_GATE"}:
         return state
     if phases is None:
-        phases = SubprocessPhases(root, plan["timeouts"])
+        phases = SubprocessPhases(root, plan["timeouts"], assessment_cache_root=(
+            _resolve(root, plan["assessment_cache_root"])
+            if "assessment_cache_root" in plan else None))
     lock_path = state_path.with_suffix(state_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:

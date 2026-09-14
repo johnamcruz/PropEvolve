@@ -132,6 +132,20 @@ Each round writes score, selection, training, and acceptance receipts. These
 make the exact corrective examples and retained anchors auditable without
 feeding validation mistakes back into training.
 
+Completed frozen assessments are reused across campaign output folders through
+a content-addressed receipt registry under the configured prepared view's
+`assessment-receipts` directory. Set optional campaign JSON field
+`assessment_cache_root` to share a different registry location. Learning-rate
+and iteration changes alone do not rerun inference. Model/adapter/projector
+weights, tokenizer, prepared/source data, scoring settings, runtime versions,
+and scoring-code changes invalidate reuse. Dataset integrity is still checked;
+corrupt or missing referenced artifacts fail explicitly rather than silently
+starting expensive inference. Preserve the registry **and** the assessment
+directories it references during cleanup. Legacy assessments without these
+identity receipts still use the existing explicit `initial_assessments` path;
+they are not automatically assumed equivalent. Updated candidates must be
+assessed again to measure learning and retention.
+
 ## Causal inputs and evidence
 
 Historical development uses independent 3-minute streams for:
