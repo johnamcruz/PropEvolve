@@ -498,6 +498,33 @@ def _verify_completed_state(state, view, teacher_groups):
                     raise ValueError("completed campaign candidate changed")
 
 
+def _select_best_strict_candidate(state, primary_metric):
+    """Record the best fully accepted trade-master for the later RL handoff."""
+    candidates = []
+    for row in state["rounds"]:
+        if row.get("decision") != "ACCEPTED":
+            continue
+        descriptor = row.get("candidate_valid")
+        policy = row.get("candidate_policy_config")
+        if not isinstance(descriptor, dict) or not isinstance(policy, str):
+            raise ValueError("accepted corrective round lacks frozen evidence")
+        summary = json.loads(
+            (Path(descriptor["path"]) / "summary.json").read_text())
+        primary = _metric(summary, primary_metric)
+        candidates.append(((primary, -int(row["round"])), row, policy))
+    if not candidates:
+        state["best_round"] = None
+        state["best_primary_metric"] = None
+        state["rl_handoff_policy_config"] = None
+        state["rl_handoff_round"] = None
+        return
+    key, row, policy = max(candidates, key=lambda item: item[0])
+    state["best_round"] = int(row["round"])
+    state["best_primary_metric"] = float(key[0])
+    state["rl_handoff_policy_config"] = str(Path(policy).resolve())
+    state["rl_handoff_round"] = int(row["round"])
+
+
 def run_campaign(path, *, phases=None):
     """Run or resume the reasoning trade-mastery corrective campaign."""
     plan = _read_campaign(path)
@@ -512,6 +539,8 @@ def run_campaign(path, *, phases=None):
         "identity_sha256": identity, "status": "PENDING",
         "current_policy_config": str(
             _resolve(root, plan["initial_policy_config"]).resolve()),
+        "best_round": None, "best_primary_metric": None,
+        "rl_handoff_policy_config": None, "rl_handoff_round": None,
         "rounds": [],
     })
     if state.get("identity_sha256") != identity:
@@ -524,6 +553,7 @@ def run_campaign(path, *, phases=None):
                 or file_digest(base / "summary.json") != preserved["summary_sha256"]):
             raise ValueError("preserved frozen assessment changed")
     _verify_completed_state(state, view, plan["required_teacher_groups"])
+    _select_best_strict_candidate(state, plan["acceptance"]["primary_metric"])
     if state.get("status") in {"COMPLETE", "FAILED_GATE"}:
         return state
     if phases is None:
@@ -638,12 +668,18 @@ def run_campaign(path, *, phases=None):
                 atomic_json(state_path, state)
                 if comparison["decision"] != "ACCEPTED":
                     state["selected_policy_config"] = str(parent_policy)
+                    _select_best_strict_candidate(
+                        state, plan["acceptance"]["primary_metric"])
                     atomic_json(state_path, state)
                     continue
                 state["current_policy_config"] = str(child_config.resolve())
                 state["selected_policy_config"] = str(child_config.resolve())
+                _select_best_strict_candidate(
+                    state, plan["acceptance"]["primary_metric"])
                 atomic_json(state_path, state)
             state["status"] = "COMPLETE"
+            _select_best_strict_candidate(
+                state, plan["acceptance"]["primary_metric"])
             state.pop("error", None)
             atomic_json(state_path, state)
             return state

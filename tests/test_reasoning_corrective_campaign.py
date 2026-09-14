@@ -251,6 +251,28 @@ class ForgetShort(FakePhases):
         scores.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
+class RoundQualityPhases(FakePhases):
+    """Two improving strict candidates followed by one regressing candidate."""
+
+    def assess(self, policy_config, view, role, output, log):
+        self.calls.append(("assess", role, str(policy_config)))
+        name = __import__("pathlib").Path(policy_config).parent.name
+        generation = int(name.split("-")[-1]) if name.startswith("round-") else 0
+        mistake = {0: -.8, 1: -.4, 2: -.1, 3: -.2}[generation]
+        mastered = {0: 1., 1: .95, 2: .9, 3: .85}[generation]
+        rows = []
+        for action in ACTIONS:
+            rows.extend(((action, mistake), (action, mastered)))
+        assessment(output, rows, primary=mistake,
+                   task_advantages={boundary: mistake for boundary in BOUNDARIES})
+        summary_path = output / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["role"] = role
+        from propevolve.reasoning_policy.integrity import file_digest
+        summary["view_manifest_sha256"] = file_digest(view / "view_manifest.json")
+        summary_path.write_text(json.dumps(summary))
+
+
 def campaign_config(tmp_path, *, rounds=2):
     initial = tmp_path / "initial.json"
     sft_config(initial, tmp_path / "initial-adapter")
@@ -425,6 +447,8 @@ def test_reasoning_campaign_rejects_forgetting_keeps_parent_and_refreshes_next_r
     assert [row["decision"] for row in result["rounds"]] == ["REJECTED", "REJECTED"]
     assert all("retention" in row["failed_gates"] for row in result["rounds"])
     assert result["selected_policy_config"] == str((tmp_path / "initial.json").resolve())
+    assert result["best_round"] is None
+    assert result["rl_handoff_policy_config"] is None
     children = [json.loads((tmp_path / f"run/round-0{i}/candidate-policy.json").read_text())
                 for i in (1, 2)]
     assert [row["targeted_sampling"]["seed"] for row in children] == [17, 18]
@@ -433,3 +457,24 @@ def test_reasoning_campaign_rejects_forgetting_keeps_parent_and_refreshes_next_r
         "round-01/candidate-train-assessment")
     assert len(children[1]["targeted_sampling"]["priority_scores_sha256"]) == 64
     assert len(children[1]["targeted_sampling"]["priority_summary_sha256"]) == 64
+
+
+def test_campaign_selects_best_strict_round_for_parent_and_rl_handoff(tmp_path):
+    """A weaker final round cannot replace the best non-forgetting checkpoint."""
+    from propevolve.reasoning_policy.corrective_campaign import run_campaign
+
+    campaign = campaign_config(tmp_path, rounds=3)
+    result = run_campaign(campaign, phases=RoundQualityPhases())
+
+    assert [row["decision"] for row in result["rounds"]] == [
+        "ACCEPTED", "ACCEPTED", "REJECTED"]
+    best = str((tmp_path / "run/round-02/candidate-policy.json").resolve())
+    assert result["current_policy_config"] == best
+    assert result["selected_policy_config"] == best
+    assert result["best_round"] == 2
+    assert result["rl_handoff_policy_config"] == best
+    assert result["rl_handoff_round"] == 2
+    third = json.loads(
+        (tmp_path / "run/round-03/candidate-policy.json").read_text())
+    assert third["resume_adapter_file"].endswith(
+        "run/round-02/candidate-adapter/adapters.safetensors")
