@@ -13,18 +13,7 @@
     "regime",
     "volume"
   ],
-  "preserved_assessments": [
-    {
-      "path": "runs/reasoning-challenger/trade-inference-assessment/train-assessment",
-      "scores_sha256": "6f5b806aa9bd51cfcde17d56cb705624d3b1dcd047170f5549f1b6524e681a62",
-      "summary_sha256": "e2e2380c0bf5b342e38ddd514c01ba162af3d5a6fe7bb42d6f990d95f461b46e"
-    },
-    {
-      "path": "runs/reasoning-challenger/corrective-trade-mastery/round-01/parent-valid-assessment",
-      "scores_sha256": "4ca81d719a3672adec3d55bb5b00b3686cfb16041933c6cbfda2e256cb8a8a2a",
-      "summary_sha256": "e14fa32fcfb9e37bd964f84f23e87fc46f524735dcaa3b507f038026928e5b1c"
-    }
-  ],
+  "preserved_assessments": [],
   "initial_assessments": {
     "train": null,
     "valid": null
