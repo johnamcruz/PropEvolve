@@ -901,8 +901,6 @@ def evaluate_action_validation(model, dataset, config, *, on_scored=None):
     rows_seen, score_rows, weighted_loss = [], [], 0.0
     for start in range(0, len(order), batch_size):
         indices = order[start:start + batch_size]
-        if len(indices) < batch_size:
-            raise ValueError("validation rows must form complete batches")
         rows = [dataset[int(index)] for index in indices]
         tensors = tuple(mx.array(value) for value in pack_examples(
             rows, max_seq_length=config["max_seq_length"]))

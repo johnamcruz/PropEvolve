@@ -566,6 +566,49 @@ def test_frozen_action_validation_batch_two_matches_batch_one():
             single["per_task"][task]["mean_target_advantage"], abs=1e-6)
 
 
+def test_frozen_action_validation_scores_an_odd_partial_batch():
+    from propevolve.reasoning_policy.supervised_trainer import evaluate_action_validation
+
+    model = tiny_backbone()
+    rows = []
+    for index, target in enumerate(("ENTER_LONG_1", "CLOSE", "ENTER_SHORT_1")):
+        row = {**example(), "target_name": target,
+               "market_embeddings": [[0., 0.], [1. + index, 2.], [3., 4.]]}
+        if target == "CLOSE":
+            row["alternatives"] = [([1, 2, 7, 4], 2), ([1, 2, 8, 4], 2)]
+            row["action_targets"] = {
+                "names": ["HOLD", "CLOSE"], "probabilities": [.1, .9],
+                "values": [-1., 0.]}
+        elif target == "ENTER_SHORT_1":
+            row["target_tokens"] = [1, 2, 6, 4]
+            row["action_targets"] = {
+                "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
+                "probabilities": [.1, .1, .8], "values": [0., -1., 2.]}
+        rows.append(row)
+    common = {
+        "seed": 17, "max_seq_length": 8, "input_mode": "embeddings",
+        "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+                               "ranking_weight": 2., "margin": .25},
+    }
+    scored = []
+
+    partial = evaluate_action_validation(model, rows, {
+        **common, "validation_batch_size": 2},
+        on_scored=lambda index, values: scored.append((index, values)))
+    single = evaluate_action_validation(model, rows, {
+        **common, "validation_batch_size": 1})
+
+    assert sorted(index for index, _ in scored) == [0, 1, 2]
+    assert partial["val_loss"] == pytest.approx(single["val_loss"], abs=1e-6)
+    assert partial["worst_task_advantage"] == pytest.approx(
+        single["worst_task_advantage"], abs=1e-6)
+    assert set(partial["per_task"]) == set(single["per_task"])
+    for task in partial["per_task"]:
+        assert partial["per_task"][task] == pytest.approx(
+            single["per_task"][task], abs=1e-6)
+
+
 def test_real_mlx_hierarchical_management_learns_hold_and_close_from_causal_state():
     import mlx.optimizers as optim
 
