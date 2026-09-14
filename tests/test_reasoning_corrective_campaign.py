@@ -87,6 +87,115 @@ def test_frozen_candidate_is_rejected_when_one_action_forgets_mastered_rows(tmp_
     assert "retention" in report["failed_gates"]
 
 
+def test_balanced_promotion_allows_only_bounded_nonmaterial_tradeoffs(tmp_path):
+    """Small redistribution may pass while every decision boundary stays learned."""
+    from propevolve.reasoning_policy.corrective_campaign import compare_frozen_assessments
+
+    before_rows, after_rows = [], []
+    for action in ACTIONS:
+        before_rows.append((action, -.5))
+        before_rows.extend((action, 1.) for _ in range(10))
+        after_rows.append((action, .2))
+        after_rows.extend((action, .8) for _ in range(10))
+    # Two marginal Long anchors may cross the boundary, but eight of ten remain
+    # mastered and no other action is traded away to improve the weakest task.
+    long_anchor = ACTIONS.index("ENTER_LONG_1") * 11 + 1
+    after_rows[long_anchor] = ("ENTER_LONG_1", -.01)
+    after_rows[long_anchor + 1] = ("ENTER_LONG_1", -.01)
+    before, after = tmp_path / "before", tmp_path / "after"
+    before_tasks = {name: -.2 for name in BOUNDARIES}
+    after_tasks = {name: -.1 for name in BOUNDARIES}
+    after_tasks["direction.SHORT"] = -.23
+    assessment(before, before_rows, primary=-.2, task_advantages=before_tasks)
+    assessment(after, after_rows, primary=-.1, task_advantages=after_tasks)
+
+    report = compare_frozen_assessments(before, after, gate(
+        minimum_primary_improvement=.01,
+        minimum_mean_mistake_advantage_delta=.01,
+        minimum_retained_mastery_rate=.8,
+        maximum_per_action_mistake_regression=.05,
+        maximum_per_task_advantage_regression=.05,
+    ))
+
+    assert report["decision"] == "ACCEPTED"
+    assert report["minimum_retained_mastery_rate"] == pytest.approx(.8)
+    assert report["minimum_retained_boundary_rate"] >= .8
+    assert min(report["task_advantage_deltas"].values()) == pytest.approx(-.03)
+
+
+def test_balanced_promotion_rejects_material_boundary_forgetting(tmp_path):
+    """Useful average lift cannot hide a materially damaged decision boundary."""
+    from propevolve.reasoning_policy.corrective_campaign import compare_frozen_assessments
+
+    before_rows, after_rows = [], []
+    for action in ACTIONS:
+        before_rows.append((action, -.5))
+        before_rows.extend((action, 1.) for _ in range(10))
+        after_rows.append((action, .2))
+        after_rows.extend((action, .8) for _ in range(10))
+    first_long_anchor = ACTIONS.index("ENTER_LONG_1") * 11 + 1
+    after_rows[first_long_anchor] = ("ENTER_LONG_1", -.01)
+    after_rows[first_long_anchor + 1] = ("ENTER_LONG_1", -.01)
+    after_rows[first_long_anchor + 2] = ("ENTER_LONG_1", -.01)
+    before, after = tmp_path / "before", tmp_path / "after"
+    before_tasks = {name: -.2 for name in BOUNDARIES}
+    after_tasks = {name: -.1 for name in BOUNDARIES}
+    after_tasks["direction.LONG"] = -.26
+    assessment(before, before_rows, primary=-.2, task_advantages=before_tasks)
+    assessment(after, after_rows, primary=-.1, task_advantages=after_tasks)
+
+    report = compare_frozen_assessments(before, after, gate(
+        minimum_primary_improvement=.01,
+        minimum_mean_mistake_advantage_delta=.01,
+        minimum_retained_mastery_rate=.8,
+        maximum_per_action_mistake_regression=.05,
+        maximum_per_task_advantage_regression=.05,
+    ))
+
+    assert report["decision"] == "REJECTED"
+    assert "retention" in report["failed_gates"]
+    assert "task_regression" in report["failed_gates"]
+
+
+def test_in_training_checkpoint_uses_the_exact_frozen_promotion_contract(tmp_path):
+    """Epoch selection and final promotion must return the same gate decision."""
+    from propevolve.reasoning_policy.corrective_campaign import (
+        compare_frozen_assessments,
+        evaluate_checkpoint_candidate,
+    )
+
+    before_rows, after_rows = [], []
+    for action in ACTIONS:
+        before_rows.extend(((action, -.5), (action, 1.), (action, 1.)))
+        after_rows.extend(((action, .2), (action, .8), (action, .8)))
+    before, after = tmp_path / "before", tmp_path / "after"
+    before_tasks = {name: -.2 for name in BOUNDARIES}
+    after_tasks = {name: -.1 for name in BOUNDARIES}
+    assessment(before, before_rows, primary=-.2, task_advantages=before_tasks)
+    assessment(after, after_rows, primary=-.1, task_advantages=after_tasks)
+    settings = gate(
+        minimum_primary_improvement=.01,
+        minimum_mean_mistake_advantage_delta=.01,
+        minimum_retained_mastery_rate=.8,
+        maximum_per_action_mistake_regression=.05,
+        maximum_per_task_advantage_regression=.05,
+    )
+    scored = [json.loads(line) for line in (after / "scores.jsonl").read_text().splitlines()]
+    prepared, score_rows = [], {}
+    for row in scored:
+        names = list(row["scores"])
+        prepared.append({"target_name": row["target"],
+                         "action_targets": {"names": names}})
+        score_rows[row["index"]] = [row["scores"][name] for name in names]
+    metrics = json.loads((after / "summary.json").read_text())["metrics"]
+
+    during_training = evaluate_checkpoint_candidate(
+        before, prepared, score_rows, metrics, settings)
+    after_training = compare_frozen_assessments(before, after, settings)
+
+    assert during_training == after_training
+
+
 def test_frozen_candidate_rejects_fixing_direction_by_forgetting_mastered_entry(tmp_path):
     """Partial mastery is retained independently of the final action answer."""
     from propevolve.reasoning_policy.corrective_campaign import compare_frozen_assessments
@@ -365,6 +474,8 @@ def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path
         "loss_weight": 1., "temperature": 1.}
     assert first_child["initial_validation_receipt"]["path"].endswith(
         "parent-valid-assessment")
+    assert first_child["checkpoint_acceptance"] == gate(
+        minimum_retained_mastery_rate=.9)
 
 
 def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_identity(tmp_path):

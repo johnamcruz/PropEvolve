@@ -198,11 +198,19 @@ class ValidationLossGuard:
         if not self.settings["enabled"]:
             self.last_decision = self._decision(False, float(metric))
             return self.last_decision
-        improved = (float(metric) < self.best_metric - self.settings["min_delta"]
-                    if self.mode == "min" else
-                    float(metric) > self.best_metric + self.settings["min_delta"])
+        eligible = val_info.get("checkpoint_eligible", True)
+        if type(eligible) is not bool:
+            raise ValueError("invalid checkpoint eligibility report")
+        improved = eligible and (
+            float(metric) < self.best_metric - self.settings["min_delta"]
+            if self.mode == "min" else
+            float(metric) > self.best_metric + self.settings["min_delta"])
         history = {"iteration": iteration, "validation_loss": float(loss),
                    "checkpoint_selected": improved}
+        if "checkpoint_eligible" in val_info:
+            history["checkpoint_eligible"] = eligible
+            history["checkpoint_failed_gates"] = list(
+                val_info.get("checkpoint_failed_gates", []))
         if self.monitor != "val_loss":
             history[self.monitor] = float(metric)
         self.history.append(history)
@@ -1014,6 +1022,14 @@ def train_supervised(config, view):
     datasets = {role: PreparedDataset(view, role) for role in ("train", "valid")}
     initial_validation = authenticated_initial_validation(
         config, view, valid_rows=len(datasets["valid"]))
+    checkpoint_acceptance = config.get("checkpoint_acceptance")
+    if checkpoint_acceptance is not None:
+        if initial_validation is None:
+            raise ValueError("balanced checkpoint selection requires a frozen parent")
+        initial_validation.update({
+            "checkpoint_eligible": True,
+            "checkpoint_failed_gates": [],
+        })
     coverage_sampler = None
     targeted_sampler = None
     round_rows = len(datasets["train"])
@@ -1151,7 +1167,21 @@ def train_supervised(config, view):
             from .market_distillation import evaluate_market_validation
             value = evaluate_market_validation(model, datasets["valid"], config)
         elif config["action_supervision"]["enabled"]:
-            value = evaluate_action_validation(model, datasets["valid"], config)
+            scored = {}
+            value = evaluate_action_validation(
+                model, datasets["valid"], config,
+                on_scored=(None if checkpoint_acceptance is None else
+                           lambda index, scores: scored.__setitem__(index, scores)))
+            if checkpoint_acceptance is not None:
+                from .corrective_campaign import evaluate_checkpoint_candidate
+                gate = evaluate_checkpoint_candidate(
+                    config["initial_validation_receipt"]["path"],
+                    datasets["valid"], scored, value, checkpoint_acceptance)
+                value.update({
+                    "checkpoint_eligible": gate["decision"] == "ACCEPTED",
+                    "checkpoint_failed_gates": gate["failed_gates"],
+                    "checkpoint_gate": gate,
+                })
         else:
             value = evaluate(model, datasets["valid"],
                 batch_size=config["validation_batch_size"],

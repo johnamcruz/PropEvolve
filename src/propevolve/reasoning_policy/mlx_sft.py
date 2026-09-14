@@ -124,6 +124,16 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         raise ValueError("invalid initial validation receipt")
     if initial_receipt is not None and payload["resume_adapter_file"] is None:
         raise ValueError("initial validation receipt requires a frozen parent adapter")
+    checkpoint_acceptance = payload["checkpoint_acceptance"]
+    if checkpoint_acceptance is not None:
+        from .corrective_campaign import validate_acceptance
+        validate_acceptance(checkpoint_acceptance)
+        if (initial_receipt is None or payload["targeted_sampling"] is None
+                or checkpoint_acceptance["primary_metric"]
+                != payload["early_stopping"]["monitor"]
+                or payload["early_stopping"]["mode"] != "max"):
+            raise ValueError(
+                "balanced checkpoint selection requires matching corrective evidence")
     chunk_size = payload["market_loss_chunk_size"]
     if chunk_size is not None and (
             type(chunk_size) is not int or chunk_size < 1

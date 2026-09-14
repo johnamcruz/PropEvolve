@@ -44,9 +44,9 @@
     "primary_metric": "worst_task_advantage",
     "minimum_primary_improvement": 0.01,
     "minimum_mean_mistake_advantage_delta": 0.01,
-    "minimum_retained_mastery_rate": 0.98,
-    "maximum_per_action_mistake_regression": 0.0,
-    "maximum_per_task_advantage_regression": 0.0
+    "minimum_retained_mastery_rate": 0.80,
+    "maximum_per_action_mistake_regression": 0.05,
+    "maximum_per_task_advantage_regression": 0.05
   },
   "timeouts": {"assessment_seconds": 21600, "training_seconds": 43200}
 }

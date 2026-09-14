@@ -123,11 +123,10 @@ def _decision_advantages(row):
     raise ValueError("frozen assessment contains an unknown action")
 
 
-def compare_frozen_assessments(before, after, settings):
-    """Gate one candidate using identical chronological validation decisions."""
+def _compare_frozen_evidence(before_summary, before_rows, after_summary,
+                             after_rows, settings):
+    """Gate aligned in-memory evidence for training and frozen promotion."""
     validate_acceptance(settings)
-    before_summary, before_rows = _read_assessment(before)
-    after_summary, after_rows = _read_assessment(after)
     if set(before_rows) != set(after_rows):
         raise ValueError("frozen assessment rows differ")
     identity = ("source_id", "completed_at_ns", "ticker", "target")
@@ -246,6 +245,45 @@ def compare_frozen_assessments(before, after, settings):
         "per_action": per_action,
         "per_boundary": per_boundary,
     }
+
+
+def compare_frozen_assessments(before, after, settings):
+    """Gate one candidate using identical chronological validation decisions."""
+    before_summary, before_rows = _read_assessment(before)
+    after_summary, after_rows = _read_assessment(after)
+    return _compare_frozen_evidence(
+        before_summary, before_rows, after_summary, after_rows, settings)
+
+
+def evaluate_checkpoint_candidate(parent_assessment, prepared_rows, score_rows,
+                                  metrics, settings):
+    """Apply the frozen promotion contract to one in-training validation epoch."""
+    before_summary, before_rows = _read_assessment(parent_assessment)
+    if len(prepared_rows) != len(before_rows) or set(score_rows) != set(before_rows):
+        raise ValueError("checkpoint validation rows differ from frozen parent")
+    after_rows = {}
+    identity = ("source_id", "completed_at_ns", "ticker", "target")
+    for index, parent in before_rows.items():
+        prepared = prepared_rows[index]
+        target = prepared.get("target_name")
+        names = prepared.get("action_targets", {}).get("names")
+        values = np.asarray(score_rows[index], dtype=float)
+        if (target != parent.get("target") or not isinstance(names, list)
+                or target not in names or set(names) != set(parent.get("scores", {}))
+                or values.shape != (len(names),) or not np.isfinite(values).all()):
+            raise ValueError("checkpoint validation rows differ from frozen parent")
+        scores = dict(zip(names, map(float, values)))
+        predicted = max(scores, key=scores.get)
+        after_rows[index] = {
+            **{name: parent[name] for name in identity},
+            "scores": scores,
+            "predicted": predicted,
+            "correct": predicted == target,
+            "target_advantage": scores[target] - max(
+                value for name, value in scores.items() if name != target),
+        }
+    return _compare_frozen_evidence(
+        before_summary, before_rows, {"metrics": metrics}, after_rows, settings)
 
 
 _CAMPAIGN_KEYS = {
@@ -407,6 +445,7 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
             "summary_sha256": train_assessment["summary_sha256"],
         },
         "mastered_anchor_retention": plan["mastered_anchor_retention"],
+        "checkpoint_acceptance": plan["acceptance"],
         "initial_validation_receipt": {
             **valid_assessment,
             "policy_config_path": str(parent_config.resolve()),

@@ -314,3 +314,31 @@ def test_action_guard_selects_worst_class_margin_not_lower_average_loss():
                                   "worst_action_advantage": -0.8})
     assert snapshots == [0, 8]
     assert guard.summary()["best_metric"] == pytest.approx(-0.5)
+
+
+def test_action_guard_never_selects_an_ineligible_imbalanced_checkpoint():
+    """A higher weakest-task score cannot override the frozen balance gate."""
+    snapshots = []
+    guard = ValidationLossGuard(
+        {"enabled": True, "patience_evaluations": 3, "min_delta": 0.01,
+         "restore_best": True, "monitor": "worst_task_advantage", "mode": "max"},
+        on_improvement=lambda report: snapshots.append(report["iteration"]),
+    )
+    parent = {"iteration": 0, "val_loss": 2.0,
+              "worst_task_advantage": -.20, "checkpoint_eligible": True}
+    imbalanced = {"iteration": 10, "val_loss": 1.5,
+                  "worst_task_advantage": -.05, "checkpoint_eligible": False,
+                  "checkpoint_failed_gates": ["task_regression"]}
+    balanced = {"iteration": 20, "val_loss": 1.4,
+                "worst_task_advantage": -.10, "checkpoint_eligible": True,
+                "checkpoint_failed_gates": []}
+
+    guard.on_val_loss_report(parent)
+    rejected = guard.on_val_loss_report(imbalanced)
+    accepted = guard.on_val_loss_report(balanced)
+
+    assert snapshots == [0, 20]
+    assert rejected["checkpoint_selected"] is False
+    assert accepted["checkpoint_selected"] is True
+    assert guard.summary()["best_iteration"] == 20
+    assert guard.summary()["history"][1]["checkpoint_eligible"] is False
