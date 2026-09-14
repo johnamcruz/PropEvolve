@@ -377,7 +377,7 @@ def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery()
     # are WAIT=2, LONG=3, SHORT=4; positioned tokens are HOLD=2, CLOSE=3.
     cases = [
         # ENTER correct/direction wrong; ENTER wrong/direction correct.
-        (1, "ENTER_LONG_1", [0., 1., 2.], [0., 2., 1.]),
+        (1, "ENTER_LONG_1", [0., -1., 2.], [0., 2., 1.]),
         (5, "ENTER_LONG_1", [2., 1., 0.], [0., 2., 1.]),
         # Both correct; both wrong.
         (7, "ENTER_LONG_1", [0., 2., 1.], [0., 2., 1.]),
@@ -385,6 +385,12 @@ def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery()
         # WAIT has no direction task; positioned state has management only.
         (9, "WAIT", [2., 1., 0.], [1., 0., -1.]),
         (10, "CLOSE", [1., 0.], [0., 2.]),
+        # Mirrored Short cases: entry-only mastery, direction-only mastery,
+        # both mastered, and both incorrect.
+        (11, "ENTER_SHORT_1", [0., 2., -1.], [0., 1., 2.]),
+        (12, "ENTER_SHORT_1", [2., 0., 1.], [0., 1., 2.]),
+        (13, "ENTER_SHORT_1", [0., 1., 2.], [0., 1., 2.]),
+        (14, "ENTER_SHORT_1", [3., 2., 1.], [0., 1., 2.]),
     ]
     for context, _, scores, _ in cases:
         action_tokens = [2, 3] if len(scores) == 2 else [2, 3, 4]
@@ -454,6 +460,9 @@ def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery()
     # WAIT trains no arbitrary direction; positioned state trains CLOSE only.
     assert scores[4, 0] > max(scores[4, 1:])
     assert scores[5, 1] > scores[5, 0]
+    for index in (6, 7, 8, 9):
+        assert scores[index, 2] > scores[index, 1]
+        assert scores[index, 2] > scores[index, 0]
 
 
 def test_production_action_batch_retains_only_mastered_boundaries():

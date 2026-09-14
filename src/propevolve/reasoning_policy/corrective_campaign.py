@@ -127,6 +127,9 @@ def _compare_frozen_evidence(before_summary, before_rows, after_summary,
                              after_rows, settings):
     """Gate aligned in-memory evidence for training and frozen promotion."""
     validate_acceptance(settings)
+    if (before_summary.get("metrics", {}).get("decision_boundary_semantics")
+            != after_summary.get("metrics", {}).get("decision_boundary_semantics")):
+        raise ValueError("frozen assessments use different decision boundary semantics")
     if set(before_rows) != set(after_rows):
         raise ValueError("frozen assessment rows differ")
     identity = ("source_id", "completed_at_ns", "ticker", "target")

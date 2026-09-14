@@ -1,0 +1,8 @@
+{
+  "purpose": "Matched diagnostic controls, not campaign promotion or a selected recipe",
+  "variants": [
+    {"name": "retention_only", "retention_weight": 4.0},
+    {"name": "smaller_step_only", "lora_lr": 0.000001, "projector_lr": 0.000001},
+    {"name": "teacher_off_only", "teacher_weight": 0.0}
+  ]
+}

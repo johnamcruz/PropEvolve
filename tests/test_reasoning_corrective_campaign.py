@@ -40,6 +40,7 @@ def assessment(path, advantages, *, primary, task_advantages=None,
     (path / "summary.json").write_text(json.dumps({
         "role": "valid", "rows": len(rows), "weights_updated": False,
         "metrics": {"worst_task_advantage": primary,
+                    "decision_boundary_semantics": "independent_enter_direction_v1",
                     "per_task": {name: {"mean_target_advantage": value}
                                  for name, value in tasks.items()}},
     }))
@@ -194,6 +195,20 @@ def test_in_training_checkpoint_uses_the_exact_frozen_promotion_contract(tmp_pat
     after_training = compare_frozen_assessments(before, after, settings)
 
     assert during_training == after_training
+
+
+def test_promotion_rejects_mixing_old_and_independent_enter_metrics(tmp_path):
+    from propevolve.reasoning_policy.corrective_campaign import compare_frozen_assessments
+    before, after = tmp_path / "before", tmp_path / "after"
+    rows = [(action, -1.) for action in ACTIONS] + [(action, 1.) for action in ACTIONS]
+    assessment(before, rows, primary=-.2)
+    assessment(after, rows, primary=-.1)
+    path = before / "summary.json"
+    payload = json.loads(path.read_text())
+    payload["metrics"].pop("decision_boundary_semantics")
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="decision boundary semantics"):
+        compare_frozen_assessments(before, after, gate())
 
 
 def test_frozen_candidate_rejects_fixing_direction_by_forgetting_mastered_entry(tmp_path):

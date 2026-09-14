@@ -136,7 +136,7 @@ def test_wait_must_beat_both_long_and_short():
     assert unsafe_long == unsafe_short
 
 
-def test_long_winner_entry_gate_cannot_be_satisfied_by_wrong_short_score():
+def test_enter_is_correct_when_either_side_wins_but_direction_is_a_separate_error():
     from propevolve.reasoning_policy.supervised_trainer import hierarchical_boundary_metrics
 
     row = {"target_name": "ENTER_LONG_1", "action_targets": {
@@ -144,8 +144,21 @@ def test_long_winner_entry_gate_cannot_be_satisfied_by_wrong_short_score():
         "values": [0.0, 2.0, -1.0]}}
     metrics = hierarchical_boundary_metrics([row], [[0.0, -1.0, 2.0]])
 
-    assert metrics["per_task"]["entry.ENTER"]["mean_target_advantage"] == -1.0
+    assert metrics["per_task"]["entry.ENTER"]["mean_target_advantage"] == 2.0
     assert metrics["per_task"]["direction.LONG"]["mean_target_advantage"] == -3.0
+    assert metrics["per_action"]["ENTER_LONG_1"]["accuracy"] == 0.0
+
+
+def test_entry_only_correction_is_independent_of_which_side_is_stronger():
+    # The economic label remains LONG; swapping the predicted direction must
+    # not change an ENTER-only objective. Direction has its own objective.
+    long_stronger = _objective(
+        [2., 1., -1.], [.1, .8, .1], [0., 2., -1.], 0,
+        [True, False, False])
+    short_stronger = _objective(
+        [2., -1., 1.], [.1, .8, .1], [0., 2., -1.], 0,
+        [True, False, False])
+    assert long_stronger == short_stronger
 
 
 def test_positioned_loss_is_only_hold_close_binary():

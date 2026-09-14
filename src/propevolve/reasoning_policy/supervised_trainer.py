@@ -492,9 +492,7 @@ def hierarchical_boundary_metrics(rows, score_rows, *, margin=0.0):
             best_value = max(long_value, short_value)
             directional = long_value != short_value
             enter = best_value > wait_value and directional
-            best_side_score = (long_score if long_value > short_value else short_score)
-            if not enter:
-                best_side_score = max(long_score, short_score)
+            best_side_score = max(long_score, short_score)
             target = "entry.ENTER" if enter else "entry.WAIT"
             advantage = (best_side_score - wait_score) if enter else (wait_score - best_side_score)
             evidence.setdefault(target, []).append(advantage)
@@ -523,6 +521,7 @@ def hierarchical_boundary_metrics(rows, score_rows, *, margin=0.0):
         raise ValueError("hierarchical metrics require decision evidence")
     return {
         **action_metrics,
+        "decision_boundary_semantics": "independent_enter_direction_v1",
         "worst_task_advantage": min(row["mean_target_advantage"] for row in per_task.values()),
         "worst_task_boundary_loss": max(row["mean_boundary_loss"] for row in per_task.values()),
         "task_macro_accuracy": float(np.mean([row["accuracy"] for row in per_task.values()])),
@@ -966,6 +965,11 @@ def authenticated_initial_validation(config, view, *, valid_rows):
     if expected_weights.resolve() != Path(config["resume_adapter_file"]).resolve():
         raise ValueError("initial validation receipt parent differs from warm start")
     metrics = summary.get("metrics")
+    if (config.get("decision_objective") == "hierarchical_binary"
+            and isinstance(metrics, dict)
+            and metrics.get("decision_boundary_semantics") != "independent_enter_direction_v1"):
+        raise ValueError("initial validation receipt uses old decision boundary semantics; "
+                         "recompute metrics from its frozen scores")
     monitor = config["early_stopping"]["monitor"]
     if (not isinstance(metrics, dict)
             or isinstance(metrics.get("val_loss"), bool)

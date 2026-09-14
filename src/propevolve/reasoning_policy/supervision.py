@@ -89,12 +89,9 @@ def hierarchical_action_objective(scores, probabilities, values, config, *,
 
     direction_eligible = ((xp.maximum(values[1], values[2]) > values[0])
                           & (values[1] != values[2]))
-    authenticated_side_score = xp.where(values[1] > values[2], scores[1], scores[2])
-    # A winner learns its authenticated side over WAIT. A WAIT row compares
-    # against the model's strongest side so neither losing side can escape.
-    enter_score = xp.where(
-        direction_eligible, authenticated_side_score,
-        xp.maximum(scores[1], scores[2]))
+    # ENTER is either executable side; economic direction is corrected by the
+    # separate LONG/SHORT objective. Match inference and retention semantics.
+    enter_score = xp.maximum(scores[1], scores[2])
     entry_scores = xp.stack([scores[0], enter_score])
     entry_probabilities = xp.stack([
         probabilities[0], probabilities[1] + probabilities[2]])

@@ -1,5 +1,9 @@
 {
   "inherits": "error_selected_distillation_parent_sft.json",
+  "component_learning_rates": {
+    "lora": 0.000001,
+    "projector": 0.000001
+  },
   "batch_size": 2,
   "iters": 2200,
   "validation_batch_size": 2,
