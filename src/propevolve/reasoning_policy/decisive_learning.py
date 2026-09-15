@@ -2,6 +2,19 @@
 import math
 
 
+def fractional_snapshot(before, after, *, fraction):
+    """Interpolate one saved displacement; never advance or alter optimizer state."""
+    if not math.isfinite(fraction) or not 0 <= fraction <= 1:
+        raise ValueError('diagnostic fraction must be finite and within [0, 1]')
+    endpoint = component_snapshot(before, after, component='both')
+    if fraction == 0:
+        return dict(before)
+    if fraction == 1:
+        return endpoint
+    return {name: value + fraction * (endpoint[name] - value)
+            for name, value in before.items()}
+
+
 def component_snapshot(before, after, *, component):
     """Isolate a saved actual update, without modifying either source snapshot."""
     if component not in {'lora', 'projector', 'both'} or before.keys() != after.keys():

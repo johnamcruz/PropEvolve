@@ -1,0 +1,12 @@
+{
+  "source_report": "runs/reasoning-challenger/management-retention-projection-repeated-01/report.json",
+  "measurement_report": "runs/reasoning-challenger/management-retention-conflict-01/report.json",
+  "before_offset": 2,
+  "after_offset": 3,
+  "row": 32,
+  "fractions": [0],
+  "measure_complete_retention": true,
+  "output": "runs/reasoning-challenger/management-failed-boundary-complete-01",
+  "memory_gb": 6,
+  "cache_mb": 256
+}
