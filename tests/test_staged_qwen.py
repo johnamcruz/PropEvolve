@@ -169,6 +169,50 @@ def test_model_family_swap_preserves_staged_differentiable_interface(family, tie
     assert traces[0][1]["assessment"] == pytest.approx(expected["assessment_scores"][0].tolist())
     assert report["decision_boundary_semantics"] == "staged_independent_binary_v1"
 
+    # Production staged loss -> LoRA/projector gradients -> native Adam must
+    # preserve an effective batch when memory requires accumulated microbatches.
+    from mlx.utils import tree_map, tree_flatten
+    inputs = {"embeddings": mx.repeat(embeddings, 4, axis=0),
+        "available": mx.repeat(available, 4, axis=0),
+        "market_query": {k: mx.repeat(v, 4, axis=0) for k, v in market_query.items()},
+        "assessment_query": {k: mx.repeat(v, 4, axis=0) for k, v in assessment_query.items()},
+        "legal_actions": legal * 4}
+    teaching = {"probabilities": mx.array([
+        [[0., 1.], [0., 1.], [.5, .5]], [[0., 1.], [1., 0.], [.5, .5]],
+        [[1., 0.], [.5, .5], [.5, .5]], [[1., 0.], [.5, .5], [.5, .5]]]),
+        "values": mx.array([[[0., 2.], [-1., 2.], [0., 0.]],
+                             [[0., 2.], [2., -1.], [0., 0.]],
+                             [[0., -1.], [0., 0.], [0., 0.]],
+                             [[0., -1.], [0., 0.], [0., 0.]]]),
+        "boundary_weights": mx.array([[1., 1., 0.], [1., 1., 0.],
+                                       [1., 0., 0.], [1., 0., 0.]]),
+        "teacher_probabilities": mx.repeat(mx.array([[.9, .1]]), 4, axis=0),
+        "teacher_weights": mx.ones((4, 2))}
+    full_batch = {"inputs": inputs, "targets": teaching}
+    def partition(s):
+        return {"inputs": {k: ({name: x[s] for name, x in v.items()}
+                               if isinstance(v, dict) else v[s]) for k, v in inputs.items()},
+                "targets": {k: v[s] for k, v in teaching.items()}}
+    loss_fn = lambda m, b: batch_loss(m, b, config=training_config)[0]
+    full_value, full_grad = nn.value_and_grad(model, loss_fn)(model, full_batch)
+    parts = [nn.value_and_grad(model, loss_fn)(model, partition(s))
+             for s in (slice(0, 2), slice(2, 4))]
+    accumulated = tree_map(lambda a, b: (a + b) / 2, parts[0][1], parts[1][1])
+    mx.eval(full_value, full_grad, accumulated, parts)
+    assert float(full_value) == pytest.approx(float((parts[0][0] + parts[1][0]) / 2), abs=1e-5)
+    for (_, a), (_, b) in zip(tree_flatten(full_grad), tree_flatten(accumulated)):
+        assert bool(mx.allclose(a, b, atol=2e-5, rtol=2e-4))
+    original = model.trainable_parameters()
+    first, second = optim.Adam(learning_rate=1e-3), optim.Adam(learning_rate=1e-3)
+    first.update(model, full_grad)
+    mx.eval(model.parameters(), first.state)
+    full_updated = model.trainable_parameters()
+    model.update(original)
+    second.update(model, accumulated)
+    mx.eval(model.parameters(), second.state)
+    for (_, a), (_, b) in zip(tree_flatten(full_updated), tree_flatten(model.trainable_parameters())):
+        assert bool(mx.allclose(a, b, atol=2e-5, rtol=2e-4))
+
     with pytest.raises(ValueError, match="query fields"):
         staged_forward(MLXReasoningBackend(model), embeddings, available,
             {**market_query, "teacher_targets": mx.ones((1, 2))}, assessment_query, legal)

@@ -35,6 +35,14 @@
   exits are censored rather than substituted for trade-mastery supervision.
 - **Partial mastery**: retain each correct applicable boundary and correct each
   incorrect one independently. WAIT targets have no direction supervision.
+- **Staged learning mass**: sum applicable boundary contributions per row, then
+  average rows. Correction, correct-label anchors, and retention KL use the same
+  row denominator. Equal-sized microbatch accumulation must reproduce the full
+  effective batch; averaging by active boundaries separately inside each small
+  batch silently changes ENTER/WAIT weights. This arithmetic invariant does not
+  guarantee retained decisions after shared-parameter updates. Validation loss
+  receipts name their reduction semantics; old reductions cannot be reused as
+  current losses, though unchanged frozen predictions remain useful evidence.
 - **Trading evidence**: future target-before-stop and excursion outcomes are
   labels, never policy inputs. Teacher-free policy evaluation must use the same
   decision definitions as training, retention, and checkpoint selection.

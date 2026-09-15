@@ -1022,6 +1022,11 @@ def authenticated_initial_validation(config, view, *, valid_rows):
     if expected_weights.resolve() != Path(config["resume_adapter_file"]).resolve():
         raise ValueError("initial validation receipt parent differs from warm start")
     metrics = summary.get("metrics")
+    if config.get("architecture") == "staged_reasoning_v1":
+        from .staged_learning import LOSS_SEMANTICS
+        if not isinstance(metrics, dict) or metrics.get("loss_semantics") != LOSS_SEMANTICS:
+            raise ValueError("initial validation receipt uses old loss reduction; "
+                             "recompute metrics from its frozen scores")
     expected_semantics = ("staged_independent_binary_v1"
         if config.get("architecture") == "staged_reasoning_v1"
         else "independent_enter_direction_v1")
@@ -1187,7 +1192,9 @@ def train_supervised(config, view):
     # Paths/budget may change for continuation; all learning/data settings must agree.
     mutable = {"adapter_path", "resume_training_state", "epochs", "iters",
                "validation_metrics_path", "save_training_state"}
+    from .staged_learning import LOSS_SEMANTICS
     identity = {"view_sha256": file_digest(Path(view) / "view_manifest.json"),
+                "loss_semantics": LOSS_SEMANTICS,
                 "config": {key: value for key, value in config.items() if key not in mutable}}
     if resume is not None:
         receipt = json.loads((Path(resume) / "receipt.json").read_text())["receipt"]

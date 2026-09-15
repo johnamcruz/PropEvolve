@@ -74,3 +74,35 @@ def test_corrective_loss_preserves_entry_while_correcting_direction():
     assert float(damaged[0, 0]) < 0
     assert float(damaged[0, 1]) == pytest.approx(float(before[0, 1]))
     assert float(damaged[0, 2]) == 0.
+
+
+def test_correction_and_retention_are_invariant_to_microbatch_partition():
+    mx = pytest.importorskip("mlx.core")
+    from propevolve.reasoning_policy.staged_learning import corrective_trade_objective
+    targets = {
+        "probabilities": mx.array([[[0., 1.], [0., 1.], [.5, .5]],
+                                   [[0., 1.], [1., 0.], [.5, .5]],
+                                   [[1., 0.], [.5, .5], [.5, .5]],
+                                   [[.5, .5], [.5, .5], [0., 1.]]]),
+        "values": mx.array([[[0., 2.], [-1., 2.], [0., 0.]],
+                             [[0., 2.], [2., -1.], [0., 0.]],
+                             [[0., -1.], [0., 0.], [0., 0.]],
+                             [[0., 0.], [0., 0.], [-1., 2.]]]),
+        "boundary_weights": mx.array([[1., 1., 0.], [1., 1., 0.],
+                                       [1., 0., 0.], [0., 0., 1.]]),
+        "parent_assessment": mx.array([[2., 2., 0.], [2., 2., 0.],
+                                       [-2., 0., 0.], [0., 0., -2.]]),
+        "retention_weights": mx.array([[1., 1., 0.], [1., 0., 0.],
+                                       [1., 0., 0.], [0., 0., 0.]])}
+    config = {"action_supervision": {"soft_target_weight": 1., "ranking_weight": 1., "margin": .1},
+              "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1., "supervision_weight": 1.}}
+    scores = mx.array([[.2, -.3, .5], [.6, -.4, .2], [-.1, .8, .2], [.2, .4, -.3]])
+    full = lambda x: corrective_trade_objective(x, targets, config)
+    def split(x):
+        return sum(corrective_trade_objective(x[s], {k: v[s] for k, v in targets.items()}, config)
+                   for s in (slice(0, 2), slice(2, 4))) / 2
+    full_loss, full_grad = mx.value_and_grad(full)(scores)
+    split_loss, split_grad = mx.value_and_grad(split)(scores)
+    mx.eval(full_loss, split_loss, full_grad, split_grad)
+    assert float(full_loss) == pytest.approx(float(split_loss), abs=1e-6)
+    assert bool(mx.allclose(full_grad, split_grad, atol=1e-6))

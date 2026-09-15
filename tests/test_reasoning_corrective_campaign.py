@@ -493,7 +493,8 @@ def test_reasoning_campaign_repeats_assess_correct_reassess_and_resumes(tmp_path
         minimum_retained_mastery_rate=.9)
 
 
-def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_identity(tmp_path):
+@pytest.mark.parametrize("staged", [False, True])
+def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_identity(tmp_path, staged):
     from propevolve.reasoning_policy.integrity import file_digest
     from propevolve.reasoning_policy.mlx_sft import read_sft_config
     from propevolve.reasoning_policy.supervised_trainer import authenticated_initial_validation
@@ -511,6 +512,8 @@ def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_id
     summary_path = receipt / "summary.json"
     summary = json.loads(summary_path.read_text())
     summary["metrics"]["val_loss"] = 2.5
+    if staged:
+        summary["metrics"]["decision_boundary_semantics"] = "staged_independent_binary_v1"
     summary.update({"config_sha256": file_digest(recipe),
                     "view_manifest_sha256": file_digest(manifest)})
     summary_path.write_text(json.dumps(summary))
@@ -525,6 +528,14 @@ def test_initial_validation_receipt_is_reused_only_with_exact_parent_and_view_id
     config = {**read_sft_config(recipe),
               "resume_adapter_file": str(adapter / "adapters.safetensors"),
               "initial_validation_receipt": descriptor}
+
+    if staged:
+        config["architecture"] = "staged_reasoning_v1"
+        with pytest.raises(ValueError, match="loss reduction"):
+            authenticated_initial_validation(config, view, valid_rows=10)
+        summary["metrics"]["loss_semantics"] = "staged_row_mean_v1"
+        summary_path.write_text(json.dumps(summary))
+        descriptor["summary_sha256"] = file_digest(summary_path)
 
     metrics = authenticated_initial_validation(config, view, valid_rows=10)
     assert metrics["worst_task_advantage"] == .1

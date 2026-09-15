@@ -1,0 +1,6 @@
+{
+  "inherits": "staged_real_correction_retention.json",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/row-mean-retention",
+  "training_log_prefix": "staged-row-mean-retention",
+  "initial_validation_receipt": null
+}

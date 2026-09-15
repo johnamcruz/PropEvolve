@@ -148,6 +148,14 @@ def test_production_sft_resume_matches_uninterrupted_optimizer_path(tmp_path):
     assert actual.keys() == expected.keys()
     for name in actual:
         np.testing.assert_allclose(actual[name], expected[name], atol=1e-6, rtol=1e-6)
+    receipt_path = tmp_path / "first" / "training-state" / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["receipt"]["identity"]["loss_semantics"] == "staged_row_mean_v1"
+    del receipt["receipt"]["identity"]["loss_semantics"]
+    receipt_path.write_text(json.dumps(receipt))
+    recipe.write_text(json.dumps({**resumed, "adapter_path": str(tmp_path / "incompatible-resume")}))
+    with pytest.raises(ValueError, match="learner configuration differs"):
+        train_prepared(recipe, tmp_path / "view")
 
 
 @pytest.mark.parametrize("tied", [False, True])

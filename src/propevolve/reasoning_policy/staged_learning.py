@@ -1,6 +1,8 @@
 """Economic supervision for the shared staged reasoning forward path."""
 from .supervision import action_objective
 
+LOSS_SEMANTICS = "staged_row_mean_v1"
+
 
 def supervised_outputs(backend, batch, config):
     """Supervise the same staged forward used by inference, without teacher forcing.
@@ -48,7 +50,7 @@ def corrective_trade_objective(scores, targets, config):
     p = mx.sigmoid(parent)
     divergence = ((mx.logaddexp(candidate, 0.) - p * candidate)
                   - (mx.logaddexp(parent, 0.) - p * parent))
-    retention = ((divergence * mastered).sum() / mx.maximum(mastered.sum(), 1.)
+    retention = ((divergence * mastered).sum() / scores.shape[0]
                  * temperature ** 2)
     loss = loss + settings["loss_weight"] * retention
     if settings.get("supervision_weight", 0.):
@@ -61,8 +63,13 @@ def corrective_trade_objective(scores, targets, config):
 def trade_objective(scores, probabilities, values, boundary_weights, settings, *, xp):
     """Supervise independent binary outputs, only at applicable boundaries.
 
-    Masks suppress direct task losses, not all indirect shared-weight effects;
-    retention must still be measured after the actual parameter update.
+    Sum applicable task contributions per example, then average examples.
+    Dividing by the number of active boundaries in each microbatch changes
+    task weights when equal-sized microbatches are accumulated: ENTER rows
+    have two boundaries, WAIT and management rows only one. The row mean
+    preserves the sampler's evidence mass independently of partitioning.
+    Masks suppress direct losses, not indirect shared-weight effects; retention
+    must still be measured after the actual parameter update.
     """
     batch = scores.shape[0]
     if (scores.shape != (batch, 3) or probabilities.shape != (batch, 3, 2)
@@ -74,4 +81,4 @@ def trade_objective(scores, probabilities, values, boundary_weights, settings, *
             logits = xp.stack([xp.array(0.), scores[i, task]])
             terms.append(boundary_weights[i, task] * action_objective(
                 logits, probabilities[i, task], values[i, task], settings, xp=xp))
-    return xp.stack(terms).sum() / xp.maximum(boundary_weights.sum(), 1.)
+    return xp.stack(terms).sum() / batch

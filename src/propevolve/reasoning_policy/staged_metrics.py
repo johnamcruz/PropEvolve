@@ -31,7 +31,7 @@ def evaluate_staged_validation(backend, dataset, config, *, on_scored=None):
     import mlx.core as mx
     from mlx.utils import tree_map
     from .staged_batches import pack_staged_examples
-    from .staged_learning import trade_objective
+    from .staged_learning import LOSS_SEMANTICS, trade_objective
     from .staged_policy import staged_forward
     size = config["validation_batch_size"]
     if not len(dataset) or type(size) is not int or size < 1:
@@ -56,7 +56,7 @@ def evaluate_staged_validation(backend, dataset, config, *, on_scored=None):
                 on_scored(start + offset, {"assessment": assessment,
                     "interpretation": mx.sigmoid(result["interpretation_scores"][offset]).tolist(),
                     "log_probs": result["log_probs"][offset].tolist()})
-    return {"val_loss": total_loss / len(rows_seen),
+    return {"val_loss": total_loss / len(rows_seen), "loss_semantics": LOSS_SEMANTICS,
         **boundary_metrics(rows_seen, scores_seen, margin=config["action_supervision"]["margin"])}
 
 
