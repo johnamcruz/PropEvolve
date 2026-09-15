@@ -279,6 +279,7 @@ class ActionOutcome:
 class ActionLabels:
     observation: np.ndarray
     outcomes: Mapping[Action, ActionOutcome]
+    management_evidence: Mapping[str, dict] | None = None
 
 
 def label_market_actions(
@@ -345,6 +346,76 @@ def label_market_actions(
             outcome_end_ns=end_ns,
         )
     return ActionLabels(np.asarray(observation).copy(), outcomes)
+
+
+def label_position_continuation(
+    environment: HistoricalChallengeEnv, *, reset_options: dict,
+    prefix: Sequence[Action], continuation_factory: Callable, max_steps: int,
+    minimum_improvement_r: float,
+) -> ActionLabels:
+    """Compare immediate CLOSE with a declared causal continuation in the simulator.
+
+    The continuation receives only each branch's current observation/info. At
+    the fixed budget it closes at the next open, unless execution already closed
+    the trade. Values use the actual closed-trade receipt, never challenge reward
+    or a hindsight-best exit. Challenge-terminal paths are censored for SFT.
+    """
+    if ("ticker" not in reset_options or "start" not in reset_options
+            or type(max_steps) is not int or max_steps < 2
+            or not np.isfinite(minimum_improvement_r) or minimum_improvement_r < 0
+            or environment.spec.per_trade_risk_dollars is None):
+        raise ValueError("invalid positioned continuation contract")
+    outcomes, evidence, anchor = {}, {}, None
+    for first_action in (Action.HOLD, Action.CLOSE):
+        branch = HistoricalChallengeEnv(environment.markets,
+            tick_values=environment.tick_values, round_trip_fees=environment.round_trip_fees,
+            spec=environment.spec, observation_spec=environment._assembler.trade_management, seed=0)
+        policy = continuation_factory()
+        observation, info = branch.reset(options=dict(reset_options))
+        for action in prefix:
+            policy(observation, info)
+            observation, _, terminated, truncated, info = branch.step(action)
+            if terminated or truncated:
+                raise ValueError("position prefix reaches terminal state")
+        if {Action(a) for a in info["valid_actions"]} != {Action.HOLD, Action.CLOSE}:
+            raise ValueError("position continuation requires an open trade")
+        if anchor is None:
+            anchor = observation.copy()
+        elif not np.array_equal(anchor, observation):
+            raise ValueError("position continuation anchor mismatch")
+        previous_receipts = len(branch.closed_trade_receipts())
+        for step in range(max_steps):
+            suggested = policy(observation, info)
+            action = first_action if step == 0 else Action.CLOSE if step == max_steps - 1 else suggested
+            if Action(action) not in {Action.HOLD, Action.CLOSE}:
+                raise ValueError("position continuation proposed non-management action")
+            observation, _, terminated, truncated, info = branch.step(action)
+            receipts = branch.closed_trade_receipts()
+            if len(receipts) > previous_receipts:
+                receipt = receipts[-1]
+                if receipt["exit_reason"] not in {"voluntary_close", "initial_stop", "ratchet_stop"}:
+                    raise ValueError("position continuation censored by challenge termination")
+                pnl = float(receipt["pnl"])
+                value = pnl / environment.spec.per_trade_risk_dollars
+                evidence[first_action.name] = {
+                    key: receipt[key] for key in (
+                        "side", "entry_timestamp", "exit_timestamp", "hold_bars",
+                        "mfe_r", "mae_r", "exit_reason", "ratchet_activated")}
+                evidence[first_action.name].update(
+                    net_r=value, pnl=pnl,
+                    excursion_units="gross_initial_stop_distance_r",
+                    net_units="net_pnl_over_configured_dollar_risk")
+                outcomes[first_action] = ActionOutcome(
+                    outcome=str(receipt["exit_reason"]), terminal_pnl=pnl,
+                    reward_to_go=value - (minimum_improvement_r if first_action == Action.HOLD else 0.),
+                    minimum_mll_headroom=float(info["minimum_mll_headroom"]), steps=step + 1,
+                    outcome_end_ns=int(np.datetime64(receipt["exit_timestamp"], "ns").astype(np.int64)))
+                break
+            if terminated or truncated:
+                raise ValueError("position continuation ended without trade receipt")
+        else:
+            raise ValueError("position continuation failed to close within horizon")
+    return ActionLabels(anchor, outcomes, management_evidence=evidence)
 
 
 def label_actions(

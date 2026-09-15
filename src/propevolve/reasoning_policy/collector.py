@@ -12,6 +12,7 @@ from .labels import (
     label_future_excursions,
     label_market_actions,
     label_position_actions,
+    label_position_continuation,
 )
 
 
@@ -38,6 +39,9 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
         raise ValueError("collection warmup must be a nonnegative integer")
     if not source_id or not continuation_id:
         raise ValueError("source and continuation identities required")
+    if opportunity_contract.get("management_label_mode") not in {
+            None, "oracle_potential", "simulator_continuation"}:
+        raise ValueError("unknown management label mode")
     if not collect_action_targets and not collect_market_targets:
         raise ValueError("collection must request at least one target family")
     if type(augment_action_targets) is not bool:
@@ -115,6 +119,13 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                         stop_r=opportunity_contract["stop_r"],
                         utilities=opportunity_contract["utilities"],
                     )
+                elif (action_label_mode == "trade_mastery_grid"
+                      and opportunity_contract.get("management_label_mode") == "simulator_continuation"):
+                    labels = label_position_continuation(
+                        environment, reset_options=reset_options, prefix=tuple(prefix),
+                        continuation_factory=continuation_factory,
+                        max_steps=opportunity_contract["horizon"],
+                        minimum_improvement_r=position_improvement)
                 elif action_label_mode == "trade_mastery_grid":
                     if (legal != {Action.HOLD, Action.CLOSE} or entry_index is None
                             or entry_action is None):

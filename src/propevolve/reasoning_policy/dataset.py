@@ -126,6 +126,8 @@ Exact value ties choose WAIT/HOLD when legal, never an arbitrary direction.
             "action_order": [a.name for a in actions],
             "action_probabilities": probabilities.tolist(),
             "outcomes": {a.name: asdict(labels.outcomes[a]) for a in actions},
+            **({"management_evidence": labels.management_evidence}
+               if labels.management_evidence is not None else {}),
         },
     }
 

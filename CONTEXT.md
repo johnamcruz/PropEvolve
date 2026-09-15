@@ -13,6 +13,18 @@
   LONG versus SHORT separately. Entering on the wrong side fails direction and
   the complete trade action, but does not also fail the ENTER decision.
 - **Management decision**: an open position learns HOLD versus CLOSE only.
+- **Executable management labels**: JSON opportunity contract
+  `management_label_mode: simulator_continuation` compares next-open CLOSE with
+  an injected causal continuation using the unchanged simulator. Stops and
+  trailing ratchets retain the environment's execution order. The configured
+  horizon is a finite labeling budget with a final CLOSE, not a 2R/3R/4R profit
+  ceiling. Existing recipes without this field retain their old oracle-potential
+  semantics and must not be presented as executable continuation evidence.
+  `targets.management_evidence` records branch MFE/MAE, realized net R and exit
+  reasons for audit only; those future receipts never enter the policy context.
+  Running MFE/MAE use gross initial-stop-distance R; realized net R uses dollar
+  risk after fees. The record explicitly names both units. Challenge-forced
+  exits are censored rather than substituted for trade-mastery supervision.
 - **Partial mastery**: retain each correct applicable boundary and correct each
   incorrect one independently. WAIT targets have no direction supervision.
 - **Trading evidence**: future target-before-stop and excursion outcomes are
