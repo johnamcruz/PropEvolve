@@ -11,6 +11,14 @@
 - **Trading evidence**: future target-before-stop and excursion outcomes are
   labels, never policy inputs. Teacher-free policy evaluation must use the same
   decision definitions as training, retention, and checkpoint selection.
+- **Prospective trade R context**: `trade.volatility_r` is the arithmetic mean
+  true range over the JSON-configured number of completed bars, multiplied by
+  contract point value and divided by configured dollar risk.
+  `trade.cost_r` is round-trip fees divided by that same risk. A full lookback
+  plus preceding close is required; `trade.volatility_available` distinguishes
+  missing history from zero volatility. These inputs are available while flat
+  and are trade economics, not challenge balance or MLL. Existing open-trade
+  excursion fields retain their original initial-stop-distance denominator.
 
 - **Challenge P&L**: net realized or marked-to-market profit relative to the
   challenge starting balance; the model does not depend on the broker's

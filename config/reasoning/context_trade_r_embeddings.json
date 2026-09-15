@@ -1,0 +1,12 @@
+{
+  "context_steps": 20,
+  "text_steps": 1,
+  "input_mode": "embeddings",
+  "volatility_lookback": 20,
+  "fields": [
+    "trade.open", "trade.position_side", "trade.risk_available",
+    "trade.mfe_r_so_far", "trade.mae_r_so_far", "trade.current_r",
+    "trade.giveback_r", "trade.hold_bars",
+    "trade.volatility_r", "trade.cost_r", "trade.volatility_available"
+  ]
+}

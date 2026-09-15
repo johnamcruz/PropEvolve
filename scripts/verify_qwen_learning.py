@@ -43,7 +43,7 @@ def main():
         raise ValueError('audited corpus identity differs')
     if any(r['issues'] for r in audit['reports'].values()):
         raise ValueError('label audit has unresolved integrity faults')
-    verify_mlx_view(plan['parent_config'], plan['view'], root=root)
+    verify_mlx_view(plan.get('view_config', plan['parent_config']), plan['view'], root=root)
     destination.mkdir(parents=True, exist_ok=False)
     class Tee:
         def __init__(self, original, file):
@@ -97,6 +97,16 @@ def main():
     print('[decisive] loading actual Qwen frozen parent', flush=True)
     policy = MLXActionPolicy.from_config(plan['parent_config'], root=root)
     model = policy.model
+    if config['projector'] != parent['projector']:
+        from propevolve.reasoning_policy.projector import (
+            state_extension_of, attach_projector, restore_projector)
+        if not state_extension_of(parent['projector'], config['projector']):
+            raise ValueError('diagnostic only permits an appended causal state extension')
+        rng_state = mx.random.state
+        attach_projector(model, config['projector'])
+        restore_projector(model, parent['adapter_path'], allow_state_extension=True)
+        mx.random.state = rng_state
+        policy.projector_config = config['projector']
     configure_trainable_components(model, config['trainable_components'])
     optimizer = build_optimizer(config)
 

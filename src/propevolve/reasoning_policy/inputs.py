@@ -62,8 +62,45 @@ def observe_context(history, environment, observation, *, ticker, row, sources):
     fields = specialist_account_fields(observation, embedding_dim=market.embeddings.shape[1],
         ticker=ticker, row=row, sources=sources, require_specialists=use_teachers)
     fields.update(environment.causal_trade_context())
+    if history.config.volatility_lookback is not None:
+        fields.update(trade_r_context(market, row=row,
+            risk_dollars=environment.spec.per_trade_risk_dollars,
+            point_value=environment.tick_values[ticker],
+            round_trip_fee=environment.round_trip_fees[ticker],
+            lookback=history.config.volatility_lookback))
     if not set(history.config.fields).issubset(fields):
         raise ValueError("configured input unavailable from causal observation")
     history.append(int(market.timestamps[row].astype("datetime64[ns]").astype(np.int64)),
         {key: fields[key] for key in history.config.fields},
         embedding=observation[:market.embeddings.shape[1]] if not use_teachers else None)
+
+
+def trade_r_context(market, *, row, risk_dollars, point_value, round_trip_fee, lookback):
+    """Completed-bar arithmetic mean true range / prospective dollar R.
+
+    Uses a full lookback plus its preceding close, never a future fill or label.
+    R is the configured dollar risk (including costs), not gross stop distance.
+    Cost is known even when volatility history is unavailable. No fitted scaler,
+    challenge state, clipping, or position-dependent denominator is used.
+    """
+    if (type(row) is not int or not 0 <= row < len(market.close)
+            or type(lookback) is not int or lookback < 1
+            or risk_dollars is None):
+        raise ValueError("invalid causal R context contract")
+    economic = np.asarray([risk_dollars, point_value, round_trip_fee], dtype=float)
+    if (not np.isfinite(economic).all() or risk_dollars <= 0 or point_value <= 0
+            or not 0 <= round_trip_fee < risk_dollars):
+        raise ValueError("invalid causal R context economics")
+    result = {"trade.volatility_r": 0., "trade.cost_r": float(round_trip_fee / risk_dollars),
+              "trade.volatility_available": float(row >= lookback)}
+    if row < lookback:
+        return result
+    start = row - lookback + 1
+    high = np.asarray(market.high[start:row + 1], dtype=float)
+    low = np.asarray(market.low[start:row + 1], dtype=float)
+    previous = np.asarray(market.close[start - 1:row], dtype=float)
+    if not np.isfinite([high, low, previous]).all() or (high < low).any():
+        raise ValueError("invalid completed bars for R context")
+    true_range = np.maximum(high - low, np.maximum(abs(high - previous), abs(low - previous)))
+    result["trade.volatility_r"] = float(true_range.mean() * point_value / risk_dollars)
+    return result

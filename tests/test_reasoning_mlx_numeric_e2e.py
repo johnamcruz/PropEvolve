@@ -7,7 +7,7 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 from propevolve.reasoning_policy.projector import (
-    attach_projector, export_policy_weights, restore_projector, temporal_features,
+    attach_projector, export_policy_weights, restore_projector, temporal_features, state_extension_of,
 )
 from propevolve.reasoning_policy.supervised_trainer import (
     batch_loss, build_optimizer, configure_trainable_components, pack_examples,
@@ -58,6 +58,34 @@ def example():
         "action_targets": {"names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"],
                            "probabilities": [.1, .8, .1], "values": [0., 10., -10.]},
         "market_embeddings": [[0., 0.], [1., 2.], [3., 4.]], "market_available": [False, True, True]}
+
+
+def test_appended_r_state_preserves_parent_prefix_and_roundtrips(tmp_path):
+    parent = {"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
+        "temporal_encoding": "pooled_levels", "state_fields": ["trade.current_r", "trade.hold_bars"],
+        "state_scales": [4., 150.]}
+    child = {**parent, "state_fields": [*parent["state_fields"], "trade.volatility_r", "trade.cost_r"],
+        "state_scales": [*parent["state_scales"], 1., 1.]}
+    assert state_extension_of(parent, child)
+    assert not state_extension_of(parent, {**child, "state_scales": [1., 150., 1., 1.]})
+    assert not state_extension_of(parent, {**child, "state_fields": list(reversed(child["state_fields"]))})
+    model = tiny_backbone(state=True)
+    embeddings = mx.array([example()["market_embeddings"]])
+    available = mx.array([example()["market_available"]])
+    expected = model.market_projector(embeddings, available, mx.array([[2., 10.]]))
+    mx.eval(expected)
+    export_policy_weights(model, tmp_path)
+    attach_projector(model, child)
+    with pytest.raises(ValueError):
+        restore_projector(model, tmp_path)
+    restore_projector(model, tmp_path, allow_state_extension=True)
+    actual = model.market_projector(embeddings, available, mx.array([[2., 10., .8, .02]]))
+    np.testing.assert_array_equal(actual, expected)
+    export_policy_weights(model, tmp_path)
+    attach_projector(model, child)
+    restore_projector(model, tmp_path)
+    np.testing.assert_array_equal(model.market_projector(embeddings, available,
+        mx.array([[2., 10., .8, .02]])), expected)
 
 
 def test_full_coverage_batches_include_partial_tail_and_preserve_rows():

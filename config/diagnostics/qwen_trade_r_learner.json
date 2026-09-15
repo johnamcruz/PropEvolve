@@ -1,0 +1,10 @@
+{
+  "inherits": "qwen_bias_corrected_learner.json",
+  "data": "runs/reasoning-challenger/trade-r-context/dataset",
+  "projector": {
+    "state_fields": ["trade.open", "trade.position_side", "trade.risk_available",
+      "trade.mfe_r_so_far", "trade.mae_r_so_far", "trade.current_r", "trade.giveback_r",
+      "trade.hold_bars", "trade.volatility_r", "trade.cost_r", "trade.volatility_available"],
+    "state_scales": [1.0, 1.0, 1.0, 4.0, 4.0, 4.0, 4.0, 150.0, 1.0, 1.0, 1.0]
+  }
+}

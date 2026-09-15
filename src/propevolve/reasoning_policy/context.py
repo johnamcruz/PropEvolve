@@ -15,8 +15,16 @@ class ContextConfig:
     fields: tuple[str, ...]
     input_mode: str = "specialists"
     text_steps: int | None = None
+    volatility_lookback: int | None = None
 
     def __post_init__(self):
+        economic_fields = {"trade.volatility_r", "trade.cost_r", "trade.volatility_available"}
+        if economic_fields.intersection(self.fields):
+            if (not economic_fields.issubset(self.fields)
+                    or type(self.volatility_lookback) is not int or self.volatility_lookback < 1):
+                raise ValueError("R context requires all economic fields and a positive volatility lookback")
+        elif self.volatility_lookback is not None:
+            raise ValueError("volatility lookback requires R context fields")
         if self.input_mode not in {"specialists", "embeddings"}:
             raise ValueError("unknown reasoning input mode")
         if self.input_mode == "embeddings" and any(
@@ -35,10 +43,11 @@ class ContextConfig:
     @classmethod
     def load(cls, path: str | Path):
         payload = json.loads(Path(path).read_text())
-        if set(payload) - {"context_steps", "fields", "input_mode", "text_steps"}:
+        if set(payload) - {"context_steps", "fields", "input_mode", "text_steps", "volatility_lookback"}:
             raise ValueError("unexpected context config fields")
         return cls(payload["context_steps"], tuple(payload["fields"]),
-                   payload.get("input_mode", "specialists"), payload.get("text_steps"))
+                   payload.get("input_mode", "specialists"), payload.get("text_steps"),
+                   payload.get("volatility_lookback"))
 
 
 @dataclass(frozen=True)

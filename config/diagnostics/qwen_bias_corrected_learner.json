@@ -1,0 +1,4 @@
+{
+  "inherits": "../reasoning/error_selected_distillation_sft.json",
+  "optimizer_config": {"adam": {"bias_correction": true}}
+}

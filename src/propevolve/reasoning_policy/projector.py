@@ -37,8 +37,10 @@ def state_extension_of(parent, child):
                    if key not in {"state_fields", "state_scales"}}
     child_base = {key: value for key, value in child.items()
                   if key not in {"state_fields", "state_scales"}}
-    return (parent_base == child_base and not parent.get("state_fields")
-            and bool(child.get("state_fields")))
+    old_fields, new_fields = parent.get("state_fields", []), child.get("state_fields", [])
+    return (parent_base == child_base and len(new_fields) > len(old_fields)
+            and new_fields[:len(old_fields)] == old_fields
+            and child.get("state_scales", [])[:len(old_fields)] == parent.get("state_scales", []))
 
 
 def pooling_weights(available, market_tokens):
@@ -135,6 +137,14 @@ def restore_projector(model, directory, *, allow_state_extension=False):
     path = Path(directory) / "projector.safetensors"
     weights = mx.load(str(path))
     expected = {key: value for key, value in tree_flatten(model.parameters()) if key.startswith("market_projector.")}
+    key = "market_projector.state_projection.weight"
+    if allow_state_extension and key in weights and key in expected:
+        old, new = weights[key], expected[key]
+        if old.ndim == new.ndim == 2 and old.shape[0] == new.shape[0] and old.shape[1] < new.shape[1]:
+            # Preserve the old prefix exactly; only newly appended input columns
+            # start at zero. They remain trainable by the usual optimizer.
+            weights[key] = mx.concatenate([old, mx.zeros(
+                (old.shape[0], new.shape[1] - old.shape[1]), dtype=old.dtype)], axis=1)
     missing = set(expected) - set(weights)
     permitted = ({key for key in expected if key.startswith(
                   "market_projector.state_projection.")}

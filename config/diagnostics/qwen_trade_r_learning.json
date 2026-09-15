@@ -1,0 +1,20 @@
+{
+  "parent_config": "config/reasoning/error_selected_distillation_parent_sft.json",
+  "learner_config": "config/diagnostics/qwen_trade_r_learner.json",
+  "view_config": "config/diagnostics/qwen_trade_r_learner.json",
+  "view": "runs/reasoning-challenger/trade-r-context/view",
+  "label_audit": ".private/research/trade-r-label-audit.json",
+  "output": "runs/reasoning-challenger/decisive-trade-r-learning-01",
+  "seed": 17,
+  "rows_per_action": 2,
+  "minimum_economic_gap": 0.25,
+  "ambiguity_r": 0.01,
+  "memory_gb": 6,
+  "cache_mb": 256,
+  "retention": {"loss_weight": 1.0, "temperature": 1.0},
+  "phases": [
+    {"name": "entry_acquisition", "actions": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"], "optimizer_steps": 10},
+    {"name": "management_and_retention", "actions": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1", "HOLD", "CLOSE"], "optimizer_steps": 10}
+  ],
+  "reload_tolerance": 0.0001
+}
