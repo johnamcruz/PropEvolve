@@ -1,6 +1,13 @@
 """Independent scalar economic reference; never used to generate training labels."""
 
 
+def label_audit_passed(reports):
+    """A completed audit needs actual row evidence and zero discrepancies."""
+    return (bool(reports)
+            and sum(sum(report['counts'].values()) for report in reports.values()) > 0
+            and all(not report['issues'] for report in reports.values()))
+
+
 def management_entry(row, parent, lookup):
     """Resolve actual entry execution, never infer direction from a WAIT label."""
     sides = {'ENTER_LONG_1': 1, 'ENTER_SHORT_1': -1}

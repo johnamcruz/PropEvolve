@@ -10,7 +10,7 @@ import numpy as np
 
 from propevolve.assets import AssetContract
 from propevolve.reasoning_policy.integrity import file_digest
-from propevolve.reasoning_policy.label_reference import barrier_result, management_entry
+from propevolve.reasoning_policy.label_reference import barrier_result, management_entry, label_audit_passed
 from propevolve.reasoning_policy.workflow import atomic_json
 
 
@@ -168,12 +168,15 @@ def main():
             reports[f'{role}/{ticker}'] = {'counts': counts, 'issues': issues,
                                           'diagnostics': notes, 'examples': examples}
         print(f'[label-audit] ticker={ticker} completed', flush=True)
-    report = {'scope': 'independent OHLC label audit; not proof of causal predictability',
+    passed = label_audit_passed(reports)
+    report = {'status': 'PASS' if passed else 'BLOCKED',
+              'scope': 'independent OHLC label audit; not proof of causal predictability',
               'dataset_manifest_sha256': file_digest(dataset/'manifest.json'),
               'sealed_2026_used': False, 'reports': reports}
     atomic_json(Path(config['output']), report)
     print(json.dumps(report, indent=2))
+    return 0 if passed else 1
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

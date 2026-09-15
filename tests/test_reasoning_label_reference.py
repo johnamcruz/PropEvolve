@@ -3,6 +3,15 @@ import pytest
 from propevolve.reasoning_policy.label_reference import barrier_result
 
 
+def test_label_audit_gate_requires_examined_rows_and_no_discrepancies():
+    from propevolve.reasoning_policy.label_reference import label_audit_passed
+    assert label_audit_passed({'train/NQ': {'counts': {'WAIT': 1}, 'issues': {}}})
+    assert not label_audit_passed({'train/NQ': {
+        'counts': {'WAIT': 1}, 'issues': {'teacher_alignment_volume': 1}}})
+    assert not label_audit_passed({})
+    assert not label_audit_passed({'train/NQ': {'counts': {}, 'issues': {}}})
+
+
 def test_management_execution_audit_replays_actual_fills_and_rejects_tampered_return():
     import copy
     import numpy as np

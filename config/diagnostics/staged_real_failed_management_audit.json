@@ -1,0 +1,5 @@
+{
+  "collection_config": "config/diagnostics/staged_real_failed_management.json",
+  "economic_tolerance_r": 0.00001,
+  "output": ".private/research/staged-real-failed-management-replay.json"
+}
