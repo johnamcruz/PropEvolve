@@ -1,0 +1,99 @@
+{
+  "parent_config": "config/reasoning/error_selected_distillation_parent_sft.json",
+  "learner_config": "config/diagnostics/management_correction_learner.json",
+  "view_config": "config/diagnostics/management_correction_learner.json",
+  "view": "runs/reasoning-challenger/management-correction-r-lineage/view",
+  "label_audit": ".private/research/management-correction-r-lineage-label-audit.json",
+  "output": "runs/reasoning-challenger/management-reinforced-anchor-coverage-01",
+  "fixed_indices": {
+    "train": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44
+    ],
+    "valid": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  },
+  "seed": 17,
+  "minimum_economic_gap": 0.25,
+  "ambiguity_r": 0.01,
+  "memory_gb": 6,
+  "cache_mb": 256,
+  "sampling_strategy": "balanced_actions",
+  "retention": {
+    "loss_weight": 1,
+    "temperature": 1
+  },
+  "phases": [
+    {
+      "name": "corrected_management_and_retention",
+      "actions": [
+        "WAIT",
+        "ENTER_LONG_1",
+        "ENTER_SHORT_1",
+        "HOLD",
+        "CLOSE"
+      ],
+      "optimizer_steps": 20
+    }
+  ],
+  "reload_tolerance": 0.0001,
+  "retention_switch": {
+    "after_updates": 7,
+    "supervision_weight": 1
+  },
+  "initial_score_reference": "runs/reasoning-challenger/management-correction-learning-01/report.json",
+  "sampling_cycle_rows": 100
+}

@@ -1,0 +1,6 @@
+{
+  "source_report": "runs/reasoning-challenger/management-complete-anchor-probe-02/report.json",
+  "output": "runs/reasoning-challenger/management-update-attribution-01",
+  "memory_gb": 6,
+  "cache_mb": 256
+}

@@ -21,6 +21,7 @@ from propevolve.reasoning_policy.projector import export_policy_weights
 from propevolve.reasoning_policy.supervised_trainer import (
     configure_trainable_components, build_optimizer, tensor_batches, batch_loss,
     evaluate_action_validation,
+    batch_objective_loss,
 )
 from propevolve.reasoning_policy.targeted_subset import _mastered_boundaries
 from propevolve.reasoning_policy.workflow import atomic_json
@@ -178,7 +179,7 @@ def main():
                 report['stages'].append(result)
                 previous = current
                 update = event['iteration'] // accumulation
-                if switch and update <= switch['after_updates']:
+                if switch and switch.get('reference_report') and update <= switch['after_updates']:
                     reference = json.loads(Path(switch['reference_report']).read_text())
                     expected = reference['stages'][update-1]['evidence']['scores']
                     delta = max(abs(a-b) for left,right in zip(expected, current['scores'])
@@ -255,9 +256,92 @@ def main():
                 iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True,
                     skip_batches=iteration_offset,
                     on_selected=record_draw,
+                    cycle_rows=plan.get('sampling_cycle_rows'),
                     sampling_strategy=plan.get('sampling_strategy', 'random')),
                 training_callback=Callback())
             iteration_offset += segment_iterations
+    if plan.get('complete_anchor_probe'):
+        from itertools import islice
+        from propevolve.reasoning_policy.decisive_learning import mean_batch_gradient
+        probe = plan['complete_anchor_probe']
+        if probe['update'] != phase['optimizer_steps'] + 1:
+            raise ValueError('complete anchor probe must immediately follow the frozen prefix')
+        reference = json.loads(Path(probe['reference_report']).read_text())
+        before_probe = assess('train')
+        def require_probe_parity(actual, expected):
+            delta = max(abs(a-b) for left,right in zip(actual['scores'], expected['scores'])
+                        for a,b in zip(left,right))
+            if delta > plan['reload_tolerance']:
+                raise ValueError(f'complete-anchor native proposal reproduction differs: {delta}')
+            return delta
+        prefix_delta = require_probe_parity(before_probe,
+            reference['stages'][probe['update']-2]['evidence'])
+        saved_weights = tree_map(lambda x: x, model.trainable_parameters())
+        saved_optimizer = tree_map(lambda x: x, optimizer.state)
+        saved_random = list(mx.random.state)
+        mx.eval(saved_weights, saved_optimizer, saved_random)
+        from propevolve.reasoning_policy.training_checkpoint import save_training_state
+        save_training_state(destination / 'probe-prefix-state', model, optimizer, {
+            'plan_sha256': report['plan_sha256'], 'view_sha256': report['view_sha256'],
+            'dataset_sha256': report['dataset_sha256'], 'iteration': iterations,
+            'frozen_retention': [row['mastered_anchor_retention'] for row in selected],
+            'selected_indices': selected_indices, 'assessment': before_probe})
+        next_draws = []
+        next_batches = list(islice(tensor_batches(selected, config['batch_size'],
+            config['max_seq_length'], loop=True, seed=config['seed'], include_partial=True,
+            sampling_strategy=plan.get('sampling_strategy', 'random'), skip_batches=iterations,
+            on_selected=lambda ids: next_draws.append([selected_indices[i] for i in ids])),
+            accumulation))
+        model.train()
+        original_loss = lambda m, *batch: batch_loss(m, *batch, config=segment_config)[0]
+        from dataclasses import replace
+        control_args = replace(native, iters=accumulation,
+            steps_per_report=accumulation, steps_per_save=accumulation,
+            grad_checkpoint=False, adapter_file=str(destination / 'control.safetensors'))
+        train(model, optimizer, selected, None, args=control_args,
+            loss=partial(batch_loss, config=segment_config),
+            iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True,
+                skip_batches=iterations, sampling_strategy=plan.get('sampling_strategy', 'random')))
+        control = assess('train')
+        control_delta = require_probe_parity(control,
+            reference['stages'][probe['update']-1]['evidence'])
+        model.update(saved_weights)
+        optimizer.state = saved_optimizer
+        mx.random.state = saved_random
+        mx.eval(model.parameters(), optimizer.state, mx.random.state)
+        model.train()
+        retention_loss = partial(batch_objective_loss,
+            config=segment_config, objective='retention')
+        acquisition_loss = lambda m, *batch: original_loss(m, *batch) - retention_loss(m, *batch)
+        acquisition_value, acquisition_gradient = mean_batch_gradient(model, next_batches,
+            loss=acquisition_loss, weight_by_rows=False)
+        anchors = [row for row in selected
+                   if any(row['mastered_anchor_retention']['boundaries'].values())]
+        anchor_indices = [selected_indices[i] for i,row in enumerate(selected)
+                          if any(row['mastered_anchor_retention']['boundaries'].values())]
+        anchor_value, anchor_gradient = mean_batch_gradient(model,
+            tensor_batches(anchors, probe['anchor_batch_size'], config['max_seq_length'],
+                           include_partial=True), loss=retention_loss, weight_by_rows=True)
+        gradient = tree_map(lambda a,b: a+b, acquisition_gradient, anchor_gradient)
+        optimizer.update(model, gradient)
+        mx.eval(model.parameters(), optimizer.state)
+        candidate = assess('train')
+        acquisition_after = sum(float(acquisition_loss(model, *b).item())
+                                for b in next_batches) / len(next_batches)
+        report['complete_anchor_probe'] = {
+            'update': probe['update'], 'reference_sha256': file_digest(probe['reference_report']),
+            'prefix_score_delta': prefix_delta, 'control_score_delta': control_delta,
+            'next_microbatch_indices': next_draws, 'anchor_indices': anchor_indices,
+            'before': before_probe, 'control': control, 'candidate': candidate,
+            'control_progress': update_progress(before_probe['boundaries'], control['boundaries']),
+            'candidate_progress': update_progress(before_probe['boundaries'], candidate['boundaries']),
+            'acquisition_loss_before': float(acquisition_value.item()),
+            'acquisition_loss_after': acquisition_after,
+            'complete_anchor_loss_before': float(anchor_value.item()),
+            'normalization': 'equal acquisition microbatch mean plus complete anchor row mean',
+            'optimizer': 'same native optimizer; restored weights, complete state and RNG before candidate'}
+        atomic_json(destination / 'report.json', report)
+        print('[complete-anchor] ' + json.dumps(report['complete_anchor_probe']['candidate_progress']), flush=True)
     report['after'] = {'train': assess('train'), 'valid': assess('valid')}
     for role in ('train', 'valid'):
         report[role + '_comparison'] = compare_learning(report['before'][role]['boundaries'],

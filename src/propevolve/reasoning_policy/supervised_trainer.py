@@ -686,7 +686,7 @@ def pack_examples(rows, *, max_seq_length):
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
                    sampling_strategy="random", include_partial=False, skip_batches=0,
                    coverage_sampler=None, targeted_sampler=None,
-                   mastered_anchor_retention=None, on_selected=None):
+                   mastered_anchor_retention=None, on_selected=None, cycle_rows=None):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
@@ -694,6 +694,10 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
         raise ValueError("not enough supervised rows for a batch")
     if coverage_sampler is not None and targeted_sampler is not None:
         raise ValueError("training batches require one rotating sampler")
+    if cycle_rows is not None and (type(cycle_rows) is not int or cycle_rows < len(dataset)
+            or sampling_strategy != "balanced_actions" or coverage_sampler is not None
+            or targeted_sampler is not None):
+        raise ValueError("explicit cycle rows require untruncated balanced action sampling")
     rng = np.random.default_rng(seed)
     round_index = 0
     while True:
@@ -702,7 +706,8 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
         elif loop and coverage_sampler is not None:
             order = coverage_sampler.order(round_index)
         elif loop and sampling_strategy == "balanced_actions":
-            order = balanced_action_order(dataset, count=len(dataset), rng=rng)
+            order = balanced_action_order(dataset,
+                count=len(dataset) if cycle_rows is None else cycle_rows, rng=rng)
         elif not loop and sampling_strategy == "balanced_actions":
             order = balanced_validation_order(dataset, rng=rng)
         else:

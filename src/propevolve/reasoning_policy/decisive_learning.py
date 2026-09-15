@@ -2,6 +2,45 @@
 import math
 
 
+def component_snapshot(before, after, *, component):
+    """Isolate a saved actual update, without modifying either source snapshot."""
+    if component not in {'lora', 'projector', 'both'} or before.keys() != after.keys():
+        raise ValueError('component comparison requires identical parameter identities')
+    result = {}
+    for name, value in before.items():
+        group = ('projector' if name.startswith('market_projector.') else
+                 'lora' if name.endswith(('.lora_a', '.lora_b')) else None)
+        if group is None or value.shape != after[name].shape:
+            raise ValueError('unsupported or mismatched diagnostic parameter')
+        result[name] = after[name] if component in {group, 'both'} else value
+    return result
+
+
+def mean_batch_gradient(model, batches, *, loss, weight_by_rows):
+    """Stream a diagnostic gradient without advancing the native optimizer.
+
+    Row weighting matches a complete-panel mean, including a partial tail.
+    Equal batch weighting matches MLX-LM's native accumulation convention.
+    """
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_map
+    derivative = nn.value_and_grad(model, loss)
+    total_value, total_gradient, mass = None, None, 0
+    for batch in batches:
+        value, gradient = derivative(model, *batch)
+        weight = int(batch[0].shape[0]) if weight_by_rows else 1
+        weighted = tree_map(lambda g: weight * g, gradient)
+        total_gradient = (weighted if total_gradient is None else
+                          tree_map(lambda a, b: a + b, total_gradient, weighted))
+        total_value = weight * value if total_value is None else total_value + weight * value
+        mass += weight
+        mx.eval(total_value, total_gradient)
+    if not mass:
+        raise ValueError('gradient panel must not be empty')
+    return total_value / mass, tree_map(lambda g: g / mass, total_gradient)
+
+
 def require_initial_score_parity(reference, initial, indices, *, tolerance):
     """Fail before updates if an input ablation changes the frozen control."""
     if reference['indices'] != indices:

@@ -3,6 +3,20 @@ import json
 import numpy as np
 import pytest
 
+
+def test_component_snapshot_isolates_actual_update_without_mutating_parent():
+    from propevolve.reasoning_policy.decisive_learning import component_snapshot
+    before = {'market_projector.weight': mx.array([1., 2.]),
+              'model.layer.lora_a': mx.array([3.]), 'model.layer.lora_b': mx.array([4.])}
+    after = {'market_projector.weight': mx.array([10., 20.]),
+             'model.layer.lora_a': mx.array([30.]), 'model.layer.lora_b': mx.array([40.])}
+    assert component_snapshot(before, after, component='projector')['model.layer.lora_a'].tolist() == [3.]
+    assert component_snapshot(before, after, component='lora')['market_projector.weight'].tolist() == [1., 2.]
+    assert component_snapshot(before, after, component='lora')['model.layer.lora_b'].tolist() == [40.]
+    assert before['market_projector.weight'].tolist() == [1., 2.]
+    with pytest.raises(ValueError):
+        component_snapshot(before, {**after, 'unknown': mx.array([0.])}, component='lora')
+
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
@@ -115,6 +129,73 @@ def test_batch_draw_receipts_match_real_rows_without_changing_tensors():
         assert selected == [int(x) for x in actual[-2][:, -1, 0].tolist()]
         for left, right in zip(actual, expected):
             np.testing.assert_array_equal(left, right)
+
+
+def test_balanced_complete_cycle_exposes_every_selected_example():
+    from itertools import islice
+    from collections import Counter
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    targets = (['CLOSE'] * 2 + ['ENTER_LONG_1'] * 2 + ['ENTER_SHORT_1'] * 2
+               + ['HOLD'] * 2 + ['WAIT'] * 2 + ['HOLD'] * 18 + ['CLOSE'] * 17)
+    rows = []
+    for target in targets:
+        row = example()
+        row['target_name'] = target
+        if target in {'HOLD', 'CLOSE'}:
+            row['alternatives'] = [([1, 2, 3, 4], 2), ([1, 2, 5, 4], 2)]
+            row['action_targets'] = {'names': ['HOLD', 'CLOSE'],
+                'probabilities': [.8, .2] if target == 'HOLD' else [.2, .8],
+                'values': [2., -1.] if target == 'HOLD' else [-1., 2.]}
+        else:
+            index = row['action_targets']['names'].index(target)
+            row['action_targets'] = {**row['action_targets'],
+                'probabilities': [.8 if i == index else .1 for i in range(3)],
+                'values': [2. if i == index else -1. for i in range(3)]}
+        index = row['action_targets']['names'].index(target)
+        row['tokens'], row['offset'] = row['alternatives'][index]
+        rows.append(row)
+    draws = []
+    list(islice(tensor_batches(rows, 2, 8, loop=True, seed=17,
+        include_partial=True, sampling_strategy='balanced_actions', cycle_rows=100,
+        on_selected=lambda ids: draws.extend(ids)), 50))
+    assert set(draws) == set(range(45))
+    assert Counter(targets[i] for i in draws) == {name: 20 for name in set(targets)}
+
+
+@pytest.mark.parametrize('cycle_rows', [0, 1, True, 2.5])
+def test_explicit_balanced_cycle_rejects_truncation(cycle_rows):
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    with pytest.raises(ValueError, match='cycle rows'):
+        next(tensor_batches([example()] * 5, 2, 8, loop=True,
+            sampling_strategy='balanced_actions', cycle_rows=cycle_rows))
+
+
+def test_streamed_anchor_gradient_equals_complete_panel_including_partial_batch():
+    from functools import partial
+    from mlx.utils import tree_flatten
+    from propevolve.reasoning_policy.decisive_learning import mean_batch_gradient
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches, batch_objective_loss
+    model = tiny_backbone()
+    rows = []
+    for i in range(3):
+        rows.append({**example(), 'mastered_anchor_retention': {
+            'scores': [0., 2., 1.],
+            'boundaries': {'entry': True, 'direction': False, 'management': False}},
+            'market_embeddings': [[0., 0.], [1., 2.], [float(i), 4.]]})
+    config = {'input_mode': 'embeddings', 'decision_objective': 'hierarchical_binary',
+        'action_supervision': {'enabled': True, 'soft_target_weight': .5,
+                              'ranking_weight': 2., 'margin': .1},
+        'mastered_anchor_retention': {'loss_weight': 1., 'temperature': 1.,
+                                      'supervision_weight': 1.}}
+    loss = partial(batch_objective_loss, config=config, objective='retention')
+    full = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=8))
+    expected_value, expected_grad = nn.value_and_grad(model, loss)(model, *full)
+    value, gradient = mean_batch_gradient(model,
+        tensor_batches(rows, 2, 8, include_partial=True), loss=loss, weight_by_rows=True)
+    assert float(value.item()) == pytest.approx(float(expected_value.item()), abs=1e-6)
+    for (name, actual), (other, expected) in zip(tree_flatten(gradient), tree_flatten(expected_grad)):
+        assert name == other
+        np.testing.assert_allclose(actual, expected, atol=1e-6, rtol=1e-5)
 
 
 def test_training_checkpoint_restores_optimizer_rng_and_next_update(tmp_path):
