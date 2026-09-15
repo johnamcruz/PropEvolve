@@ -12,6 +12,14 @@
 - **Direction decision**: when the economic label calls for ENTER, evaluate
   LONG versus SHORT separately. Entering on the wrong side fails direction and
   the complete trade action, but does not also fail the ENTER decision.
+- **Entry outcome evidence**: barrier labels distinguish `stop_before_target`,
+  `below_target_profit`, `below_target_loss`, `below_target_flat`, and achieved
+  target levels. `terminal_pnl` is the conservative barrier-reference outcome;
+  `targets.entry_evidence` separately retains full-horizon return and MFE/MAE.
+  A recovery after a stop is never credited to the stopped trade. These are
+  entry-qualification labels, not an adaptive exit-policy backtest. The existing
+  JSON qualification utilities and direction/WAIT convention remain unchanged;
+  distinguishing outcomes is not a claim that their learning weights are optimal.
 - **Management decision**: an open position learns HOLD versus CLOSE only.
 - **Executable management labels**: JSON opportunity contract
   `management_label_mode: simulator_continuation` compares next-open CLOSE with

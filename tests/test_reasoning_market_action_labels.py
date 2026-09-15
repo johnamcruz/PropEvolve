@@ -1,6 +1,45 @@
 from propevolve.decision import Action
 from propevolve.reasoning_policy.labels import classify_market_action_rows, label_market_actions
 from test_reasoning_challenger_e2e import environment
+import numpy as np
+import pytest
+
+
+@pytest.mark.parametrize("side,sign", [(Action.ENTER_LONG_1, 1), (Action.ENTER_SHORT_1, -1)])
+def test_entry_labels_distinguish_stop_from_profitable_target_miss(side, sign):
+    env = environment()
+    market = env.markets["NQ"]
+    path = 1000 + sign * np.array([0., 0., 5., 10., 0., 0., 0., 0.])
+    market.open[:] = market.close[:] = path
+    market.high[:], market.low[:] = path + .1, path - .1
+    kwargs = dict(decision=0, role_end=8, observation=[0.], risk_dollars=300.,
+        point_value=20., round_trip_fee=4., minimum_mll_headroom=3000.,
+        horizon=3, target_rs=(2., 3., 4.), stop_r=1.,
+        utilities={"winner": 2., "failure": -1., "wait": 0.,
+                   "missed_opportunity": -.25, "conflict_margin": .25})
+    missed = label_market_actions(market, **kwargs)
+    assert missed.outcomes[side].outcome == "below_target_profit"
+    assert missed.outcomes[side].terminal_pnl == pytest.approx(196.)
+    assert missed.outcomes[Action.WAIT].reward_to_go > missed.outcomes[side].reward_to_go
+    # Same terminal profit, but this path first crossed the initial stop.
+    if sign > 0:
+        market.low[2] = 980.
+    else:
+        market.high[2] = 1020.
+    stopped = label_market_actions(market, **kwargs)
+    assert stopped.outcomes[side].outcome == "stop_before_target"
+    assert stopped.outcomes[side].terminal_pnl == pytest.approx(-300.)
+    assert stopped.entry_evidence[side.name]["full_horizon_terminal_r_net"] == pytest.approx(196 / 300)
+    from propevolve.reasoning_policy.context import ContextConfig, RollingContext
+    from propevolve.reasoning_policy.dataset import supervised_record
+    context = RollingContext(ContextConfig(2, ("trade.current_r",), input_mode="embeddings"))
+    context.append(int(market.timestamps[0].astype("datetime64[ns]").astype(np.int64)),
+        {"trade.current_r": 0.}, embedding=np.ones(2))
+    record = supervised_record(context.snapshot(), stopped, source_id="fixture",
+        continuation_id="barrier-reference", target_temperature=1.)
+    assert record["targets"]["entry_evidence"][side.name]["barrier_outcome"] == "stop_before_target"
+    assert "entry_evidence" not in record["messages"][-2]["content"]
+    assert "mfe_r_gross" not in record["messages"][-2]["content"]
 
 
 def _labels(kind):

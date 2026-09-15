@@ -1,8 +1,9 @@
-"""Same-state economic labels, computed only by the production simulator.
+"""Same-state economic labels with explicit execution/reference semantics.
 
-These are realized outcomes under a declared continuation policy, not oracle
-pass probabilities. Reconstructing a bounded causal prefix through reset/step
-avoids an incomplete snapshot implementation and shares immutable market data.
+Continuation labels use the production simulator and a declared causal policy.
+Entry qualification uses a conservative OHLC barrier reference, not an adaptive
+exit-policy return or pass probability. Reconstructed simulator prefixes share
+immutable market data without inventing an incomplete snapshot implementation.
 """
 
 from __future__ import annotations
@@ -280,6 +281,35 @@ class ActionLabels:
     observation: np.ndarray
     outcomes: Mapping[Action, ActionOutcome]
     management_evidence: Mapping[str, dict] | None = None
+    entry_evidence: Mapping[str, dict] | None = None
+
+
+def _entry_barrier_evidence(market, *, decision, horizon, sign, risk, point_value, fee, target, stop):
+    """Economic barrier reference, separate from full-horizon oracle excursion.
+
+    Uses the same conservative adverse-first OHLC convention as qualification.
+    Target fills are credited at the barrier; adverse opening gaps are not
+    clamped to the stop. This is not an adaptive exit-policy simulation.
+    """
+    first, last = decision + 1, decision + horizon
+    entry = float(market.open[first])
+    adverse_points = (stop * risk - fee) / point_value
+    favorable_points = (target * risk + fee) / point_value
+    for index in range(first, last + 1):
+        opening, high, low = map(float, (market.open[index], market.high[index], market.low[index]))
+        if not np.isfinite([opening, high, low]).all():
+            raise ValueError("nonfinite entry barrier source")
+        adverse = entry - low if sign > 0 else high - entry
+        favorable = high - entry if sign > 0 else entry - low
+        if adverse >= adverse_points:
+            stop_price = entry - sign * adverse_points
+            fill = min(opening, stop_price) if sign > 0 else max(opening, stop_price)
+            return "stop_before_target", sign * (fill - entry) * point_value - fee, index
+        if favorable >= favorable_points:
+            return f"target_{target:g}r_before_stop", target * risk, index
+    pnl = sign * (float(market.close[last]) - entry) * point_value - fee
+    category = "below_target_profit" if pnl > 0 else "below_target_loss" if pnl < 0 else "below_target_flat"
+    return category, pnl, last
 
 
 def label_market_actions(
@@ -291,8 +321,10 @@ def label_market_actions(
     Future paths are labels only and never enter the causal prompt. This is the
     SFT entry boundary: the smallest configured target (normally 2R) establishes
     a valid setup, while larger achieved targets increase its economic value.
-    Positioned HOLD/CLOSE labels are produced separately by
-    ``label_position_actions``; challenge pass/blow behavior belongs to RL.
+    Positioned HOLD/CLOSE labels are produced separately by the configured
+    management labeler; challenge pass/blow behavior belongs to RL. Barrier
+    terminal P&L and full-window excursions are distinct evidence. The utility
+    settings remain qualification preferences, not calibrated expected returns.
     """
     required = {"winner", "failure", "wait", "missed_opportunity", "conflict_margin"}
     if set(utilities) != required or not np.isfinite(list(utilities.values())).all():
@@ -332,20 +364,32 @@ def label_market_actions(
         Action.ENTER_LONG_1: side_values[0],
         Action.ENTER_SHORT_1: side_values[1],
     }
-    end_ns = int(market.timestamps[decision + horizon].astype("datetime64[ns]").astype(np.int64))
-    outcomes = {}
+    outcomes, evidence = {}, {}
     for action, value in values.items():
         side = "long" if action is Action.ENTER_LONG_1 else "short" if action is Action.ENTER_SHORT_1 else None
-        terminal_pnl = 0.0 if side is None else excursions[side]["terminal_r_net"] * risk_dollars
+        category, terminal_pnl, terminal_index = "wait", 0., decision + horizon
+        if side is not None:
+            achieved_target = achieved[0 if side == "long" else 1]
+            category, terminal_pnl, terminal_index = _entry_barrier_evidence(
+                market, decision=decision, horizon=horizon, sign=1 if side == "long" else -1,
+                risk=risk_dollars, point_value=point_value, fee=round_trip_fee,
+                target=achieved_target or target_rs[0], stop=stop_r)
+            evidence[action.name] = {
+                "qualified_entry": achieved_target > 0,
+                "achieved_target_r": achieved_target,
+                "barrier_outcome": category,
+                "barrier_terminal_r_net": terminal_pnl / risk_dollars,
+                "full_horizon_terminal_r_net": excursions[side]["terminal_r_net"],
+                "mfe_r_gross": excursions[side]["mfe_r_gross"],
+                "mae_r_gross": excursions[side]["mae_r_gross"],
+                "semantics": "adverse_first_barrier_reference_not_adaptive_execution"}
         outcomes[action] = ActionOutcome(
-            outcome=("wait" if side is None else
-                     f"target_{achieved[0 if side == 'long' else 1]:g}r_before_stop"
-                     if achieved[0 if side == "long" else 1] else "failed_target"),
+            outcome=category,
             terminal_pnl=float(terminal_pnl), reward_to_go=float(value),
-            minimum_mll_headroom=float(minimum_mll_headroom), steps=horizon,
-            outcome_end_ns=end_ns,
+            minimum_mll_headroom=float(minimum_mll_headroom), steps=terminal_index - decision,
+            outcome_end_ns=int(market.timestamps[terminal_index].astype("datetime64[ns]").astype(np.int64)),
         )
-    return ActionLabels(np.asarray(observation).copy(), outcomes)
+    return ActionLabels(np.asarray(observation).copy(), outcomes, entry_evidence=evidence)
 
 
 def label_position_continuation(

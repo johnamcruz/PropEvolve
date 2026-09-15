@@ -128,6 +128,8 @@ Exact value ties choose WAIT/HOLD when legal, never an arbitrary direction.
             "outcomes": {a.name: asdict(labels.outcomes[a]) for a in actions},
             **({"management_evidence": labels.management_evidence}
                if labels.management_evidence is not None else {}),
+            **({"entry_evidence": labels.entry_evidence}
+               if labels.entry_evidence is not None else {}),
         },
     }
 
