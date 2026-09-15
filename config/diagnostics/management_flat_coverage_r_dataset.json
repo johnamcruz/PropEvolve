@@ -1,0 +1,7 @@
+{
+  "dataset": "runs/reasoning-challenger/management-flat-coverage-pool/dataset",
+  "source": "config/reasoning/source_environment.json",
+  "context": "config/reasoning/context_trade_r_continuous_embeddings.json",
+  "output": "runs/reasoning-challenger/management-flat-coverage-r/dataset",
+  "specialist_score_mode": "post_fit"
+}
