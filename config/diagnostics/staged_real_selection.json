@@ -1,0 +1,15 @@
+{
+  "base_dataset": "runs/reasoning-challenger/staged-real-proof/dataset",
+  "output": "runs/reasoning-challenger/staged-real-proof/balanced-dataset",
+  "specialist_score_mode": "post_fit",
+  "sources": [
+    {"dataset": "runs/reasoning-challenger/staged-real-proof/dataset", "role": "train",
+     "indices": [0,1,12,24,25,26,37,39,40,52,53,54,58,59,71,72,74,82,83,84,95,101,102,108,109,110,117,124,125,126,138,139,146,158,163]},
+    {"dataset": "runs/reasoning-challenger/staged-real-proof/failed-management", "role": "train",
+     "indices": [12,51,87,135,185,214,262,346,353,377]},
+    {"dataset": "runs/reasoning-challenger/staged-real-proof/dataset", "role": "valid",
+     "indices": [0,11,12,13,16,25,26,27,28,29,30,31,42,43,46,47,48,49,50,61,66,71,72,73,75,87,88,99,100,112,113,124,125,126,138]},
+    {"dataset": "runs/reasoning-challenger/staged-real-proof/failed-management", "role": "valid",
+     "indices": [8,56,68,84,86,110,134,158,182,194]}
+  ]
+}

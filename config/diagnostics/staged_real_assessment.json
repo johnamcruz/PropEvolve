@@ -1,0 +1,6 @@
+{
+  "inherits": "staged_real_sft.json",
+  "stage_role": "staged_initialization",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/frozen-base",
+  "resume_adapter_file": null
+}
