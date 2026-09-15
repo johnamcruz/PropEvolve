@@ -697,8 +697,7 @@ def main(argv=None):
         result = {"stage": args.stage, "completed": True}
     elif args.stage == "rl":
         from .context import ContextConfig
-        from .staged_inference import StagedReasoningPolicy
-        from .rl import read_rl_config, MLXAdapterLearner, train_rl
+        from .rl import read_rl_config, MLXAdapterLearner, train_rl, load_challenge_policy
         source, _, _, _, identity = load_source_contract(config, root)
         rl_config = read_rl_config(resolve(root, config["rl_config"]))
         output = resolve(root, rl_config["output_adapter"])
@@ -735,9 +734,8 @@ def main(argv=None):
             receipt = verify_checkpoint(resolve(root, resume))
             if receipt["contract"] != contract:
                 raise ValueError("RL resume contract differs from saved training")
-        runtime_settings = {**model_settings, "adapter_path":
-            model_settings["adapter_path"] if resume is None else str(resolve(root, resume))}
-        policy = StagedReasoningPolicy.from_settings(runtime_settings)
+        policy = load_challenge_policy(model_settings, context,
+            resume_checkpoint=None if resume is None else resolve(root, resume))
         learner = MLXAdapterLearner(policy, rl_config)
         resume_state = None
         if resume is not None:

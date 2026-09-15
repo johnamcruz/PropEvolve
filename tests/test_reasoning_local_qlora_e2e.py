@@ -74,45 +74,25 @@ def test_inference_assessment_exports_indexed_scores_without_changing_metrics(tm
 
 
 
-def test_direct_market_adapter_feeds_trade_sft_in_existing_workflow(tmp_path):
+def test_staged_adapter_feeds_corrective_sft_in_existing_workflow(tmp_path):
     from mlx_lm import load
     from propevolve.reasoning_policy.workflow import run_workflow
-    from propevolve.reasoning_policy.integrity import file_digest
     from test_reasoning_prepared_full_action_e2e import prepared_action_view
-    from test_reasoning_market_distillation import settings
-    import shutil
     model_path = tiny_quantized_qwen(tmp_path / "model")
     _, tokenizer = load(model_path)
     _, _, action = prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer,
-        model=model_path, iters=2)
+        model=model_path, iters=2, staged=True)
     action.update(seed=11, validation_batch_size=1, val_batches=1, steps_per_report=1,
         steps_per_eval=1, save_every=2, trainable_components=["lora", "projector"],
         component_learning_rates={"lora": 1e-3, "projector": 1e-3})
-    data = tmp_path / "market-data"
-    shutil.copytree(tmp_path / "data", data)
-    for role in ("train", "valid"):
-        record = json.loads((data / f"{role}.jsonl").read_text())
-        target = {"expansion.long": .85, "expansion.short": .15}
-        record["targets"]["specialist_targets"] = target
-        record["messages"][-1]["content"] = json.dumps(target)
-        (data / f"{role}.jsonl").write_text(json.dumps(record) + "\n")
-    manifest = json.loads((data / "manifest.json").read_text())
-    manifest["files"] = {role: file_digest(data / f"{role}.jsonl") for role in ("train", "valid")}
-    (data / "manifest.json").write_text(json.dumps(manifest))
-    audit = json.loads((data / "audit.json").read_text())
-    audit["manifest_sha256"] = file_digest(data / "manifest.json")
-    (data / "audit.json").write_text(json.dumps(audit))
-    market = {**action, "data": str(data), "stage_role": "market_distillation",
-        "distillation_targets": ["expansion"],
-        "market_distillation": settings(), "adapter_path": str(tmp_path / "market-adapter"),
-        "action_supervision": {"enabled": False, "margin": .25, "soft_target_weight": 1., "ranking_weight": 1.}}
-    action.update(resume_adapter_file=str(tmp_path / "market-adapter/adapters.safetensors"),
-                  resume_adapter_requirements={"stage_role": "market_distillation",
-                                               "distillation_targets": ["expansion"]})
-    (tmp_path / "market.json").write_text(json.dumps(market))
+    parent = {**action, "adapter_path": str(tmp_path / "parent-adapter")}
+    action.update(resume_adapter_file=str(tmp_path / "parent-adapter/adapters.safetensors"),
+                  resume_adapter_requirements={"architecture": "staged_reasoning_v1",
+                                               "staged_policy": parent["staged_policy"]})
+    (tmp_path / "parent.json").write_text(json.dumps(parent))
     (tmp_path / "action.json").write_text(json.dumps(action))
     steps = []
-    for name, adapter in (("market", "market-adapter"), ("action", "adapter")):
+    for name, adapter in (("parent", "parent-adapter"), ("action", "adapter")):
         job = {"workspace_root": str(tmp_path), "sft_config": f"{name}.json",
                "mlx_view": f"{name}-workflow-view"}
         (tmp_path / f"{name}-job.json").write_text(json.dumps(job))
@@ -125,7 +105,7 @@ def test_direct_market_adapter_feeds_trade_sft_in_existing_workflow(tmp_path):
     path.write_text(json.dumps(plan))
     result = run_workflow(path)
     assert result["status"] == "COMPLETE"
-    assert set(result["completed"]) == {"market", "action"}
+    assert set(result["completed"]) == {"parent", "action"}
     saved = json.loads((tmp_path / "adapter/adapter_config.json").read_text())
     assert saved["resume_adapter_file"] == action["resume_adapter_file"]
     assert "status=complete" in (tmp_path / "adapter/training.log").read_text()
@@ -143,7 +123,7 @@ def test_production_sft_resume_matches_uninterrupted_optimizer_path(tmp_path):
     model_path = tiny_quantized_qwen(tmp_path / "model")
     _, tokenizer = load(model_path)
     _, _, config = prepared_action_view(tmp_path, embeddings=True, tokenizer=tokenizer,
-                                        model=model_path, iters=2)
+                                        model=model_path, iters=2, staged=True)
     config.update(seed=11, val_batches=1, steps_per_report=1, steps_per_eval=1,
                   save_every=1, trainable_components=["lora", "projector"],
                   component_learning_rates={"lora": 1e-4, "projector": 1e-3},

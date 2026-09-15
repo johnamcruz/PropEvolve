@@ -63,6 +63,48 @@ def require_challenge_mastery_context(context_config):
     return context_config
 
 
+def load_challenge_policy(parent_settings, context_config, *, resume_checkpoint=None,
+                          policy_factory=None):
+    """Extend an authenticated SFT policy with explicit causal account inputs.
+
+    Only assessment state changes. Market queries, projector and learned LoRA
+    weights remain those of the SFT parent. Resumed artifacts must preserve this
+    exact contract and parent identity. The caller owns economic acceptance.
+    """
+    import copy
+    from .model_config import validate_trade_mastery_parent
+    from .integrity import file_digest
+    from .staged_inference import StagedReasoningPolicy
+    validate_trade_mastery_parent(parent_settings)
+    require_challenge_mastery_context(context_config)
+    if (parent_settings.get("architecture") != "staged_reasoning_v1"
+            or parent_settings.get("stage_role") != "trade_mastery"):
+        raise ValueError("challenge RL requires a staged trade-mastery parent")
+    previous = parent_settings["staged_policy"]["state_fields"]
+    if (not set(previous).issubset(context_config.fields)
+            or context_config.context_steps != parent_settings["projector"]["context_steps"]):
+        raise ValueError("challenge context must preserve SFT state and embedding history")
+    parent = Path(parent_settings["adapter_path"])
+    metadata = json.loads((parent / "adapter_config.json").read_text())
+    settings = copy.deepcopy(parent_settings)
+    settings["stage_role"] = "challenge_mastery"
+    settings["staged_policy"]["state_fields"] = list(context_config.fields)
+    settings["sft_parent_identity"] = {
+        "metadata_sha256": file_digest(parent / "adapter_config.json"),
+        "weights": {name: file_digest(parent / name) for name in metadata["weight_files"]}}
+    factory = policy_factory or StagedReasoningPolicy.from_settings
+    if resume_checkpoint is not None:
+        from .checkpoints import verify_checkpoint
+        verify_checkpoint(resume_checkpoint)
+        settings["adapter_path"] = str(resume_checkpoint)
+        return factory(settings)
+    policy = factory(parent_settings)
+    # A fresh runtime owns its loaded weights. Do not mutate the supplied JSON
+    # contract or rewrite the immutable parent's saved artifact.
+    policy.settings = settings
+    return policy
+
+
 @dataclass(frozen=True)
 class RLDecision:
     actions: tuple[str, ...]

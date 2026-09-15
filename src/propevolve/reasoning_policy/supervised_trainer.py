@@ -1043,6 +1043,8 @@ def authenticated_initial_validation(config, view, *, valid_rows):
 
 
 def train_supervised(config, view):
+    if config.get("architecture") != "staged_reasoning_v1":
+        raise ValueError("production SFT requires staged_reasoning_v1; legacy scorer training is retired")
     import mlx.core as mx
     from mlx_lm import load
     from mlx_lm.tuner.utils import linear_to_lora_layers

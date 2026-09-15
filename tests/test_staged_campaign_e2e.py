@@ -49,7 +49,9 @@ def test_native_staged_campaign_assesses_corrects_checkpoints_and_resumes(tmp_pa
                  "economic_contract": "fixture", "split_audit": "fixture"})
     (data / "audit.json").write_text(json.dumps({"status": "PASS",
         "manifest_sha256": file_digest(data / "manifest.json"),
-        "specialist_score_mode": "post_fit", "sealed_touched": False}))
+        "specialist_score_mode": "post_fit", "sealed_touched": False,
+        "actions_by_role": {role: {action: 1 for action in actions}
+                            for role in ("train", "valid")}}))
     staged = settings()
     staged["state_fields"] = ["trade.current_r"]
     staged["market"]["channels"] = [{"name": f"{g}.signal", "query": f"{g}?", "weight": 1.}
@@ -61,6 +63,11 @@ def test_native_staged_campaign_assesses_corrects_checkpoints_and_resumes(tmp_pa
         chat_template_kwargs={"enable_thinking": False}, steps_per_report=1,
         steps_per_eval=1, save_every=1, val_batches=5, seed=11,
         decision_objective="hierarchical_binary", stage_role="trade_mastery",
+        dataset_requirements={"minimum_rows_per_action": {
+            role: {action: 1 for action in actions} for role in ("train", "valid")},
+            "expected_splits": {"train": [start, start + day],
+                                "valid": [start + day, start + 2 * day]},
+            "sealed_start_ns": start + 2 * day},
         early_stopping={"enabled": True, "patience_evaluations": 2, "min_delta": 0.,
                         "restore_best": True, "monitor": "worst_task_advantage", "mode": "max"})
     parent = tmp_path / "parent.json"
@@ -107,3 +114,55 @@ def test_native_staged_campaign_assesses_corrects_checkpoints_and_resumes(tmp_pa
     child = json.loads(Path(round_state["candidate_policy_config"]).read_text())
     assert child["resume_adapter_requirements"]["staged_policy"] == staged
     assert run_campaign(campaign, phases=NativePhases()) == result
+
+    # The accepted SFT artifact (or safe parent fallback) starts challenge RL.
+    # Complete causal account context must be added without changing the market
+    # interpretation or discarding its trained weights.
+    import numpy as np
+    from propevolve.reasoning_policy.context import ContextConfig
+    from propevolve.reasoning_policy.mlx_sft import read_sft_config
+    from propevolve.reasoning_policy.rl import (
+        CHALLENGE_MASTERY_FIELDS, load_challenge_policy, rollout, MLXAdapterLearner)
+    from propevolve.reasoning_policy.checkpoints import restore_training_state
+    from test_reasoning_challenger_e2e import environment
+    selected = read_sft_config(result["current_policy_config"])
+    original_fields = list(selected["staged_policy"]["state_fields"])
+    context = ContextConfig(3, CHALLENGE_MASTERY_FIELDS, input_mode="embeddings")
+    actor = load_challenge_policy(selected, context)
+    assert selected["staged_policy"]["state_fields"] == original_fields
+    assert actor.settings["stage_role"] == "challenge_mastery"
+    assert actor.settings["staged_policy"]["market"] == staged["market"]
+    decisions, _ = rollout(actor, environment(), options={"ticker": "NQ", "start": 0},
+        context_config=context, sources=(), rng=np.random.default_rng(11), max_steps=8)
+    rl_settings = {"seed": 11, "learning_rate": 1e-5, "weight_decay": 0.,
+        "max_update_rows": 1, "epochs": 1, "minibatch_size": 1,
+        "clip_epsilon": .2, "kl_weight": .01, "entropy_weight": 0., "max_grad_norm": 1.}
+    learner = MLXAdapterLearner(actor, rl_settings)
+    row = decisions[0]
+    learner.update([(row, 1.)], np.random.default_rng(1))
+    checkpoint = tmp_path / "rl-checkpoint"
+    learner.save(checkpoint, selected["adapter_path"], {"contract": "fixture"},
+        runtime={"next_group": 1, "metrics": [], "rng": np.random.default_rng(1).bit_generator.state})
+    from propevolve.decision import Action
+    legal = [Action[name] for name in row.actions]
+    expected = actor.assess(row.staged_context, legal)
+    resumed = load_challenge_policy(selected, context, resume_checkpoint=checkpoint)
+    assert resumed.assess(row.staged_context, legal) == expected
+    resumed_learner = MLXAdapterLearner(resumed, rl_settings)
+    assert restore_training_state(checkpoint, optimizer=resumed_learner.optimizer)["next_group"] == 1
+    learner.update([(row, 1.)], np.random.default_rng(2))
+    resumed_learner.update([(row, 1.)], np.random.default_rng(2))
+    actual = resumed.assess(row.staged_context, legal)
+    expected = actor.assess(row.staged_context, legal)
+    np.testing.assert_allclose(list(actual["log_probs"].values()),
+        list(expected["log_probs"].values()), rtol=1e-6, atol=1e-6)
+
+    # Resume must reject a different assessment contract even when tensor
+    # dimensions and checkpoint files are still compatible.
+    changed_context = ContextConfig(3, tuple(reversed(CHALLENGE_MASTERY_FIELDS)),
+                                    input_mode="embeddings")
+    with pytest.raises(ValueError, match="staged_policy"):
+        load_challenge_policy(selected, changed_context, resume_checkpoint=checkpoint)
+    with pytest.raises(ValueError, match="embedding history"):
+        load_challenge_policy(selected,
+            ContextConfig(4, CHALLENGE_MASTERY_FIELDS, input_mode="embeddings"))

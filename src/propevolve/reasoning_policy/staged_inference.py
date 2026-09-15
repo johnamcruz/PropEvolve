@@ -56,6 +56,8 @@ class StagedReasoningPolicy:
             for key in ("projector", "staged_policy", "selection", "chat_template_kwargs"):
                 if metadata.get(key) != settings[key]:
                     raise ValueError(f"staged adapter contract differs at {key}")
+            if metadata.get("sft_parent_identity") != settings.get("sft_parent_identity"):
+                raise ValueError("staged adapter SFT parent identity differs")
             for filename, digest in metadata["weight_files"].items():
                 if file_digest(Path(adapter) / filename) != digest:
                     raise ValueError("staged adapter weight identity mismatch")

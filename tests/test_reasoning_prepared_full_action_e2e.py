@@ -36,7 +36,7 @@ def _embedding_cache(tmp_path, *, ticker="NQ", rows=8, width=2):
 
 
 def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="external-runtime",
-                         iters=1, embedding_storage="json", causal_state=False):
+                         iters=1, embedding_storage="json", causal_state=False, staged=False):
     env = environment()
     labels = label_actions(env, reset_options={"ticker": "NQ", "start": 0}, prefix=(),
         continuation_factory=passive_factory, max_steps=8)
@@ -49,6 +49,12 @@ def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="e
     day = 86400 * 10**9
     valid = copy.deepcopy(train)
     valid.update(source_id="valid", completed_at_ns=start+day, label_end_ns=train["label_end_ns"]+day)
+    if staged:
+        for record in (train, valid):
+            prompt = json.loads(record["messages"][1]["content"])
+            prompt["fields"] = ["trade.unrealized_r"]
+            record["messages"][1]["content"] = json.dumps(prompt)
+            record["targets"]["specialist_targets"] = {"expansion.long": .9, "expansion.short": .1}
     data = tmp_path / "data"
     write_supervised_dataset([train, valid], data,
         splits={"train": [start, start+day], "valid": [start+day, start+2*day]}, sealed_start_ns=start+2*day,
@@ -70,6 +76,10 @@ def prepared_action_view(tmp_path, *, embeddings=False, tokenizer=None, model="e
                       if embeddings else None),
         "action_verbalizers": ACTION_VERBALIZERS,
         "action_supervision": {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
+    if staged:
+        from test_staged_queries import settings
+        config.update(architecture="staged_reasoning_v1", staged_policy=settings(),
+            interpretation_loss_weight=.5, selection="hierarchical_greedy")
     path = tmp_path / "recipe.json"
     path.write_text(json.dumps(config))
     view = tmp_path / "view"
