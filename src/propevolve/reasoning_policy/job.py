@@ -697,7 +697,7 @@ def main(argv=None):
         result = {"stage": args.stage, "completed": True}
     elif args.stage == "rl":
         from .context import ContextConfig
-        from .policy import MLXActionPolicy
+        from .staged_inference import StagedReasoningPolicy
         from .rl import read_rl_config, MLXAdapterLearner, train_rl
         source, _, _, _, identity = load_source_contract(config, root)
         rl_config = read_rl_config(resolve(root, config["rl_config"]))
@@ -735,11 +735,9 @@ def main(argv=None):
             receipt = verify_checkpoint(resolve(root, resume))
             if receipt["contract"] != contract:
                 raise ValueError("RL resume contract differs from saved training")
-        policy = MLXActionPolicy.load(model_settings["model"],
-            adapter_path=model_settings["adapter_path"] if resume is None else str(resolve(root, resume)),
-            max_seq_length=model_settings["max_seq_length"],
-            chat_template_kwargs=model_settings["chat_template_kwargs"],
-            input_mode=model_settings["input_mode"], projector=model_settings["projector"])
+        runtime_settings = {**model_settings, "adapter_path":
+            model_settings["adapter_path"] if resume is None else str(resolve(root, resume))}
+        policy = StagedReasoningPolicy.from_settings(runtime_settings)
         learner = MLXAdapterLearner(policy, rl_config)
         resume_state = None
         if resume is not None:
@@ -769,7 +767,7 @@ def main(argv=None):
     else:
         from .context import ContextConfig
         from .evaluation import evaluate_responsibilities
-        from .policy import MLXActionPolicy
+        from .staged_inference import StagedReasoningPolicy
         source, _, splits, _, identity = load_source_contract(config, root)
         destination = resolve(root, config["evaluation_output"])
         if destination.exists():
@@ -781,8 +779,7 @@ def main(argv=None):
             from ..policy import load_policy
             policy = load_policy(resolve(root, config["policy_config"]), root=root)
         else:
-            # Existing challenger recipes remain valid.
-            policy = MLXActionPolicy.from_config(resolve(root, config["evaluation_policy_config"]), root=root)
+            policy = StagedReasoningPolicy.from_config(resolve(root, config["evaluation_policy_config"]), root=root)
         env, sources = load_role(config, root, source, "valid",
             include_specialists=policy.requires_specialists)
         criteria = json.loads(resolve(root, config["evaluation_metrics_config"]).read_text())

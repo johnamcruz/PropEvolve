@@ -356,6 +356,8 @@ def view_contract(config: dict) -> dict:
         "trust_remote_code", "dataset_requirements", "distillation_targets",
     )
     contract = {key: config.get(key) for key in keys}
+    if config.get("architecture") == "staged_reasoning_v1":
+        contract.update(architecture=config["architecture"], staged_policy=config["staged_policy"])
     if config.get("market_distillation") is not None:
         contract["market_distillation"] = config["market_distillation"]
     if config.get("error_selected_distillation") is not None:
@@ -416,7 +418,11 @@ system boundary for tests; the production caller loads it with MLX-LM.
                         reserved = projector_prefix_tokens(config["projector"])
                     else:
                         reserved = 0
-                    if config.get("market_distillation") is not None:
+                    staged = config.get("architecture") == "staged_reasoning_v1"
+                    if staged:
+                        from .staged_preparation import encode_staged_record
+                        encoded = encode_staged_record(record, config, tokenizer)
+                    elif config.get("market_distillation") is not None:
                         from .market_distillation import encode_market_targets
                         encoded = encode_market_targets(record, config["market_distillation"],
                             tokenizer, max_seq_length=config["max_seq_length"] - reserved,
@@ -426,13 +432,13 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             max_seq_length=config["max_seq_length"] - reserved,
                             chat_template_kwargs=config["chat_template_kwargs"])
                         encoded = {"tokens": tokens, "offset": offset}
-                    if config.get("error_selected_distillation") is not None:
+                    if not staged and config.get("error_selected_distillation") is not None:
                         from .market_distillation import encode_market_targets
                         encoded["error_selected_distillation"] = encode_market_targets(
                             record, config["error_selected_distillation"]["settings"],
                             tokenizer, max_seq_length=config["max_seq_length"] - reserved,
                             chat_template_kwargs=config["chat_template_kwargs"])
-                    if config["action_supervision"]["enabled"]:
+                    if not staged and config["action_supervision"]["enabled"]:
                         from .supervision import action_targets
                         alternatives = action_targets(record)
                         encoded["action_targets"] = alternatives

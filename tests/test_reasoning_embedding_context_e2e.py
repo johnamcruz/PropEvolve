@@ -50,10 +50,15 @@ def test_teacher_free_reasoning_adapter_trades_in_shared_simulator_without_looku
     from propevolve.reasoning_policy.evaluation import evaluate_policy
     class ExternalRuntime:
         requires_specialists = False
-        def decide(self, context, legal_actions):
+        def assess(self, context, legal_actions):
             assert context.embeddings is not None
             action = Action.HOLD if Action.HOLD in legal_actions else Action.ENTER_LONG_1
-            return action, {item.name: float(item == action) for item in legal_actions}
+            probabilities = {item.name: (.8 if item == action else .2 / (len(legal_actions) - 1))
+                             for item in legal_actions}
+            return {"action": action,
+                    "log_probs": {name: float(np.log(p)) for name, p in probabilities.items()},
+                    "interpretation": {"trend.long": .8},
+                    "assessment": {"entry": 1., "direction": 1., "management": 1.}}
     class ForbiddenSources:
         def __iter__(self):
             raise AssertionError("teacher used by teacher-free evaluation")

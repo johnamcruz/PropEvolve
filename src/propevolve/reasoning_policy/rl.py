@@ -12,8 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from ..decision import Action
-from .context import RollingContext
-from .dataset import context_messages, embedding_payload
+from .context import ContextWindow, RollingContext
 from .inputs import observe_context
 
 
@@ -66,16 +65,15 @@ def require_challenge_mastery_context(context_config):
 
 @dataclass(frozen=True)
 class RLDecision:
-    messages: list
     actions: tuple[str, ...]
     selected: int
     old_log_probs: tuple[float, ...]
     reward: float
-    market_context: dict | None = None
+    staged_context: ContextWindow
 
 
 def rollout(policy, environment, *, options, context_config, sources, rng, max_steps):
-    """Store CPU causal prompts and detached sampling probabilities only."""
+    """Store CPU causal contexts and detached sampling probabilities only."""
     observation, info = environment.reset(options=options)
     market = environment.markets[options["ticker"]]
     context = RollingContext(context_config)
@@ -85,9 +83,8 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
         observe_context(context, environment, observation, ticker=options["ticker"], row=row, sources=sources)
         actions = tuple(sorted((Action(a) for a in info["valid_actions"]), key=int))
         names = tuple(action.name for action in actions)
-        messages = context_messages(context.snapshot(), actions)
-        market_context = embedding_payload(context.snapshot()) or None
-        scores = policy.completion_scores(messages, names, **({"market_context": market_context} if market_context else {}))
+        snapshot = context.snapshot()
+        scores = policy.assess(snapshot, actions)["log_probs"]
         logits = np.asarray([scores[name] for name in names], dtype=np.float64)
         if not np.isfinite(logits).all():
             raise ValueError("nonfinite rollout logits")
@@ -95,7 +92,8 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
         log_probs = logits - np.log(np.exp(logits).sum())
         selected = int(rng.choice(len(actions), p=np.exp(log_probs)))
         observation, reward, terminated, truncated, info = environment.step(actions[selected])
-        decisions.append(RLDecision(messages, names, selected, tuple(log_probs), float(reward), market_context))
+        decisions.append(RLDecision(names, selected, tuple(log_probs), float(reward),
+                                    staged_context=snapshot))
         row = int(info["fill_index"])
         if terminated or truncated:
             if info["outcome"] not in {"pass", "blow", "timeout"}:
@@ -159,36 +157,37 @@ def read_rl_config(path):
 
 
 class MLXAdapterLearner:
-    """Reuse the policy's actual token scores; update only loaded LoRA tensors."""
+    """Update the staged policy through the same forward computation as rollout."""
 
     def __init__(self, policy, config):
         import mlx.core as mx
         import mlx.optimizers as optim
         from mlx.utils import tree_flatten
         self.policy, self.config = policy, config
+        self.model = policy.backend.model
         mx.random.seed(config["seed"])
         self.optimizer = optim.AdamW(learning_rate=config["learning_rate"],
                                     weight_decay=config["weight_decay"])
         # Loaded adapters must be the only trainable leaves.
-        policy.model.freeze()
+        self.model.freeze()
         found = 0
-        for _, module in policy.model.named_modules():
+        for _, module in self.model.named_modules():
             keys = [key for key in ("lora_a", "lora_b") if hasattr(module, key)]
             if keys:
                 module.unfreeze(keys=keys, recurse=False)
                 found += 1
-        leaves = tree_flatten(policy.model.trainable_parameters())
+        leaves = tree_flatten(self.model.trainable_parameters())
         if not found or any(name.rsplit(".", 1)[-1] not in {"lora_a", "lora_b"} for name, _ in leaves):
             raise ValueError("RL requires trainable LoRA adapters and a frozen base")
-        if policy.input_mode == "embeddings":
-            policy.model.market_projector.unfreeze()
-        policy.model.eval()  # deterministic scoring; eval does not disable gradients
+        self.model.market_projector.unfreeze()
+        self.model.eval()  # deterministic scoring; eval does not disable gradients
 
     def update(self, rows, rng):
         import mlx.core as mx
         import mlx.nn as nn
         from mlx.utils import tree_map, tree_flatten
-        from .policy import sequence_scores
+        from .staged_policy import staged_forward
+        from .backend import MLXReasoningBackend
         config = self.config
         if not rows:
             raise ValueError("RL update needs rollout decisions")
@@ -196,22 +195,23 @@ class MLXAdapterLearner:
         selected_rows = [rows[int(i)] for i in indices]
         losses = []
         gradient_norms = []
-        def loss(model, tokens, old, selected, advantage):
-            scores = sequence_scores(model, tokens)
-            log_probs = scores - mx.logsumexp(scores)
+        def loss(model, inputs, old, selected, advantage):
+            log_probs = staged_forward(MLXReasoningBackend(model), **inputs)["log_probs"][0]
             return clipped_action_loss(log_probs, old, selected, advantage,
                 clip_epsilon=config["clip_epsilon"], kl_weight=config["kl_weight"],
                 entropy_weight=config["entropy_weight"], xp=mx)
-        grad_fn = nn.value_and_grad(self.policy.model, loss)
+        grad_fn = nn.value_and_grad(self.model, loss)
         for _ in range(config["epochs"]):
             rng.shuffle(selected_rows)
             for start in range(0, len(selected_rows), config["minibatch_size"]):
                 batch = selected_rows[start:start + config["minibatch_size"]]
                 accumulated = None
                 for decision, advantage in batch:
-                    tokens = self.policy.tokenize_completions(decision.messages, decision.actions,
-                        market_context=decision.market_context)
-                    value, grads = grad_fn(self.policy.model, tokens, mx.array(decision.old_log_probs),
+                    if decision.staged_context is None:
+                        raise ValueError("RL requires staged causal rollout context")
+                    inputs = self.policy.prepare(decision.staged_context,
+                        [Action[name] for name in decision.actions])
+                    value, grads = grad_fn(self.model, inputs, mx.array(decision.old_log_probs),
                                            decision.selected, advantage)
                     mx.eval(value, grads)
                     losses.append(float(value.item()))
@@ -225,8 +225,8 @@ class MLXAdapterLearner:
                     raise ValueError("nonfinite RL gradient or loss")
                 gradient_norms.append(float(norm.item()))
                 factor = mx.minimum(1.0, config["max_grad_norm"] / mx.maximum(norm, mx.array(1e-12)))
-                self.optimizer.update(self.policy.model, tree_map(lambda g: g * factor, accumulated))
-                mx.eval(self.policy.model.parameters(), self.optimizer.state)
+                self.optimizer.update(self.model, tree_map(lambda g: g * factor, accumulated))
+                mx.eval(self.model.parameters(), self.optimizer.state)
                 mx.clear_cache()
         by_action = {}
         for decision, advantage in selected_rows:
@@ -249,8 +249,9 @@ class MLXAdapterLearner:
         temporary = Path(tempfile.mkdtemp(prefix=".reasoning-rl-", dir=destination.parent))
         try:
             from .projector import export_policy_weights
-            export_policy_weights(self.policy.model, temporary)
-            shutil.copyfile(Path(parent_adapter) / "adapter_config.json", temporary / "adapter_config.json")
+            export_policy_weights(self.model, temporary)
+            from .staged_inference import seal_staged_weights
+            seal_staged_weights(temporary, self.policy.settings)
             (temporary / "rl_receipt.json").write_text(json.dumps(metadata, indent=2, allow_nan=False))
             if runtime is not None:
                 from .checkpoints import save_training_state

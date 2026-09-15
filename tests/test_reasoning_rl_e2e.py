@@ -21,10 +21,16 @@ class ScriptedRuntime:
     """External-model stand-in; never claim this proves neural learning."""
     def __init__(self, entry):
         self.entry = entry
+        self.settings = {"staged_policy": {"state_fields": ["trade.current_r"]}}
 
-    def completion_scores(self, messages, completions):
+    def assess(self, context, actions):
+        from propevolve.decision import Action
+        completions = [a.name for a in actions]
         preferred = "HOLD" if "HOLD" in completions else self.entry
-        return {name: 0.0 if name == preferred else -1000.0 for name in completions}
+        return {"action": Action[preferred], "interpretation": {},
+            "assessment": {"entry": -1. if preferred == "WAIT" else 1.,
+                           "direction": -1. if preferred == "ENTER_SHORT_1" else 1., "management": 1.},
+            "log_probs": {name: 0.0 if name == preferred else -1000.0 for name in completions}}
 
 
 class RecordingRuntime(ScriptedRuntime):
@@ -32,9 +38,9 @@ class RecordingRuntime(ScriptedRuntime):
         super().__init__(entry)
         self.requests = []
 
-    def completion_scores(self, messages, completions, **kwargs):
-        self.requests.append((messages, tuple(completions), kwargs))
-        return super().completion_scores(messages, completions)
+    def assess(self, context, actions):
+        self.requests.append((context, tuple(a.name for a in actions)))
+        return super().assess(context, actions)
 
 
 def test_challenge_mastery_context_rejects_trade_only_sft_fields():
@@ -67,9 +73,9 @@ def test_rl_receives_prop_state_costs_time_and_legal_actions_end_to_end():
 
     assert terminal["outcome"] == "timeout"
     assert len(runtime.requests) == len(decisions)
-    prompt = json.loads(runtime.requests[0][0][1]["content"])
-    assert tuple(prompt["fields"]) == CHALLENGE_MASTERY_FIELDS
-    latest = dict(zip(prompt["fields"], prompt["history_oldest_first"][-1]))
+    snapshot = runtime.requests[0][0]
+    assert snapshot.fields == CHALLENGE_MASTERY_FIELDS
+    latest = dict(zip(snapshot.fields, snapshot.values[-1]))
     assert latest["challenge.profit_target_dollars"] == 6_000.0
     assert latest["challenge.max_loss_dollars"] == 3_000.0
     assert latest["challenge.target_remaining_dollars"] == 6_000.0
@@ -77,8 +83,8 @@ def test_rl_receives_prop_state_costs_time_and_legal_actions_end_to_end():
     assert latest["account.challenge_remaining"] == 1.0
     assert latest["account.point_value_norm"] == pytest.approx(20.0 / 3_000.0)
     assert latest["account.round_trip_fee_norm"] == pytest.approx(4.0 / 3_000.0)
-    assert prompt["legal_actions"] == ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]
-    assert "market_context" in runtime.requests[0][2]
+    assert runtime.requests[0][1] == ("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1")
+    assert snapshot.embeddings is not None
 
 
 def test_complete_pass_and_blow_generate_opposite_learning_pressure():

@@ -1,7 +1,14 @@
 # Domain context
 
-- **Entry decision**: ENTER means taking either a Long or Short trade; WAIT
-  means sitting out. Its score boundary is `max(Long, Short) > WAIT`.
+- **Entry decision**: ENTER means taking a trade; WAIT means sitting out.
+  The configured reasoning model assesses entry separately from direction using its predicted market
+  interpretation. ENTER is not an executable sixth action.
+- **Market interpretation**: the reasoning model's learned description of causal market
+  conditions from Chronos embedding history, supervised by authenticated
+  Expansion, Trend, Regime and Volume targets during training only.
+- **Trade assessment**: the reasoning model's learned entry, direction and management
+  judgments based on its own market interpretation and causal trade state.
+  Teacher answers and future trade outcomes are not assessment inputs.
 - **Direction decision**: when the economic label calls for ENTER, evaluate
   LONG versus SHORT separately. Entering on the wrong side fails direction and
   the complete trade action, but does not also fail the ENTER decision.

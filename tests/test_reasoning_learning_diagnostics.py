@@ -15,37 +15,50 @@ from test_reasoning_collection_evaluation_e2e import sources
 from test_reasoning_rl_e2e import ScriptedRuntime
 
 
+def with_context(record):
+    record = dict(record)
+    prompt = json.loads(record["messages"][-2]["content"])
+    prompt.update(fields=["trade.current_r"], history_oldest_first=[[0.]])
+    record["messages"] = [*record["messages"][:-2],
+        {"role": "user", "content": json.dumps(prompt)}, record["messages"][-1]]
+    record.update(market_embeddings=[[1., 2.]], market_available=[True])
+    return record
+
+
 def test_frozen_audit_respects_actual_legal_actions_instead_of_inventing_alternatives():
     record = {"source_id": "masked", "completed_at_ns": 1,
         "messages": [{"role": "user", "content": json.dumps({"legal_actions": ["WAIT"]})},
                      {"role": "assistant", "content": "WAIT"}]}
-    report = score_labeled_examples(ScriptedRuntime("WAIT"), [record])[0]
+    report = score_labeled_examples(ScriptedRuntime("WAIT"), [with_context(record)])[0]
     assert report["scores"] == {"WAIT": 0.0}
-    assert report["target_advantage"] is None
+    assert report["target_advantage"] == 1.
 
 
 def test_frozen_audit_forwards_the_complete_causal_embedding_context():
-    class CapturingPolicy:
+    class CapturingPolicy(ScriptedRuntime):
         def __init__(self):
+            super().__init__("WAIT")
+            self.settings["staged_policy"]["state_fields"] = ["trade.current_r", "trade.giveback_r"]
             self.context = None
 
-        def completion_scores(self, messages, choices, *, market_context):
-            self.context = market_context
-            return {choice: float(choice == "WAIT") for choice in choices}
+        def assess(self, context, actions):
+            self.context = context
+            return super().assess(context, actions)
 
     policy = CapturingPolicy()
     record = {"source_id": "causal", "completed_at_ns": 1,
         "market_embeddings": [[1., 2.]], "market_available": [True],
         "causal_state": [0.25, -0.5],
+        "causal_state_fields": ["trade.current_r", "trade.giveback_r"],
         "messages": [{"role": "user", "content": json.dumps({"legal_actions":
-            ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]})},
+            ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"], "fields": []})},
             {"role": "assistant", "content": "WAIT"}]}
 
     score_labeled_examples(policy, [record])
 
-    assert policy.context == {
-        "market_embeddings": [[1., 2.]], "market_available": [True],
-        "causal_state": [0.25, -0.5]}
+    np.testing.assert_array_equal(policy.context.embeddings, [[1., 2.]])
+    np.testing.assert_array_equal(policy.context.values[-1], [.25, -.5])
+    assert policy.context.available.tolist() == [True]
 
 
 def test_trade_mastery_report_is_separate_from_challenge_economics():
@@ -83,7 +96,7 @@ def test_real_rollout_reports_frozen_ranking_before_and_after_update():
         context_config=ContextConfig(2, ("account.realized_pnl_norm",)), sources=sources(),
         config={"seed": 7, "groups": 1, "group_size": 2, "max_steps": 8,
                 "advantage_scale": 1, "checkpoint_every_groups": 1},
-        diagnostic_records=[record])
+        diagnostic_records=[with_context(record)])
     report = reports[0]
     assert report["audit_before"][0]["correct"] is True
     assert report["audit_after"][0]["correct"] is False
@@ -100,15 +113,16 @@ def test_learning_audit_rejects_corrupt_legal_actions_and_nonfinite_scores():
     with pytest.raises(ValueError, match="conflicts with legal actions"):
         score_labeled_examples(ScriptedRuntime("WAIT"), [malformed])
 
-    class NonFinitePolicy:
-        def completion_scores(self, messages, choices, **kwargs):
-            return {choice: (float("nan") if choice == "WAIT" else 0.0)
-                    for choice in choices}
+    class NonFinitePolicy(ScriptedRuntime):
+        def assess(self, context, actions):
+            result = super().assess(context, actions)
+            result["log_probs"]["WAIT"] = float("nan")
+            return result
     valid = {"source_id": "bad-score", "completed_at_ns": 1,
-        "messages": [{"role": "user", "content": "{}"},
+        "messages": [{"role": "user", "content": '{"legal_actions": ["WAIT"]}'},
                      {"role": "assistant", "content": "WAIT"}]}
     with pytest.raises(ValueError, match="invalid frozen audit scores"):
-        score_labeled_examples(NonFinitePolicy(), [valid])
+        score_labeled_examples(NonFinitePolicy("WAIT"), [with_context(valid)])
     with pytest.raises(ValueError, match="needs labeled examples"):
         score_labeled_examples(ScriptedRuntime("WAIT"), [])
 
@@ -129,15 +143,15 @@ def test_trade_mastery_summary_requires_all_five_competing_action_boundaries(mut
 def test_learning_audit_cli_scores_an_authenticated_record_without_training(
         tmp_path, monkeypatch, capsys):
     records = tmp_path / "records.jsonl"
-    records.write_text(json.dumps({
+    records.write_text(json.dumps(with_context({
         "source_id": "row-1", "completed_at_ns": 1,
         "messages": [
             {"role": "user", "content": json.dumps({"legal_actions": ["WAIT"]})},
             {"role": "assistant", "content": "WAIT"},
         ],
-    }) + "\n")
+    })) + "\n")
     monkeypatch.setattr(
-        "propevolve.reasoning_policy.learning_audit.MLXActionPolicy.from_config",
+        "propevolve.reasoning_policy.learning_audit.StagedReasoningPolicy.from_config",
         lambda path: ScriptedRuntime("WAIT"),
     )
 

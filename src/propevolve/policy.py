@@ -4,7 +4,7 @@ Adapters own model state, not simulator state. Call reset at every episode.
 Resource paths are relative to the explicitly supplied workspace root.
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,8 @@ class PolicyDecision:
     action: Action
     scores: dict[str, float]
     score_type: str
+    interpretation: dict[str, float] = field(default_factory=dict)
+    assessment: dict[str, float] = field(default_factory=dict)
 
 
 class TradingPolicy(ABC):
@@ -67,8 +69,11 @@ class ReasoningPolicy(TradingPolicy):
     def decide(self, inputs):
         if inputs.context is None:
             raise ValueError("reasoning policy requires causal context")
-        action, scores = self.policy.decide(inputs.context, inputs.legal_actions)
-        return _decision(action, scores, "log_likelihood", inputs.legal_actions)
+        result = self.policy.assess(inputs.context, inputs.legal_actions)
+        decision = _decision(result["action"], result["log_probs"],
+                             "log_probability", inputs.legal_actions)
+        return PolicyDecision(decision.action, decision.scores, decision.score_type,
+                              result["interpretation"], result["assessment"])
 
 
 def load_policy(path, *, root):
@@ -78,6 +83,7 @@ def load_policy(path, *, root):
     root = Path(root)
     kind = config.get("kind")
     if kind == "reasoning":
-        from .reasoning_policy.policy import MLXActionPolicy
-        return ReasoningPolicy(MLXActionPolicy.from_config(root / config["model_config"], root=root))
+        from .reasoning_policy.staged_inference import StagedReasoningPolicy
+        return ReasoningPolicy(StagedReasoningPolicy.from_config(
+            root / config["model_config"], root=root))
     raise ValueError(f"unknown policy kind: {kind!r}")

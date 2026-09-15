@@ -83,7 +83,10 @@ def test_changed_frozen_input_runs_new_assessment(tmp_path, changed):
 
 
 @pytest.mark.parametrize("setting,value", [("decision_objective", "full_action"),
-                                          ("validation_batch_size", 2), ("seed", 99)])
+                                          ("validation_batch_size", 2), ("seed", 99),
+                                          ("architecture", "staged_reasoning_v1"),
+                                          ("staged_policy", {"assessment_instruction": "changed"}),
+                                          ("selection", "hierarchical_greedy")])
 def test_changed_scoring_contract_does_not_reuse_metrics(tmp_path, setting, value):
     from propevolve.reasoning_policy.assessment_receipts import cached_assessment
     config, view = fixture(tmp_path)

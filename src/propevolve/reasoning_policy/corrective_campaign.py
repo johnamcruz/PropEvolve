@@ -92,6 +92,9 @@ def _task_advantages(summary):
 
 def _decision_advantages(row):
     """Return target-relative evidence for each applicable decision boundary."""
+    if row.get("score_type") == "log_probability":
+        from .staged_metrics import assessment_advantages
+        return assessment_advantages(row)
     target = row.get("target")
     scores = row.get("scores")
     if not isinstance(scores, dict):
@@ -266,11 +269,16 @@ def evaluate_checkpoint_candidate(parent_assessment, prepared_rows, score_rows,
         raise ValueError("checkpoint validation rows differ from frozen parent")
     after_rows = {}
     identity = ("source_id", "completed_at_ns", "ticker", "target")
+    staged = metrics.get("decision_boundary_semantics") == "staged_independent_binary_v1"
     for index, parent in before_rows.items():
         prepared = prepared_rows[index]
         target = prepared.get("target_name")
         names = prepared.get("action_targets", {}).get("names")
-        values = np.asarray(score_rows[index], dtype=float)
+        evidence = score_rows[index]
+        if staged and (not isinstance(evidence, dict)
+                       or not {"assessment", "log_probs"}.issubset(evidence)):
+            raise ValueError("staged checkpoint requires independent assessment evidence")
+        values = np.asarray(evidence["log_probs"] if staged else evidence, dtype=float)
         if (target != parent.get("target") or not isinstance(names, list)
                 or target not in names or set(names) != set(parent.get("scores", {}))
                 or values.shape != (len(names),) or not np.isfinite(values).all()):
@@ -285,6 +293,18 @@ def evaluate_checkpoint_candidate(parent_assessment, prepared_rows, score_rows,
             "target_advantage": scores[target] - max(
                 value for name, value in scores.items() if name != target),
         }
+        if staged:
+            from .staged_policy import select_legal_action
+            from .staged_metrics import assessment_advantages
+            if np.asarray(evidence["assessment"]).shape != (3,):
+                raise ValueError("staged checkpoint requires three assessment outputs")
+            row = after_rows[index]
+            row.update(score_type="log_probability", assessment=dict(zip(
+                ("entry", "direction", "management"), evidence["assessment"])))
+            row["predicted"] = select_legal_action(evidence["assessment"],
+                [Action[name] for name in names]).name
+            row["correct"] = row["predicted"] == target
+            row["target_advantage"] = min(assessment_advantages(row).values())
     return _compare_frozen_evidence(
         before_summary, before_rows, {"metrics": metrics}, after_rows, settings)
 
@@ -415,7 +435,8 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
     parent = read_sft_config(parent_config, root=root)
     preserved = ("model", "data", "input_mode", "projector", "action_verbalizers",
                  "decision_objective", "lora_parameters", "num_layers",
-                 "max_seq_length", "chat_template_kwargs")
+                 "max_seq_length", "chat_template_kwargs", "architecture",
+                 "staged_policy", "selection")
     if any(template.get(name) != parent.get(name) for name in preserved):
         raise ValueError("corrective SFT template differs from its frozen parent")
     parent_adapter = Path(parent["adapter_path"])
@@ -426,6 +447,9 @@ def _write_child_config(plan, root, round_root, parent_config, train_assessment,
     parent_metadata = json.loads(parent_metadata_path.read_text())
     requirements = {name: parent_metadata.get(name) for name in (
         "input_mode", "decision_objective", "action_supervision", "projector")}
+    if parent.get("architecture") == "staged_reasoning_v1":
+        requirements.update({name: parent_metadata.get(name) for name in (
+            "architecture", "staged_policy", "selection")})
     view_manifest_path = _resolve(root, plan["prepared_view"]) / "view_manifest.json"
     view_manifest = json.loads(view_manifest_path.read_text())
     prepared_counts = view_manifest.get("prepared_counts")

@@ -16,22 +16,24 @@ def test_unknown_policy_kind_fails_before_loading_a_model(tmp_path):
         load_policy(recipe, root=tmp_path)
 
 
-def test_reasoning_adapter_preserves_legal_completion_scores():
+def test_reasoning_adapter_preserves_staged_assessment():
     from propevolve.policy import ReasoningPolicy
     from propevolve.reasoning_policy.context import ContextConfig, RollingContext
     # External inference-runtime stand-in; simulator and adapter are real.
     class Runtime:
         requires_specialists = True
-        def decide(self, context, legal_actions):
-            scores = {action.name: -float(int(action) + 1) for action in legal_actions}
-            return max(legal_actions, key=lambda action: scores[action.name]), scores
+        def assess(self, context, legal_actions):
+            return {"action": Action.WAIT, "log_probs": {"WAIT": 0.},
+                    "interpretation": {"trend.long": .2},
+                    "assessment": {"entry": -1., "direction": 0., "management": 0.}}
     context = RollingContext(ContextConfig(2, ("account.realized_pnl_norm",)))
     context.append(1, {"account.realized_pnl_norm": 0.0})
     policy = ReasoningPolicy(Runtime())
     assert isinstance(policy, TradingPolicy)
     decision = policy.decide(PolicyInput(np.ones(4), (Action.WAIT,), context.snapshot()))
     assert decision.action == Action.WAIT
-    assert decision.score_type == "log_likelihood"
+    assert decision.score_type == "log_probability"
+    assert decision.interpretation == {"trend.long": .2}
     assert policy.requires_specialists is True
     with pytest.raises(ValueError, match="causal context"):
         policy.decide(PolicyInput(np.ones(4), (Action.WAIT,)))

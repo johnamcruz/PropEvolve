@@ -672,7 +672,7 @@ def test_evaluation_job_runs_teacher_free_trade_and_challenge_boundaries(
         {}, {}, {"train": [0, 100], "valid": [100, 200]}, 300, "source-id"
     ))
     monkeypatch.setattr(
-        "propevolve.reasoning_policy.policy.MLXActionPolicy.from_config",
+        "propevolve.reasoning_policy.staged_inference.StagedReasoningPolicy.from_config",
         lambda *args, **kwargs: policy,
     )
     monkeypatch.setattr(job, "load_role", lambda *args, **kwargs: (object(), ()))

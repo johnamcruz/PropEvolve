@@ -42,7 +42,7 @@ def assessment_identity(config_path, view, role, *, root=None):
     settings = {name: config.get(name) for name in (
         "max_seq_length", "input_mode", "projector", "action_verbalizers",
         "chat_template_kwargs", "decision_objective", "action_supervision",
-        "seed", "validation_batch_size")}
+        "seed", "validation_batch_size", "architecture", "staged_policy", "selection")}
     view, data = Path(view), Path(config["data"])
     files = {"view_manifest": file_digest(view / "view_manifest.json"),
              "prepared_rows": file_digest(view / f"{role}.jsonl"),
@@ -51,7 +51,10 @@ def assessment_identity(config_path, view, role, *, root=None):
     if source_manifest.exists():
         files["source_manifest"] = file_digest(source_manifest)
     modules = ("learning_audit.py", "supervised_trainer.py", "supervision.py",
-               "policy.py", "projector.py", "tokenization.py", "mlx_sft.py",
+               "backend.py", "staged_inference.py", "staged_policy.py",
+               "staged_queries.py", "staged_metrics.py", "staged_batches.py",
+               "staged_preparation.py", "staged_learning.py", "market_distillation.py",
+               "projector.py", "tokenization.py", "mlx_sft.py",
                "decision_schema.py", "assessment_receipts.py")
     code = {name: file_digest(Path(__file__).with_name(name)) for name in modules}
     packages = {}

@@ -121,6 +121,10 @@ def validate_targeted_sampling(settings):
 
 def _assessment_boundaries(row):
     """Return applicable mastered boundaries from frozen action scores."""
+    if row.get("score_type") == "log_probability":
+        from .staged_metrics import assessment_advantages
+        return {name.split(".", 1)[0]: value > 0
+                for name, value in assessment_advantages(row).items()}
     target, scores = row.get("target"), row.get("scores")
     if target in {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}:
         names = {"WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"}
@@ -198,6 +202,8 @@ class TargetedSampler:
             "correct": bool(row.get("correct", row["target_advantage"] >= 0)),
             "target_advantage": float(row["target_advantage"]),
             "scores": row.get("scores"),
+            "assessment": row.get("assessment"),
+            "score_type": row.get("score_type"),
         } for row in scored}
         self.priority = set()
         if priority_scored is not None:
@@ -361,6 +367,23 @@ class TargetedSampler:
                 or not isinstance(names, list) or not names):
             raise ValueError("targeted row differs from frozen assessment")
         parent = evidence["scores"]
+        if "staged_queries" in row:
+            from .staged_metrics import boundary_metrics
+            assessment = evidence.get("assessment")
+            if (evidence.get("score_type") != "log_probability"
+                    or not isinstance(assessment, dict)
+                    or set(assessment) != set(_RETENTION_BOUNDARIES)):
+                raise ValueError("staged corrections require frozen independent assessments")
+            # Preserve the existing economic-label consistency check; its
+            # legacy score-derived mastery is deliberately not used here.
+            _mastered_boundaries(row, parent)
+            raw = [assessment[name] for name in _RETENTION_BOUNDARIES]
+            metrics = boundary_metrics([row], [raw])
+            mastered = {name: False for name in _RETENTION_BOUNDARIES}
+            for name, metric in metrics["per_task"].items():
+                mastered[name.split(".", 1)[0]] = metric["accuracy"] == 1.
+            return {**row, "mastered_anchor_retention": {
+                "boundaries": mastered, "assessment": list(map(float, raw))}}
         boundaries = _mastered_boundaries(row, parent)
         result = dict(row)
         result["mastered_anchor_retention"] = {

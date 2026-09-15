@@ -82,6 +82,12 @@ resource cap is an error, never a fabricated economic timeout.
                     "legal_actions": [item.name for item in info["valid_actions"]],
                     "requested_action": action.name, "action_scores": scores,
                     "score_type": score_type,
+                    **({"market_interpretation": decision.interpretation,
+                        "trade_assessment": decision.assessment}
+                       if shared_policy else {}),
+                    **({"action_probabilities": {name: float(np.exp(value))
+                        for name, value in scores.items()}}
+                       if score_type == "log_probability" else {}),
                     **({"action_log_likelihoods": scores} if score_type == "log_likelihood" else {}),
                     "account": environment.causal_trade_context()})
             observation, reward, terminated, truncated, info = environment.step(action)

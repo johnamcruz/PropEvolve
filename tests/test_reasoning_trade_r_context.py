@@ -185,7 +185,7 @@ def test_json_enrichment_to_prepared_batches_preserves_labels_and_cached_embeddi
     from propevolve.reasoning_policy.mlx_sft import prepare_mlx_view, PreparedDataset
     from test_cache import MeanEncoder
     from test_reasoning_dataset_audit_e2e import _record
-    from test_reasoning_token_parity_e2e import LiteralTokenizer, ACTION_VERBALIZERS
+    from reasoning_tokenizer import LiteralTokenizer, ACTION_VERBALIZERS
     times = pd.date_range('2024-01-01', periods=20, freq='3min', tz='UTC')
     source = tmp_path/'NQ.csv'
     pd.DataFrame({'datetime': times, 'open': 100., 'high': 103., 'low': 99.,

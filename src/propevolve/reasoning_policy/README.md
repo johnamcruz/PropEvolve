@@ -6,10 +6,10 @@ pass.
 
 ## Current path
 
-1. A market-distillation stage teaches Expansion, Trend, Regime and Volume
-   semantics
-   from aligned training-only targets. The deployed policy receives frozen FFM
-   embeddings plus normalized account/trade state, never teacher outputs.
+1. `StagedReasoningPolicy` uses an injected `ReasoningBackend`:
+   causal Chronos embeddings → predicted market interpretation → trade assessment
+   → legal actions. Expansion, Trend, Regime and Volume are authenticated
+   training targets, never supplied teacher answers at inference.
 2. `context.RollingContext` supplies completed-bar history with an availability
    mask. `config/reasoning/context.json` starts with 20 bars; length is configurable.
 3. Flat-state SFT labels rank WAIT/Long/Short using the configured minimum
@@ -25,15 +25,14 @@ pass.
 6. `dataset.write_supervised_dataset` writes disjoint chronological roles with
    full label reserves and a sealed boundary. A reviewed matching `audit.json`
    is required before the MLX preparation command can proceed.
-7. `mlx_sft` creates encoded token/offset datasets and delegates adapter
-   training to MLX-LM. SFT, RL and inference share one chat-tokenization boundary;
-   the native dataset adapter does not wrap the prompt a second time.
-   Inputs are loss-masked. Overlength samples fail rather than
-   silently truncate. The first model candidate is quantized, so LoRA is QLoRA.
-8. `policy.MLXActionPolicy` scores only legal action completions. These scores
-   are log likelihoods, not action values. Evaluation reports five-action trade
-   mastery separately from existing simulator challenge outcomes and explicitly
-   reports specialist dependence.
+7. `mlx_sft` prepares target-free interpretation and assessment queries plus
+   separate teacher/economic targets. The staged forward computation is shared
+   by SFT, assessment, live inference and RL updates. Assessment consumes the
+   model's predicted interpretation, not teacher answers or a raw-embedding bypass.
+8. Independent ENTER/WAIT, LONG/SHORT and HOLD/CLOSE assessments produce legal
+   action probabilities. The former direct-completion scorer has been removed.
+   The environment retains execution authority. Native E2E tests prove mechanics;
+   real-data acquisition, retention and economic transfer remain acceptance gates.
 
 ## Responsibility boundary
 
@@ -75,8 +74,7 @@ The corrective reasoning workflow is a resumable sequence of frozen assessment
 and short SFT rounds:
 
 ```sh
-python -m propevolve.reasoning_policy.corrective_campaign \
-  --config config/reasoning/error_selected_distillation_campaign.json
+python -m propevolve.reasoning_policy.corrective_campaign --config CAMPAIGN.json
 ```
 
 Each round assesses the accepted parent over the complete development role,
@@ -108,13 +106,14 @@ separately from pass/blow/near-blow economics.
 
 ## Configurable backbone and causal trade context
 
-`MLXActionPolicy.from_config(path)` reads `model`, `adapter_path`, and
-`max_seq_length` from any JSON recipe, including the SFT recipe. The model can
+`StagedReasoningPolicy.from_config(path)` reads the staged query contract, model,
+adapter, projector and token budget from JSON. The model can
 be a compatible MLX-LM repository ID or local directory. Set `adapter_path` to
 null for base-model inference; SFT requires an explicit new output directory.
 Changing the base requires a matching adapter, not reuse of another model's LoRA
 weights. Loading checks the native adapter metadata before loading large weights.
-This is a compatibility guard, not a checkpoint content-authentication claim.
+Staged adapter manifests bind the model/query contract and executable weight
+hashes. Old direct-action adapters are not silently compatible.
 
 Prompt-template options inherit `config/reasoning/defaults.json` and can be
 overridden with `chat_template_kwargs` in the recipe. Use the saved effective

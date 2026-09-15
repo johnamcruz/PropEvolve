@@ -13,7 +13,7 @@ from propevolve.reasoning_policy.integrity import file_digest
 from propevolve.reasoning_policy.mlx_sft import PreparedDataset, prepare_mlx_view
 from propevolve.reasoning_policy.supervised_trainer import pack_examples
 from test_reasoning_challenger_e2e import environment, passive_factory
-from test_reasoning_token_parity_e2e import ACTION_VERBALIZERS, LiteralTokenizer
+from reasoning_tokenizer import ACTION_VERBALIZERS, LiteralTokenizer
 
 
 def _embedding_cache(tmp_path, *, ticker="NQ", rows=8, width=2):

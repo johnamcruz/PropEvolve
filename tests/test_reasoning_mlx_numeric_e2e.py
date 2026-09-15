@@ -46,7 +46,6 @@ from propevolve.reasoning_policy.projector import (
 from propevolve.reasoning_policy.supervised_trainer import (
     batch_loss, build_optimizer, configure_trainable_components, pack_examples,
 )
-from propevolve.reasoning_policy.policy import sequence_scores
 
 
 @pytest.fixture(autouse=True)
@@ -315,55 +314,8 @@ def test_latest_state_plus_causal_deltas_exposes_lifecycle_without_future_rows()
     np.testing.assert_array_equal(revised[:, -1], [[7., 1.]])
 
 
-def test_real_mlx_projector_gradient_update_and_save_reload_preserve_scores(tmp_path):
-    from mlx.utils import tree_flatten
-    import mlx.optimizers as optim
-    model = tiny_backbone()
-    row = example()
-    packed = tuple(mx.array(x) for x in pack_examples([row], max_seq_length=8))
-    config = {"input_mode": "embeddings", "action_supervision":
-        {"enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
-    def loss(m, *batch):
-        return batch_loss(m, *batch, config=config)[0]
-    old, gradients = nn.value_and_grad(model, loss)(model, *packed)
-    flat = dict(tree_flatten(gradients))
-    assert set(flat) == {"market_projector.projection.weight"}
-    assert bool(mx.any(flat["market_projector.projection.weight"] != 0).item())
-    optim.SGD(learning_rate=1e-5).update(model, gradients)
-    assert float(loss(model, *packed).item()) < float(old.item())
-    tokens = tuple((*item, np.asarray(row["market_embeddings"], np.float32),
-                   np.asarray(row["market_available"], bool)) for item in row["alternatives"])
-    expected = sequence_scores(model, tokens)
-    model.market_projector.freeze()
-    export_policy_weights(model, tmp_path)
-    assert (tmp_path / "projector.safetensors").is_file()
-    restored = tiny_backbone()
-    # Preserve the same frozen external backbone; only projector is reloaded.
-    restored.model = model.model
-    restored.output = model.output
-    restore_projector(restored, tmp_path)
-    np.testing.assert_allclose(np.asarray(sequence_scores(restored, tokens)), np.asarray(expected), atol=1e-6)
 
 
-def test_real_mlx_causal_state_projector_changes_scores_and_survives_reload(tmp_path):
-    model = tiny_backbone(128, state=True)
-    embeddings = np.asarray(example()["market_embeddings"], np.float32)
-    available = np.asarray(example()["market_available"], bool)
-    tokens = ([1, 2, 3, 4], 2, np.asarray([2.0, 75.0], np.float32),
-              embeddings, available)
-    baseline = ([1, 2, 3, 4], 2, np.asarray([0.0, 0.0], np.float32),
-                embeddings, available)
-    expected = sequence_scores(model, [tokens, baseline])
-    assert float(expected[0].item()) != float(expected[1].item())
-
-    model.market_projector.freeze()
-    export_policy_weights(model, tmp_path)
-    restored = tiny_backbone(128, state=True)
-    restored.model = model.model
-    restored.output = model.output
-    restore_projector(restored, tmp_path)
-    actual = sequence_scores(restored, [tokens, baseline])
-    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-6)
 
 
 def test_existing_market_projector_can_warm_start_causal_state_extension(tmp_path):
@@ -971,48 +923,3 @@ def test_component_optimizer_routes_distinct_learning_rates_by_public_parameter_
         before["market_projector.weight"] - after["market_projector.weight"]).item())
     lora_delta = float(mx.abs(before["adapter.lora_a"] - after["adapter.lora_a"]).item())
     assert projector_delta == pytest.approx(10 * lora_delta, rel=1e-2)
-
-
-def test_masked_history_cannot_affect_projected_scores():
-    model = tiny_backbone()
-    embeddings = np.array(example()["market_embeddings"], np.float32)
-    available = np.array(example()["market_available"], bool)
-    expected = sequence_scores(model, [([1, 2, 3, 4], 2, embeddings, available)])
-    embeddings[0] = 10000
-    actual = sequence_scores(model, [([1, 2, 3, 4], 2, embeddings, available)])
-    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-6)
-
-
-@pytest.mark.parametrize("names", [("WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"), ("HOLD", "CLOSE"), ("WAIT",)])
-def test_actual_policy_selects_only_legal_actions_and_preserves_score_parity(names):
-    from propevolve.decision import Action
-    from propevolve.reasoning_policy.context import ContextConfig, RollingContext
-    from propevolve.reasoning_policy.dataset import context_messages, embedding_payload
-    from propevolve.reasoning_policy.policy import MLXActionPolicy
-    from test_reasoning_token_parity_e2e import LiteralTokenizer
-    history = RollingContext(ContextConfig(3, ("account.realized_pnl_norm",), input_mode="embeddings"))
-    history.append(1, {"account.realized_pnl_norm": -.5}, embedding=np.array([1., 2.]))
-    policy = MLXActionPolicy(tiny_backbone(128), LiteralTokenizer(), max_seq_length=2048,
-        input_mode="embeddings", projector={"embedding_dim": 2, "context_steps": 3, "market_tokens": 2,
-                                             "temporal_encoding": "pooled_levels"})
-    actions = tuple(Action[name] for name in names)
-    context = history.snapshot()
-    chosen, scores = policy.decide(context, actions)
-    assert chosen in actions
-    assert set(scores) == set(names)
-    assert scores[chosen.name] == max(scores.values())
-    encoded = policy.tokenize_completions(context_messages(context, actions), names,
-        market_context=embedding_payload(context))
-    np.testing.assert_allclose(list(scores.values()), np.asarray(sequence_scores(policy.model, encoded)), atol=1e-6)
-    with pytest.raises(ValueError, match="without legal actions"):
-        policy.decide(context, [])
-
-
-def test_policy_rejects_nonfinite_scores_instead_of_executing_an_action():
-    from propevolve.reasoning_policy.policy import MLXActionPolicy
-    from test_reasoning_token_parity_e2e import LiteralTokenizer
-    model = tiny_backbone(128)
-    model.output.weight = mx.full(model.output.weight.shape, float("nan"))
-    policy = MLXActionPolicy(model, LiteralTokenizer(), max_seq_length=256)
-    with pytest.raises(ValueError, match="nonfinite action scores"):
-        policy.completion_scores([{"role": "user", "content": "state"}], ["WAIT", "ENTER_LONG_1"])

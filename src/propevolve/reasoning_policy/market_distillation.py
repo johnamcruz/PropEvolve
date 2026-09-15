@@ -1,4 +1,4 @@
-"""Training-only probability queries; targets never become input tokens."""
+"""Teacher-free market queries and their separate training-only supervision."""
 import math
 from collections.abc import Mapping
 
@@ -78,22 +78,37 @@ def probability_loss(scores, probabilities, weights):
     return ((losses * weights).sum(axis=-1) / weights.sum(axis=-1)).mean()
 
 
-def market_outputs(model, tokens, embeddings, available, causal_states,
-                   positions, probabilities, weights, label_ids):
+def predict_market_scores(model, tokens, embeddings, available, causal_states,
+                          positions, label_ids):
+    """Existing learner entry point, delegated to the injected model interface."""
+    from .backend import MLXReasoningBackend
+    return interpretation_scores(MLXReasoningBackend(model), tokens, embeddings,
+                                 available, causal_states, positions, label_ids)
+
+
+def interpretation_scores(backend, tokens, embeddings, available, causal_states,
+                          positions, label_ids):
+    """Reasoning-model market predictions without any target-bearing inputs."""
     import mlx.core as mx
     inputs = tokens[:, 0, :-1]
-    prefix = model.market_projector(embeddings, available, causal_states)
-    joined = mx.concatenate([prefix, model.model.embed_tokens(inputs)], axis=1)
-    hidden = model.model(inputs, input_embeddings=joined)
+    prefix = backend.market_prefix(embeddings, available, causal_states)
+    joined = mx.concatenate([prefix, backend.embed_tokens(inputs)], axis=1)
+    hidden = backend.hidden_states(inputs, joined)
     indices = mx.stop_gradient(positions + prefix.shape[1])
     queried = mx.take_along_axis(hidden, indices[..., None], axis=1)
     # Project only query positions, not hundreds of numerical answer positions.
-    logits = (model.model.embed_tokens.as_linear(queried)
-              if model.args.tie_word_embeddings else model.lm_head(queried)).astype(mx.float32)
+    logits = backend.output_logits(queried).astype(mx.float32)
     selected = mx.take_along_axis(logits,
         mx.broadcast_to(mx.stop_gradient(label_ids[:, None, :]),
                         (*logits.shape[:2], 2)), axis=-1)
-    scores = selected[..., 1] - selected[..., 0]
+    return selected[..., 1] - selected[..., 0]
+
+
+def market_outputs(model, tokens, embeddings, available, causal_states,
+                   positions, probabilities, weights, label_ids):
+    import mlx.core as mx
+    scores = predict_market_scores(model, tokens, embeddings, available,
+                                   causal_states, positions, label_ids)
     return probability_loss(scores, probabilities, weights), mx.array(tokens.shape[0]), scores
 
 

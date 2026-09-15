@@ -1,12 +1,10 @@
 """Config-to-runtime contract; no real model downloads or training."""
 
 import json
-import sys
-from types import SimpleNamespace
 
 import pytest
 
-from propevolve.reasoning_policy.policy import MLXActionPolicy
+from propevolve.reasoning_policy.staged_inference import StagedReasoningPolicy
 from propevolve.reasoning_policy.model_config import (
     validate_trade_mastery_parent,
     validate_trade_mastery_settings,
@@ -14,24 +12,26 @@ from propevolve.reasoning_policy.model_config import (
 
 
 def test_arbitrary_recipe_selects_model_and_matching_adapter(tmp_path, monkeypatch):
-    # MLX-LM is the external runtime seam, not a mocked application collaborator.
     calls = []
-    model = SimpleNamespace(eval=lambda: None)
-    tokenizer = SimpleNamespace(chat_template="template", eos_token="END",
-                                encode=lambda text: [1], apply_chat_template=lambda *a, **k: "prompt")
-    def load(name, **kwargs):
-        calls.append((name, kwargs["adapter_path"]))
-        return model, tokenizer
-    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(load=load))
+    from test_staged_queries import settings
+    from propevolve.reasoning_policy.integrity import file_digest
+    def load(config):
+        calls.append((config["model"], config["adapter_path"]))
+        return object(), object()
     for name in ("example/backbone-a", "example/backbone-b"):
         adapter = tmp_path / name.rsplit("/", 1)[-1]
         adapter.mkdir()
-        (adapter / "adapter_config.json").write_text(json.dumps({"model": name}))
+        (adapter / "projector.safetensors").write_bytes(b"external backend fixture")
+        config = {"model": name, "adapter_path": str(adapter), "max_seq_length": 1024,
+            "architecture": "staged_reasoning_v1", "staged_policy": settings(),
+            "projector": {"state_fields": []}, "selection": "hierarchical_greedy",
+            "chat_template_kwargs": {}}
+        (adapter / "adapter_config.json").write_text(json.dumps({**config,
+            "weight_files": {"projector.safetensors": file_digest(adapter / "projector.safetensors")}}))
         recipe = tmp_path / "any-name.json"
-        recipe.write_text(json.dumps({"model": name, "adapter_path": str(adapter),
-                                      "max_seq_length": 1024}))
-        policy = MLXActionPolicy.from_config(recipe)
-        assert policy.max_seq_length == 1024
+        recipe.write_text(json.dumps(config))
+        policy = StagedReasoningPolicy.from_config(recipe, backend_factory=load)
+        assert policy.settings["max_seq_length"] == 1024
     assert calls == [("example/backbone-a", str(tmp_path / "backbone-a")),
                      ("example/backbone-b", str(tmp_path / "backbone-b"))]
 
@@ -44,18 +44,19 @@ def test_invalid_runtime_recipe_fails_before_loading_model(tmp_path, change):
     recipe.write_text(json.dumps({"model": "example/base", "adapter_path": None,
                                   "max_seq_length": 1024, **change}))
     with pytest.raises(ValueError):
-        MLXActionPolicy.from_config(recipe)
+        StagedReasoningPolicy.from_config(recipe)
 
 
 def test_wrong_base_adapter_rejected_before_optional_runtime_load(tmp_path):
     adapter = tmp_path / "adapter"
     adapter.mkdir()
-    (adapter / "adapter_config.json").write_text(json.dumps({"model": "example/old"}))
+    (adapter / "adapter_config.json").write_text(json.dumps({"model": "example/old",
+        "architecture": "staged_reasoning_v1"}))
     recipe = tmp_path / "replacement.json"
     recipe.write_text(json.dumps({"model": "example/new", "adapter_path": str(adapter),
-                                  "max_seq_length": 1024}))
+                                  "max_seq_length": 1024, "staged_policy": {}}))
     with pytest.raises(ValueError, match="base model"):
-        MLXActionPolicy.from_config(recipe)
+        StagedReasoningPolicy.from_config(recipe)
 
 
 def test_rl_parent_must_be_a_complete_teacher_free_trade_mastery_policy():

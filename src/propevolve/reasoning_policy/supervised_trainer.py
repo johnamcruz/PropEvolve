@@ -600,6 +600,9 @@ def build_optimizer(config):
 
 
 def pack_examples(rows, *, max_seq_length):
+    if any("staged_queries" in row for row in rows):
+        from .staged_batches import pack_staged_examples
+        return (pack_staged_examples(rows, max_seq_length=max_seq_length),)
     alternatives = [row.get("alternatives", [(row["tokens"], row["offset"])]) for row in rows]
     actions = max(map(len, alternatives))
     length = max(len(tokens) for group in alternatives for tokens, _ in group)
@@ -725,7 +728,9 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
                 rows = [targeted_sampler.training_row(
                     int(index), row, retain_mastery=True)
                     for index, row in zip(indices, rows)]
-            packed = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
+            from mlx.utils import tree_map
+            packed = tree_map(lambda x: mx.array(x) if isinstance(x, np.ndarray) else x,
+                pack_examples(rows, max_seq_length=max_seq_length))
             if on_selected is not None:
                 on_selected(tuple(map(int, indices)))
             yield packed
@@ -930,16 +935,25 @@ def batch_objective_loss(model, *batch, config, objective):
     return _batch_outputs(model, *batch, config=config, objective=objective)[0]
 
 
-def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-               causal_states, embeddings, available, *extras, config):
-    loss, tokens_count, _ = _batch_outputs(
-        model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-        causal_states, embeddings, available, *extras, config=config)
+def batch_loss(model, *batch, config):
+    if config.get("architecture") == "staged_reasoning_v1":
+        from .backend import MLXReasoningBackend
+        from .staged_learning import supervised_outputs
+        if len(batch) != 1 or not isinstance(batch[0], dict):
+            raise ValueError("staged SFT cannot consume legacy action-scoring batches")
+        loss, tokens_count, _ = supervised_outputs(MLXReasoningBackend(model), batch[0], config)
+    else:
+        loss, tokens_count, _ = _batch_outputs(model, *batch, config=config)
     return loss, tokens_count
 
 
 def evaluate_action_validation(model, dataset, config, *, on_scored=None):
     """Evaluate every fixed validation row once and expose balanced boundaries."""
+    if config.get("architecture") == "staged_reasoning_v1":
+        from .backend import MLXReasoningBackend
+        from .staged_metrics import evaluate_staged_validation
+        return evaluate_staged_validation(MLXReasoningBackend(model), dataset, config,
+                                          on_scored=on_scored)
     import mlx.core as mx
     # Frozen validation rows are never training anchors. Retention is evaluated
     # by the campaign's same-row parent/candidate gate, not added to val loss.
@@ -1008,9 +1022,12 @@ def authenticated_initial_validation(config, view, *, valid_rows):
     if expected_weights.resolve() != Path(config["resume_adapter_file"]).resolve():
         raise ValueError("initial validation receipt parent differs from warm start")
     metrics = summary.get("metrics")
+    expected_semantics = ("staged_independent_binary_v1"
+        if config.get("architecture") == "staged_reasoning_v1"
+        else "independent_enter_direction_v1")
     if (config.get("decision_objective") == "hierarchical_binary"
             and isinstance(metrics, dict)
-            and metrics.get("decision_boundary_semantics") != "independent_enter_direction_v1"):
+            and metrics.get("decision_boundary_semantics") != expected_semantics):
         raise ValueError("initial validation receipt uses old decision boundary semantics; "
                          "recompute metrics from its frozen scores")
     monitor = config["early_stopping"]["monitor"]
@@ -1287,6 +1304,9 @@ def train_supervised(config, view):
             if config["input_mode"] == "embeddings":
                 restore_projector(model, best)
         export_policy_weights(model, destination)
+        if config.get("architecture") == "staged_reasoning_v1":
+            from .staged_inference import seal_staged_weights
+            seal_staged_weights(destination, config)
         summary = guard.summary()
         (destination / "training_selection.json").write_text(json.dumps(summary, indent=2))
         event_log.record_complete(summary)
