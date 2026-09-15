@@ -1,0 +1,11 @@
+{
+  "baseline_report": "runs/reasoning-challenger/management-individual-margin-01/report.json",
+  "candidate_report": "runs/reasoning-challenger/management-individual-margin-03/report.json",
+  "fraction": 1,
+  "source_report": "runs/reasoning-challenger/management-retention-projection-repeated-01/report.json",
+  "dataset_reference_report": "runs/reasoning-challenger/management-complete-anchor-probe-02/report.json",
+  "before_weights": "runs/reasoning-challenger/management-retention-projection-repeated-01/update-03/state/weights.safetensors",
+  "output": "runs/reasoning-challenger/management-margin-chronological-01",
+  "memory_gb": 6,
+  "cache_mb": 256
+}

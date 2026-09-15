@@ -1,0 +1,19 @@
+{
+  "source_report": "runs/reasoning-challenger/management-retention-projection-repeated-01/report.json",
+  "measurement_report": "runs/reasoning-challenger/management-retention-conflict-01/report.json",
+  "before_offset": 2,
+  "after_offset": 3,
+  "continue_report": "runs/reasoning-challenger/management-individual-margin-03/report.json",
+  "continue_fraction": 1,
+  "acquire_row": 5,
+  "acquire_boundary": "SHORT",
+  "target_margin": 0.05,
+  "maximum_relative_displacement": 3,
+  "solver_tolerance": 0.00000001,
+  "maximum_solver_cycles": 10000,
+  "gram_block_size": 65536,
+  "fractions": [1, 0.5, 0.25],
+  "output": "runs/reasoning-challenger/management-individual-margin-04",
+  "memory_gb": 6,
+  "cache_mb": 256
+}

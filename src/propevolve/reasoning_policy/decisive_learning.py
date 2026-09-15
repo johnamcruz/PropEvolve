@@ -2,6 +2,60 @@
 import math
 
 
+def retained_margin_progress(before, after, *, forgotten, minimum_gain):
+    """Diagnostic continuation only; never a model-promotion decision."""
+    return (all(math.isfinite(x) for x in (before, after, minimum_gain))
+            and minimum_gain > 0 and forgotten == 0 and after-before >= minimum_gain)
+
+
+def precise_gram(rows, *, block_size):
+    """Accumulate a small double-precision Gram without doubling the gradient bank."""
+    import numpy as np
+    rows = np.asarray(rows)
+    if rows.ndim != 2 or block_size < 1 or not np.isfinite(rows).all():
+        raise ValueError('invalid gradient bank')
+    gram = np.zeros((len(rows), len(rows)), dtype=np.float64)
+    for start in range(0, rows.shape[1], block_size):
+        block = rows[:, start:start+block_size].astype(np.float64)
+        gram += block @ block.T
+    return gram
+
+
+def differentiable_boundary_margin(scores, names, boundary, *, xp):
+    """Same hierarchical decision as assessment, retaining array autodiff."""
+    values = dict(zip(names, scores))
+    if boundary in {'ENTER', 'WAIT'}:
+        gap = xp.maximum(values['ENTER_LONG_1'], values['ENTER_SHORT_1']) - values['WAIT']
+        return gap if boundary == 'ENTER' else -gap
+    if boundary in {'LONG', 'SHORT'}:
+        gap = values['ENTER_LONG_1'] - values['ENTER_SHORT_1']
+        return gap if boundary == 'LONG' else -gap
+    if boundary in {'HOLD', 'CLOSE'}:
+        gap = values['HOLD'] - values['CLOSE']
+        return gap if boundary == 'HOLD' else -gap
+    raise ValueError('unsupported decision boundary')
+
+
+def constraint_multipliers(gram, residual, *, tolerance, maximum_cycles):
+    """Dual coordinate projection for G d >= target; diagnostic, not a learner."""
+    import numpy as np
+    gram, residual = np.asarray(gram, dtype=float), np.asarray(residual, dtype=float)
+    if (gram.shape != (len(residual), len(residual)) or not len(residual)
+            or not np.isfinite(gram).all() or not np.isfinite(residual).all()
+            or not np.all(np.diag(gram) > 0) or tolerance <= 0 or maximum_cycles < 1):
+        raise ValueError('invalid margin constraints')
+    multipliers = np.zeros(len(residual))
+    for _ in range(maximum_cycles):
+        previous = multipliers.copy()
+        for i in range(len(residual)):
+            multipliers[i] = max(0., multipliers[i] +
+                (residual[i] - gram[i] @ multipliers) / gram[i, i])
+        if (np.max(residual - gram @ multipliers) <= tolerance
+                and np.max(np.abs(multipliers - previous)) <= tolerance):
+            return multipliers
+    raise ValueError('margin constraints did not converge')
+
+
 def fractional_snapshot(before, after, *, fraction):
     """Interpolate one saved displacement; never advance or alter optimizer state."""
     if not math.isfinite(fraction) or not 0 <= fraction <= 1:
