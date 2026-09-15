@@ -1068,6 +1068,9 @@ def train_supervised(config, view):
         directory = Path(parent).parent
         verify_adapter_base(config["model"], directory)
         metadata = json.loads((directory / "adapter_config.json").read_text())
+        for key in ("architecture", "staged_policy", "selection"):
+            if metadata.get(key) != config.get(key):
+                raise ValueError(f"staged SFT parent differs at {key}")
         validate_sft_parent_contract(config, metadata)
         for key in ("lora_parameters", "num_layers", "chat_template_kwargs", "input_mode"):
             if metadata.get(key) != config.get(key):

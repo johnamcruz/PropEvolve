@@ -137,3 +137,16 @@ def test_audited_dataset_reaches_staged_native_batches_without_action_completion
     learner = MLXAdapterLearner(reloaded, rl_config)
     update = learner.update([(decisions[0], 1.)], np.random.default_rng(11))
     assert update["mean_gradient_norm"] > 0
+
+    # Shape-compatible old action adapters must not become staged parents just
+    # because a caller omitted optional warm-start requirements.
+    metadata["architecture"] = "direct_action"
+    (trained / "adapter_config.json").write_text(json.dumps(metadata))
+    config.update(adapter_path=str(tmp_path / "invalid-warm-start"),
+        resume_adapter_file=str(trained / "adapters.safetensors"),
+        resume_adapter_requirements=None)
+    # Restore the original SFT state schema used by this prepared view.
+    config["staged_policy"]["state_fields"] = ["trade.unrealized_r"]
+    recipe.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="staged.*parent"):
+        train_prepared(recipe, view)
