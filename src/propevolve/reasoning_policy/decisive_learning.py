@@ -16,6 +16,36 @@ def component_snapshot(before, after, *, component):
     return result
 
 
+def project_retention_displacement(before, proposed, gradient):
+    """Diagnostic one-sided LoRA step projection, not a new optimizer.
+
+    Retention is minimized, so a positive gradient dot displacement is harmful
+    locally. Preserve projector and native optimizer state; finite action ranks
+    must still be checked after this first-order correction.
+    """
+    import mlx.core as mx
+    result = component_snapshot(before, proposed, component='both')
+    if before.keys() != gradient.keys():
+        raise ValueError('retention gradient identity differs')
+    names = [n for n in before if n.endswith(('.lora_a', '.lora_b'))]
+    if not names:
+        raise ValueError('retention projection requires LoRA parameters')
+    delta = {n: proposed[n].astype(mx.float32) - before[n].astype(mx.float32) for n in names}
+    dot = float(sum(mx.sum(gradient[n].astype(mx.float32)*delta[n]) for n in names).item())
+    norm2 = float(sum(mx.sum(gradient[n].astype(mx.float32)**2) for n in names).item())
+    if not math.isfinite(dot) or not math.isfinite(norm2):
+        raise ValueError('nonfinite retention displacement')
+    coefficient = max(dot, 0.) / norm2 if norm2 > 0. else 0.
+    if coefficient:
+        for n in names:
+            result[n] = (proposed[n].astype(mx.float32)
+                         - coefficient * gradient[n].astype(mx.float32)).astype(proposed[n].dtype)
+    after_dot = float(sum(mx.sum(gradient[n].astype(mx.float32)
+        * (result[n].astype(mx.float32)-before[n].astype(mx.float32))) for n in names).item())
+    return result, {'dot_before': dot, 'dot_after': after_dot, 'coefficient': coefficient,
+                    'retention_gradient_norm': norm2**0.5}
+
+
 def mean_batch_gradient(model, batches, *, loss, weight_by_rows):
     """Stream a diagnostic gradient without advancing the native optimizer.
 

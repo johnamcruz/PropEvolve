@@ -17,6 +17,26 @@ def test_component_snapshot_isolates_actual_update_without_mutating_parent():
     with pytest.raises(ValueError):
         component_snapshot(before, {**after, 'unknown': mx.array([0.])}, component='lora')
 
+
+def test_retention_projection_changes_only_harmful_lora_displacement():
+    from propevolve.reasoning_policy.decisive_learning import project_retention_displacement
+    before = {'model.layer.lora_a': mx.array([1., 1.]),
+              'market_projector.weight': mx.array([5.])}
+    proposed = {'model.layer.lora_a': mx.array([3., 2.]),
+                'market_projector.weight': mx.array([6.])}
+    gradient = {'model.layer.lora_a': mx.array([1., 0.]),
+                'market_projector.weight': mx.array([100.])}
+    corrected, receipt = project_retention_displacement(before, proposed, gradient)
+    assert corrected['model.layer.lora_a'].tolist() == [1., 2.]
+    assert corrected['market_projector.weight'].tolist() == [6.]
+    assert receipt['dot_before'] == 2.
+    assert receipt['dot_after'] == 0.
+    assert proposed['model.layer.lora_a'].tolist() == [3., 2.]
+    gradient['model.layer.lora_a'] = mx.array([-1., 0.])
+    unchanged, receipt = project_retention_displacement(before, proposed, gradient)
+    assert unchanged['model.layer.lora_a'].tolist() == [3., 2.]
+    assert receipt['coefficient'] == 0.
+
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
@@ -54,6 +74,9 @@ def tiny_backbone(vocabulary=16, *, state=False):
             self.lm_head = self.output
             self.args = type("Args", (), {"tie_word_embeddings": False})()
             self.forward_calls = 0
+        @property
+        def layers(self):
+            return [self.model]
         def __call__(self, inputs, input_embeddings=None):
             self.forward_calls += 1
             return self.output(self.model(inputs, input_embeddings=input_embeddings))
@@ -230,7 +253,8 @@ def test_training_checkpoint_restores_optimizer_rng_and_next_update(tmp_path):
         np.testing.assert_array_equal(value, expected[name])
 
 
-def test_native_segment_restart_preserves_optimizer_and_next_balanced_batches(tmp_path, monkeypatch):
+@pytest.mark.parametrize('checkpointed', [False, True])
+def test_native_segment_restart_preserves_optimizer_and_next_balanced_batches(tmp_path, monkeypatch, checkpointed):
     from functools import partial
     from mlx.utils import tree_flatten
     import mlx.optimizers as optim
@@ -260,7 +284,7 @@ def test_native_segment_restart_preserves_optimizer_and_next_balanced_batches(tm
             args = TrainingArgs(batch_size=2, iters=count, val_batches=0,
                 steps_per_report=count, steps_per_eval=count, steps_per_save=count,
                 adapter_file=str(tmp_path / 'native.safetensors'), max_seq_length=8,
-                grad_checkpoint=False, grad_accumulation_steps=2)
+                grad_checkpoint=checkpointed and offset == 0, grad_accumulation_steps=2)
             train(model, optimizer, rows, None, args=args,
                 loss=partial(batch_loss, config=config),
                 iterate_batches=partial(tensor_batches, seed=17, include_partial=True,

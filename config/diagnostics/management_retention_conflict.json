@@ -1,0 +1,6 @@
+{
+  "source_report": "runs/reasoning-challenger/management-complete-anchor-probe-02/report.json",
+  "output": "runs/reasoning-challenger/management-retention-conflict-01",
+  "memory_gb": 6,
+  "cache_mb": 256
+}

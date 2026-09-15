@@ -1,0 +1,11 @@
+{
+  "measurement_report": "runs/reasoning-challenger/management-retention-conflict-01/report.json",
+  "resume_report": "runs/reasoning-challenger/management-retention-projection-02/report.json",
+  "output": "runs/reasoning-challenger/management-retention-projection-repeated-01",
+  "maximum_updates": 12,
+  "maximum_forgotten": 0,
+  "minimum_acquired": 0,
+  "final_minimum_acquired": 1,
+  "memory_gb": 6,
+  "cache_mb": 256
+}
