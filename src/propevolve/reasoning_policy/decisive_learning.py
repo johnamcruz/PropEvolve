@@ -29,20 +29,22 @@ def component_snapshot(before, after, *, component):
     return result
 
 
-def project_retention_displacement(before, proposed, gradient):
-    """Diagnostic one-sided LoRA step projection, not a new optimizer.
+def project_retention_displacement(before, proposed, gradient, *, component='lora'):
+    """Diagnostic one-sided component step projection, not a new optimizer.
 
     Retention is minimized, so a positive gradient dot displacement is harmful
-    locally. Preserve projector and native optimizer state; finite action ranks
+    locally. Preserve other components and native optimizer state; finite action ranks
     must still be checked after this first-order correction.
     """
     import mlx.core as mx
     result = component_snapshot(before, proposed, component='both')
     if before.keys() != gradient.keys():
         raise ValueError('retention gradient identity differs')
-    names = [n for n in before if n.endswith(('.lora_a', '.lora_b'))]
+    if component not in {'lora', 'projector'}:
+        raise ValueError('retention projection requires a named component')
+    names = [n for n in before if (n.startswith('market_projector.')) == (component == 'projector')]
     if not names:
-        raise ValueError('retention projection requires LoRA parameters')
+        raise ValueError('retention projection requires component parameters')
     delta = {n: proposed[n].astype(mx.float32) - before[n].astype(mx.float32) for n in names}
     dot = float(sum(mx.sum(gradient[n].astype(mx.float32)*delta[n]) for n in names).item())
     norm2 = float(sum(mx.sum(gradient[n].astype(mx.float32)**2) for n in names).item())

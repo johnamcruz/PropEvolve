@@ -18,3 +18,18 @@ def test_saved_update_fraction_preserves_sources_and_exact_endpoints():
     for invalid in (-.1, 1.1, float('nan')):
         with pytest.raises(ValueError):
             fractional_snapshot(before, after, fraction=invalid)
+
+
+def test_projector_retention_does_not_alter_lora_learning_step():
+    mx = pytest.importorskip('mlx.core')
+    from propevolve.reasoning_policy.decisive_learning import project_retention_displacement
+    before = {'layer.lora_a': mx.array([0., 0.]),
+              'market_projector.weight': mx.array([0., 0.])}
+    proposed = {'layer.lora_a': mx.array([3., 2.]),
+                'market_projector.weight': mx.array([2., 1.])}
+    gradient = {'layer.lora_a': mx.array([1., 0.]),
+                'market_projector.weight': mx.array([1., 0.])}
+    result, receipt = project_retention_displacement(before, proposed, gradient, component='projector')
+    assert result['market_projector.weight'].tolist() == [0., 1.]
+    assert result['layer.lora_a'].tolist() == [3., 2.]
+    assert receipt['dot_after'] == 0

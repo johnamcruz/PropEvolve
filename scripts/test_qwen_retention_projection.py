@@ -101,7 +101,8 @@ def main():
         resume = json.loads(resume_path.read_text())
         if resume['source_sha256'] != measured['source_sha256']:
             raise ValueError('resume source identity differs')
-        last = resume['updates'][-1]
+        last = (next(s for s in resume['updates'] if s['offset'] == plan['resume_offset'])
+                if 'resume_offset' in plan else resume['updates'][-1])
         start_offset = last['offset'] + 1
         resume_state = resume_path.parent / f'update-{start_offset:02d}' / 'state'
         restored = load_training_state(resume_state, model, optimizer)
@@ -142,11 +143,19 @@ def main():
         proposed = dict(tree_flatten(model.trainable_parameters()))
         native_evidence = assess(rows)
         native_delta = None
+        if offset == start_offset and plan.get('native_reference_report'):
+            reference = json.loads(Path(plan['native_reference_report']).read_text())
+            step = next(s for s in reference['updates'] if s['offset'] == offset)
+            native_delta = require_parity(native_evidence, step['native'])
         if offset == 0:
             if draws != source['complete_anchor_probe']['next_microbatch_indices']:
                 raise ValueError('native next batches differ')
             native_delta = require_parity(native_evidence, source['complete_anchor_probe']['control'])
         corrected, projection = project_retention_displacement(before, proposed, retention_gradient)
+        if plan.get('projector_retention', False):
+            corrected, projector_projection = project_retention_displacement(
+                before, corrected, retention_gradient, component='projector')
+            projection = {'lora': projection, 'projector': projector_projection}
         model.load_weights(list(corrected.items()), strict=False)
         current = assess(rows)
         progress = update_progress(previous['boundaries'], current['boundaries'])
