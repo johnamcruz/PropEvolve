@@ -796,7 +796,12 @@ def boundary_retention_loss(scores, parent_scores, boundary_masks, *, temperatur
 
 
 def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,
-                   causal_states, embeddings, available, *extras, config):
+                   causal_states, embeddings, available, *extras, config, objective=None):
+    if objective is not None and (config.get("decision_objective") != "hierarchical_binary"
+            or not config["action_supervision"]["enabled"]
+            or config.get("market_distillation") is not None
+            or config.get("market_loss_chunk_size") is not None):
+        raise ValueError("objective diagnostic requires unchunked hierarchical action training")
     if config.get("market_distillation") is not None:
         if len(extras) != 4:
             raise ValueError("market distillation requires an authenticated short-query view")
@@ -856,6 +861,7 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
     else:
         scores = mean_completion_scores(token_scores, mask, xp=mx)
     losses = []
+    task_terms = []
     correction_masks = None if retention is None else ~extras[-1]
     for index in range(batch_size):
         if config["action_supervision"]["enabled"]:
@@ -870,21 +876,40 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
                     config["action_supervision"], xp=mx, valid=valid[index]))
         else:
             losses.append(completion_objective(scores[index], valid[index], xp=mx))
+        if objective is not None:
+            task_terms.append(hierarchical_action_objective(
+                scores[index], probabilities[index], values[index], config["action_supervision"],
+                task_code=task_codes[index], xp=mx, return_terms=True,
+                correction_boundaries=(None if correction_masks is None else correction_masks[index])))
     loss = mx.stack(losses).mean()
+    teacher_contribution = retention_contribution = mx.array(0.)
     if corrective is not None:
         query_tokens, positions, teacher_probabilities, teacher_weights, label_ids = extras[:5]
         from .market_distillation import market_outputs
         teacher_loss, _, _ = market_outputs(
             model, query_tokens, embeddings, available, causal_states,
             positions, teacher_probabilities, teacher_weights, label_ids)
-        loss = loss + corrective["loss_weight"] * teacher_loss
+        teacher_contribution = corrective["loss_weight"] * teacher_loss
+        loss = loss + teacher_contribution
     if retention is not None:
         parent_scores, boundary_masks = extras[-2:]
-        loss = loss + retention["loss_weight"] * boundary_retention_loss(
+        retention_contribution = retention["loss_weight"] * boundary_retention_loss(
             scores, parent_scores, boundary_masks,
             temperature=retention["temperature"],
             minimum_margin=config["action_supervision"]["margin"])
+        loss = loss + retention_contribution
+    if objective is not None:
+        terms = mx.stack(task_terms).mean(axis=0)
+        loss = dict(entry=terms[0], direction=terms[1], management=terms[2],
+                    teacher=teacher_contribution, retention=retention_contribution)[objective]
     return loss, mx.array(tokens.shape[0]), scores
+
+
+def batch_objective_loss(model, *batch, config, objective):
+    """Measure a weighted production contribution, without installing another optimizer."""
+    if objective not in {"entry", "direction", "management", "teacher", "retention"}:
+        raise ValueError("unknown diagnostic objective")
+    return _batch_outputs(model, *batch, config=config, objective=objective)[0]
 
 
 def batch_loss(model, tokens, offsets, lengths, valid, probabilities, values, task_codes,

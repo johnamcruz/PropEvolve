@@ -1,0 +1,16 @@
+{
+  "parent_config": "config/reasoning/error_selected_distillation_parent_sft.json",
+  "learner_config": "config/reasoning/error_selected_distillation_sft.json",
+  "view": "runs/reasoning-challenger/error-selected-distillation/view",
+  "learning_report": "runs/reasoning-challenger/decisive-learning-01/report.json",
+  "generalization_report": "runs/reasoning-challenger/decisive-generalization-01/report.json",
+  "label_audit": ".private/research/trade-label-audit.json",
+  "output": "runs/reasoning-challenger/qwen-gradient-audit-01",
+  "optimizer_steps": 3,
+  "seed": 17,
+  "ambiguity_r": 0.01,
+  "retention": {"loss_weight": 1.0, "temperature": 1.0},
+  "memory_gb": 6,
+  "cache_mb": 256,
+  "gradient_relative_tolerance": 0.002
+}

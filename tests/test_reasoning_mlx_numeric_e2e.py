@@ -295,6 +295,37 @@ def test_error_selected_action_update_uses_action_and_teacher_targets_on_same_ro
                for _, value in tree_flatten(gradients))
 
 
+def test_named_production_objectives_reconstruct_loss_and_gradient_without_changing_update():
+    from mlx.utils import tree_flatten
+    from propevolve.reasoning_policy.supervised_trainer import batch_objective_loss
+    model = tiny_backbone()
+    row = {**example(), "target_name": "ENTER_LONG_1",
+        "mastered_anchor_retention": {"scores": [0., 2., 1.],
+            "boundaries": {"entry": True, "direction": False, "management": False}},
+        "error_selected_distillation": {"tokens": [1, 7, 8, 4], "offset": 2,
+            "market_targets": {"positions": [1, 2], "probabilities": [.9, .1],
+                "weights": [1., 1.], "label_ids": [9, 10]}}}
+    packed = tuple(mx.array(x) for x in pack_examples([row], max_seq_length=8))
+    config = {"input_mode": "embeddings", "decision_objective": "hierarchical_binary",
+        "action_supervision": {"enabled": True, "soft_target_weight": 1.,
+            "ranking_weight": 2., "margin": .25},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+        "error_selected_distillation": {"loss_weight": .5, "settings": {}}}
+    actual, gradient = nn.value_and_grad(model, lambda m: batch_loss(m, *packed, config=config)[0])(model)
+    parts, gradients = [], []
+    for name in ('entry', 'direction', 'management', 'teacher', 'retention'):
+        value, grad = nn.value_and_grad(model, lambda m: batch_objective_loss(
+            m, *packed, config=config, objective=name))(model)
+        parts.append(float(value.item()))
+        gradients.append(dict(tree_flatten(grad)))
+    assert sum(parts) == pytest.approx(float(actual.item()), rel=1e-5)
+    assert parts[0] == 0.  # Correct ENTER is retained, not corrected.
+    assert parts[2] == 0.  # No management loss on a flat row.
+    for name, value in tree_flatten(gradient):
+        np.testing.assert_allclose(np.asarray(sum(g[name] for g in gradients)),
+                                   np.asarray(value), atol=1e-5, rtol=1e-4)
+
+
 def test_mastered_anchor_retention_penalizes_drift_and_never_protects_mistakes():
     from propevolve.reasoning_policy.supervised_trainer import anchor_retention_loss
 

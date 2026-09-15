@@ -67,7 +67,7 @@ ties receive no ranking margin. Soft labels preserve their uncertainty.
 
 
 def hierarchical_action_objective(scores, probabilities, values, config, *,
-                                  task_code, xp, correction_boundaries=None):
+                                  task_code, xp, correction_boundaries=None, return_terms=False):
     """Optimize state-appropriate binary decisions with shared action scores.
 
     ``task_code`` is zero for a flat WAIT/LONG/SHORT state and one for a
@@ -114,4 +114,10 @@ def hierarchical_action_objective(scores, probabilities, values, config, *,
         scores[:2], probabilities[:2] / xp.maximum(probabilities[:2].sum(), 1e-12),
         values[:2], config, xp=xp)
     management_loss = boundaries[2] * management_loss
+    if return_terms:
+        return xp.stack([
+            xp.where(task_code == 0, entry_weight * entry_loss / xp.maximum(flat_weight, 1.), 0.),
+            xp.where(task_code == 0, direction_weight * direction_loss / xp.maximum(flat_weight, 1.), 0.),
+            xp.where(task_code == 0, 0., management_loss),
+        ])
     return xp.where(task_code == 0, flat_loss, management_loss)
