@@ -1,0 +1,5 @@
+{
+  "inherits": "staged_real_trade_loss_control.json",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/trade-loss-control-resumed",
+  "resume_training_state": "runs/reasoning-challenger/staged-real-proof/trade-loss-control/training-state"
+}
