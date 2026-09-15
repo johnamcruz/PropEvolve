@@ -481,8 +481,9 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             raise ValueError("teacher fields leaked into teacher-free SFT prompt")
                         state_fields = config["projector"].get("state_fields", [])
                         if state_fields:
-                            fields = prompt.get("fields")
-                            history = np.asarray(prompt.get("history_oldest_first"), dtype=np.float32)
+                            fields = record.get("causal_state_fields", prompt.get("fields"))
+                            history = np.asarray([record["causal_state"]] if "causal_state_fields" in record
+                                else prompt.get("history_oldest_first"), dtype=np.float32)
                             if (not isinstance(fields, list) or len(set(fields)) != len(fields)
                                     or history.ndim != 2 or history.shape[1] != len(fields)
                                     or not len(history) or not np.isfinite(history).all()

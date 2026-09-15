@@ -11,6 +11,14 @@
 - **Trading evidence**: future target-before-stop and excursion outcomes are
   labels, never policy inputs. Teacher-free policy evaluation must use the same
   decision definitions as training, retention, and checkpoint selection.
+- **Management collection coverage**: job JSON `management_sampling: all_states`
+  preserves repeated HOLD/CLOSE labels at the configured `sample_stride`, up to
+  `maximum_examples_per_episode`. `first_per_action` retains legacy collection
+  behavior. Both explicit and economic-sampling episode paths use the same
+  trade-management plan. Flat WAIT remains a single entry decision. Rebuilding
+  a corpus requires a new output and coverage audit; existing assessments are
+  not evidence for newly collected rows. Repeated neighboring rows are not
+  independent evidence of generalization.
 - **Prospective trade R context**: `trade.volatility_r` is the arithmetic mean
   true range over the JSON-configured number of completed bars, multiplied by
   contract point value and divided by configured dollar risk.
@@ -19,6 +27,12 @@
   missing history from zero volatility. These inputs are available while flat
   and are trade economics, not challenge balance or MLL. Existing open-trade
   excursion fields retain their original initial-stop-distance denominator.
+  A context JSON may declare `text_fields` to keep these appended R inputs
+  continuous-only. Dataset `causal_state_fields` names the numeric values;
+  visible prompt values must match exactly. This preserves the original text
+  while supplying the same numeric state in prepared training and live policy
+  inference. New projector columns initialize at zero when explicitly extending
+  a parent; matched diagnostics verify initial action-score parity before updates.
 
 - **Challenge P&L**: net realized or marked-to-market profit relative to the
   challenge starting balance; the model does not depend on the broker's
@@ -37,3 +51,13 @@
 - **Golden trajectory**: an immutable input/action sequence and expected
   economic receipt captured from the trusted simulator contract. PropEvolve
   must reproduce it through its public `reset`/`step` interface.
+### Management-only diagnostic lineage
+
+Trade-mastery management rows retain actual entry side and execution-bar timestamp
+in `targets.position_entry`, including when `management_only` excludes the entry
+label. This is audit metadata, not a policy prompt input. The independent OHLC
+audit resolves legacy entry rows through authenticated selection-source manifests
+and rejects missing/conflicting entry lineage rather than guessing from WAIT.
+The bounded management correction uses JSON-selected rows, frozen-parent inference
+first, and the unchanged chronological control. Collection/audit success is not
+proof of learning, retention, or economic generalization.

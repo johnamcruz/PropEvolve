@@ -1,0 +1,14 @@
+{
+  "inherits": "../reasoning/error_selected_distillation_job.json",
+  "status": "management_coverage_diagnostic_not_training",
+  "management_sampling": "all_states",
+  "maximum_examples_per_episode": 151,
+  "sample_stride": 5,
+  "economic_action_sampling": {
+    "train": {"per_action": 30, "seed": 3801},
+    "valid": {"per_action": 10, "seed": 3802}
+  },
+  "dataset_output": "runs/reasoning-challenger/management-coverage/dataset",
+  "label_census_output": "runs/reasoning-challenger/management-coverage/label-census.json",
+  "mlx_view": "runs/reasoning-challenger/management-coverage/view"
+}

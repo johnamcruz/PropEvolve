@@ -415,12 +415,24 @@ def action_collection_plan(config, expected_action):
     if scope not in {"entry", "trade_mastery"}:
         raise ValueError("unknown action supervision scope")
     maximum = config["maximum_examples_per_episode"]
+    management = {}
+    if "management_only" in config:
+        if type(config["management_only"]) is not bool:
+            raise ValueError("management_only must be boolean")
+        if config["management_only"] and (scope != "trade_mastery" or action == Action.WAIT):
+            raise ValueError("management_only requires a positioned trade plan")
+        management["management_only"] = config["management_only"]
+    if "management_sampling" in config:
+        if config["management_sampling"] not in {"first_per_action", "all_states"}:
+            raise ValueError("unknown management sampling")
+        management["management_sampling"] = config["management_sampling"]
     if scope == "trade_mastery" and action in {
             Action.ENTER_LONG_1, Action.ENTER_SHORT_1}:
         return {
             "mode": "trade_mastery_grid",
             "maximum_examples": maximum,
             "initial_entry_action": action,
+            **management,
         }
     return {
         "mode": "market_barrier_grid",
@@ -511,6 +523,8 @@ def collect_job(path):
                             collect_action_targets=kind == "action",
                             collect_market_targets=kind == "market",
                             augment_action_targets=augment_action,
+                            **({} if plan is None else {
+                                key: plan[key] for key in ("management_sampling", "management_only") if key in plan}),
                         ):
                             if pair[kind] is not None:
                                 expected = Action(selected["expected_action"]).name
@@ -524,17 +538,23 @@ def collect_job(path):
             else:
                 for selected in episodes:
                     episode = {key: selected[key] for key in ("ticker", "start")}
+                    plan = (action_collection_plan(config, selected["expected_action"])
+                            if kind == "action" and "expected_action" in selected else None)
                     for pair in collect_examples(
                         env, reset_options=episode, context_config=context, sources=sources,
                         behavior_factory=factory, continuation_factory=factory,
                         source_id=identity + ":" + json.dumps(episode, sort_keys=True),
                         continuation_id=continuation_id,
-                        maximum_examples=config["maximum_examples_per_episode"],
+                        maximum_examples=(config["maximum_examples_per_episode"]
+                                          if plan is None else plan["maximum_examples"]),
                         sample_stride=config["sample_stride"],
                         rollout_max_steps=config["rollout_max_steps"],
                         target_temperature=config["target_temperature"],
                         opportunity_contract=config["opportunity_contract"],
-                        action_label_mode=action_label_mode,
+                        action_label_mode=(action_label_mode if plan is None else plan["mode"]),
+                        initial_entry_action=(None if plan is None else plan["initial_entry_action"]),
+                        **({} if plan is None else {
+                            key: plan[key] for key in ("management_sampling", "management_only") if key in plan}),
                         collection_warmup_steps=config.get("collection_warmup_steps", 0),
                         collect_action_targets=kind == "action",
                         collect_market_targets=kind == "market",
@@ -543,7 +563,8 @@ def collect_job(path):
                         if pair[kind] is not None:
                             if kind == "action" and "expected_action" in selected:
                                 expected = Action(selected["expected_action"]).name
-                                if pair[kind]["messages"][-1]["content"] != expected:
+                                legal = pair[kind]["targets"].get("action_order", ())
+                                if expected in legal and pair[kind]["messages"][-1]["content"] != expected:
                                     raise ValueError("selected economic action changed during collection")
                             yield pair[kind]
     manifest = write_supervised_dataset(

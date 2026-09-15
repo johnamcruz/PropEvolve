@@ -1,0 +1,7 @@
+{
+  "dataset": "runs/reasoning-challenger/error-selected-distillation/dataset",
+  "source": "config/reasoning/source_environment.json",
+  "context": "config/reasoning/context_trade_r_continuous_embeddings.json",
+  "output": "runs/reasoning-challenger/trade-r-continuous-context/dataset",
+  "specialist_score_mode": "post_fit"
+}

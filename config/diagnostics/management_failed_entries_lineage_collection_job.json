@@ -1,0 +1,5 @@
+{
+  "inherits": "management_failed_entries_collection_job.json",
+  "dataset_output": "runs/reasoning-challenger/management-failed-entries-lineage/dataset",
+  "mlx_view": "runs/reasoning-challenger/management-failed-entries-lineage/view"
+}

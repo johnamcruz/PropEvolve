@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from propevolve.reasoning_policy.decisive_learning import decision_evidence, compare_learning, evaluation_recipe
+from propevolve.reasoning_policy.decisive_learning import decision_evidence, compare_learning, evaluation_recipe, require_initial_score_parity, fixed_diagnostic_indices
 from propevolve.reasoning_policy.integrity import file_digest
 from propevolve.reasoning_policy.mlx_sft import read_sft_config, PreparedDataset, verify_mlx_view
 from propevolve.reasoning_policy.policy import MLXActionPolicy
@@ -62,6 +62,11 @@ def main():
     indices, rows = {}, {}
     required = {'WAIT', 'ENTER_LONG_1', 'ENTER_SHORT_1', 'HOLD', 'CLOSE'}
     for role, dataset in datasets.items():
+        if 'fixed_indices' in plan:
+            indices[role] = fixed_diagnostic_indices(dataset.rows, plan['fixed_indices'][role],
+                minimum_gap=plan['minimum_economic_gap'])
+            rows[role] = [dataset[i] for i in indices[role]]
+            continue
         groups = {name: [] for name in required}
         for i, row in enumerate(dataset.rows):
             economics = row['action_targets']
@@ -87,7 +92,7 @@ def main():
         'status': 'RUNNING', 'stages': [], 'simulator_transfer': 'NOT_RUN',
         'limitations': ['Clear-label diagnostic only; ambiguous rows audited separately.',
             '2024 is development, not untouched final validation.',
-            'Management corpus is winner-entry conditioned; failed paths need separate evidence.']}
+            'Management coverage and entry conditioning must be interpreted using dataset lineage.']}
     atomic_json(destination / 'report.json', report)
     import mlx.core as mx
     from mlx_lm.tuner.trainer import train, TrainingArgs
@@ -122,6 +127,12 @@ def main():
 
     previous = assess('train')
     report['before'] = {'train': previous, 'valid': assess('valid')}
+    if plan.get('initial_score_reference'):
+        reference_path = Path(plan['initial_score_reference'])
+        delta = require_initial_score_parity(json.loads(reference_path.read_text()),
+            report['before'], report['indices'], tolerance=plan['reload_tolerance'])
+        report['initial_score_parity'] = {'maximum_delta': delta,
+            'reference_sha256': file_digest(reference_path)}
     atomic_json(destination / 'report.json', report)
     print('[decisive] baseline=' + json.dumps(compare_learning(
         previous['boundaries'], previous['boundaries'])), flush=True)
@@ -164,7 +175,8 @@ def main():
             grad_accumulation_steps=accumulation, clear_cache_threshold=config['clear_cache_threshold'])
         train(model, optimizer, selected, None, args=native,
             loss=partial(batch_loss, config=config),
-            iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True),
+            iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True,
+                sampling_strategy=plan.get('sampling_strategy', 'random')),
             training_callback=Callback())
     report['after'] = {'train': assess('train'), 'valid': assess('valid')}
     for role in ('train', 'valid'):

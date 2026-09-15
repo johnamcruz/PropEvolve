@@ -1,0 +1,7 @@
+{
+  "inherits": "management_coverage_collection_job.json",
+  "sample_stride": 1,
+  "dataset_output": "runs/reasoning-challenger/management-coverage-dense/dataset",
+  "label_census_output": "runs/reasoning-challenger/management-coverage-dense/label-census.json",
+  "mlx_view": "runs/reasoning-challenger/management-coverage-dense/view"
+}

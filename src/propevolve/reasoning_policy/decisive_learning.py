@@ -2,6 +2,30 @@
 import math
 
 
+def require_initial_score_parity(reference, initial, indices, *, tolerance):
+    """Fail before updates if an input ablation changes the frozen control."""
+    if reference['indices'] != indices:
+        raise ValueError('initial comparison requires identical rows')
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError('invalid initial score parity tolerance')
+    maximum = 0.0
+    for role in ('train', 'valid'):
+        old, new = reference['before'][role]['scores'], initial[role]['scores']
+        if len(old) != len(new):
+            raise ValueError('initial score parity shape mismatch')
+        for left, right in zip(old, new):
+            if len(left) != len(right) or not all(math.isfinite(x) for x in (*left, *right)):
+                raise ValueError('invalid initial score parity evidence')
+            maximum = max(maximum, max((abs(a-b) for a, b in zip(left, right)), default=0.0))
+        if 'boundaries' in initial[role] and 'boundaries' in reference['before'][role]:
+            changes = compare_learning(reference['before'][role]['boundaries'], initial[role]['boundaries'])
+            if changes['acquired'] or changes['forgotten']:
+                raise ValueError('initial score parity changed a decision boundary')
+    if maximum > tolerance:
+        raise ValueError(f'initial score parity exceeded tolerance: {maximum}')
+    return maximum
+
+
 def evaluation_recipe(config, *, adapter_path):
     """Export an evaluable policy, not the diagnostic's in-memory sampler state."""
     return {**config, 'adapter_path': adapter_path, 'targeted_sampling': None,
@@ -138,3 +162,18 @@ def simulate_prefix(policy, environment, *, options, context_config, max_steps, 
             'expectancy_r': float(info.get('expectancy_r', 0.)),
             'average_mfe_r': float(info.get('avg_mfe_r', 0.)),
             'average_mae_r': float(info.get('avg_mae_r', 0.))}
+def fixed_diagnostic_indices(rows, indices, *, minimum_gap):
+    """Honor an audited JSON cohort without resampling its chronological control."""
+    if (not isinstance(indices, list) or not indices
+            or any(type(i) is not int or i < 0 or i >= len(rows) for i in indices)
+            or len(set(indices)) != len(indices)):
+        raise ValueError('invalid fixed diagnostic indices')
+    for i in indices:
+        row = rows[i]
+        targets = row['action_targets']
+        values = dict(zip(targets['names'], targets['values']))
+        gap = values[row['target_name']] - max(
+            value for name, value in values.items() if name != row['target_name'])
+        if not gap >= minimum_gap:
+            raise ValueError('fixed diagnostic row fails economic gap')
+    return list(indices)

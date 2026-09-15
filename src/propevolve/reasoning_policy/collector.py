@@ -141,6 +141,15 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                     target_temperature=target_temperature,
                 )
                 action_record["ticker"] = ticker
+                if action_label_mode == "trade_mastery_grid" and entry_index is not None:
+                    # Explicit execution lineage is required when the flat entry
+                    # row is deliberately excluded from management-only corpora.
+                    action_record["targets"]["position_entry"] = {
+                        "action": entry_action.name,
+                        "completed_at_ns": int(market.timestamps[entry_index].astype(
+                            "datetime64[ns]").astype(np.int64)),
+                        "execution": "bar_open",
+                    }
             target_grid = None
             excursions = None
             if collect_market_targets or augment_action_targets:

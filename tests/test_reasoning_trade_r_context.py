@@ -80,7 +80,8 @@ def test_r_context_rejects_undefined_rather_than_fabricating_economics(values):
         trade_r_context(environment().markets["NQ"], **{**arguments, **values})
 
 
-def test_existing_labeled_row_enrichment_matches_live_serialization():
+@pytest.mark.parametrize('numeric_only', [False, True])
+def test_existing_labeled_row_enrichment_matches_live_serialization(numeric_only):
     from propevolve.reasoning_policy.trade_r_dataset import enrich_record
     from propevolve.reasoning_policy.dataset import context_messages, embedding_payload
     from propevolve.decision import Action
@@ -91,7 +92,8 @@ def test_existing_labeled_row_enrichment_matches_live_serialization():
     observation, _ = env.reset(options={"ticker": "NQ", "start": 2})
     old = ContextConfig(2, ("trade.open",), "embeddings", 1)
     new = ContextConfig(2, ("trade.open", "trade.volatility_r", "trade.cost_r",
-        "trade.volatility_available"), "embeddings", 1, 2)
+        "trade.volatility_available"), "embeddings", 1, 2,
+        text_fields=old.fields if numeric_only else None)
     actions = [Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1]
     histories = [RollingContext(c) for c in (old, new)]
     for history in histories:
@@ -107,6 +109,7 @@ def test_existing_labeled_row_enrichment_matches_live_serialization():
     assert len(json.loads(before['messages'][1]['content'])['fields']) == 1
     payload = embedding_payload(histories[1].snapshot(), state_fields=new.fields)
     np.testing.assert_array_equal(payload['causal_state'],
+        result['causal_state'] if numeric_only else
         json.loads(result['messages'][1]['content'])['history_oldest_first'][-1])
 
 
@@ -127,7 +130,53 @@ def test_trade_r_inputs_do_not_depend_on_challenge_target_or_mll():
     np.testing.assert_array_equal(*snapshots)
 
 
-def test_json_enrichment_to_prepared_batches_preserves_labels_and_cached_embeddings(tmp_path):
+def test_continuous_r_inputs_do_not_change_the_frozen_parent_prompt():
+    from propevolve.reasoning_policy.dataset import context_messages, embedding_payload
+    from propevolve.decision import Action
+    base = environment()
+    env = HistoricalChallengeEnv(base.markets, tick_values={'NQ': 20.}, round_trip_fees={'NQ': 6.},
+        spec=replace(base.spec, per_trade_risk_dollars=300., ratchet_activation_r=10., ratchet_giveback_r=1.), seed=7)
+    old_fields = ('trade.open', 'trade.current_r')
+    fields = (*old_fields, 'trade.volatility_r', 'trade.cost_r', 'trade.volatility_available')
+    configs = [ContextConfig(2, old_fields, 'embeddings', 1),
+        ContextConfig(2, fields, 'embeddings', 1, 2, text_fields=old_fields)]
+    windows = []
+    observation, _ = env.reset(options={'ticker': 'NQ', 'start': 2})
+    for config in configs:
+        history = RollingContext(config)
+        observe_context(history, env, observation, ticker='NQ', row=2, sources=())
+        windows.append(history.snapshot())
+    actions = [Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1]
+    assert context_messages(windows[0], actions) == context_messages(windows[1], actions)
+    payload = embedding_payload(windows[1])
+    assert payload['causal_state_fields'] == list(fields)
+    assert payload['causal_state'][-3] > 0
+    assert payload['causal_state'][-2] == pytest.approx(.02)
+
+
+@pytest.mark.parametrize('mutation', ['future', 'nonfinite', 'visible_mismatch'])
+def test_audit_rejects_corrupt_continuous_state_even_when_prompt_is_valid(tmp_path, mutation):
+    from test_reasoning_dataset_audit_e2e import _dataset
+    from propevolve.reasoning_policy.dataset import audit_supervised_dataset
+    from propevolve.reasoning_policy.integrity import file_digest
+    root = _dataset(tmp_path)
+    rows = [json.loads(s) for s in (root/'train.jsonl').read_text().splitlines()]
+    prompt = json.loads(rows[0]['messages'][1]['content'])
+    fields = [*prompt['fields'], 'future_mfe' if mutation == 'future' else 'trade.volatility_r']
+    values = [*prompt['history_oldest_first'][-1], float('nan') if mutation == 'nonfinite' else .5]
+    if mutation == 'visible_mismatch':
+        values[0] += 10.
+    rows[0].update(causal_state_fields=fields, causal_state=values)
+    (root/'train.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+    manifest = json.loads((root/'manifest.json').read_text())
+    manifest['files']['train'] = file_digest(root/'train.jsonl')
+    (root/'manifest.json').write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='continuous causal state'):
+        audit_supervised_dataset(root, specialist_score_mode='out_of_fold')
+
+
+@pytest.mark.parametrize('numeric_only', [False, True])
+def test_json_enrichment_to_prepared_batches_preserves_labels_and_cached_embeddings(tmp_path, numeric_only):
     import pandas as pd
     from propevolve.cache import build_embedding_cache, EmbeddingCache
     from propevolve.decision import Action
@@ -163,13 +212,25 @@ def test_json_enrichment_to_prepared_batches_preserves_labels_and_cached_embeddi
             'economic_contract': 'fixture', 'split_audit': {'status': 'PASS'}},
         embedding_storage='source_embedding_reference_v1', embedding_source_cache_root=cache_path.parent)
     audit_supervised_dataset(parent, specialist_score_mode='post_fit')
+    from propevolve.reasoning_policy.dataset_selection import select_dataset
+    selection = tmp_path/'selection.json'
+    selection.write_text(json.dumps({'base_dataset':str(parent),
+        'output':str(tmp_path/'selected'), 'specialist_score_mode':'post_fit',
+        'sources':[{'dataset':str(parent),'role':role,'indices':[0,2]}
+                   for role in ('train','valid')]}))
+    assert select_dataset(selection)['counts'] == {'train':2,'valid':2}
+    for role in ('train','valid'):
+        original = [json.loads(line) for line in (parent/f'{role}.jsonl').read_text().splitlines()]
+        selected = [json.loads(line) for line in (tmp_path/f'selected/{role}.jsonl').read_text().splitlines()]
+        assert selected == [original[0],original[2]]
     economics = tmp_path/'economics.json'
     economics.write_text(json.dumps({'challenge': {'per_trade_risk_dollars': 300.},
         'point_values': {'NQ': 20.}, 'round_trip_fees': {'NQ': 6.}}))
     fields = ['trade.open', 'trade.current_r', 'trade.volatility_r', 'trade.cost_r', 'trade.volatility_available']
     context = tmp_path/'context.json'
     context.write_text(json.dumps({'context_steps': 2, 'fields': fields, 'input_mode': 'embeddings',
-        'text_steps': 2, 'volatility_lookback': 2}))
+        'text_steps': 2, 'volatility_lookback': 2,
+        **({'text_fields': fields[:2]} if numeric_only else {})}))
     plan = tmp_path/'plan.json'
     plan.write_text(json.dumps({'dataset': str(parent), 'source': str(economics), 'context': str(context),
         'output': str(tmp_path/'enriched'), 'specialist_score_mode': 'post_fit'}))
@@ -179,6 +240,8 @@ def test_json_enrichment_to_prepared_batches_preserves_labels_and_cached_embeddi
         after = [json.loads(s) for s in (tmp_path/f'enriched/{role}.jsonl').read_text().splitlines()]
         assert [r['targets'] for r in before] == [r['targets'] for r in after]
         assert [r['market_embedding_reference'] for r in before] == [r['market_embedding_reference'] for r in after]
+        if numeric_only:
+            assert [r['messages'] for r in before] == [r['messages'] for r in after]
     recipe = tmp_path/'sft.json'
     recipe.write_text(json.dumps({'model': 'external-runtime', 'data': str(tmp_path/'enriched'),
         'adapter_path': str(tmp_path/'adapter'), 'num_layers': 1, 'batch_size': 1,

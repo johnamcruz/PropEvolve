@@ -10,7 +10,7 @@ import numpy as np
 
 from propevolve.assets import AssetContract
 from propevolve.reasoning_policy.integrity import file_digest
-from propevolve.reasoning_policy.label_reference import barrier_result
+from propevolve.reasoning_policy.label_reference import barrier_result, management_entry
 from propevolve.reasoning_policy.workflow import atomic_json
 
 
@@ -27,10 +27,28 @@ def main():
     assets = AssetContract.load(source['assets'])
     stop_at = max(bounds[1] for bounds in manifest['splits'].values())
     roles = {}
+    entry_rows = defaultdict(list)
     for role, bounds in manifest['splits'].items():
         if file_digest(dataset / f'{role}.jsonl') != manifest['files'][role]:
             raise ValueError('dataset row checksum changed')
         roles[role] = [json.loads(line) for line in (dataset / f'{role}.jsonl').open()]
+    # A selected cohort may omit its original flat-entry row. Resolve it
+    # through the authenticated source corpus, not by guessing its direction.
+    for selected_source in manifest['lineage'].get('selection', []):
+        source_dataset = Path(selected_source['dataset'])
+        source_manifest_path = source_dataset / 'manifest.json'
+        if file_digest(source_manifest_path) != selected_source['manifest_sha256']:
+            raise ValueError('selection source manifest changed')
+        source_manifest = json.loads(source_manifest_path.read_text())
+        role = selected_source['role']
+        rows_path = source_dataset / f'{role}.jsonl'
+        if file_digest(rows_path) != source_manifest['files'][role]:
+            raise ValueError('selection source rows changed')
+        with rows_path.open() as stream:
+            for line in stream:
+                row = json.loads(line)
+                if row['messages'][-1]['content'] in ('ENTER_LONG_1', 'ENTER_SHORT_1'):
+                    entry_rows[role].append(row)
     reports = {}
     for ticker in source['tickers']:
         # CSV timestamps are bar opens; model decisions are completed-bar closes.
@@ -67,6 +85,9 @@ def main():
             examples = defaultdict(list)
             parents = {r['source_id']: r for _, r in selected
                        if r['messages'][-1]['content'] not in ('HOLD', 'CLOSE')}
+            for row in entry_rows[role]:
+                if row['ticker'] == ticker:
+                    parents.setdefault(row['source_id'], row)
             def flag(name, index):
                 issues[name] += 1
                 if len(examples[name]) < config['max_examples_per_issue']:
@@ -118,13 +139,13 @@ def main():
                             flag('excursion_' + side + '_' + key, index)
                 if action in ('HOLD', 'CLOSE'):
                     parent = parents.get(row['source_id'])
-                    if parent is None:
-                        flag('missing_entry_lineage', index)
+                    try:
+                        entry_i, sign = management_entry(row, parent, lookup)
+                    except ValueError:
+                        flag('invalid_entry_lineage', index)
                         continue
-                    if parent['messages'][-1]['content'] in ('ENTER_LONG_1', 'ENTER_SHORT_1'):
+                    if parent is not None and parent['messages'][-1]['content'] in ('ENTER_LONG_1', 'ENTER_SHORT_1'):
                         notes['management_from_expost_winner'] += 1
-                    entry_i = lookup[parent['completed_at_ns']] + 1
-                    sign = 1 if parent['messages'][-1]['content'] == 'ENTER_LONG_1' else -1
                     entry = prices[entry_i,0]
                     close_r = (sign*(prices[first,0]-entry)*pv-fee)/risk
                     if abs(close_r-values['CLOSE']) > config['economic_tolerance_r']:

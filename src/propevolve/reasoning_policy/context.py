@@ -16,9 +16,16 @@ class ContextConfig:
     input_mode: str = "specialists"
     text_steps: int | None = None
     volatility_lookback: int | None = None
+    text_fields: tuple[str, ...] | None = None
 
     def __post_init__(self):
+        if self.text_fields is not None and (self.input_mode != 'embeddings'
+                or not self.text_fields or len(set(self.text_fields)) != len(self.text_fields)
+                or not set(self.text_fields).issubset(self.fields)):
+            raise ValueError('text fields must be a nonempty subset of embedding context fields')
         economic_fields = {"trade.volatility_r", "trade.cost_r", "trade.volatility_available"}
+        if self.text_fields is not None and not (set(self.fields) - set(self.text_fields)).issubset(economic_fields):
+            raise ValueError('only appended R context fields may be continuous-only')
         if economic_fields.intersection(self.fields):
             if (not economic_fields.issubset(self.fields)
                     or type(self.volatility_lookback) is not int or self.volatility_lookback < 1):
@@ -43,11 +50,12 @@ class ContextConfig:
     @classmethod
     def load(cls, path: str | Path):
         payload = json.loads(Path(path).read_text())
-        if set(payload) - {"context_steps", "fields", "input_mode", "text_steps", "volatility_lookback"}:
+        if set(payload) - {"context_steps", "fields", "input_mode", "text_steps", "volatility_lookback", "text_fields"}:
             raise ValueError("unexpected context config fields")
         return cls(payload["context_steps"], tuple(payload["fields"]),
                    payload.get("input_mode", "specialists"), payload.get("text_steps"),
-                   payload.get("volatility_lookback"))
+                   payload.get("volatility_lookback"),
+                   None if payload.get('text_fields') is None else tuple(payload['text_fields']))
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,7 @@ class ContextWindow:
     fields: tuple[str, ...]
     embeddings: np.ndarray | None = None
     text_steps: int | None = None
+    text_fields: tuple[str, ...] | None = None
 
 
 class RollingContext:
@@ -101,4 +110,4 @@ class RollingContext:
             embeddings[-len(self._rows):] = np.stack([item[2] for item in self._rows])
             embeddings.setflags(write=False)
         return ContextWindow(values, available, tuple(item[0] for item in self._rows),
-                             self.config.fields, embeddings, self.config.text_steps)
+                             self.config.fields, embeddings, self.config.text_steps, self.config.text_fields)

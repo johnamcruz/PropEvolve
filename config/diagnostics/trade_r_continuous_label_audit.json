@@ -1,0 +1,6 @@
+{
+  "dataset": "runs/reasoning-challenger/trade-r-continuous-context/dataset",
+  "source": "config/reasoning/source_environment.json",
+  "output": ".private/research/trade-r-continuous-label-audit.json",
+  "economic_tolerance_r": 0.00001, "near_tie_r": 0.01, "max_examples_per_issue": 5
+}

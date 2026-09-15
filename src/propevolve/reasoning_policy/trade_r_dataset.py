@@ -34,6 +34,12 @@ def enrich_record(record, market, *, context, risk_dollars, point_value, round_t
         # Match RollingContext's float32 representation exactly.
         values.extend(float(np.float32(fields[name])) for name in extra)
     prompt['fields'] = list(context.fields)
+    if context.text_fields is not None:
+        result['causal_state_fields'] = list(context.fields)
+        result['causal_state'] = list(history[-1])
+        prompt['fields'] = list(context.text_fields)
+        prompt['history_oldest_first'] = [[values[context.fields.index(name)]
+            for name in context.text_fields] for values in history]
     result['messages'][1]['content'] = json.dumps(prompt, separators=(',', ':'), allow_nan=False)
     return result
 

@@ -1,0 +1,86 @@
+{
+  "base_dataset": "runs/reasoning-challenger/error-selected-distillation/dataset",
+  "output": "runs/reasoning-challenger/management-correction-pool-lineage/dataset",
+  "specialist_score_mode": "post_fit",
+  "sources": [
+    {
+      "dataset": "runs/reasoning-challenger/error-selected-distillation/dataset",
+      "role": "train",
+      "indices": [
+        14083,
+        12229,
+        2540,
+        7217,
+        5801,
+        12022,
+        7222,
+        3351,
+        14459,
+        6764
+      ]
+    },
+    {
+      "dataset": "runs/reasoning-challenger/error-selected-distillation/dataset",
+      "role": "valid",
+      "indices": [
+        3245,
+        808,
+        280,
+        101,
+        1345,
+        1952,
+        858,
+        445,
+        5320,
+        3633
+      ]
+    },
+    {
+      "dataset": "runs/reasoning-challenger/management-coverage-dense/dataset",
+      "role": "train",
+      "indices": [
+        408,
+        308,
+        451,
+        437,
+        969,
+        1067,
+        1294,
+        1360,
+        1447,
+        1411,
+        1925,
+        1881,
+        2124,
+        2020,
+        2283,
+        2431,
+        2579,
+        2856
+      ]
+    },
+    {
+      "dataset": "runs/reasoning-challenger/management-failed-entries-lineage/dataset",
+      "role": "train",
+      "indices": [
+        289,
+        261,
+        308,
+        292,
+        721,
+        593,
+        981,
+        977,
+        1327,
+        1320,
+        1517,
+        1374,
+        1705,
+        1716,
+        2058,
+        1827,
+        2448
+      ]
+    }
+  ]
+}

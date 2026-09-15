@@ -1,0 +1,4 @@
+{
+  "inherits": "qwen_trade_r_learner.json",
+  "data": "runs/reasoning-challenger/trade-r-continuous-context/dataset"
+}

@@ -1,0 +1,10 @@
+{
+  "inherits": "qwen_trade_r_continuous_learner.json",
+  "data": "runs/reasoning-challenger/management-correction-r-lineage/dataset",
+  "dataset_requirements": {
+    "minimum_rows_per_action": {
+      "train": {"WAIT": 2, "ENTER_LONG_1": 2, "ENTER_SHORT_1": 2, "HOLD": 20, "CLOSE": 19},
+      "valid": {"WAIT": 2, "ENTER_LONG_1": 2, "ENTER_SHORT_1": 2, "HOLD": 2, "CLOSE": 2}
+    }
+  }
+}

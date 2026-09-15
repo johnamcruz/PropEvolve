@@ -25,6 +25,54 @@ from propevolve.reasoning_policy.integrity import file_digest
 from test_reasoning_source_config import source_payload
 
 
+@pytest.mark.parametrize('direction,entry', [(1, Action.ENTER_LONG_1), (-1, Action.ENTER_SHORT_1)])
+def test_json_job_collects_repeated_holds_through_real_simulator(tmp_path, monkeypatch, direction, entry):
+    from dataclasses import replace
+    from test_reasoning_challenger_e2e import environment
+    from propevolve.environment import HistoricalChallengeEnv
+    base = environment()
+    market = base.markets['NQ']
+    market.open[:] = market.close[:] = 1000 + direction * np.array([0,0,0,11,22,33,44,55])
+    market.high[:] = market.close + .1
+    market.low[:] = market.close - .1
+    def load(*args, **kwargs):
+        import copy
+        markets = copy.deepcopy(base.markets)
+        if args[3] == 'valid':
+            markets['NQ'].timestamps[:] += np.timedelta64(1, 'D')
+        return HistoricalChallengeEnv(markets, tick_values=base.tick_values,
+            round_trip_fees=base.round_trip_fees,
+            spec=replace(base.spec, per_trade_risk_dollars=300,
+                         ratchet_activation_r=10, ratchet_giveback_r=1), seed=7), ()
+    # Cached market/source loading is the external boundary; collection,
+    # labels, JSON configuration, serialization and auditing remain real.
+    start = int(market.timestamps[0].astype('datetime64[ns]').astype(np.int64))
+    end = int(market.timestamps[-1].astype('datetime64[ns]').astype(np.int64)) + 1
+    monkeypatch.setattr(job, 'load_source_contract', lambda *a: (
+        {'teachers':[{'kind':'fixture','identity':'test'}], 'challenge':{}}, {'continuation':{'kind':'reset_states'}},
+        {'train':[start,end], 'valid':[start+86400000000000,end+86400000000000]},
+        end+172800000000000, 'test-source'))
+    monkeypatch.setattr(job, 'load_role', load)
+    (tmp_path/'context.json').write_text(json.dumps({'context_steps':2,
+        'fields':['trade.hold_bars','trade.current_r'], 'input_mode':'embeddings'}))
+    config = {'workspace_root':str(tmp_path), 'context_config':'context.json', 'seed':7,
+        'collection_policy':{'kind':'reset_states'}, 'dataset_kind':'action',
+        'action_supervision_scope':'trade_mastery','management_sampling':'all_states',
+        'maximum_examples_per_episode':4,'sample_stride':1,'rollout_max_steps':5,
+        'collection_warmup_steps':1,'target_temperature':.5,'dataset_output':'dataset',
+        'tickers':{'train':['NQ'],'valid':['NQ']},
+        'episodes':{role:[{'ticker':'NQ','start':0,'expected_action':int(entry)}] for role in ('train','valid')},
+        'opportunity_contract':{'horizon':4,'target_rs':[2.],'stop_r':1.,
+          'position_minimum_improvement_r':.1,
+          'utilities':{'winner':2.,'failure':-1.,'wait':0.,'missed_opportunity':-.25,'conflict_margin':.25}}}
+    path=tmp_path/'job.json';path.write_text(json.dumps(config))
+    result=collect_job(path)
+    rows=[json.loads(line) for line in (tmp_path/'dataset/train.jsonl').read_text().splitlines()]
+    holds=[r for r in rows if r['messages'][-1]['content']=='HOLD']
+    assert len(holds)==3
+    assert result['counts']['train']==4
+
+
 def test_readiness_reports_missing_sources_without_loading_a_model(tmp_path):
     config = tmp_path / "arbitrary-name.json"
     config.write_text(json.dumps({
@@ -81,6 +129,29 @@ def test_trade_mastery_job_config_expands_only_winning_entries_into_position_lab
         "maximum_examples": 1,
         "initial_entry_action": None,
     }
+
+
+@pytest.mark.parametrize('setting', ['unknown', None, 1])
+def test_management_collection_rejects_invalid_json_choice(setting):
+    with pytest.raises(ValueError, match='management sampling'):
+        action_collection_plan({'action_supervision_scope':'trade_mastery',
+            'maximum_examples_per_episode':4, 'management_sampling':setting}, Action.WAIT)
+
+
+def test_management_sampling_does_not_expand_flat_wait_examples():
+    plan = action_collection_plan({'action_supervision_scope':'trade_mastery',
+        'maximum_examples_per_episode':100, 'management_sampling':'all_states'}, Action.WAIT)
+    assert plan == {'mode':'market_barrier_grid','maximum_examples':1,'initial_entry_action':None}
+
+
+def test_management_only_plan_allows_labeling_a_failed_entry_without_teaching_entry():
+    plan = action_collection_plan({'action_supervision_scope':'trade_mastery',
+        'maximum_examples_per_episode':10, 'management_sampling':'all_states',
+        'management_only':True}, Action.ENTER_SHORT_1)
+    assert plan['management_only'] is True
+    with pytest.raises(ValueError, match='management.only'):
+        action_collection_plan({'action_supervision_scope':'trade_mastery',
+            'maximum_examples_per_episode':10,'management_only':True}, Action.WAIT)
 
 
 def test_passive_collection_uses_wait_flat_and_hold_positioned(tmp_path):
@@ -330,6 +401,7 @@ def test_collect_job_preserves_economic_action_and_lineage_across_roles(
         yield {"action": {
             "source_id": kwargs["source_id"],
             "messages": [{"role": "assistant", "content": "ENTER_LONG_1"}],
+            "targets": {"action_order": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]},
         }}
     monkeypatch.setattr(
         "propevolve.reasoning_policy.collector.collect_examples", collect_examples

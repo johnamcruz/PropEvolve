@@ -1,0 +1,293 @@
+{
+  "inherits": "management_coverage_dense_collection_job.json",
+  "management_only": true,
+  "economic_action_sampling": null,
+  "episodes": {
+    "train": [
+      {
+        "start": 50214,
+        "ticker": "CL",
+        "expected_action": 1
+      },
+      {
+        "start": 50214,
+        "ticker": "CL",
+        "expected_action": 2
+      },
+      {
+        "start": 51794,
+        "ticker": "CL",
+        "expected_action": 1
+      },
+      {
+        "start": 51794,
+        "ticker": "CL",
+        "expected_action": 2
+      },
+      {
+        "start": 43284,
+        "ticker": "ES",
+        "expected_action": 1
+      },
+      {
+        "start": 43284,
+        "ticker": "ES",
+        "expected_action": 2
+      },
+      {
+        "start": 70458,
+        "ticker": "ES",
+        "expected_action": 1
+      },
+      {
+        "start": 70458,
+        "ticker": "ES",
+        "expected_action": 2
+      },
+      {
+        "start": 49959,
+        "ticker": "GC",
+        "expected_action": 1
+      },
+      {
+        "start": 49959,
+        "ticker": "GC",
+        "expected_action": 2
+      },
+      {
+        "start": 72477,
+        "ticker": "GC",
+        "expected_action": 1
+      },
+      {
+        "start": 72477,
+        "ticker": "GC",
+        "expected_action": 2
+      },
+      {
+        "start": 65975,
+        "ticker": "NQ",
+        "expected_action": 1
+      },
+      {
+        "start": 65975,
+        "ticker": "NQ",
+        "expected_action": 2
+      },
+      {
+        "start": 188456,
+        "ticker": "NQ",
+        "expected_action": 1
+      },
+      {
+        "start": 188456,
+        "ticker": "NQ",
+        "expected_action": 2
+      },
+      {
+        "start": 16335,
+        "ticker": "RTY",
+        "expected_action": 1
+      },
+      {
+        "start": 16335,
+        "ticker": "RTY",
+        "expected_action": 2
+      },
+      {
+        "start": 99086,
+        "ticker": "RTY",
+        "expected_action": 1
+      },
+      {
+        "start": 99086,
+        "ticker": "RTY",
+        "expected_action": 2
+      },
+      {
+        "start": 49236,
+        "ticker": "SI",
+        "expected_action": 1
+      },
+      {
+        "start": 49236,
+        "ticker": "SI",
+        "expected_action": 2
+      },
+      {
+        "start": 184585,
+        "ticker": "SI",
+        "expected_action": 1
+      },
+      {
+        "start": 184585,
+        "ticker": "SI",
+        "expected_action": 2
+      },
+      {
+        "start": 79350,
+        "ticker": "YM",
+        "expected_action": 1
+      },
+      {
+        "start": 79350,
+        "ticker": "YM",
+        "expected_action": 2
+      },
+      {
+        "start": 190975,
+        "ticker": "YM",
+        "expected_action": 1
+      },
+      {
+        "start": 190975,
+        "ticker": "YM",
+        "expected_action": 2
+      },
+      {
+        "start": 693,
+        "ticker": "ZB",
+        "expected_action": 1
+      },
+      {
+        "start": 693,
+        "ticker": "ZB",
+        "expected_action": 2
+      },
+      {
+        "start": 124593,
+        "ticker": "ZB",
+        "expected_action": 1
+      },
+      {
+        "start": 124593,
+        "ticker": "ZB",
+        "expected_action": 2
+      },
+      {
+        "start": 51153,
+        "ticker": "ZN",
+        "expected_action": 1
+      },
+      {
+        "start": 51153,
+        "ticker": "ZN",
+        "expected_action": 2
+      },
+      {
+        "start": 169107,
+        "ticker": "ZN",
+        "expected_action": 1
+      },
+      {
+        "start": 169107,
+        "ticker": "ZN",
+        "expected_action": 2
+      }
+    ],
+    "valid": [
+      {
+        "start": 86372,
+        "ticker": "CL",
+        "expected_action": 1
+      },
+      {
+        "start": 86372,
+        "ticker": "CL",
+        "expected_action": 2
+      },
+      {
+        "start": 96260,
+        "ticker": "CL",
+        "expected_action": 1
+      },
+      {
+        "start": 96260,
+        "ticker": "CL",
+        "expected_action": 2
+      },
+      {
+        "start": 46466,
+        "ticker": "ES",
+        "expected_action": 1
+      },
+      {
+        "start": 46466,
+        "ticker": "ES",
+        "expected_action": 2
+      },
+      {
+        "start": 53986,
+        "ticker": "GC",
+        "expected_action": 1
+      },
+      {
+        "start": 53986,
+        "ticker": "GC",
+        "expected_action": 2
+      },
+      {
+        "start": 68667,
+        "ticker": "NQ",
+        "expected_action": 1
+      },
+      {
+        "start": 68667,
+        "ticker": "NQ",
+        "expected_action": 2
+      },
+      {
+        "start": 39850,
+        "ticker": "RTY",
+        "expected_action": 1
+      },
+      {
+        "start": 39850,
+        "ticker": "RTY",
+        "expected_action": 2
+      },
+      {
+        "start": 66897,
+        "ticker": "SI",
+        "expected_action": 1
+      },
+      {
+        "start": 66897,
+        "ticker": "SI",
+        "expected_action": 2
+      },
+      {
+        "start": 49913,
+        "ticker": "YM",
+        "expected_action": 1
+      },
+      {
+        "start": 49913,
+        "ticker": "YM",
+        "expected_action": 2
+      },
+      {
+        "start": 56299,
+        "ticker": "ZB",
+        "expected_action": 1
+      },
+      {
+        "start": 56299,
+        "ticker": "ZB",
+        "expected_action": 2
+      },
+      {
+        "start": 20714,
+        "ticker": "ZN",
+        "expected_action": 1
+      },
+      {
+        "start": 20714,
+        "ticker": "ZN",
+        "expected_action": 2
+      }
+    ]
+  },
+  "dataset_output": "runs/reasoning-challenger/management-failed-entries/dataset",
+  "mlx_view": "runs/reasoning-challenger/management-failed-entries/view"
+}

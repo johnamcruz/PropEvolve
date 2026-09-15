@@ -52,6 +52,8 @@ serialize thousands of FFM latent coordinates as decimal tokens.
     values = context.values[context.available]
     text_steps = len(values) if context.text_steps is None else context.text_steps
     values = values[-text_steps:]
+    text_fields = context.fields if context.text_fields is None else context.text_fields
+    values = values[:, [context.fields.index(field) for field in text_fields]]
     if not np.isfinite(values).all():
         raise ValueError("context contains nonfinite data")
     actions = tuple(Action(a).name for a in legal_actions)
@@ -65,7 +67,7 @@ serialize thousands of FFM latent coordinates as decimal tokens.
             "Return only the action name. Future prices are unknown."
         )},
         {"role": "user", "content": json.dumps({
-            "fields": context.fields, "history_oldest_first": values.tolist(),
+            "fields": text_fields, "history_oldest_first": values.tolist(),
             "legal_actions": actions,
         }, separators=(",", ":"), allow_nan=False)},
     ]
@@ -77,6 +79,8 @@ def embedding_payload(context, *, state_fields=()):
         return {}
     payload = {"market_embeddings": context.embeddings.tolist(),
                "market_available": context.available.tolist()}
+    if not state_fields and context.text_fields is not None:
+        state_fields = context.fields
     if state_fields:
         if len(set(state_fields)) != len(state_fields) or any(
                 field not in context.fields for field in state_fields):
@@ -85,6 +89,7 @@ def embedding_payload(context, *, state_fields=()):
         payload["causal_state"] = [
             float(latest[context.fields.index(field)]) for field in state_fields
         ]
+        payload["causal_state_fields"] = list(state_fields)
     return payload
 
 
@@ -450,6 +455,19 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                 if (not isinstance(fields, list) or not fields or history.ndim != 2
                         or history.shape[1] != len(fields) or not np.isfinite(history).all()):
                     raise ValueError("invalid causal prompt history")
+                if 'causal_state' in record or 'causal_state_fields' in record:
+                    state_names = record.get('causal_state_fields')
+                    state = np.asarray(record.get('causal_state'), dtype=np.float32)
+                    allowed = set(fields) | {'trade.volatility_r', 'trade.cost_r', 'trade.volatility_available'}
+                    if (not isinstance(state_names, list) or not state_names
+                            or any(not isinstance(name, str) for name in state_names)
+                            or len(set(state_names)) != len(state_names)
+                            or not set(fields).issubset(state_names)
+                            or not set(state_names).issubset(allowed)
+                            or state.shape != (len(state_names),) or not np.isfinite(state).all()
+                            or not np.array_equal(state[[state_names.index(name) for name in fields]],
+                                                  history[-1].astype(np.float32))):
+                        raise ValueError('invalid or mismatched continuous causal state')
                 if (supervision_scope in {"trade_mastery", "market"}
                         and any(field.startswith(("account.", "challenge."))
                                 for field in fields)):

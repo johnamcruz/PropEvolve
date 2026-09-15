@@ -4,6 +4,31 @@ import pytest
 from propevolve.reasoning_policy.decisive_learning import decision_evidence, compare_learning
 
 
+def test_fixed_diagnostic_rows_preserve_order_and_reject_ambiguous_selection():
+    from propevolve.reasoning_policy.decisive_learning import fixed_diagnostic_indices
+    rows = [{'target_name': 'HOLD', 'action_targets': {
+        'names': ['HOLD', 'CLOSE'], 'values': [2., 1.]}} for _ in range(3)]
+    assert fixed_diagnostic_indices(rows, [2, 0], minimum_gap=.25) == [2, 0]
+    for indices in ([0, 0], [3], [-1], [True], []):
+        with pytest.raises(ValueError):
+            fixed_diagnostic_indices(rows, indices, minimum_gap=.25)
+    rows[0]['action_targets']['values'] = [1., 1.]
+    with pytest.raises(ValueError, match='economic gap'):
+        fixed_diagnostic_indices(rows, [0], minimum_gap=.25)
+
+
+def test_matched_input_experiment_rejects_changed_parent_scores_or_rows():
+    from propevolve.reasoning_policy.decisive_learning import require_initial_score_parity
+    initial = {role: {'scores': [[-1., -2.], [-3., -4., -5.]]} for role in ('train', 'valid')}
+    reference = {'indices': {'train': [1, 2], 'valid': [3, 4]}, 'before': initial}
+    assert require_initial_score_parity(reference, initial, reference['indices'], tolerance=1e-4) == 0.
+    changed = {**initial, 'valid': {'scores': [[-1., -2.], [-3., -4., -5.01]]}}
+    with pytest.raises(ValueError, match='initial score parity'):
+        require_initial_score_parity(reference, changed, reference['indices'], tolerance=1e-4)
+    with pytest.raises(ValueError, match='identical rows'):
+        require_initial_score_parity(reference, initial, {'train': [2, 1], 'valid': [3, 4]}, tolerance=1e-4)
+
+
 def test_enter_correct_wrong_direction_is_not_an_entry_failure():
     row = {"target_name": "ENTER_LONG_1", "action_targets": {
         "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"], "values": [0., 2., -1.]}}
