@@ -1,0 +1,4 @@
+{
+  "inherits": "staged_real_base.json",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/frozen-base"
+}

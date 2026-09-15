@@ -3,6 +3,37 @@ import pytest
 from propevolve.reasoning_policy.label_reference import barrier_result
 
 
+def test_management_execution_audit_replays_actual_fills_and_rejects_tampered_return():
+    import copy
+    import numpy as np
+    from propevolve.decision import Action
+    from propevolve.reasoning_policy.labels import label_position_continuation
+    from propevolve.reasoning_policy.label_reference import verify_management_execution
+    from test_reasoning_challenger_e2e import environment, passive_factory
+    env = environment()
+    from dataclasses import replace
+    from propevolve.environment import HistoricalChallengeEnv
+    env = HistoricalChallengeEnv(env.markets, tick_values=env.tick_values,
+        round_trip_fees=env.round_trip_fees, spec=replace(env.spec, per_trade_risk_dollars=300.,
+            ratchet_activation_r=2., ratchet_giveback_r=.5), seed=0)
+    market = env.markets['NQ']
+    labels = label_position_continuation(env, reset_options={'ticker': 'NQ', 'start': 0},
+        prefix=(Action.ENTER_LONG_1,), continuation_factory=passive_factory,
+        max_steps=3, minimum_improvement_r=.1)
+    from dataclasses import asdict
+    row = {'ticker': 'NQ', 'completed_at_ns': int(market.timestamps[1].astype('datetime64[ns]').astype(np.int64)),
+        'targets': {'outcomes': {a.name: asdict(v) for a,v in labels.outcomes.items()},
+                    'management_evidence': labels.management_evidence,
+                    'position_entry': {'action': 'ENTER_LONG_1', 'execution': 'bar_open',
+                        'completed_at_ns': int(market.timestamps[1].astype('datetime64[ns]').astype(np.int64))}}}
+    options = dict(reset_options={'ticker': 'NQ', 'start': 0}, horizon=3,
+                   minimum_improvement_r=.1, tolerance=1e-5)
+    assert verify_management_execution(env, row, **options) == []
+    wrong = copy.deepcopy(row)
+    wrong['targets']['outcomes']['HOLD']['terminal_pnl'] += 100.
+    assert 'HOLD.terminal_pnl' in verify_management_execution(env, wrong, **options)
+
+
 @pytest.mark.parametrize("side,high,low,expected", [
     (1, [102.125], [99.5], True),
     (-1, [100.5], [97.875], True),

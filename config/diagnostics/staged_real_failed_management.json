@@ -1,0 +1,13 @@
+{
+  "inherits": "management_failed_entries_collection_job.json",
+  "status": "staged_executable_failed_entry_management_gate",
+  "context_config": "config/reasoning/context_trade_r_continuous_embeddings.json",
+  "management_sampling": "all_states",
+  "maximum_examples_per_episode": 12,
+  "sample_stride": 1,
+  "rollout_max_steps": 200,
+  "opportunity_contract": {"management_label_mode": "simulator_continuation"},
+  "dataset_output": "runs/reasoning-challenger/staged-real-proof/failed-management",
+  "label_census_output": "runs/reasoning-challenger/staged-real-proof/failed-management-census.json",
+  "mlx_view": "runs/reasoning-challenger/staged-real-proof/failed-management-view"
+}

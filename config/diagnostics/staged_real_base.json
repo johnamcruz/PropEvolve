@@ -1,0 +1,51 @@
+{
+  "inherits": "../reasoning/defaults.json",
+  "model": ".private/models/qwen3-0.6b-4bit-73e3e38",
+  "model_source": "local",
+  "architecture": "staged_reasoning_v1",
+  "selection": "hierarchical_greedy",
+  "adapter_path": null,
+  "seed": 17,
+  "num_layers": 8,
+  "lora_parameters": {"rank": 8, "scale": 16.0, "dropout": 0.0},
+  "stage_role": "staged_initialization",
+  "input_mode": "embeddings",
+  "max_seq_length": 4096,
+  "projector": {
+    "embedding_dim": 2560,
+    "context_steps": 20,
+    "market_tokens": 5,
+    "temporal_encoding": "latest_plus_deltas"
+  },
+  "staged_policy": {
+    "market": {
+      "instruction": "Interpret completed Chronos market context. Predict each named probability; Long and Short events are independent. Conditional quality is not event frequency. No teacher answers or future prices are available.",
+      "negative_token": "N",
+      "positive_token": "Y",
+      "channels": [
+        {"name": "expansion.long_attempt_probability", "query": "Long expansion attempt?", "weight": 1.0},
+        {"name": "expansion.long_clean_retained_given_attempt_probability", "query": "Long clean expansion conditional on attempt?", "weight": 1.0},
+        {"name": "expansion.short_attempt_probability", "query": "Short expansion attempt?", "weight": 1.0},
+        {"name": "expansion.short_clean_retained_given_attempt_probability", "query": "Short clean expansion conditional on attempt?", "weight": 1.0},
+        {"name": "regime.chop_no_trend_probability", "query": "Chop without trend?", "weight": 1.0},
+        {"name": "regime.chop_end_transition_probability", "query": "Transition out of chop?", "weight": 1.0},
+        {"name": "regime.expansion_trend_probability", "query": "Expansion trend regime?", "weight": 1.0},
+        {"name": "trend.long_launch_probability", "query": "Long trend launch?", "weight": 1.0},
+        {"name": "trend.short_launch_probability", "query": "Short trend launch?", "weight": 1.0},
+        {"name": "trend.long_conditional_quality", "query": "Long trend quality conditional on launch?", "weight": 1.0},
+        {"name": "trend.short_conditional_quality", "query": "Short trend quality conditional on launch?", "weight": 1.0},
+        {"name": "volume.long_participation_probability", "query": "Long volume participation?", "weight": 1.0},
+        {"name": "volume.long_clean_given_participation_probability", "query": "Long clean move conditional on participation?", "weight": 1.0},
+        {"name": "volume.short_participation_probability", "query": "Short volume participation?", "weight": 1.0},
+        {"name": "volume.short_clean_given_participation_probability", "query": "Short clean move conditional on participation?", "weight": 1.0}
+      ]
+    },
+    "assessment_instruction": "Use your predicted market interpretation and causal trade state to assess trade economics. Flat: enter only a suitable opportunity for at least 2R before a 1R loss. Direction is separate from whether to enter. Positioned: hold valid continuation beyond 2R without a fixed profit ceiling; close when continuation no longer justifies the risk. No challenge balance or future outcomes are supplied.",
+    "state_fields": ["trade.open", "trade.position_side", "trade.risk_available", "trade.mfe_r_so_far", "trade.mae_r_so_far", "trade.current_r", "trade.giveback_r", "trade.hold_bars", "trade.volatility_r", "trade.cost_r", "trade.volatility_available"],
+    "tasks": [
+      {"name": "entry", "query": "Enter rather than wait?", "negative_token": "W", "positive_token": "E"},
+      {"name": "direction", "query": "Long rather than short if entering?", "negative_token": "S", "positive_token": "L"},
+      {"name": "management", "query": "Hold rather than close the open trade?", "negative_token": "C", "positive_token": "H"}
+    ]
+  }
+}

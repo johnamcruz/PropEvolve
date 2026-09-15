@@ -1,0 +1,19 @@
+{
+  "inherits": "../reasoning/error_selected_distillation_job.json",
+  "status": "staged_real_label_gate_not_campaign",
+  "context_config": "config/reasoning/context_trade_r_continuous_embeddings.json",
+  "management_sampling": "all_states",
+  "maximum_examples_per_episode": 12,
+  "sample_stride": 5,
+  "rollout_max_steps": 200,
+  "opportunity_contract": {
+    "management_label_mode": "simulator_continuation"
+  },
+  "economic_action_sampling": {
+    "train": {"per_action": 9, "seed": 3801},
+    "valid": {"per_action": 9, "seed": 3802}
+  },
+  "dataset_output": "runs/reasoning-challenger/staged-real-proof/dataset",
+  "label_census_output": "runs/reasoning-challenger/staged-real-proof/label-census.json",
+  "mlx_view": "runs/reasoning-challenger/staged-real-proof/view"
+}

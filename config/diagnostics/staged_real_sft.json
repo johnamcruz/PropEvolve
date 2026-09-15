@@ -1,0 +1,40 @@
+{
+  "inherits": "staged_real_frozen.json",
+  "stage_role": "trade_mastery",
+  "distillation_targets": ["expansion", "trend", "regime", "volume"],
+  "data": "runs/reasoning-challenger/staged-real-proof/balanced-dataset",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/acquisition",
+  "resume_adapter_file": "runs/reasoning-challenger/staged-real-proof/frozen-base/adapters.safetensors",
+  "resume_adapter_requirements": {"stage_role": "staged_initialization"},
+  "train": true,
+  "fine_tune_type": "lora",
+  "mask_prompt": true,
+  "trust_remote_code": false,
+  "trainable_components": ["lora", "projector"],
+  "learning_rate": 0.000001,
+  "component_learning_rates": {"lora": 0.000001, "projector": 0.000001},
+  "batch_size": 2,
+  "grad_accumulation_steps": 5,
+  "grad_checkpoint": true,
+  "iters": 50,
+  "steps_per_report": 5,
+  "steps_per_eval": 10,
+  "save_every": 10,
+  "validation_batch_size": 2,
+  "val_batches": 1000,
+  "batch_sampling": "balanced_actions",
+  "decision_objective": "hierarchical_binary",
+  "action_supervision": {"enabled": true, "soft_target_weight": 0.5, "ranking_weight": 2.0, "margin": 0.1},
+  "interpretation_loss_weight": 0.25,
+  "save_training_state": true,
+  "early_stopping": {"enabled": true, "patience_evaluations": 5, "min_delta": 0.0, "restore_best": true, "monitor": "worst_task_advantage", "mode": "max"},
+  "dataset_requirements": {
+    "minimum_rows_per_action": {
+      "train": {"WAIT": 2, "ENTER_LONG_1": 2, "ENTER_SHORT_1": 2, "HOLD": 2, "CLOSE": 2},
+      "valid": {"WAIT": 2, "ENTER_LONG_1": 2, "ENTER_SHORT_1": 2, "HOLD": 2, "CLOSE": 2}
+    },
+    "expected_splits": {"train": [1609459200000000000, 1704067200000000000], "valid": [1704067200000000000, 1735689600000000000]},
+    "sealed_start_ns": 1767225600000000000
+  },
+  "training_log_prefix": "staged-real-acquisition"
+}
