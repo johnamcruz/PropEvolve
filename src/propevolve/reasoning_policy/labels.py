@@ -192,18 +192,21 @@ def _target_before_adverse(
     if not adverse_points > 0.0:
         raise ValueError("entry supervision adverse distance must be positive")
     entry = float(open_[fill_index])
+    if (not np.isfinite(entry) or not np.isfinite(high[fill_index:stop]).all()
+            or not np.isfinite(low[fill_index:stop]).all()):
+        raise ValueError("entry labels require finite price evidence")
     for index in range(fill_index, stop):
         if side == "long":
-            favorable = float(high[index]) - entry
-            adverse = entry - float(low[index])
+            favorable_hit = float(high[index]) >= entry + favorable_points
+            adverse_hit = float(low[index]) <= entry - adverse_points
         elif side == "short":
-            favorable = entry - float(low[index])
-            adverse = float(high[index]) - entry
+            favorable_hit = float(low[index]) <= entry - favorable_points
+            adverse_hit = float(high[index]) >= entry + adverse_points
         else:
             raise ValueError("side must be long or short")
-        if adverse >= adverse_points:
+        if adverse_hit:
             return False
-        if favorable >= favorable_points:
+        if favorable_hit:
             return True
     return False
 
@@ -247,16 +250,18 @@ def classify_market_action_rows(
         entry = entries[start:end, None]
         high = high_windows[start:end]
         low = low_windows[start:end]
+        if not (np.isfinite(entry).all() and np.isfinite(high).all() and np.isfinite(low).all()):
+            raise ValueError("entry labels require finite price evidence")
         achieved = []
-        for favorable, adverse in ((high - entry, entry - low),
-                                    (entry - low, high - entry)):
-            adverse_hits = adverse >= adverse_points
+        for sign in (1, -1):
+            adverse_hits = (low <= entry - adverse_points if sign > 0
+                            else high >= entry + adverse_points)
             first_adverse = np.argmax(adverse_hits, axis=1)
             first_adverse = np.where(adverse_hits.any(axis=1), first_adverse, horizon)
             before_adverse = steps < first_adverse[:, None]
-            maximum = np.max(np.where(before_adverse, favorable, -np.inf), axis=1)
-            maximum = np.maximum(maximum, 0.0)
-            levels = (maximum[:, None] >= target_points[None, :]).sum(axis=1)
+            signed_prices = high if sign > 0 else -low
+            maximum = np.max(np.where(before_adverse, signed_prices, -np.inf), axis=1)
+            levels = (maximum[:, None] >= sign * entry + target_points[None, :]).sum(axis=1)
             achieved.append(levels)
         long_levels, short_levels = achieved
         chosen = np.full(end - start, int(Action.WAIT), dtype=np.int8)
@@ -299,13 +304,13 @@ def _entry_barrier_evidence(market, *, decision, horizon, sign, risk, point_valu
         opening, high, low = map(float, (market.open[index], market.high[index], market.low[index]))
         if not np.isfinite([opening, high, low]).all():
             raise ValueError("nonfinite entry barrier source")
-        adverse = entry - low if sign > 0 else high - entry
-        favorable = high - entry if sign > 0 else entry - low
-        if adverse >= adverse_points:
+        adverse_hit = low <= entry - adverse_points if sign > 0 else high >= entry + adverse_points
+        favorable_hit = high >= entry + favorable_points if sign > 0 else low <= entry - favorable_points
+        if adverse_hit:
             stop_price = entry - sign * adverse_points
             fill = min(opening, stop_price) if sign > 0 else max(opening, stop_price)
             return "stop_before_target", sign * (fill - entry) * point_value - fee, index
-        if favorable >= favorable_points:
+        if favorable_hit:
             return f"target_{target:g}r_before_stop", target * risk, index
     pnl = sign * (float(market.close[last]) - entry) * point_value - fee
     category = "below_target_profit" if pnl > 0 else "below_target_loss" if pnl < 0 else "below_target_flat"

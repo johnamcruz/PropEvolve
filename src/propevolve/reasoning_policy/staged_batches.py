@@ -20,7 +20,15 @@ def binary_targets(target):
     weights = np.zeros(3, np.float32)
     if names == ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"]:
         enter = p[1] + p[2]
-        probabilities[0] = [p[0], enter]
+        # ENTER competes on the best available economic action, not on the
+        # number of executable sides. Summing two losing-side masses can teach
+        # ENTER even when WAIT has the highest utility. Pair normalization
+        # preserves the source softmax temperature without that multiplicity.
+        best_side = 1 + int(np.argmax(v[1:]))
+        entry_mass = p[0] + p[best_side]
+        if entry_mass <= 0:
+            raise ValueError("entry boundary has no probability mass")
+        probabilities[0] = [p[0] / entry_mass, p[best_side] / entry_mass]
         values[0] = [v[0], max(v[1], v[2])]
         weights[0] = 1.
         if max(v[1], v[2]) > v[0] and v[1] != v[2]:
