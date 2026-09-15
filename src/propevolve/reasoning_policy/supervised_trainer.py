@@ -686,7 +686,7 @@ def pack_examples(rows, *, max_seq_length):
 def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, comm_group=None,
                    sampling_strategy="random", include_partial=False, skip_batches=0,
                    coverage_sampler=None, targeted_sampler=None,
-                   mastered_anchor_retention=None):
+                   mastered_anchor_retention=None, on_selected=None):
     import mlx.core as mx
     if comm_group is not None and comm_group.size() != 1:
         raise ValueError("reasoning trainer currently supports one local worker")
@@ -720,7 +720,10 @@ def tensor_batches(dataset, batch_size, max_seq_length, loop=False, seed=None, c
                 rows = [targeted_sampler.training_row(
                     int(index), row, retain_mastery=True)
                     for index, row in zip(indices, rows)]
-            yield tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
+            packed = tuple(mx.array(x) for x in pack_examples(rows, max_seq_length=max_seq_length))
+            if on_selected is not None:
+                on_selected(tuple(map(int, indices)))
+            yield packed
         if not loop:
             return
         round_index += 1
@@ -897,6 +900,16 @@ def _batch_outputs(model, tokens, offsets, lengths, valid, probabilities, values
             scores, parent_scores, boundary_masks,
             temperature=retention["temperature"],
             minimum_margin=config["action_supervision"]["margin"])
+        if retention.get("supervision_weight", 0.0):
+            # Reinforce only authenticated correct boundaries. Keep its
+            # normalization separate so mistake supervision is not diluted.
+            mastered_loss = mx.stack([hierarchical_action_objective(
+                scores[index], probabilities[index], values[index],
+                config["action_supervision"], task_code=task_codes[index], xp=mx,
+                correction_boundaries=boundary_masks[index])
+                for index in range(batch_size)]).mean()
+            retention_contribution = (retention_contribution
+                + retention["supervision_weight"] * mastered_loss)
         loss = loss + retention_contribution
     if objective is not None:
         terms = mx.stack(task_terms).mean(axis=0)

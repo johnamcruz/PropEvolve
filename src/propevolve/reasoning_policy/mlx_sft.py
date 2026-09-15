@@ -106,6 +106,9 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         if payload["targeted_sampling"] is None or not supervision["enabled"]:
             raise ValueError(
                 "mastered anchor retention requires targeted action supervision")
+        if (retention.get("supervision_weight", 0.0)
+                and payload["decision_objective"] != "hierarchical_binary"):
+            raise ValueError("mastered anchor supervision requires hierarchical boundaries")
     initial_receipt = payload["initial_validation_receipt"]
     receipt_keys = {"path", "scores_sha256", "summary_sha256",
                     "policy_config_path", "policy_config_sha256",

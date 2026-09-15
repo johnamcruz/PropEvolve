@@ -57,6 +57,18 @@ def test_newly_acquired_boundary_is_protected_on_the_next_comparison():
     assert lost["all_clear_correct"] is False
 
 
+def test_finite_update_progress_requires_learning_not_just_an_unchanged_model():
+    from propevolve.reasoning_policy.decisive_learning import update_progress
+    before = [{'WAIT': {'margin': .4, 'correct': True, 'ambiguous': False}},
+              {'ENTER': {'margin': -.8, 'correct': False, 'ambiguous': False}}]
+    after = [{'WAIT': {'margin': .1, 'correct': True, 'ambiguous': False}},
+             {'ENTER': {'margin': -.5, 'correct': False, 'ambiguous': False}}]
+    result = update_progress(before, after)
+    assert result['forgotten'] == 0
+    assert result['mistake_margin_change'] == pytest.approx(.3)
+    assert update_progress(before, before)['mistake_margin_change'] == 0.
+
+
 def test_nonfinite_scores_are_rejected():
     row = {"target_name": "WAIT", "action_targets": {
         "names": ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"], "values": [0., -1., -1.]}}

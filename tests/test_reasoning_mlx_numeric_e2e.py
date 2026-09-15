@@ -98,6 +98,25 @@ def test_full_coverage_batches_include_partial_tail_and_preserve_rows():
     assert [float(value) for batch in batches for value in batch[-2][:, -1, 0].tolist()] == [0., 1., 2., 3., 4.]
 
 
+def test_batch_draw_receipts_match_real_rows_without_changing_tensors():
+    from itertools import islice
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    rows = [example() for _ in range(5)]
+    for index, row in enumerate(rows):
+        row['market_embeddings'] = [[0., 0.], [1., 2.], [float(index), 4.]]
+    receipts = []
+    options = dict(batch_size=2, max_seq_length=8, include_partial=True,
+                   loop=True, seed=17, skip_batches=2)
+    observed = list(islice(tensor_batches(rows, **options,
+        on_selected=lambda ids: receipts.append(list(ids))), 4))
+    reference = list(islice(tensor_batches(rows, **options), 4))
+    assert len(receipts) == 4
+    for selected, actual, expected in zip(receipts, observed, reference):
+        assert selected == [int(x) for x in actual[-2][:, -1, 0].tolist()]
+        for left, right in zip(actual, expected):
+            np.testing.assert_array_equal(left, right)
+
+
 def test_training_checkpoint_restores_optimizer_rng_and_next_update(tmp_path):
     from propevolve.reasoning_policy.training_checkpoint import save_training_state, load_training_state
     from mlx.utils import tree_flatten
@@ -128,6 +147,53 @@ def test_training_checkpoint_restores_optimizer_rng_and_next_update(tmp_path):
     update(restored, restored_optimizer)
     for name, value in tree_flatten(restored.trainable_parameters()):
         np.testing.assert_array_equal(value, expected[name])
+
+
+def test_native_segment_restart_preserves_optimizer_and_next_balanced_batches(tmp_path, monkeypatch):
+    from functools import partial
+    from mlx.utils import tree_flatten
+    import mlx.optimizers as optim
+    from mlx_lm.tuner.trainer import train, TrainingArgs
+    from propevolve.reasoning_policy.supervised_trainer import tensor_batches
+    # This suite intentionally runs MLX on CPU; skip the native GPU wired-limit
+    # setup, not the actual compiled learner, batches, or optimizer.
+    monkeypatch.setattr(mx.metal, "is_available", lambda: False)
+    rows = [example() for _ in range(5)]
+    for index, row in enumerate(rows):
+        target_index = index % 3
+        row["target_name"] = row["action_targets"]["names"][target_index]
+        row["action_targets"] = {**row["action_targets"],
+            "probabilities": [.8 if i == target_index else .1 for i in range(3)],
+            "values": [2. if i == target_index else -1. for i in range(3)]}
+        row["tokens"], row["offset"] = row["alternatives"][target_index]
+        row["market_embeddings"] = [[0., 0.], [1., 2.], [float(index), 4.]]
+    config = {"input_mode": "embeddings", "action_supervision": {
+        "enabled": True, "soft_target_weight": 1., "ranking_weight": 1., "margin": .25}}
+
+    def execute(segments):
+        mx.random.seed(7)
+        model = tiny_backbone()
+        optimizer = optim.Adam(learning_rate=1e-4)
+        offset = 0
+        for count in segments:
+            args = TrainingArgs(batch_size=2, iters=count, val_batches=0,
+                steps_per_report=count, steps_per_eval=count, steps_per_save=count,
+                adapter_file=str(tmp_path / 'native.safetensors'), max_seq_length=8,
+                grad_checkpoint=False, grad_accumulation_steps=2)
+            train(model, optimizer, rows, None, args=args,
+                loss=partial(batch_loss, config=config),
+                iterate_batches=partial(tensor_batches, seed=17, include_partial=True,
+                    skip_batches=offset, sampling_strategy="balanced_actions"))
+            offset += count
+        mx.eval(model.parameters(), optimizer.state)
+        return dict(tree_flatten(model.trainable_parameters())), dict(tree_flatten(optimizer.state))
+
+    uninterrupted = execute([8])
+    segmented = execute([6, 2])
+    for expected, actual in zip(uninterrupted, segmented):
+        assert expected.keys() == actual.keys()
+        for key in expected:
+            np.testing.assert_allclose(actual[key], expected[key], atol=1e-7, rtol=1e-6)
 
 
 def test_latest_state_plus_causal_deltas_exposes_lifecycle_without_future_rows():
@@ -323,7 +389,8 @@ def test_error_selected_action_update_uses_action_and_teacher_targets_on_same_ro
                for _, value in tree_flatten(gradients))
 
 
-def test_named_production_objectives_reconstruct_loss_and_gradient_without_changing_update():
+@pytest.mark.parametrize("supervision_weight", [0., 1.])
+def test_named_production_objectives_reconstruct_loss_and_gradient_without_changing_update(supervision_weight):
     from mlx.utils import tree_flatten
     from propevolve.reasoning_policy.supervised_trainer import batch_objective_loss
     model = tiny_backbone()
@@ -337,7 +404,8 @@ def test_named_production_objectives_reconstruct_loss_and_gradient_without_chang
     config = {"input_mode": "embeddings", "decision_objective": "hierarchical_binary",
         "action_supervision": {"enabled": True, "soft_target_weight": 1.,
             "ranking_weight": 2., "margin": .25},
-        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.,
+                                      "supervision_weight": supervision_weight},
         "error_selected_distillation": {"loss_weight": .5, "settings": {}}}
     actual, gradient = nn.value_and_grad(model, lambda m: batch_loss(m, *packed, config=config)[0])(model)
     parts, gradients = [], []
@@ -416,7 +484,8 @@ def test_boundary_retention_enforces_a_configured_positive_margin():
     assert float(weak.item()) > .1
 
 
-def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery():
+@pytest.mark.parametrize("supervision_weight", [0., 1.])
+def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery(supervision_weight):
     import mlx.optimizers as optim
     from propevolve.reasoning_policy.supervised_trainer import _batch_outputs
     from propevolve.reasoning_policy.targeted_subset import TargetedSampler
@@ -492,7 +561,8 @@ def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery()
         "input_mode": "tokens", "decision_objective": "hierarchical_binary",
         "action_supervision": {"enabled": True, "soft_target_weight": 1.,
                                "ranking_weight": 2., "margin": .25},
-        "mastered_anchor_retention": {"loss_weight": 4., "temperature": 1.},
+        "mastered_anchor_retention": {"loss_weight": 4., "temperature": 1.,
+                                      "supervision_weight": supervision_weight},
     }
 
     def loss(m):
@@ -524,7 +594,8 @@ def test_real_mlx_correction_learns_failed_boundary_without_forgetting_mastery()
         assert scores[index, 2] > scores[index, 0]
 
 
-def test_production_action_batch_retains_only_mastered_boundaries():
+@pytest.mark.parametrize("supervision_weight", [0., 1.])
+def test_production_action_batch_retains_only_mastered_boundaries(supervision_weight):
     from propevolve.reasoning_policy.supervised_trainer import _batch_outputs, pack_examples
 
     model = tiny_backbone()
@@ -545,7 +616,8 @@ def test_production_action_batch_retains_only_mastered_boundaries():
         "input_mode": "embeddings", "decision_objective": "hierarchical_binary",
         "action_supervision": {"enabled": True, "soft_target_weight": 1.,
                                "ranking_weight": 2., "margin": .25},
-        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.},
+        "mastered_anchor_retention": {"loss_weight": 1., "temperature": 1.,
+                                      "supervision_weight": supervision_weight},
     }
     packed = tuple(mx.array(value) for value in pack_examples(rows, max_seq_length=8))
     retained, _, _ = _batch_outputs(model, *packed, config=config)
@@ -567,6 +639,23 @@ def test_production_action_batch_retains_only_mastered_boundaries():
 
     assert float(retained.item()) > float(action_only.item())
     assert float(same_retained.item()) == pytest.approx(float(retained.item()), abs=1e-6)
+
+    from propevolve.reasoning_policy.supervised_trainer import batch_objective_loss
+    from propevolve.reasoning_policy.supervised_trainer import hierarchical_action_objective
+    baseline_config = {**config, "mastered_anchor_retention": {
+        "loss_weight": 1., "temperature": 1.}}
+    baseline, _, scores = _batch_outputs(model, *packed, config=baseline_config)
+    expected = mx.stack([hierarchical_action_objective(
+        scores[i], packed[4][i], packed[5][i], config["action_supervision"],
+        task_code=packed[6][i], xp=mx, correction_boundaries=packed[-1][i])
+        for i in range(2)]).mean()
+    assert float(expected.item()) > 0
+    assert float((retained - baseline).item()) == pytest.approx(
+        supervision_weight * float(expected.item()), abs=1e-6)
+    contributions = [batch_objective_loss(model, *packed, config=config, objective=name)
+                     for name in ("entry", "direction", "management", "teacher", "retention")]
+    assert float(mx.stack(contributions).sum().item()) == pytest.approx(
+        float(retained.item()), abs=1e-6)
 
 
 def test_frozen_action_validation_does_not_require_training_only_anchor_tensors():

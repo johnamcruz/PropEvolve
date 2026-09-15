@@ -72,13 +72,18 @@ def validate_mastered_anchor_retention(settings):
     if settings is None:
         return
     if (not isinstance(settings, dict)
-            or set(settings) != {"loss_weight", "temperature"}
+            or set(settings) not in ({"loss_weight", "temperature"},
+                                    {"loss_weight", "temperature", "supervision_weight"})
             or any(isinstance(settings[name], bool)
                    or not isinstance(settings[name], (int, float))
                    or not math.isfinite(float(settings[name]))
                    or settings[name] <= 0
                    for name in ("loss_weight", "temperature"))):
         raise ValueError("invalid mastered anchor retention configuration")
+    weight = settings.get("supervision_weight", 0.0)
+    if (isinstance(weight, bool) or not isinstance(weight, (int, float))
+            or not math.isfinite(float(weight)) or weight < 0):
+        raise ValueError("invalid mastered anchor supervision weight")
 
 
 def validate_targeted_sampling(settings):

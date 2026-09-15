@@ -190,6 +190,15 @@ def test_sft_json_enables_only_authenticated_targeted_action_sampling(tmp_path):
     path.write_text(json.dumps(retained))
     assert read_sft_config(path, root=tmp_path)["mastered_anchor_retention"] == {
         "loss_weight": 1.0, "temperature": 1.0}
+    reinforced = {**retained, "mastered_anchor_retention": {
+        **retained["mastered_anchor_retention"], "supervision_weight": 1.0}}
+    path.write_text(json.dumps(reinforced))
+    with pytest.raises(ValueError, match="hierarchical"):
+        read_sft_config(path, root=tmp_path)
+    reinforced["decision_objective"] = "hierarchical_binary"
+    path.write_text(json.dumps(reinforced))
+    assert read_sft_config(path, root=tmp_path)["mastered_anchor_retention"][
+        "supervision_weight"] == 1.0
     path.write_text(json.dumps({**retained, "targeted_sampling": None}))
     with pytest.raises(ValueError, match="mastered anchor retention"):
         read_sft_config(path, root=tmp_path)
@@ -197,6 +206,14 @@ def test_sft_json_enables_only_authenticated_targeted_action_sampling(tmp_path):
         **payload["action_supervision"], "enabled": False}}))
     with pytest.raises(ValueError, match="targeted sampling"):
         read_sft_config(path, root=tmp_path)
+
+
+@pytest.mark.parametrize("weight", [-1, True, float("nan"), float("inf"), "1"])
+def test_mastered_supervision_rejects_invalid_weights(weight):
+    from propevolve.reasoning_policy.targeted_subset import validate_mastered_anchor_retention
+    with pytest.raises(ValueError, match="supervision weight"):
+        validate_mastered_anchor_retention({"loss_weight": 1., "temperature": 1.,
+                                            "supervision_weight": weight})
 
 
 def test_targeted_sampler_drives_real_mlx_training_batches():

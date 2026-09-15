@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from propevolve.reasoning_policy.decisive_learning import decision_evidence, compare_learning, evaluation_recipe, require_initial_score_parity, fixed_diagnostic_indices
+from propevolve.reasoning_policy.decisive_learning import decision_evidence, compare_learning, evaluation_recipe, require_initial_score_parity, fixed_diagnostic_indices, update_progress
 from propevolve.reasoning_policy.integrity import file_digest
 from propevolve.reasoning_policy.mlx_sft import read_sft_config, PreparedDataset, verify_mlx_view
 from propevolve.reasoning_policy.policy import MLXActionPolicy
@@ -95,6 +95,7 @@ def main():
             'Management coverage and entry conditioning must be interpreted using dataset lineage.']}
     atomic_json(destination / 'report.json', report)
     import mlx.core as mx
+    from mlx.utils import tree_map
     from mlx_lm.tuner.trainer import train, TrainingArgs
     mx.set_memory_limit(int(plan['memory_gb'] * 1024**3))
     mx.set_cache_limit(int(plan['cache_mb'] * 1024**2))
@@ -140,7 +141,8 @@ def main():
         # New correct boundaries become anchors at the next phase; old mistakes
         # are never protected. Within the phase the reference stays frozen.
         selected = []
-        for row, scores in zip(rows['train'], previous['scores']):
+        selected_indices = []
+        for row_index, (row, scores) in enumerate(zip(rows['train'], previous['scores'])):
             if row['target_name'] not in phase['actions']:
                 continue
             item = copy.copy(row)
@@ -149,13 +151,25 @@ def main():
                 'scores': scores,
                 'boundaries': _mastered_boundaries(row, dict(zip(names, scores)))}
             selected.append(item)
+            selected_indices.append(indices['train'][row_index])
         stage = destination / phase['name']
         stage.mkdir()
         accumulation = config['grad_accumulation_steps']
         iterations = phase['optimizer_steps'] * accumulation
+        probe = plan.get('endpoint_probe')
+        snapshot = None
+        snapshot_evidence = None
+        iteration_offset = 0
+        switch = plan.get('retention_switch')
+        phase_draws = []
+        def record_draw(local_indices):
+            phase_draws.append([selected_indices[i] for i in local_indices])
+        report.setdefault('sampling', {})[phase['name']] = {
+            'selected_indices': selected_indices, 'microbatch_indices': phase_draws}
         class Callback:
             def on_train_loss_report(self, event):
-                nonlocal previous
+                nonlocal previous, snapshot, snapshot_evidence
+                event = {**event, 'iteration': event['iteration'] + iteration_offset}
                 current = assess('train')
                 result = {'phase': phase['name'], 'iteration': event['iteration'],
                     'train_loss': event['train_loss'], 'evidence': current,
@@ -163,21 +177,87 @@ def main():
                     'vs_parent': compare_learning(report['before']['train']['boundaries'], current['boundaries'])}
                 report['stages'].append(result)
                 previous = current
+                update = event['iteration'] // accumulation
+                if switch and update <= switch['after_updates']:
+                    reference = json.loads(Path(switch['reference_report']).read_text())
+                    expected = reference['stages'][update-1]['evidence']['scores']
+                    delta = max(abs(a-b) for left,right in zip(expected, current['scores'])
+                                for a,b in zip(left,right))
+                    if delta > plan['reload_tolerance']:
+                        raise ValueError(f'unchanged optimizer prefix differs: {delta}')
+                    result['prefix_score_delta'] = delta
+                if probe and update == probe['update'] - 1:
+                    snapshot = tree_map(lambda x: x, model.trainable_parameters())
+                    mx.eval(snapshot)
+                    snapshot_evidence = current
+                if probe and update == probe['update']:
+                    if snapshot is None:
+                        raise ValueError('endpoint probe requires a preceding optimizer snapshot')
+                    reference = json.loads(Path(probe['reference_report']).read_text())
+                    for expected, actual in (
+                        (reference['stages'][update-2]['evidence'], snapshot_evidence),
+                        (reference['stages'][update-1]['evidence'], current),
+                    ):
+                        delta = max(abs(a-b) for left,right in zip(expected['scores'], actual['scores'])
+                                    for a,b in zip(left,right))
+                        if delta > plan['reload_tolerance']:
+                            raise ValueError(f'optimizer-prefix reproduction differs: {delta}')
+                    proposal = tree_map(lambda x: x, model.trainable_parameters())
+                    mx.eval(proposal)
+                    report['endpoint_probe'] = {'update': update, 'endpoints': [],
+                        'reference_sha256': file_digest(probe['reference_report']),
+                        'before': snapshot_evidence,
+                        'optimizer_state': 'one native proposal; evaluation does not advance moments'}
+                    try:
+                        for scale in probe['scales']:
+                            if not 0 <= scale <= 1:
+                                raise ValueError('endpoint scale must lie in [0,1]')
+                            weights = (proposal if scale == 1 else snapshot if scale == 0 else
+                                tree_map(lambda old,new: old + scale*(new-old), snapshot, proposal))
+                            model.update(weights)
+                            mx.eval(model.parameters())
+                            endpoint = {'scale': scale, 'train': assess('train'), 'valid': assess('valid')}
+                            endpoint['progress'] = update_progress(
+                                snapshot_evidence['boundaries'], endpoint['train']['boundaries'])
+                            report['endpoint_probe']['endpoints'].append(endpoint)
+                            atomic_json(destination / 'report.json', report)
+                            print('[endpoint] ' + json.dumps({'scale': scale, **endpoint['progress']}), flush=True)
+                    finally:
+                        model.update(proposal)
+                        mx.eval(model.parameters())
                 atomic_json(destination / 'report.json', report)
                 print('[decisive] ' + json.dumps({k: v for k, v in result.items() if k != 'evidence'}), flush=True)
                 model.train()
             def on_val_loss_report(self, event):
                 pass
-        native = TrainingArgs(batch_size=config['batch_size'], iters=iterations,
-            val_batches=0, steps_per_report=accumulation, steps_per_eval=iterations,
-            steps_per_save=iterations, adapter_file=str(stage / 'native.safetensors'),
-            max_seq_length=config['max_seq_length'], grad_checkpoint=config['grad_checkpoint'],
-            grad_accumulation_steps=accumulation, clear_cache_threshold=config['clear_cache_threshold'])
-        train(model, optimizer, selected, None, args=native,
-            loss=partial(batch_loss, config=config),
-            iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True,
-                sampling_strategy=plan.get('sampling_strategy', 'random')),
-            training_callback=Callback())
+        segments = [iterations]
+        if switch:
+            prefix = switch['after_updates'] * accumulation
+            if not 0 < prefix < iterations or probe:
+                raise ValueError('retention switch requires a nonempty unchanged prefix and suffix')
+            segments = [prefix, iterations - prefix]
+        for segment_index, segment_iterations in enumerate(segments):
+            segment_config = config
+            if segment_index:
+                segment_config = {**config, 'mastered_anchor_retention': {
+                    **config['mastered_anchor_retention'],
+                    'supervision_weight': switch['supervision_weight']}}
+                from propevolve.reasoning_policy.targeted_subset import validate_mastered_anchor_retention
+                validate_mastered_anchor_retention(segment_config['mastered_anchor_retention'])
+            native = TrainingArgs(batch_size=config['batch_size'], iters=segment_iterations,
+                val_batches=0, steps_per_report=accumulation, steps_per_eval=segment_iterations,
+                steps_per_save=segment_iterations, adapter_file=str(stage / 'native.safetensors'),
+                max_seq_length=config['max_seq_length'],
+                grad_checkpoint=config['grad_checkpoint'] and segment_index == 0,
+                grad_accumulation_steps=accumulation, clear_cache_threshold=config['clear_cache_threshold'])
+            train(model, optimizer, selected, None, args=native,
+                loss=partial(batch_loss, config=segment_config),
+                iterate_batches=partial(tensor_batches, seed=config['seed'], include_partial=True,
+                    skip_batches=iteration_offset,
+                    on_selected=record_draw,
+                    sampling_strategy=plan.get('sampling_strategy', 'random')),
+                training_callback=Callback())
+            iteration_offset += segment_iterations
     report['after'] = {'train': assess('train'), 'valid': assess('valid')}
     for role in ('train', 'valid'):
         report[role + '_comparison'] = compare_learning(report['before'][role]['boundaries'],

@@ -177,3 +177,11 @@ def fixed_diagnostic_indices(rows, indices, *, minimum_gap):
         if not gap >= minimum_gap:
             raise ValueError('fixed diagnostic row fails economic gap')
     return list(indices)
+def update_progress(before, after):
+    """Report plasticity on old mistakes separately from retained decisions."""
+    result = compare_learning(before, after)
+    changes = [new[name]['margin'] - value['margin']
+               for old, new in zip(before, after) for name, value in old.items()
+               if not value['ambiguous'] and not value['correct']]
+    return {**result, 'mistake_count': len(changes),
+            'mistake_margin_change': sum(changes) / len(changes) if changes else None}
