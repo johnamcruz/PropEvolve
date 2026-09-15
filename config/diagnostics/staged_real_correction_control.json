@@ -1,0 +1,24 @@
+{
+  "inherits": "staged_real_sft.json",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/correction-control",
+  "resume_adapter_file": "runs/reasoning-challenger/staged-real-proof/acquisition/adapters.safetensors",
+  "resume_adapter_requirements": {"stage_role": "trade_mastery"},
+  "training_log_prefix": "staged-correction-control",
+  "targeted_sampling": {
+    "assessment_path": "runs/reasoning-challenger/staged-real-proof/candidate-train",
+    "summary_sha256": "4a546335d0649ff66f07f5c7bf8cd43f0804942d333115458cb440f244759664",
+    "scores_sha256": "5dae2fa2ff0ac1c99d241d38ac405d816a8a5144fb8143472d999bd8f45edfa3",
+    "rows_per_group": 9,
+    "mistake_fraction": 0.5,
+    "seed": 17,
+    "balance_mode": "hierarchical_boundaries"
+  },
+  "initial_validation_receipt": {
+    "path": "runs/reasoning-challenger/staged-real-proof/candidate-valid",
+    "summary_sha256": "b514d5f7ca49d28d46920458977ff7f580a2bad14079145919d33e86738c12c9",
+    "scores_sha256": "e114ce3e1deff40b59643e2334164745732e140f060e8eb2dc47129ab2f6d848",
+    "policy_config_path": "config/diagnostics/staged_real_sft.json",
+    "policy_config_sha256": "b4fd6360bbc188e5900733ad9d3885a2afa57e6ccb09f5c9b358fa71bac4aef9",
+    "view_manifest_sha256": "45492cdd51189b5cdd9698fcbd4170da215ed9eecb2d2cff052a55ffabeeb852"
+  }
+}

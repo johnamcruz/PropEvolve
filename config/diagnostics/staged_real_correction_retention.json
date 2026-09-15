@@ -1,0 +1,10 @@
+{
+  "inherits": "staged_real_correction_control.json",
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/correction-retention",
+  "training_log_prefix": "staged-correction-retention",
+  "mastered_anchor_retention": {
+    "loss_weight": 1.0,
+    "temperature": 1.0,
+    "supervision_weight": 1.0
+  }
+}
