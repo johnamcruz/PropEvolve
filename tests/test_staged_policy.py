@@ -5,6 +5,38 @@ import pytest
 from propevolve.decision import Action
 
 
+@pytest.mark.parametrize("action", list(Action))
+@pytest.mark.parametrize("scores", [[-10., -10., -10.], [10., 10., 10.]])
+def test_forced_legal_action_has_all_mass_and_is_selected(action, scores):
+    from propevolve.reasoning_policy.staged_policy import legal_action_log_probs, select_legal_action
+    assert np.exp(legal_action_log_probs(np.array(scores), (action,), xp=np)).tolist() == [1.]
+    assert select_legal_action(scores, (action,)) == action
+
+
+@pytest.mark.parametrize("scores,expected", [
+    ([2., 2., -100.], Action.ENTER_LONG_1),
+    ([2., -2., 100.], Action.ENTER_SHORT_1),
+    ([-2., 2., 100.], Action.WAIT),
+    ([-2., -2., -100.], Action.WAIT),
+    ([0., 2., 0.], Action.WAIT),
+    ([2., 0., 0.], Action.WAIT),
+])
+def test_flat_selection_respects_entry_direction_and_ties(scores, expected):
+    from propevolve.reasoning_policy.staged_policy import select_legal_action, legal_action_log_probs
+    actions = (Action.WAIT, Action.ENTER_LONG_1, Action.ENTER_SHORT_1)
+    assert select_legal_action(scores, actions) == expected
+    p = np.exp(legal_action_log_probs(np.array(scores), actions, xp=np))
+    assert p.sum() == pytest.approx(1.)
+    assert (p >= 0).all()
+
+
+@pytest.mark.parametrize("score,expected", [(-2., Action.CLOSE), (0., Action.CLOSE), (2., Action.HOLD)])
+def test_positioned_selection_ignores_entry_direction(score, expected):
+    from propevolve.reasoning_policy.staged_policy import select_legal_action
+    for unrelated in (-100., 100.):
+        assert select_legal_action([unrelated, unrelated, score], (Action.HOLD, Action.CLOSE)) == expected
+
+
 def test_separate_entry_and_direction_form_one_legal_distribution():
     from propevolve.reasoning_policy.staged_policy import legal_action_log_probs
 

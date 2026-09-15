@@ -9,6 +9,30 @@ from propevolve.environment import HistoricalChallengeEnv
 from test_reasoning_challenger_e2e import environment, passive_factory
 
 
+def assert_management_teaching(result, expected):
+    """Real simulator receipts through serialization and native learning loss."""
+    mx = pytest.importorskip("mlx.core")
+    from propevolve.reasoning_policy.context import ContextConfig, RollingContext
+    from propevolve.reasoning_policy.dataset import supervised_record
+    from propevolve.reasoning_policy.supervision import action_targets
+    from propevolve.reasoning_policy.staged_batches import binary_targets
+    from propevolve.reasoning_policy.staged_learning import trade_objective
+    context = RollingContext(ContextConfig(2, ("trade.current_r",), input_mode="embeddings"))
+    context.append(1, {"trade.current_r": 0.}, embedding=np.ones(2))
+    record = supervised_record(context.snapshot(), result, source_id="management-test",
+                               continuation_id="simulator", target_temperature=.5)
+    assert record["messages"][-1]["content"] == expected.name
+    p, v, w = binary_targets(action_targets(record))
+    assert w.tolist() == [0., 0., 1.]
+    assert p.sum(axis=1).tolist() == pytest.approx([1., 1., 1.])
+    _, gradient = mx.value_and_grad(lambda scores: trade_objective(scores,
+        mx.array(p[None]), mx.array(v[None]), mx.array(w[None]),
+        {"soft_target_weight": 1., "ranking_weight": 1., "margin": .25}, xp=mx))(mx.zeros((1, 3)))
+    mx.eval(gradient)
+    assert gradient[0, :2].tolist() == [0., 0.]
+    assert (gradient[0, 2].item() < 0) == (expected == Action.HOLD)
+
+
 def test_collector_rejects_unknown_management_recipe_instead_of_using_oracle_labels():
     from propevolve.reasoning_policy.collector import collect_examples
     with pytest.raises(ValueError, match="management label mode"):
@@ -43,6 +67,7 @@ def test_trailing_continuation_keeps_more_than_four_r_and_records_excursions(sid
     assert evidence["mae_r"] >= 0.
     assert evidence["exit_reason"] == "ratchet_stop"
     assert evidence["net_r"] == pytest.approx(1496. / 300.)
+    assert_management_teaching(result, Action.HOLD)
 
 
 @pytest.mark.parametrize("side,sign", [(Action.ENTER_LONG_1, 1), (Action.ENTER_SHORT_1, -1)])
@@ -72,6 +97,7 @@ def test_management_label_matches_simulator_exit_not_best_future_open(side, sign
     assert result.outcomes[Action.CLOSE].reward_to_go > result.outcomes[Action.HOLD].reward_to_go
     assert result.outcomes[Action.HOLD].outcome_end_ns == int(market.timestamps[4].astype("datetime64[ns]").astype(np.int64))
     assert env.closed_trade_receipts() == ()
+    assert_management_teaching(result, Action.CLOSE)
     from propevolve.reasoning_policy.collector import collect_examples
     from propevolve.reasoning_policy.context import ContextConfig
     records = list(collect_examples(env,
@@ -109,3 +135,4 @@ def test_management_label_matches_simulator_exit_not_best_future_open(side, sign
         continuation_factory=passive_factory, max_steps=3, minimum_improvement_r=.1)
     assert stopped.outcomes[Action.HOLD].outcome == "initial_stop"
     assert stopped.outcomes[Action.HOLD].terminal_pnl == pytest.approx(-404.)
+    assert_management_teaching(stopped, Action.CLOSE)

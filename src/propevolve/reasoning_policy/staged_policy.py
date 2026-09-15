@@ -16,6 +16,8 @@ def select_legal_action(assessment, legal_actions):
         raise ValueError("selection requires three finite binary assessments")
     # Also validates the legal position state and uniqueness.
     legal_action_log_probs(values, actions, xp=np)
+    if len(actions) == 1:
+        return actions[0]
     entry, direction, management = values
     if Action.WAIT in actions:
         action = (Action.WAIT if entry <= 0 or direction == 0 else

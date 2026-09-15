@@ -8,18 +8,27 @@ import pytest
     ("ENTER_LONG_1", [-2., 2., 0.], [False, True, False]),
     ("ENTER_LONG_1", [2., 2., 0.], [True, True, False]),
     ("ENTER_LONG_1", [-2., -2., 0.], [False, False, False]),
+    ("ENTER_SHORT_1", [2., 2., 0.], [True, False, False]),
+    ("ENTER_SHORT_1", [-2., -2., 0.], [False, True, False]),
+    ("ENTER_SHORT_1", [2., -2., 0.], [True, True, False]),
+    ("ENTER_SHORT_1", [-2., 2., 0.], [False, False, False]),
     ("WAIT", [-2., 2., 0.], [True, False, False]),
+    ("WAIT", [2., -2., 0.], [False, False, False]),
     ("HOLD", [2., 2., 2.], [False, False, True]),
+    ("HOLD", [2., 2., -2.], [False, False, False]),
+    ("CLOSE", [2., 2., -2.], [False, False, True]),
+    ("CLOSE", [2., 2., 2.], [False, False, False]),
 ])
 def test_staged_sampler_retains_only_correct_applicable_boundaries(target, scores, expected):
     from propevolve.reasoning_policy.targeted_subset import TargetedSampler
     from propevolve.reasoning_policy.staged_policy import legal_action_log_probs
     from propevolve.decision import Action
     from test_reasoning_targeted_subset import settings
-    names = (["HOLD", "CLOSE"] if target == "HOLD" else
+    names = (["HOLD", "CLOSE"] if target in {"HOLD", "CLOSE"} else
              ["WAIT", "ENTER_LONG_1", "ENTER_SHORT_1"])
-    values = ([2., 0.] if target == "HOLD" else
-              [0., -1., -1.] if target == "WAIT" else [0., 2., -1.])
+    values = ([2., 0.] if target == "HOLD" else [0., 2.] if target == "CLOSE" else
+              [0., -1., -1.] if target == "WAIT" else
+              [0., -1., 2.] if target == "ENTER_SHORT_1" else [0., 2., -1.])
     log_probs = legal_action_log_probs(np.array(scores), [Action[n] for n in names], xp=np)
     evidence = {"index": 0, "ticker": "NQ", "target": target, "completed_at_ns": 100,
         "target_advantage": -1., "scores": dict(zip(names, log_probs.tolist())),
