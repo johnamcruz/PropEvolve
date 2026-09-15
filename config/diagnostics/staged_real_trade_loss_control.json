@@ -1,0 +1,14 @@
+{
+  "inherits": "staged_real_sft.json",
+  "interpretation_loss_weight": 0.0,
+  "adapter_path": "runs/reasoning-challenger/staged-real-proof/trade-loss-control",
+  "training_log_prefix": "staged-real-trade-loss-control",
+  "initial_validation_receipt": {
+    "path": "runs/reasoning-challenger/staged-real-proof/frozen-valid",
+    "summary_sha256": "d2ac1c0e79ef964124f1d07733abcaf5ebd82571c5868013b0bfcf8a855dc6a0",
+    "scores_sha256": "a3794045c4bbea3037e73f549a8a9b11bd4524d7017e83da52b997d0024f6dbf",
+    "policy_config_path": "config/diagnostics/staged_real_assessment.json",
+    "policy_config_sha256": "03ebe246f196fd8d265b21693dd2c8a79a4febd4410ef9dde5c0a328a19596e2",
+    "view_manifest_sha256": "45492cdd51189b5cdd9698fcbd4170da215ed9eecb2d2cff052a55ffabeeb852"
+  }
+}
