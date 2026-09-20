@@ -67,8 +67,16 @@ def load_market_series(
     ticker: str,
     start: str | None = None,
     end: str | None = None,
+    setup_bundle: str | Path | None = None,
 ):
-    """Align source OHLC bars to cached decision-close timestamps."""
+    """Align source OHLC bars to cached decision-close timestamps.
+
+    ``setup_bundle`` optionally attaches the Expansion + order-flow channels from the
+    ffm-strategies research bundle. NOTE the clock difference: this cache is indexed by
+    bar CLOSE while the bundle is indexed by bar OPEN, so the bundle is shifted forward
+    by one timeframe before matching. Getting that wrong would silently align the signal
+    to the wrong bar and look like the policy failing to learn.
+    """
     from .environment import MarketSeries
 
     source = Path(source).resolve(strict=True)
@@ -106,6 +114,14 @@ def load_market_series(
     cache_rows = np.flatnonzero(eligible)
     if len(indices) < 2:
         raise ValueError("requested market slice has fewer than two cached rows")
+    setup_channels = None
+    if setup_bundle is not None:
+        from .setup_signals import align_setup_channels, read_setup_bundle
+
+        bundle_opens, bundle_channels = read_setup_bundle(setup_bundle)
+        bundle_closes = bundle_opens + np.timedelta64(timeframe, "m")
+        setup_channels = align_setup_channels(
+            bundle_closes, bundle_channels, closes[indices])
     return MarketSeries(
         ticker=ticker,
         timestamps=closes[indices],
@@ -115,6 +131,7 @@ def load_market_series(
         close=frame["close"].to_numpy(np.float32)[indices],
         embeddings=_contiguous_embedding_view(cache.embeddings, cache_rows),
         embeddings_authenticated=True,
+        setup_channels=setup_channels,
     )
 
 

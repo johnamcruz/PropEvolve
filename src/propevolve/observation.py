@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .decision import PositionSide
+from .setup_signals import SetupSignalSpec
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class ObservationAssembler:
         max_loss: float,
         profit_target: float,
         trade_management: TradeManagementObservationSpec | None = None,
+        setup_signals: "SetupSignalSpec | None" = None,
     ) -> None:
         if embedding_dim < 1 or max_loss <= 0 or profit_target <= 0:
             raise ValueError("observation dimensions and economics must be positive")
@@ -119,6 +121,7 @@ class ObservationAssembler:
         self.max_loss = float(max_loss)
         self.profit_target = float(profit_target)
         self.trade_management = trade_management or TradeManagementObservationSpec()
+        self.setup_signals = setup_signals or SetupSignalSpec()
 
     @property
     def output_dim(self) -> int:
@@ -126,9 +129,15 @@ class ObservationAssembler:
             self.embedding_dim
             + self.ACCOUNT_DIM
             + self.trade_management.output_dim
+            + self.setup_signals.output_dim
         )
 
-    def assemble(self, embedding: np.ndarray, account: AccountState) -> np.ndarray:
+    def assemble(
+        self,
+        embedding: np.ndarray,
+        account: AccountState,
+        setup: np.ndarray | None = None,
+    ) -> np.ndarray:
         embedding = np.asarray(embedding, dtype=np.float32)
         if embedding.shape != (self.embedding_dim,):
             raise ValueError(
@@ -180,7 +189,22 @@ class ObservationAssembler:
             )
             if not np.isfinite(management_values).all():
                 raise ValueError("trade-management state must be finite")
-        return np.concatenate((embedding, account_values, management_values))
+        setup_values = np.empty(0, dtype=np.float32)
+        if self.setup_signals.output_dim:
+            if setup is None:
+                raise ValueError(
+                    "setup-signal channels are enabled but none were supplied")
+            setup_values = np.asarray(setup, dtype=np.float32)
+            if setup_values.shape != (self.setup_signals.output_dim,):
+                raise ValueError(
+                    f"setup shape {setup_values.shape} != "
+                    f"({self.setup_signals.output_dim},)")
+            if not np.isfinite(setup_values).all():
+                raise ValueError("setup-signal channels must be finite")
+        elif setup is not None:
+            raise ValueError("setup-signal channels supplied but the feature is off")
+        return np.concatenate(
+            (embedding, account_values, management_values, setup_values))
 
 
 __all__ = [

@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from .decision import Action, ActionMasker, PositionSide
+from .setup_signals import (
+    CHANNEL_NAMES as SETUP_CHANNEL_NAMES,
+    SetupSignalSpec,
+)
 from .episode_coverage import (
     DeterministicEpisodeCoverage,
     FullDataEpisodeCoverageSpec,
@@ -156,6 +160,9 @@ class MarketSeries:
     close: np.ndarray
     embeddings: np.ndarray
     embeddings_authenticated: bool = False
+    # Causal per-bar Expansion + order-flow context (see propevolve.setup_signals).
+    # None keeps every existing market byte-identical.
+    setup_channels: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         lengths = {
@@ -182,6 +189,18 @@ class MarketSeries:
             raise ValueError("market timestamps must be strictly increasing")
         if np.isnat(self.timestamps).any():
             raise ValueError("market timestamps must be finite")
+        if self.setup_channels is not None:
+            channels = np.asarray(self.setup_channels)
+            if (
+                channels.ndim != 2
+                or len(channels) != len(self.timestamps)
+                or channels.shape[1] != len(SETUP_CHANNEL_NAMES)
+            ):
+                raise ValueError(
+                    "setup channels must be one row per bar with "
+                    f"{len(SETUP_CHANNEL_NAMES)} columns")
+            if not np.isfinite(channels).all():
+                raise ValueError("setup channels must be finite")
 
 
 _CENTRAL = ZoneInfo("America/Chicago")
@@ -321,6 +340,7 @@ class HistoricalChallengeEnv:
         spec: ChallengeSpec,
         round_trip_fees: dict[str, float],
         observation_spec: TradeManagementObservationSpec | None = None,
+        setup_signals: SetupSignalSpec | None = None,
         seed: int,
         episode_coverage: FullDataEpisodeCoverageSpec | None = None,
     ) -> None:
@@ -366,11 +386,18 @@ class HistoricalChallengeEnv:
             else None
         )
         self._rng = np.random.default_rng(seed)
+        self.setup_signals = setup_signals or SetupSignalSpec()
+        if self.setup_signals.output_dim and any(
+            market.setup_channels is None for market in self.markets.values()
+        ):
+            raise ValueError(
+                "setup-signal channels are enabled but a market has none")
         self._assembler = ObservationAssembler(
             next(iter(embedding_dims)),
             max_loss=self.spec.max_loss,
             profit_target=self.spec.profit_target,
             trade_management=observation_spec,
+            setup_signals=self.setup_signals,
         )
         self._masker = ActionMasker(
             max_position_size=self.spec.max_position_size,
@@ -1364,6 +1391,10 @@ class HistoricalChallengeEnv:
 
     def _observation(self) -> np.ndarray:
         assert self._market is not None
+        setup = None
+        if self.setup_signals.output_dim:
+            assert self._market.setup_channels is not None
+            setup = self._market.setup_channels[self._index]
         return self._assembler.assemble(
-            self._market.embeddings[self._index], self._account_state()
+            self._market.embeddings[self._index], self._account_state(), setup
         )
