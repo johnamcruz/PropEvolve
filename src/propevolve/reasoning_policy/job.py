@@ -479,10 +479,17 @@ def collect_job(path):
                                    (augment_action and role in specialist_roles))
             env, sources = load_role(config, root, role_sources[role][0], role,
                                      include_specialists=include_specialists)
-            episodes = (economic_episode_specs(config, env, sources, role)
-                        if config.get("economic_action_sampling") is not None else
-                        configured_episodes(config, env, role))
-            if (config.get("economic_action_sampling") is not None
+            if config.get("setup_action_sampling") is not None:
+                # Anchors from the Expansion + order-flow rule itself, so the reasoning
+                # policy learns the same setup algoTraderAI's PPO trades.
+                from .setup_episodes import setup_episode_specs
+                episodes = setup_episode_specs(config, env, role)
+            elif config.get("economic_action_sampling") is not None:
+                episodes = economic_episode_specs(config, env, sources, role)
+            else:
+                episodes = configured_episodes(config, env, role)
+            if ((config.get("economic_action_sampling") is not None
+                 or config.get("setup_action_sampling") is not None)
                     and config.get("embedding_storage") == "source_embedding_reference_v1"):
                 # The schedule is now lightweight. Release the all-market selector
                 # before traversing one cache-local ticker at a time.
