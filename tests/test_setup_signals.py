@@ -170,3 +170,12 @@ def test_a_trigger_on_an_unavailable_bar_yields_no_side(tmp_path):
 def test_a_wrong_width_row_is_rejected():
     with pytest.raises(ValueError):
         entry_side_from_channels(np.zeros(3))
+
+
+def test_underscore_keys_are_notes_but_a_misspelled_setting_still_raises():
+    """Configs carry their rationale inline; a typo must not be silently ignored."""
+    spec = SetupSignalSpec.from_config(
+        {"state": "expansion_flow_v1", "_gate_note": "why the gate is off"})
+    assert spec.state == "expansion_flow_v1"
+    with pytest.raises(TypeError):
+        SetupSignalSpec.from_config({"state": "expansion_flow_v1", "gate_entires": True})

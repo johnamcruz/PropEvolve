@@ -358,16 +358,21 @@ def load_role(config, root, source, role, *, include_specialists=True):
     from ..cache import load_market_series
     from ..environment import ChallengeSpec, HistoricalChallengeEnv
     from ..observation import TradeManagementObservationSpec
+    from ..setup_signals import SetupSignalSpec
     from ..teachers.composition import load_teacher_targets
 
     assets = AssetContract.load(resolve(root, source["assets"]))
     assets.verify()
     prefix = "train" if role == "train" else "validation"
     temporal = source["temporal"]
+    # The Expansion + order-flow channels ride along with the bars when configured, so
+    # every consumer of a market sees the same causal context the policy is judged on.
+    setup_bundle = config.get("setup_bundle")
     markets = {ticker: load_market_series(
         Path(assets.market_data) / f"{ticker}_{source['timeframe_minutes']}min.csv",
         resolve(root, source["cache_root"]) / ticker, ticker=ticker,
         start=temporal[f"{prefix}_start"], end=temporal[f"{prefix}_end"],
+        setup_bundle=setup_bundle,
     ) for ticker in config["tickers"][role]}
     sources = (load_teacher_targets(tuple(source["teachers"]), root=root, markets=markets).sources
                if include_specialists else ())
@@ -387,6 +392,7 @@ def load_role(config, root, source, role, *, include_specialists=True):
         markets, tick_values=source["point_values"], round_trip_fees=source["round_trip_fees"],
         spec=ChallengeSpec(**source["challenge"]),
         observation_spec=TradeManagementObservationSpec.from_config(source["observation"]),
+        setup_signals=SetupSignalSpec.from_config(config.get("setup_signals")),
         seed=config["seed"],
     )
     return env, sources

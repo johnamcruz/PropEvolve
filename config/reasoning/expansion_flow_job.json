@@ -1,0 +1,47 @@
+{
+  "_purpose": "The PropEvolve equivalent of the shipped algoTraderAI strategy: a reasoning policy that learns the Expansion + order-flow setup, with the RL stage teaching the prop-challenge constraints. The comparison target is production measured on four unseen eval seeds at 250 episodes: 55.0% pass, 35.5% win rate, 4.15R average winner, +0.83R expectancy, zero blow.",
+  "inherits": "error_selected_distillation_job.json",
+  "status": "expansion_flow_reasoning_v1",
+
+  "_ticker_note": "NQ only. Order flow exists for no other market in this program, and the setup is defined by it.",
+  "tickers": {
+    "train": ["NQ"],
+    "valid": ["NQ"]
+  },
+
+  "_split_note": "Redrawn. PropEvolve's stock split validates on 2025, which is development data for the Expansion + flow rule and for every algoTraderAI measurement, so reusing it would report a number that has already been optimised against. Training stops at 2024-01-01 and validation covers 2024, leaving 2025 untouched here as the honest comparison window against the shipped PPO. 2026 remains sealed.",
+  "dataset_temporal": {
+    "train_start": "2021-06-01",
+    "train_end": "2024-01-01",
+    "validation_start": "2024-01-01",
+    "validation_end": "2025-01-01"
+  },
+
+  "_anchor_note": "Anchors come from the rule's own triggers rather than the barrier-label census, so the policy is taught the same events the PPO trades. Waits are drawn from armed windows the flow declined, which are the informative refusals.",
+  "economic_action_sampling": null,
+  "setup_action_sampling": {
+    "train": {
+      "per_action": 3000,
+      "seed": 4101,
+      "wait_pool": "armed"
+    },
+    "valid": {
+      "per_action": 1000,
+      "seed": 4102,
+      "wait_pool": "armed"
+    }
+  },
+
+  "setup_signals": {
+    "state": "expansion_flow_v1",
+    "_gate_note": "gate_entries stays OFF. Forcing the rule's side would guarantee the policy trades the flow direction, but it would also foreclose the question being asked, which is whether a reasoning model can learn the setup. Direction tested as unlearnable standalone (0.52 accuracy), so a coin-flip side is the failure mode to watch for; turn this on to isolate selection and management if that is what shows up.",
+    "gate_entries": false
+  },
+  "setup_bundle": "/Volumes/CRUZ SSD/ffm-strategies/runs/nq_expansion_flow_trigger_v1/bundle/signals.parquet",
+
+  "dataset_output": "runs/reasoning-challenger/expansion-flow/dataset",
+  "label_census_output": "runs/reasoning-challenger/expansion-flow/label-census.json",
+  "temporal_split_audit": "runs/reasoning-challenger/expansion-flow/source-audit.json",
+  "mlx_view": "runs/reasoning-challenger/expansion-flow/view",
+  "sft_config": "config/reasoning/expansion_flow_sft.json"
+}

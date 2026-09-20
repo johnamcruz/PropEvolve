@@ -65,7 +65,14 @@ class SetupSignalSpec:
 
     @classmethod
     def from_config(cls, config: dict | None) -> "SetupSignalSpec":
-        return cls() if config is None else cls(**config)
+        """Build from config, ignoring ``_``-prefixed annotation keys.
+
+        Unknown real keys still raise: a misspelled setting must not be silently
+        dropped. Only keys that begin with an underscore are treated as notes.
+        """
+        if config is None:
+            return cls()
+        return cls(**{k: v for k, v in config.items() if not k.startswith("_")})
 
     @property
     def output_dim(self) -> int:
