@@ -15,14 +15,18 @@ Two properties worth stating plainly, because they decide what the comparison me
 
 * The anchors are the SAME events algoTraderAI's PPO sees as gates, so the two systems are
   learning on identical opportunities and their pass rates are comparable.
-* The taught side comes from the flow, which is the one direction signal that survived
-  testing (as a conditional rule, not as a standalone model). If the reasoning policy is
-  to beat PPO it has to do so by choosing WHICH setups to take and how to manage them,
-  not by inventing a better direction call.
+* The ACTION is not dictated by the rule. Anchors say where to study; PropEvolve's
+  economics say what the right action was. Teaching the rule's own verdict would cap the
+  policy at imitating a rule we already have, and would fight the error-selected
+  distillation, whose whole purpose is to train on the cases the current policy gets
+  wrong. ``setup_action`` is recorded for reporting only.
 
-Waits are sampled from bars the rule declined so the policy sees both sides of the
-decision; without them it would only ever be shown entries and would learn to always
-enter.
+Declined bars are sampled too, so the policy sees both sides of the decision instead of
+only ever being shown entries. They carry NO expected action: PropEvolve labels from the
+forward outcome, and asserting "the rule waited" would contradict the collector whenever
+a declined setup would in fact have worked. So the anchors choose WHERE the policy
+studies and the economics choose WHAT the right action was there — which is also what
+leaves room to beat the rule rather than merely imitate it.
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ def _eligible_range(environment, ticker: str, warmup: int) -> np.ndarray:
 
 
 def setup_episode_specs(config, environment, role: str) -> list[dict]:
-    """Anchors on rule triggers (taught as entries) plus declined bars (taught as Wait).
+    """Anchors on the rule's triggers, plus the bars it declined.
 
     ``setup_action_sampling[role]`` takes ``per_action`` and ``seed``; ``wait_pool``
     chooses which declined bars are eligible for Wait anchors:
@@ -107,8 +111,13 @@ def setup_episode_specs(config, environment, role: str) -> list[dict]:
             take = min(per_action, len(rows))
             chosen = rng.choice(rows, size=take, replace=False) if take < len(rows) else rows
             for row in np.sort(np.asarray(chosen)):
+                # No expected_action. The anchors choose WHERE the policy studies; the
+                # economics choose WHAT the right action was there. Asserting the rule's
+                # own verdict would cap the policy at imitating a rule we already have,
+                # and would contradict the collector wherever the rule was wrong — which
+                # is precisely the population the error-selected distillation needs.
                 specs.append({"ticker": ticker, "start": int(row) - warmup,
-                              "expected_action": int(action)})
+                              "setup_action": int(action)})
     specs.sort(key=lambda item: (item["ticker"], item["start"]))
     if not specs:
         raise ValueError("the setup produced no anchors for this role")

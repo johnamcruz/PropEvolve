@@ -132,6 +132,29 @@ def stratified_action_rows(candidates, *, per_action, seed):
     return selected
 
 
+def setup_row_mask(market, requirement: str) -> np.ndarray:
+    """Rows allowed by the Expansion + order-flow channels.
+
+        trigger    only bars where the frozen rule fired
+        armed      bars inside an armed Expansion window (rule fired or not)
+        available  any bar with both an Expansion score and a flow reading
+    """
+    from ..setup_signals import CHANNEL_NAMES
+
+    if market.setup_channels is None:
+        raise ValueError(
+            f"{market.ticker} has no setup channels; setup_row_filter needs the bundle")
+    if requirement not in {"trigger", "armed", "available"}:
+        raise ValueError("setup_row_filter must be trigger, armed or available")
+    channels = np.asarray(market.setup_channels)
+    available = channels[:, CHANNEL_NAMES.index("setup_available")] > 0.0
+    if requirement == "available":
+        return available
+    if requirement == "armed":
+        return available & (channels[:, CHANNEL_NAMES.index("expansion_armed")] > 0.0)
+    return available & (channels[:, CHANNEL_NAMES.index("setup_trigger")] > 0.0)
+
+
 def economic_episode_specs(config, environment, sources, role):
     """Turn the exhaustive economic census into reproducible SFT anchors."""
     sampling = config["economic_action_sampling"][role]
@@ -154,6 +177,15 @@ def economic_episode_specs(config, environment, sources, role):
         )
         eligible = labels >= 0
         eligible[:warmup] = False
+        # Restrict the census to the Expansion + order-flow setup when configured. The
+        # LABELS stay economic — each bar keeps the action its forward outcome justifies,
+        # so the policy still learns which entries are profitable and which lose — but the
+        # rows it studies become the setups algoTraderAI actually trades. That is what
+        # makes the two systems comparable, and it leaves the policy free to disagree with
+        # the rule, which is the population the error-selected distillation needs.
+        setup_filter = config.get("setup_row_filter")
+        if setup_filter is not None:
+            eligible &= setup_row_mask(market, setup_filter)
         session_keys = environment._session_keys[ticker]
         unique_sessions = np.unique(session_keys)
         last_start_session = unique_sessions[-environment.spec.episode_days]
@@ -516,7 +548,8 @@ def collect_job(path):
                     for selected in groups[ticker]:
                         episode = {key: selected[key] for key in ("ticker", "start")}
                         plan = (action_collection_plan(config, selected["expected_action"])
-                                if kind == "action" else None)
+                                if kind == "action" and "expected_action" in selected
+                                else None)
                         for pair in collect_examples(
                             ticker_env, reset_options=episode, context_config=context,
                             sources=ticker_sources, behavior_factory=factory,
@@ -539,7 +572,7 @@ def collect_job(path):
                             **({} if plan is None else {
                                 key: plan[key] for key in ("management_sampling", "management_only") if key in plan}),
                         ):
-                            if pair[kind] is not None:
+                            if pair[kind] is not None and "expected_action" in selected:
                                 expected = Action(selected["expected_action"]).name
                                 legal = pair[kind]["targets"].get("action_order", ())
                                 if (expected in legal

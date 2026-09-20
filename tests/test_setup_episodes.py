@@ -73,17 +73,19 @@ def _config(**sampling):
 def test_every_trigger_becomes_an_entry_anchor_on_the_flow_side():
     env = _env(_channels())
     specs = setup_episode_specs(_config(), env, "train")
-    by_row = {s["start"]: s["expected_action"] for s in specs}
+    by_row = {s["start"]: s.get("setup_action") for s in specs}
     assert by_row[20] == int(Action.ENTER_LONG_1)
     assert by_row[40] == int(Action.ENTER_LONG_1)
     assert by_row[60] == int(Action.ENTER_SHORT_1)
 
 
-def test_declined_bars_are_taught_as_wait_so_the_policy_can_refuse():
+def test_no_anchor_dictates_an_action_to_the_collector():
+    """Anchors choose WHERE to study; PropEvolve's economics choose WHAT was right.
+    Dictating the rule's verdict would cap the policy at imitating it."""
     specs = setup_episode_specs(_config(), _env(_channels()), "train")
-    actions = [s["expected_action"] for s in specs]
-    assert int(Action.WAIT) in actions
-    assert actions.count(int(Action.WAIT)) > 0
+    declined = [s for s in specs if s.get("setup_action") == int(Action.WAIT)]
+    assert declined
+    assert all("expected_action" not in s for s in specs)
 
 
 def test_the_default_wait_pool_is_the_hard_negatives_inside_armed_windows():
@@ -91,7 +93,7 @@ def test_the_default_wait_pool_is_the_hard_negatives_inside_armed_windows():
     an unarmed bar teaches almost nothing."""
     channels = _channels(armed=range(15, 30))
     specs = setup_episode_specs(_config(), _env(channels), "train")
-    waits = [s["start"] for s in specs if s["expected_action"] == int(Action.WAIT)]
+    waits = [s["start"] for s in specs if s.get("setup_action") == int(Action.WAIT)]
     assert waits and all(channels[row, _ARMED] > 0.0 for row in waits)
 
 
@@ -100,7 +102,7 @@ def test_the_any_wait_pool_widens_beyond_armed_windows():
     narrow = setup_episode_specs(_config(wait_pool="armed"), _env(channels), "train")
     wide = setup_episode_specs(_config(wait_pool="any", per_action=50),
                                _env(channels), "train")
-    count = lambda specs: sum(1 for s in specs if s["expected_action"] == int(Action.WAIT))
+    count = lambda specs: sum(1 for s in specs if s.get("setup_action") == int(Action.WAIT))
     assert count(wide) > count(narrow)
 
 
@@ -122,7 +124,7 @@ def test_per_action_caps_each_class_and_is_reproducible():
     env = _env(channels)
     first = setup_episode_specs(_config(per_action=5), env, "train")
     again = setup_episode_specs(_config(per_action=5), env, "train")
-    longs = [s for s in first if s["expected_action"] == int(Action.ENTER_LONG_1)]
+    longs = [s for s in first if s.get("setup_action") == int(Action.ENTER_LONG_1)]
     assert len(longs) == 5 and first == again
 
 

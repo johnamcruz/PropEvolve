@@ -34,8 +34,15 @@ class ContextConfig:
             raise ValueError("volatility lookback requires R context fields")
         if self.input_mode not in {"specialists", "embeddings"}:
             raise ValueError("unknown reasoning input mode")
+        # In embedding mode the policy must not be fed TEACHER probabilities as inputs —
+        # that is what this guard is for. "setup." is allowed alongside account/trade/
+        # challenge because it is frozen upstream market context (the Expansion + order-
+        # flow channels), not a teacher head's output: it is computed from completed bars
+        # by a fixed artifact, is available identically at inference, and is never a
+        # distillation target.
         if self.input_mode == "embeddings" and any(
-                not name.startswith(("account.", "trade.", "challenge.")) for name in self.fields):
+                not name.startswith(("account.", "trade.", "challenge.", "setup."))
+                for name in self.fields):
             raise ValueError("teacher fields cannot be inputs in embedding mode")
         if type(self.context_steps) is not int or self.context_steps < 1:
             raise ValueError("context_steps must be a positive integer")

@@ -3,6 +3,7 @@
 import numpy as np
 
 from ..observation import ObservationAssembler
+from ..setup_signals import CHANNEL_NAMES as SETUP_CHANNEL_NAMES
 
 
 ACCOUNT_FIELDS = (
@@ -18,7 +19,8 @@ MANAGEMENT_FIELDS = (
 
 
 def specialist_account_fields(
-    observation, *, embedding_dim: int, ticker: str, row: int, sources, require_specialists=True,
+    observation, *, embedding_dim: int, ticker: str, row: int, sources,
+    require_specialists=True, setup_dim: int = 0,
 ) -> dict[str, float]:
     """Read only the exact aligned score row, plus production-normalized state.
 
@@ -29,11 +31,27 @@ Missing specialist history is an error, not a fabricated zero probability.
     observation = np.asarray(observation)
     if observation.ndim != 1 or not np.isfinite(observation).all():
         raise ValueError("observation must be a finite vector")
-    account = observation[embedding_dim:]
+    tail = observation[embedding_dim:]
+    # The Expansion + order-flow channels are appended last by ObservationAssembler.
+    # They are split off here and exposed as NAMED fields, because a reasoning policy
+    # reads named prompt fields, not raw vector positions — leaving them in the account
+    # slice would both break its width contract and hide the setup from the model.
+    setup_dim = int(setup_dim)
+    if setup_dim:
+        if len(tail) <= setup_dim:
+            raise ValueError("observation is too short to carry setup channels")
+        account, setup_values = tail[:-setup_dim], tail[-setup_dim:]
+    else:
+        account, setup_values = tail, np.empty(0)
     if len(account) not in {ObservationAssembler.ACCOUNT_DIM, ObservationAssembler.ACCOUNT_DIM + 6}:
         raise ValueError("account observation contract mismatch")
     names = ACCOUNT_FIELDS + (MANAGEMENT_FIELDS if len(account) > len(ACCOUNT_FIELDS) else ())
     fields = {f"account.{name}": float(value) for name, value in zip(names, account)}
+    if setup_dim:
+        if setup_dim != len(SETUP_CHANNEL_NAMES):
+            raise ValueError("setup channel contract mismatch")
+        fields.update({f"setup.{name}": float(value)
+                       for name, value in zip(SETUP_CHANNEL_NAMES, setup_values)})
     if not require_specialists:
         return fields
     kinds = [source.kind for source in sources]
@@ -60,7 +78,8 @@ def observe_context(history, environment, observation, *, ticker, row, sources):
     market = environment.markets[ticker]
     use_teachers = history.config.input_mode == "specialists"
     fields = specialist_account_fields(observation, embedding_dim=market.embeddings.shape[1],
-        ticker=ticker, row=row, sources=sources, require_specialists=use_teachers)
+        ticker=ticker, row=row, sources=sources, require_specialists=use_teachers,
+        setup_dim=environment.setup_signals.output_dim)
     fields.update(environment.causal_trade_context())
     if history.config.volatility_lookback is not None:
         fields.update(trade_r_context(market, row=row,

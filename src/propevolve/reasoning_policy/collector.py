@@ -190,10 +190,13 @@ and fold-safe specialist source receipts. No caches are rebuilt here.
                 teachers = specialist_account_fields(
                     observation, embedding_dim=market.embeddings.shape[1],
                     ticker=ticker, row=row, sources=sources,
+                    setup_dim=environment.setup_signals.output_dim,
                 )
+                # setup.* are causal INPUTS, not teacher targets: distilling them would
+                # train the policy to predict a number it is already handed.
                 specialist_targets = {
                     key: value for key, value in teachers.items()
-                    if not key.startswith("account.")
+                    if not key.startswith(("account.", "setup."))
                 }
             if augment_action_targets:
                 action_record["targets"].update(

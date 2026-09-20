@@ -156,3 +156,21 @@ def test_the_loader_shifts_the_bundle_from_bar_open_to_bar_close(tmp_path, monke
     assert unshifted[1, CHANNEL_NAMES.index("setup_trigger")] == 0.0   # the bug it prevents
     assert unshifted[:, CHANNEL_NAMES.index("setup_available")].sum() < \
         shifted[:, CHANNEL_NAMES.index("setup_available")].sum()
+
+
+def test_setup_fields_are_legal_embedding_mode_inputs_but_teacher_fields_are_not(tmp_path):
+    """The embedding-mode guard exists to keep TEACHER probabilities out of the inputs.
+    The setup channels are frozen upstream market context, available identically at
+    inference and never a distillation target, so they belong with account/trade."""
+    import json as _json
+    from propevolve.reasoning_policy.context import ContextConfig
+
+    def _write(fields):
+        path = tmp_path / f"ctx_{abs(hash(tuple(fields)))}.json"
+        path.write_text(_json.dumps({"context_steps": 4, "input_mode": "embeddings",
+                                     "fields": list(fields)}))
+        return path
+
+    ContextConfig.load(_write(["trade.open", "setup.flow_persistence"]))
+    with pytest.raises(ValueError, match="teacher fields cannot be inputs"):
+        ContextConfig.load(_write(["trade.open", "expansion.long_attempt_probability"]))
