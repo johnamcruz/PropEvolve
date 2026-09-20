@@ -13,6 +13,9 @@ dependencies = [
   "numpy>=1.26",
   "optuna>=4.8,<5",
   "pandas>=2.1",
+  # parquet engine, pinned to the version ffm-strategies and algoTraderAI write with
+  # so the setup-channel bundle is read by the same reader that produced it
+  "pyarrow>=25.0",
   "torch>=2.4",
 ]
 
