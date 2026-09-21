@@ -178,6 +178,18 @@ def read_sft_config(path: str | Path, *, root=None) -> dict:
         ("worst_action_advantage", "max"),
         ("worst_task_boundary_loss", "min"),
         ("worst_task_advantage", "max"),
+        # Accuracy monitors. The advantage/boundary-loss monitors above are margin
+        # statistics: they improve when logits shrink toward zero, so a collapsed
+        # constant classifier rises monotonically while accuracy sits at chance.
+        # These cannot be gamed that way.
+        ("worst_task_accuracy", "max"),
+        ("worst_action_accuracy", "max"),
+        # Balanced accuracy over the complementary task buckets. A constant
+        # classifier scores exactly chance here no matter which constant it picks,
+        # and no amount of logit rotation moves it, so this is the honest monitor
+        # for "is the policy making a conditional decision at all".
+        ("task_macro_accuracy", "max"),
+        ("macro_accuracy", "max"),
     }
     if (supervision["enabled"] and payload.get("batch_sampling") == "balanced_actions"
             and (guard.monitor, guard.mode) not in valid_action_monitors):
@@ -486,7 +498,14 @@ system boundary for tests; the production caller loads it with MLX-LM.
                             encoded.update(market_embeddings=embeddings.tolist(),
                                            market_available=available.tolist())
                         prompt = json.loads(messages[-2]["content"])
-                        if any(not field.startswith(("account.", "trade.", "challenge.")) for field in prompt["fields"]):
+                        # "setup." is admitted with account/trade/challenge: these are the
+                        # frozen Expansion + order-flow channels, causal market context
+                        # computed from completed bars and identical at inference. The
+                        # guard exists to keep TEACHER HEAD outputs (expansion.*, trend.*,
+                        # regime.*, volume.*) out of a teacher-free prompt, and those stay
+                        # excluded.
+                        if any(not field.startswith(("account.", "trade.", "challenge.", "setup."))
+                               for field in prompt["fields"]):
                             raise ValueError("teacher fields leaked into teacher-free SFT prompt")
                         state_fields = config["projector"].get("state_fields", [])
                         if state_fields:

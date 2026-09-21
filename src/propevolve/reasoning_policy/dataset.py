@@ -476,8 +476,14 @@ def audit_supervised_dataset(path: str | Path, *, specialist_score_mode: str) ->
                         and any(field.startswith(("account.", "challenge."))
                                 for field in fields)):
                     raise ValueError("SFT prompt contains challenge or account state")
+                # "setup." joins "trade." here. The guard's purpose is to keep ACCOUNT and
+                # CHALLENGE state out of a market judgement (checked immediately above);
+                # the setup channels are causal market context, the same category as
+                # trade.volatility_r, which already rides under the trade. prefix. They
+                # are frozen upstream inputs, identical at inference, never targets.
                 if (supervision_scope == "trade_mastery"
-                        and any(not field.startswith("trade.") for field in fields)):
+                        and any(not field.startswith(("trade.", "setup."))
+                                for field in fields)):
                     raise ValueError("trade-mastery prompt contains non-trade text state")
                 embeddings = record.get("market_embeddings")
                 available = record.get("market_available")

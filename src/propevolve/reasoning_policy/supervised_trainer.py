@@ -525,6 +525,10 @@ def hierarchical_boundary_metrics(rows, score_rows, *, margin=0.0):
         "worst_task_advantage": min(row["mean_target_advantage"] for row in per_task.values()),
         "worst_task_boundary_loss": max(row["mean_boundary_loss"] for row in per_task.values()),
         "task_macro_accuracy": float(np.mean([row["accuracy"] for row in per_task.values()])),
+        # Min over per-task accuracy. Unlike worst_task_advantage this cannot be
+        # improved by shrinking logits toward zero: a collapsed constant classifier
+        # scores 0.0 here because its complement task is always wrong.
+        "worst_task_accuracy": min(row["accuracy"] for row in per_task.values()),
         "per_task": per_task,
     }
 

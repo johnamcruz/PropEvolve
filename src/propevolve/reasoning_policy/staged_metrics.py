@@ -107,4 +107,6 @@ def boundary_metrics(rows, score_rows, *, margin=0.):
         "worst_task_boundary_loss": max(r["mean_boundary_loss"] for r in per_task.values()),
         "worst_action_boundary_loss": max(r["mean_boundary_loss"] for r in per_action.values()),
         "task_macro_accuracy": float(np.mean([r["accuracy"] for r in per_task.values()])),
+        "worst_task_accuracy": min(r["accuracy"] for r in per_task.values()),
+        "worst_action_accuracy": min(r["accuracy"] for r in per_action.values()),
         "macro_accuracy": float(np.mean([r["accuracy"] for r in per_action.values()]))}

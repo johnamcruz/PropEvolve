@@ -1,6 +1,5 @@
 {
- "inherits": "../diagnostics/trade_inference_assessment_sft.json",
- "data": "runs/reasoning-challenger/expansion-flow/dataset",
+ "inherits": "../diagnostics/staged_real_frozen.json",
  "stage_role": "trade_mastery",
  "distillation_targets": [
   "expansion",
@@ -8,90 +7,99 @@
   "regime",
   "volume"
  ],
- "error_selected_distillation": {
-  "loss_weight": 0.25,
-  "settings": {
-   "instruction": "Estimate each requested market probability from the completed Chronos-2 embedding context. Long and Short events are independent. Future prices and teacher answers are unavailable.",
-   "negative_token": "N",
-   "positive_token": "Y",
-   "channels": [
-    {
-     "name": "expansion.long_attempt_probability",
-     "query": "\nLong expansion attempt?",
-     "weight": 1.0
-    },
-    {
-     "name": "expansion.long_clean_retained_given_attempt_probability",
-     "query": "\nLong expansion quality conditional on attempt?",
-     "weight": 1.0
-    },
-    {
-     "name": "expansion.short_attempt_probability",
-     "query": "\nShort expansion attempt?",
-     "weight": 1.0
-    },
-    {
-     "name": "expansion.short_clean_retained_given_attempt_probability",
-     "query": "\nShort expansion quality conditional on attempt?",
-     "weight": 1.0
-    },
-    {
-     "name": "regime.chop_no_trend_probability",
-     "query": "\nChop without trend?",
-     "weight": 1.0
-    },
-    {
-     "name": "regime.chop_end_transition_probability",
-     "query": "\nTransition out of chop?",
-     "weight": 1.0
-    },
-    {
-     "name": "regime.expansion_trend_probability",
-     "query": "\nExpansion trend regime?",
-     "weight": 1.0
-    },
-    {
-     "name": "trend.long_launch_probability",
-     "query": "\nLong trend launch?",
-     "weight": 1.0
-    },
-    {
-     "name": "trend.short_launch_probability",
-     "query": "\nShort trend launch?",
-     "weight": 1.0
-    },
-    {
-     "name": "trend.long_conditional_quality",
-     "query": "\nLong trend conditional quality?",
-     "weight": 1.0
-    },
-    {
-     "name": "trend.short_conditional_quality",
-     "query": "\nShort trend conditional quality?",
-     "weight": 1.0
-    },
-    {
-     "name": "volume.long_participation_probability",
-     "query": "\nLong-side volume participation?",
-     "weight": 1.0
-    },
-    {
-     "name": "volume.long_clean_given_participation_probability",
-     "query": "\nLong-side volume quality conditional on participation?",
-     "weight": 1.0
-    },
-    {
-     "name": "volume.short_participation_probability",
-     "query": "\nShort-side volume participation?",
-     "weight": 1.0
-    },
-    {
-     "name": "volume.short_clean_given_participation_probability",
-     "query": "\nShort-side volume quality conditional on participation?",
-     "weight": 1.0
-    }
-   ]
-  }
+ "data": "runs/reasoning-challenger/expansion-flow/dataset",
+ "adapter_path": "runs/reasoning-challenger/expansion-flow/adapter",
+ "resume_adapter_file": null,
+ "train": true,
+ "fine_tune_type": "lora",
+ "mask_prompt": true,
+ "trust_remote_code": false,
+ "trainable_components": [
+  "lora",
+  "projector"
+ ],
+ "learning_rate": 1e-06,
+ "component_learning_rates": {
+  "lora": 1e-06,
+  "projector": 1e-06
  },
- "_purpose": "SFT stage for the Expansion + order-flow reasoning policy. Keeps the error-selected distillation machinery (the four PropEvolve teachers stay as auxiliary probability supervision) and points the dataset at the expansion-flow anchors."
+ "batch_size": 2,
+ "grad_accumulation_steps": 5,
+ "grad_checkpoint": true,
+ "iters": 50,
+ "steps_per_report": 5,
+ "steps_per_eval": 10,
+ "save_every": 10,
+ "validation_batch_size": 2,
+ "val_batches": 2667,
+ "batch_sampling": "balanced_actions",
+ "decision_objective": "hierarchical_binary",
+ "action_supervision": {
+  "enabled": true,
+  "soft_target_weight": 0.5,
+  "ranking_weight": 2.0,
+  "margin": 0.1
+ },
+ "interpretation_loss_weight": 0.25,
+ "save_training_state": true,
+ "early_stopping": {
+  "enabled": true,
+  "patience_evaluations": 5,
+  "min_delta": 0.005,
+  "restore_best": true,
+  "monitor": "task_macro_accuracy",
+  "mode": "max"
+ },
+ "dataset_requirements": {
+  "minimum_rows_per_action": {
+   "train": {
+    "WAIT": 1,
+    "ENTER_LONG_1": 1,
+    "ENTER_SHORT_1": 1,
+    "HOLD": 1,
+    "CLOSE": 1
+   },
+   "valid": {
+    "WAIT": 1,
+    "ENTER_LONG_1": 1,
+    "ENTER_SHORT_1": 1,
+    "HOLD": 1,
+    "CLOSE": 1
+   }
+  },
+  "expected_splits": {
+   "train": [
+    1622505600000000000,
+    1704067200000000000
+   ],
+   "valid": [
+    1704067200000000000,
+    1735689600000000000
+   ]
+  },
+  "sealed_start_ns": 1767225600000000000
+ },
+ "training_log_prefix": "staged-real-acquisition",
+ "_purpose": "SFT for the Expansion + order-flow reasoning policy \u2014 the PropEvolve equivalent of the shipped algoTraderAI strategy. Same staged_reasoning_v1 architecture and LoRA setup as the production recipe; only the dataset, the adapter path and the expected split change. Target to beat, production on four unseen eval seeds at 250 episodes: 55.0% pass, 35.5% win rate, 4.15R average winner, +0.83R expectancy, 0 blow.",
+ "staged_policy": {
+  "state_fields": [
+   "trade.open",
+   "trade.position_side",
+   "trade.risk_available",
+   "trade.mfe_r_so_far",
+   "trade.mae_r_so_far",
+   "trade.current_r",
+   "trade.giveback_r",
+   "trade.hold_bars",
+   "trade.volatility_r",
+   "trade.cost_r",
+   "trade.volatility_available",
+   "setup.expansion_score",
+   "setup.expansion_armed",
+   "setup.flow_persistence",
+   "setup.setup_trigger",
+   "setup.setup_side",
+   "setup.setup_available"
+  ]
+ }
 }
