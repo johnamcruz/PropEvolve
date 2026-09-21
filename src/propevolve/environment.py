@@ -47,6 +47,15 @@ class ChallengeSpec:
     ratchet_lock_floor_r: float = 0.0
     mll_proximity_penalty_coefficient: float = 0.0
     lead_giveback_penalty_coefficient: float = 0.0
+    # Zero-blow controls. Simulated on this spec the frozen flow rule passes 41.7% of
+    # 30-day challenges and blows 46.2%, drawing down $25,745 against a $3,000 floor,
+    # while algoTraderAI runs the same signal at 55% pass with zero blow. Its zero-blow
+    # foundation carries exactly these two, which PropEvolve had no equivalent of:
+    # a daily loss limit and a loss-streak cooldown. Both are entry blocks, so the
+    # reasoning policy and the RL stage are constrained alike. Off by default.
+    daily_loss_limit_dollars: float | None = None
+    loss_streak_cooldown_trades: int | None = None
+    loss_streak_cooldown_bars: int = 0
     large_win_threshold_r: float = 2.0
     large_win_bonus_coefficient: float = 0.0
 
@@ -62,6 +71,14 @@ class ChallengeSpec:
             raise ValueError("challenge economics and durations must be positive")
         if self.max_position_size != 1:
             raise ValueError("PropEvolve v1 supports exactly one contract")
+        if self.daily_loss_limit_dollars is not None and self.daily_loss_limit_dollars <= 0:
+            raise ValueError("daily loss limit must be positive when configured")
+        if self.loss_streak_cooldown_trades is not None:
+            if self.loss_streak_cooldown_trades < 1:
+                raise ValueError("loss streak trigger must be at least one trade")
+            if self.loss_streak_cooldown_bars < 1:
+                # A streak trigger with no pause is a silent no-op, not a control.
+                raise ValueError("loss streak cooldown requires a positive bar count")
         if self.terminal_pass_reward <= 0 or self.terminal_blow_reward >= 0:
             raise ValueError("terminal pass and blow rewards must have opposite signs")
         if min(
@@ -425,6 +442,10 @@ class HistoricalChallengeEnv:
         self._first_recovery_relapse_index: int | None = None
         self._recovery_relapse_count = 0
         self._post_recovery_min_realized_pnl: float | None = None
+        self._session_realized_loss: float = 0.0
+        self._session_key: object = None
+        self._loss_streak: int = 0
+        self._cooldown_until_index: int | None = None
         self._post_recovery_was_negative = False
         self._minimum_mll_headroom = math.inf
 
@@ -616,6 +637,10 @@ class HistoricalChallengeEnv:
             self._account.close_session()
             self._trading_days_elapsed += 1
             info["session_boundary"] = True
+            # A new CME session restores the day's loss budget. The loss streak does
+            # NOT reset here: a run of losers spanning a session boundary is exactly
+            # the adverse regime the cooldown exists to sit out.
+            self._begin_session_if_new(force=True)
         self._apply_action(action, fill, info)
 
         self._apply_protective_stop(next_index, info)
@@ -823,6 +848,46 @@ class HistoricalChallengeEnv:
             },
         )
 
+    def _begin_session_if_new(self, *, force: bool = False) -> None:
+        """Reset the day's loss budget when the CME session rolls."""
+        if self._market is None:
+            return
+        key = None
+        if self._ticker in self._session_keys:
+            key = self._session_keys[self._ticker][self._index]
+        if force or key != self._session_key:
+            self._session_key = key
+            self._session_realized_loss = 0.0
+
+    def _record_trade_result(self, net_pnl: float) -> None:
+        """Track the day's losses and the consecutive-loss streak."""
+        if net_pnl < 0:
+            self._session_realized_loss += -float(net_pnl)
+            self._loss_streak += 1
+            trigger = self.spec.loss_streak_cooldown_trades
+            if trigger is not None and self._loss_streak >= trigger:
+                self._cooldown_until_index = self._index + self.spec.loss_streak_cooldown_bars
+        else:
+            self._loss_streak = 0
+
+    def _entry_blocked_by_risk(self, info: dict) -> bool:
+        """Refuse a NEW entry when the day is spent or a loss streak is cooling off.
+
+        Entry-side only. Liquidating an open position on a counter would turn a risk
+        control into a forced market order at the worst possible moment; the policy keeps
+        management either way.
+        """
+        limit = self.spec.daily_loss_limit_dollars
+        if limit is not None and self._session_realized_loss >= limit:
+            info["daily_loss_block"] = True
+            return True
+        until = self._cooldown_until_index
+        if (self.spec.loss_streak_cooldown_trades is not None and until is not None
+                and self._index < until):
+            info["loss_streak_block"] = True
+            return True
+        return False
+
     def _apply_action(self, action: Action, fill: float, info: dict) -> None:
         position = self._position
         if position is None:
@@ -831,6 +896,8 @@ class HistoricalChallengeEnv:
                 Action.ENTER_SHORT_1: (PositionSide.SHORT, 1),
             }
             if action in entries:
+                if self._entry_blocked_by_risk(info):
+                    return
                 side, size = entries[action]
                 if self.setup_signals.gate_entries:
                     # The rule lends its side to an entry the policy chose. v2 measured
@@ -969,6 +1036,7 @@ class HistoricalChallengeEnv:
             self._position = None
         if closes_trade:
             self._closed_trade_pnls.append(float(net_pnl))
+            self._record_trade_result(float(net_pnl))
         return fee
 
     @staticmethod
