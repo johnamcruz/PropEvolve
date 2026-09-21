@@ -1,6 +1,6 @@
 {
  "_purpose": "Challenge-mastery RL for the Expansion + flow setup. The SFT parent supplies trade mastery (management measured at 0.92); this stage adds the 27 account/challenge fields and learns skip/enter under prop constraints \u2014 the decision SFT structurally cannot make, because the trade_mastery guard forbids account.* and challenge.* in its prompt. This mirrors algoTraderAI, whose PPO also only chose skip/enter and hold/close on top of a fixed timing+side rule.",
- "input_policy_config": "config/reasoning/expansion_flow_sft.json",
+ "input_policy_config": "config/reasoning/expansion_flow_v2_parent_sft.json",
  "output_adapter": "runs/reasoning-challenger/expansion-flow/rl-adapter",
  "resume_checkpoint": null,
  "frozen_audit": null,

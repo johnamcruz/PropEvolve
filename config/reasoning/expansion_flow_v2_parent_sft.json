@@ -1,0 +1,347 @@
+{
+ "optimizer": "adam",
+ "optimizer_config": {
+  "adam": {}
+ },
+ "component_learning_rates": {
+  "lora": 1e-05,
+  "projector": 1e-05
+ },
+ "lr_schedule": null,
+ "trainable_components": [
+  "lora",
+  "projector"
+ ],
+ "resume_adapter_file": null,
+ "resume_training_state": null,
+ "save_training_state": true,
+ "epochs": null,
+ "market_loss_chunk_size": null,
+ "market_distillation": null,
+ "error_selected_distillation": {
+  "loss_weight": 0.25,
+  "settings": {
+   "instruction": "Estimate each requested market probability from the completed Chronos-2 embedding context. Long and Short events are independent. Future prices and teacher answers are unavailable.",
+   "negative_token": "N",
+   "positive_token": "Y",
+   "channels": [
+    {
+     "name": "expansion.long_attempt_probability",
+     "query": "\nLong expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.long_clean_retained_given_attempt_probability",
+     "query": "\nLong expansion quality conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_attempt_probability",
+     "query": "\nShort expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_clean_retained_given_attempt_probability",
+     "query": "\nShort expansion quality conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_no_trend_probability",
+     "query": "\nChop without trend?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_end_transition_probability",
+     "query": "\nTransition out of chop?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.expansion_trend_probability",
+     "query": "\nExpansion trend regime?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_launch_probability",
+     "query": "\nLong trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_launch_probability",
+     "query": "\nShort trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_conditional_quality",
+     "query": "\nLong trend conditional quality?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_conditional_quality",
+     "query": "\nShort trend conditional quality?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_participation_probability",
+     "query": "\nLong-side volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_clean_given_participation_probability",
+     "query": "\nLong-side volume quality conditional on participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_participation_probability",
+     "query": "\nShort-side volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_clean_given_participation_probability",
+     "query": "\nShort-side volume quality conditional on participation?",
+     "weight": 1.0
+    }
+   ]
+  }
+ },
+ "mastered_anchor_retention": null,
+ "initial_validation_receipt": null,
+ "checkpoint_acceptance": null,
+ "coverage_sampling": null,
+ "prepared_sampling": null,
+ "targeted_sampling": null,
+ "include_partial_batch": false,
+ "resume_adapter_requirements": null,
+ "stage_role": "trade_mastery",
+ "distillation_targets": [
+  "expansion",
+  "trend",
+  "regime",
+  "volume"
+ ],
+ "action_supervision": {
+  "enabled": true,
+  "soft_target_weight": 0.5,
+  "ranking_weight": 2.0,
+  "margin": 0.1
+ },
+ "decision_objective": "hierarchical_binary",
+ "input_mode": "embeddings",
+ "batch_sampling": "balanced_actions",
+ "projector": {
+  "embedding_dim": 2560,
+  "context_steps": 20,
+  "market_tokens": 5,
+  "temporal_encoding": "latest_plus_deltas"
+ },
+ "clear_cache_threshold": 0,
+ "validation_metrics_path": null,
+ "training_log_filename": "training.log",
+ "training_events_filename": "training.events.jsonl",
+ "training_log_prefix": "staged-real-acquisition",
+ "seed": 17,
+ "val_batches": 889,
+ "validation_batch_size": 6,
+ "steps_per_report": 5,
+ "steps_per_eval": 1000,
+ "save_every": 1000,
+ "early_stopping": {
+  "enabled": true,
+  "patience_evaluations": 3,
+  "min_delta": 0.005,
+  "restore_best": true,
+  "monitor": "task_macro_accuracy",
+  "mode": "max"
+ },
+ "chat_template_kwargs": {
+  "enable_thinking": false
+ },
+ "action_verbalizers": {
+  "WAIT": "A",
+  "ENTER_LONG_1": "B",
+  "ENTER_SHORT_1": "C",
+  "HOLD": "D",
+  "CLOSE": "E"
+ },
+ "model": "/Volumes/CRUZ SSD/PropEvolve/.private/models/qwen3-0.6b-4bit-73e3e38",
+ "model_source": "local",
+ "architecture": "staged_reasoning_v1",
+ "selection": "hierarchical_greedy",
+ "adapter_path": "runs/reasoning-challenger/expansion-flow/adapter-v2",
+ "num_layers": 8,
+ "lora_parameters": {
+  "rank": 8,
+  "scale": 16.0,
+  "dropout": 0.0
+ },
+ "max_seq_length": 4096,
+ "staged_policy": {
+  "market": {
+   "instruction": "Interpret completed Chronos market context. Predict each named probability; Long and Short events are independent. Conditional quality is not event frequency. No teacher answers or future prices are available.",
+   "negative_token": "N",
+   "positive_token": "Y",
+   "channels": [
+    {
+     "name": "expansion.long_attempt_probability",
+     "query": "Long expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.long_clean_retained_given_attempt_probability",
+     "query": "Long clean expansion conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_attempt_probability",
+     "query": "Short expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_clean_retained_given_attempt_probability",
+     "query": "Short clean expansion conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_no_trend_probability",
+     "query": "Chop without trend?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_end_transition_probability",
+     "query": "Transition out of chop?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.expansion_trend_probability",
+     "query": "Expansion trend regime?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_launch_probability",
+     "query": "Long trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_launch_probability",
+     "query": "Short trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_conditional_quality",
+     "query": "Long trend quality conditional on launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_conditional_quality",
+     "query": "Short trend quality conditional on launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_participation_probability",
+     "query": "Long volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_clean_given_participation_probability",
+     "query": "Long clean move conditional on participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_participation_probability",
+     "query": "Short volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_clean_given_participation_probability",
+     "query": "Short clean move conditional on participation?",
+     "weight": 1.0
+    }
+   ]
+  },
+  "assessment_instruction": "Use your predicted market interpretation and causal trade state to assess trade economics. Flat: enter only a suitable opportunity for at least 2R before a 1R loss. Direction is separate from whether to enter. Positioned: hold valid continuation beyond 2R without a fixed profit ceiling; close when continuation no longer justifies the risk. No challenge balance or future outcomes are supplied.",
+  "state_fields": [
+   "trade.open",
+   "trade.position_side",
+   "trade.risk_available",
+   "trade.mfe_r_so_far",
+   "trade.mae_r_so_far",
+   "trade.current_r",
+   "trade.giveback_r",
+   "trade.hold_bars",
+   "trade.volatility_r",
+   "trade.cost_r",
+   "trade.volatility_available",
+   "setup.expansion_score",
+   "setup.expansion_armed",
+   "setup.flow_persistence",
+   "setup.setup_trigger",
+   "setup.setup_side",
+   "setup.setup_available"
+  ],
+  "tasks": [
+   {
+    "name": "entry",
+    "query": "Enter rather than wait?",
+    "negative_token": "W",
+    "positive_token": "E"
+   },
+   {
+    "name": "direction",
+    "query": "Long rather than short if entering?",
+    "negative_token": "S",
+    "positive_token": "L"
+   },
+   {
+    "name": "management",
+    "query": "Hold rather than close the open trade?",
+    "negative_token": "C",
+    "positive_token": "H"
+   }
+  ]
+ },
+ "data": "/Volumes/CRUZ SSD/PropEvolve/runs/reasoning-challenger/expansion-flow/view",
+ "train": true,
+ "fine_tune_type": "lora",
+ "mask_prompt": true,
+ "trust_remote_code": false,
+ "learning_rate": 1e-05,
+ "batch_size": 2,
+ "grad_accumulation_steps": 5,
+ "grad_checkpoint": true,
+ "iters": 4000,
+ "interpretation_loss_weight": 0.25,
+ "dataset_requirements": {
+  "minimum_rows_per_action": {
+   "train": {
+    "WAIT": 1,
+    "ENTER_LONG_1": 1,
+    "ENTER_SHORT_1": 1,
+    "HOLD": 1,
+    "CLOSE": 1
+   },
+   "valid": {
+    "WAIT": 1,
+    "ENTER_LONG_1": 1,
+    "ENTER_SHORT_1": 1,
+    "HOLD": 1,
+    "CLOSE": 1
+   }
+  },
+  "expected_splits": {
+   "train": [
+    1622505600000000000,
+    1704067200000000000
+   ],
+   "valid": [
+    1704067200000000000,
+    1735689600000000000
+   ]
+  },
+  "sealed_start_ns": 1767225600000000000
+ },
+ "_purpose": "RL parent = the v2 distilled reasoning model. With gate_entries on, direction comes from the order-flow rule, so MANAGEMENT is the whole SFT inheritance: v2 measured 0.9013 against v3's 0.8429. v3's trigger dataset existed only to fix direction, which it did not (0.4675-0.5025 against a 0.5525 ceiling), and it cost 7 points of the one skill that transfers. Built from v2's own saved adapter_config.json so the parent contract cannot drift from the artifact.",
+ "workspace_root": "/Volumes/CRUZ SSD/PropEvolve",
+ "weight_files": {
+  "adapters.safetensors": "a46a4ff235a4c7b14c218566227926d59d9a2692fc95282b65a6d5dd495734bb",
+  "projector.safetensors": "a7995fbcae85997cfa82bdad18c0a97076121526d26dca366aee633507faeb67"
+ }
+}
