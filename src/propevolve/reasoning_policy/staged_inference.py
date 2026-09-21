@@ -86,10 +86,18 @@ class StagedReasoningPolicy:
         import mlx.core as mx
         batch = self.prepare(context, legal_actions)
         result = staged_forward(self.backend, **batch)
-        mx.eval(result)
-        interpretation = mx.sigmoid(result["interpretation_scores"])[0].tolist()
-        assessment = result["assessment_scores"][0].tolist()
-        log_probs = result["log_probs"][0].tolist()
+        # Build every output the caller needs INTO one graph before evaluating. The
+        # sigmoid used to run after mx.eval(result), which made a second graph with its
+        # own device sync; now a single eval covers all three and each tolist() reads
+        # already-materialised memory. Rollout calls this once per decision bar, so the
+        # saved syncs are per-decision, not per-episode.
+        interpretation_scores = mx.sigmoid(result["interpretation_scores"])[0]
+        assessment_scores = result["assessment_scores"][0]
+        log_prob_scores = result["log_probs"][0]
+        mx.eval(interpretation_scores, assessment_scores, log_prob_scores)
+        interpretation = interpretation_scores.tolist()
+        assessment = assessment_scores.tolist()
+        log_probs = log_prob_scores.tolist()
         if not np.isfinite(interpretation + assessment + log_probs).all():
             raise ValueError("nonfinite staged reasoning prediction")
         actions = batch["legal_actions"][0]

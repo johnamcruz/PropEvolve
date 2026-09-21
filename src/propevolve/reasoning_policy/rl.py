@@ -5,11 +5,13 @@ Repeated identical episode starts supply independent sampled trajectories and
 a leave-one-out return baseline. No critic or second large reference model.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 
 import numpy as np
+
+from ..setup_signals import entry_side_from_channels
 
 from ..decision import Action
 from .context import ContextWindow, RollingContext
@@ -114,6 +116,26 @@ class RLDecision:
     staged_context: ContextWindow
 
 
+def decision_is_forced(environment) -> bool:
+    """True when this bar has exactly one reachable outcome, so a model call cannot matter.
+
+    Gated and flat on a bar the rule did not trigger, every entry is declined by the gate
+    and the step resolves to WAIT whatever the policy says. An episode is 30 days x 480
+    bars and triggered bars are ~1.3% of them, so skipping these is the difference between
+    about an hour of model calls per episode and a few minutes. Ungated the policy owns
+    direction, so nothing is forced; with a position open, management is always its call.
+    """
+    signals = getattr(environment, "setup_signals", None)
+    if signals is None or not getattr(signals, "gate_entries", False):
+        return False
+    if getattr(environment, "_position", None) is not None:
+        return False
+    market = getattr(environment, "_market", None)
+    if market is None or market.setup_channels is None:
+        return False
+    return entry_side_from_channels(market.setup_channels[environment._index]) == 0
+
+
 def rollout(policy, environment, *, options, context_config, sources, rng, max_steps):
     """Store CPU causal contexts and detached sampling probabilities only."""
     observation, info = environment.reset(options=options)
@@ -121,10 +143,25 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
     context = RollingContext(context_config)
     row = options["start"]
     decisions = []
+    pending_reward = 0.0
     for _ in range(max_steps):
         observe_context(context, environment, observation, ticker=options["ticker"], row=row, sources=sources)
         actions = tuple(sorted((Action(a) for a in info["valid_actions"]), key=int))
         names = tuple(action.name for action in actions)
+        if decision_is_forced(environment):
+            # No choice exists, so there is no gradient to collect. Reward earned here
+            # still belongs to the episode, so it accrues to the decision that led into
+            # this stretch and the undiscounted return stays exactly what it was.
+            observation, reward, terminated, truncated, info = environment.step(Action.WAIT)
+            pending_reward += float(reward)
+            row = int(info["fill_index"])
+            if terminated or truncated:
+                if info["outcome"] not in {"pass", "blow", "timeout"}:
+                    raise ValueError("invalid RL episode outcome")
+                if decisions and pending_reward:
+                    decisions[-1] = replace(decisions[-1], reward=decisions[-1].reward + pending_reward)
+                return decisions, info
+            continue
         snapshot = context.snapshot()
         scores = policy.assess(snapshot, actions)["log_probs"]
         logits = np.asarray([scores[name] for name in names], dtype=np.float64)
@@ -134,8 +171,10 @@ def rollout(policy, environment, *, options, context_config, sources, rng, max_s
         log_probs = logits - np.log(np.exp(logits).sum())
         selected = int(rng.choice(len(actions), p=np.exp(log_probs)))
         observation, reward, terminated, truncated, info = environment.step(actions[selected])
-        decisions.append(RLDecision(names, selected, tuple(log_probs), float(reward),
+        decisions.append(RLDecision(names, selected, tuple(log_probs),
+                                    float(reward) + pending_reward,
                                     staged_context=snapshot))
+        pending_reward = 0.0
         row = int(info["fill_index"])
         if terminated or truncated:
             if info["outcome"] not in {"pass", "blow", "timeout"}:

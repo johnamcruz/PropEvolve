@@ -43,5 +43,7 @@
  "context_config": "config/reasoning/context_expansion_flow_embeddings.json",
  "setup_row_filter": "trigger",
  "_setup_row_filter_note": "trigger. Measured on the armed dataset: the rule fires on only ~12% of armed bars, so 88% of directional rows carried NO rule side and the economic label there is an oracle nobody can predict. That put the direction ceiling at 0.504 (train) / 0.509 (valid) and the v2 policy scored 0.4905 \u2014 at the ceiling. The armed window did not let the policy learn to disagree with the rule; it drowned the 12% learnable rows in noise. On triggered bars the rule side is correct 0.529 (train) / 0.572 (valid), which is learnable, and WAIT-vs-ENTER there becomes the real question: the rule fired, is this setup worth taking?",
- "_sampling_note": "Triggered rows are scarce: train has 3860 across the three actions (WAIT 1328 / LONG 1304 / SHORT 1228) against 31444 armed, so 3000 per action is impossible under setup_row_filter=trigger. 1200/400 fits inside the smallest class with margin. The dataset is ~4x smaller than the armed one, which is the deliberate trade: every row now carries a rule side instead of 88 percent of them carrying none."
+ "_sampling_note": "Triggered rows are scarce: train has 3860 across the three actions (WAIT 1328 / LONG 1304 / SHORT 1228) against 31444 armed, so 3000 per action is impossible under setup_row_filter=trigger. 1200/400 fits inside the smallest class with margin. The dataset is ~4x smaller than the armed one, which is the deliberate trade: every row now carries a rule side instead of 88 percent of them carrying none.",
+ "rl_config": "config/reasoning/expansion_flow_rl.json",
+ "rl_context_config": "config/reasoning/context_expansion_flow_challenge_embeddings.json"
 }
