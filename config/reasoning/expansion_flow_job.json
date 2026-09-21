@@ -21,11 +21,11 @@
  "_anchor_note": "Anchors are PropEvolve's own economic barrier labels \u2014 each bar keeps the action its forward outcome justifies, so the policy learns which entries are profitable and which lose \u2014 but the candidate ROWS are restricted to the Expansion + order-flow setup. Same labels, same machinery, same error-selected distillation; only the study population changes, to the setups algoTraderAI actually trades.",
  "economic_action_sampling": {
   "train": {
-   "per_action": 3000,
+   "per_action": 700,
    "seed": 4101
   },
   "valid": {
-   "per_action": 1000,
+   "per_action": 200,
    "seed": 4102
   }
  },
@@ -35,12 +35,13 @@
   "gate_entries": true
  },
  "setup_bundle": "/Volumes/CRUZ SSD/ffm-strategies/runs/nq_expansion_flow_trigger_v1/bundle/signals.parquet",
- "dataset_output": "runs/reasoning-challenger/expansion-flow/dataset",
- "label_census_output": "runs/reasoning-challenger/expansion-flow/label-census.json",
- "temporal_split_audit": "runs/reasoning-challenger/expansion-flow/source-audit.json",
- "mlx_view": "runs/reasoning-challenger/expansion-flow/view",
+ "dataset_output": "runs/reasoning-challenger/expansion-flow/dataset-trigger",
+ "label_census_output": "runs/reasoning-challenger/expansion-flow/label-census-trigger.json",
+ "temporal_split_audit": "runs/reasoning-challenger/expansion-flow/source-audit-trigger.json",
+ "mlx_view": "runs/reasoning-challenger/expansion-flow/view-trigger",
  "sft_config": "config/reasoning/expansion_flow_sft.json",
  "context_config": "config/reasoning/context_expansion_flow_embeddings.json",
- "setup_row_filter": "armed",
- "_setup_row_filter_note": "'armed' studies every bar inside an armed Expansion window, which includes the ones the flow rule declined. That is deliberate: restricting to 'trigger' would only ever show the policy the rule's own choices and cap it at imitation, whereas the armed window is where it can learn to disagree \u2014 taking a setup the rule skipped, or skipping one it took."
+ "setup_row_filter": "trigger",
+ "_setup_row_filter_note": "trigger. Measured on the armed dataset: the rule fires on only ~12% of armed bars, so 88% of directional rows carried NO rule side and the economic label there is an oracle nobody can predict. That put the direction ceiling at 0.504 (train) / 0.509 (valid) and the v2 policy scored 0.4905 \u2014 at the ceiling. The armed window did not let the policy learn to disagree with the rule; it drowned the 12% learnable rows in noise. On triggered bars the rule side is correct 0.529 (train) / 0.572 (valid), which is learnable, and WAIT-vs-ENTER there becomes the real question: the rule fired, is this setup worth taking?",
+ "_sampling_note": "Triggered rows are scarce: train has 3860 across the three actions (WAIT 1328 / LONG 1304 / SHORT 1228) against 31444 armed, so 3000 per action is impossible under setup_row_filter=trigger. 1200/400 fits inside the smallest class with margin. The dataset is ~4x smaller than the armed one, which is the deliberate trade: every row now carries a rule side instead of 88 percent of them carrying none."
 }
