@@ -154,3 +154,32 @@ def test_nothing_is_blocked_when_the_controls_are_off():
     env._loss_streak = 99
     env.step(Action.ENTER_LONG_1)
     assert env._position is not None
+
+
+# ───────────────────────── per-episode isolation
+def test_risk_state_resets_between_episodes():
+    """Carry-over silently blocks every later episode and starves RL of any signal.
+
+    Found in the first RL run: episode one spent its daily loss budget, and episodes
+    two through four opened no position at all, so every return was identical, every
+    leave-one-out advantage was exactly zero, and the policy received no gradient.
+    """
+    env = _env(_spec(daily_loss_limit_dollars=500.0,
+                     loss_streak_cooldown_trades=2, loss_streak_cooldown_bars=5))
+    env._session_realized_loss = 900.0
+    env._loss_streak = 7
+    env._cooldown_until_index = 10_000
+    env.reset()
+    assert env._session_realized_loss == 0.0
+    assert env._loss_streak == 0
+    assert env._cooldown_until_index is None
+
+
+def test_a_fresh_episode_can_enter_after_a_blocked_one():
+    env = _env(_spec(daily_loss_limit_dollars=500.0))
+    env._session_realized_loss = 10_000.0
+    env.step(Action.ENTER_LONG_1)
+    assert env._position is None, "blocked as intended"
+    env.reset()
+    env.step(Action.ENTER_LONG_1)
+    assert env._position is not None, "a new episode must start with a clean budget"

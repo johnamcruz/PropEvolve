@@ -528,6 +528,14 @@ class HistoricalChallengeEnv:
             raise ValueError("episode start does not leave a causal decision step")
         self._market = market
         self._ticker = ticker
+        # Per-episode risk state. Carrying this across reset() silently blocks every
+        # later episode: the first one spends its daily budget, the rest open nothing,
+        # every return is identical, and the leave-one-out advantage is exactly zero, so
+        # RL receives no gradient at all. Observed in the first RL run.
+        self._session_realized_loss = 0.0
+        self._session_key = None
+        self._loss_streak = 0
+        self._cooldown_until_index = None
         self._index = start
         self._start = start
         self._end = end
