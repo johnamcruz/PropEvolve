@@ -31,8 +31,8 @@
  },
  "setup_signals": {
   "state": "expansion_flow_v1",
-  "_gate_note": "gate_entries stays OFF. Forcing the rule's side would guarantee the policy trades the flow direction, but it would also foreclose the question being asked, which is whether a reasoning model can learn the setup. Direction tested as unlearnable standalone (0.52 accuracy), so a coin-flip side is the failure mode to watch for; turn this on to isolate selection and management if that is what shows up.",
-  "gate_entries": false
+  "_gate_note": "gate_entries ON. The v2 run measured the policy direction at 0.4905 balanced accuracy over 4000 iterations while management reached 0.9248, so the side is handed to the frozen flow rule (sign(persistence_45), +$300,556 net 2021-2025) and the policy is measured on what it demonstrably learns: selection and management. This is an ENVIRONMENT gate \u2014 it changes rollouts and evaluation, not the economic SFT labels, which stay forward-outcome based.",
+  "gate_entries": true
  },
  "setup_bundle": "/Volumes/CRUZ SSD/ffm-strategies/runs/nq_expansion_flow_trigger_v1/bundle/signals.parquet",
  "dataset_output": "runs/reasoning-challenger/expansion-flow/dataset",

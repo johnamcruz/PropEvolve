@@ -14,6 +14,7 @@ from .decision import Action, ActionMasker, PositionSide
 from .setup_signals import (
     CHANNEL_NAMES as SETUP_CHANNEL_NAMES,
     SetupSignalSpec,
+    entry_side_from_channels,
 )
 from .episode_coverage import (
     DeterministicEpisodeCoverage,
@@ -831,6 +832,23 @@ class HistoricalChallengeEnv:
             }
             if action in entries:
                 side, size = entries[action]
+                if self.setup_signals.gate_entries:
+                    # The rule lends its side to an entry the policy chose. v2 measured
+                    # the policy's own direction at 0.4905 balanced accuracy, so charging
+                    # it for a side it cannot produce would only confound selection with
+                    # direction. A bar the rule did not trigger has no side to lend, so
+                    # there is no gated entry to make and the step stands down to a wait.
+                    assert self._market is not None
+                    assert self._market.setup_channels is not None
+                    rule_side = entry_side_from_channels(
+                        self._market.setup_channels[self._index])
+                    if rule_side == 0:
+                        info["setup_gate_declined"] = True
+                        return
+                    gated = PositionSide.LONG if rule_side > 0 else PositionSide.SHORT
+                    info["setup_gate_side"] = int(rule_side)
+                    info["setup_gate_overrode"] = bool(gated is not side)
+                    side = gated
                 assert self._account is not None
                 if self._recovery_success_pnl is not None:
                     self._recovery_entry_open = True
