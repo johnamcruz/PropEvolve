@@ -8,7 +8,7 @@
   "volume"
  ],
  "data": "runs/reasoning-challenger/expansion-flow/dataset",
- "adapter_path": "runs/reasoning-challenger/expansion-flow/adapter",
+ "adapter_path": "runs/reasoning-challenger/expansion-flow/adapter-v2",
  "resume_adapter_file": null,
  "train": true,
  "fine_tune_type": "lora",
@@ -18,20 +18,20 @@
   "lora",
   "projector"
  ],
- "learning_rate": 1e-06,
+ "learning_rate": 1e-05,
  "component_learning_rates": {
-  "lora": 1e-06,
-  "projector": 1e-06
+  "lora": 1e-05,
+  "projector": 1e-05
  },
  "batch_size": 2,
  "grad_accumulation_steps": 5,
  "grad_checkpoint": true,
- "iters": 50,
+ "iters": 4000,
  "steps_per_report": 5,
- "steps_per_eval": 10,
- "save_every": 10,
- "validation_batch_size": 2,
- "val_batches": 2667,
+ "steps_per_eval": 1000,
+ "save_every": 1000,
+ "validation_batch_size": 6,
+ "val_batches": 889,
  "batch_sampling": "balanced_actions",
  "decision_objective": "hierarchical_binary",
  "action_supervision": {
@@ -44,7 +44,7 @@
  "save_training_state": true,
  "early_stopping": {
   "enabled": true,
-  "patience_evaluations": 5,
+  "patience_evaluations": 3,
   "min_delta": 0.005,
   "restore_best": true,
   "monitor": "task_macro_accuracy",
@@ -101,5 +101,90 @@
    "setup.setup_side",
    "setup.setup_available"
   ]
+ },
+ "error_selected_distillation": {
+  "loss_weight": 0.25,
+  "settings": {
+   "instruction": "Estimate each requested market probability from the completed Chronos-2 embedding context. Long and Short events are independent. Future prices and teacher answers are unavailable.",
+   "negative_token": "N",
+   "positive_token": "Y",
+   "channels": [
+    {
+     "name": "expansion.long_attempt_probability",
+     "query": "\nLong expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.long_clean_retained_given_attempt_probability",
+     "query": "\nLong expansion quality conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_attempt_probability",
+     "query": "\nShort expansion attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "expansion.short_clean_retained_given_attempt_probability",
+     "query": "\nShort expansion quality conditional on attempt?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_no_trend_probability",
+     "query": "\nChop without trend?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.chop_end_transition_probability",
+     "query": "\nTransition out of chop?",
+     "weight": 1.0
+    },
+    {
+     "name": "regime.expansion_trend_probability",
+     "query": "\nExpansion trend regime?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_launch_probability",
+     "query": "\nLong trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_launch_probability",
+     "query": "\nShort trend launch?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.long_conditional_quality",
+     "query": "\nLong trend conditional quality?",
+     "weight": 1.0
+    },
+    {
+     "name": "trend.short_conditional_quality",
+     "query": "\nShort trend conditional quality?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_participation_probability",
+     "query": "\nLong-side volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.long_clean_given_participation_probability",
+     "query": "\nLong-side volume quality conditional on participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_participation_probability",
+     "query": "\nShort-side volume participation?",
+     "weight": 1.0
+    },
+    {
+     "name": "volume.short_clean_given_participation_probability",
+     "query": "\nShort-side volume quality conditional on participation?",
+     "weight": 1.0
+    }
+   ]
+  }
  }
 }
