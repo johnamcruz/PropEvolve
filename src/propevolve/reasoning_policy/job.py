@@ -422,12 +422,42 @@ def load_role(config, root, source, role, *, include_specialists=True):
         sources = (*sources, volume)
     env = HistoricalChallengeEnv(
         markets, tick_values=source["point_values"], round_trip_fees=source["round_trip_fees"],
-        spec=ChallengeSpec(**source["challenge"]),
+        spec=ChallengeSpec(**apply_challenge_risk_overrides(
+            source["challenge"], config.get("challenge_risk_overrides"))),
         observation_spec=TradeManagementObservationSpec.from_config(source["observation"]),
         setup_signals=SetupSignalSpec.from_config(config.get("setup_signals")),
         seed=config["seed"],
     )
     return env, sources
+
+
+# Only these may be overridden at the job level. source_environment.json is shared by
+# many configs and source_identity hashes it, so adding risk controls there would
+# invalidate the lineage of every dataset already built against it. Letting an override
+# reach profit_target, max_loss or the reward terms would let a run quietly redefine the
+# challenge it claims to pass, which is the whole basis of the algoTraderAI comparison.
+CHALLENGE_RISK_OVERRIDES = frozenset({
+    "daily_loss_limit_dollars",
+    "loss_streak_cooldown_trades",
+    "loss_streak_cooldown_bars",
+})
+
+
+def apply_challenge_risk_overrides(challenge, overrides):
+    """Return the challenge contract with risk controls added, economics untouched."""
+    merged = dict(challenge)
+    if overrides is None:
+        return merged
+    if not isinstance(overrides, dict):
+        raise ValueError("challenge risk overrides must be a mapping")
+    unknown = set(overrides) - CHALLENGE_RISK_OVERRIDES
+    if unknown:
+        raise ValueError(
+            "challenge risk overrides may only set "
+            + ", ".join(sorted(CHALLENGE_RISK_OVERRIDES))
+            + "; refused: " + ", ".join(sorted(unknown)))
+    merged.update(overrides)
+    return merged
 
 
 def collection_factory(config, root):
