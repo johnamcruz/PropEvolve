@@ -85,3 +85,53 @@ def test_the_rule_baseline_scores_below_a_safe_but_dull_policy():
     rule = challenge_objective({"pass": 0.417, "blow": 0.462, "timeout": 0.122})
     dull = challenge_objective({"pass": 0.238, "blow": 0.0, "timeout": 0.762})
     assert dull > rule
+
+
+# ───────────────────────── GAE and the update
+def test_advantages_use_a_value_baseline_not_a_group_mean():
+    """The group-mean baseline is what made direct RL diverge at group_size 4.
+
+    With four episodes the leave-one-out baseline reflected which episode an action
+    landed in rather than whether it was good, so advantages flipped sign wholesale
+    between groups. A learned value function gives a per-state baseline instead.
+    """
+    from propevolve.reasoning_policy.compact_rl import compute_gae
+    rewards = [1.0, 1.0, 1.0]
+    values = [0.0, 0.0, 0.0]
+    adv, ret = compute_gae(rewards, values, last_value=0.0, gamma=1.0, lam=1.0)
+    assert len(adv) == 3 and len(ret) == 3
+    # undiscounted return-to-go with a zero baseline
+    assert ret == pytest.approx([3.0, 2.0, 1.0])
+
+
+def test_gae_credits_a_late_reward_backwards():
+    from propevolve.reasoning_policy.compact_rl import compute_gae
+    adv, ret = compute_gae([0.0, 0.0, 5.0], [0.0, 0.0, 0.0], last_value=0.0, gamma=1.0, lam=1.0)
+    assert ret == pytest.approx([5.0, 5.0, 5.0])
+    assert adv[0] > 0
+
+
+def test_a_perfect_value_function_gives_zero_advantage():
+    from propevolve.reasoning_policy.compact_rl import compute_gae
+    adv, _ = compute_gae([1.0, 1.0], [2.0, 1.0], last_value=0.0, gamma=1.0, lam=1.0)
+    assert adv == pytest.approx([0.0, 0.0], abs=1e-6)
+
+
+def test_ppo_update_moves_the_policy_toward_advantaged_actions():
+    from propevolve.reasoning_policy.compact_rl import ActorCritic, ppo_update
+    import torch
+    net = ActorCritic(4, n_actions=3, hidden=(16,), seed=3)
+    obs = torch.zeros(8, 4)
+    mask = torch.ones(8, 3, dtype=torch.bool)
+    actions = torch.zeros(8, dtype=torch.long)          # always action 0
+    with torch.no_grad():
+        old = masked_categorical(net(obs)[0], mask).log_prob(actions)
+    before = masked_categorical(net(obs)[0], mask).probs[0, 0].item()
+    adv = torch.ones(8)                                  # action 0 was good
+    ret = torch.ones(8)
+    opt = torch.optim.Adam(net.parameters(), lr=0.05)
+    for _ in range(20):
+        ppo_update(net, opt, obs, mask, actions, old, adv, ret,
+                   clip_epsilon=0.2, value_coef=0.5, entropy_coef=0.0, max_grad_norm=1.0)
+    after = masked_categorical(net(obs)[0], mask).probs[0, 0].item()
+    assert after > before

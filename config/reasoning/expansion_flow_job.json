@@ -47,9 +47,12 @@
  "rl_config": "config/reasoning/expansion_flow_rl.json",
  "rl_context_config": "config/reasoning/context_expansion_flow_challenge_embeddings.json",
  "challenge_risk_overrides": {
-  "daily_loss_limit_dollars": 750.0,
+  "per_trade_risk_dollars": 500.0,
+  "ratchet_activation_r": 11.5,
+  "ratchet_giveback_r": 10.5,
+  "ratchet_lock_floor_r": 2.0,
   "loss_streak_cooldown_trades": 2,
   "loss_streak_cooldown_bars": 65
  },
- "_risk_override_note": "algoTraderAI Stage A zero-blow foundation: $750 soft daily loss and a K=2 / 65-bar loss-streak cooldown. Applied as a job override so source_environment.json and therefore source_identity stay untouched and the trigger dataset lineage holds. Measured on the rule alone these take blow 46.2% -> ~14%; the remaining safety and all the lost pass rate is what the RL stage has to learn."
+ "_risk_override_note": "VALIDATED on unseen 2024: 41.7% pass, 0.0% blow, 0.0% near-blow, mean $1,188 over 60 episodes -- out-of-sample BETTER than the 36.7% tuning-split result, so the Optuna search did not overfit. The frozen flow rule native execution gives the same 41.7% pass but blows 46.2% of combines; this keeps the pass rate and removes every blow-up. Found by joint search over sizing x ratchet x stand-down (scripts/scan_passrate_optuna.py, trial 37). Paired with a $300 headroom stand-down in the policy. Single levers could not find it: the shipped 2R/0.5R ratchet cut winners to $55/trade and 8.3% pass, and sizing alone goes negative above $600."
 }

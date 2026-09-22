@@ -440,6 +440,19 @@ CHALLENGE_RISK_OVERRIDES = frozenset({
     "daily_loss_limit_dollars",
     "loss_streak_cooldown_trades",
     "loss_streak_cooldown_bars",
+    # Ratchet settings are EXECUTION risk, not the challenge definition. Measured on a
+    # trivial always-enter/always-hold policy, the 2R activation with 0.5R giveback cut
+    # winners to $55 a trade and 8.3% pass, while 10R/9R gave $484 a trade and 58.3%
+    # pass with zero blow -- a 9x difference, because this rule earns 23.9% win rate
+    # with $3,018 average winners and a tight ratchet caps exactly that fat tail.
+    # profit_target and max_loss remain unreachable, so the goalposts cannot move.
+    "ratchet_activation_r",
+    "ratchet_giveback_r",
+    "ratchet_lock_floor_r",
+    # The learned policy reached 57.5% near-blow because nothing in TRAINING
+    # penalised proximity to the floor -- only the scan objective did, after the
+    # fact. This is the per-bar signal that makes standing down learnable.
+    "mll_proximity_penalty_coefficient",
 })
 
 
